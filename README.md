@@ -1,6 +1,6 @@
-# Lumiverse Backend
+# Lumiverse
 
-The backend server for Lumiverse, a full-featured AI chat application. Provides the data layer, real-time event bus, LLM generation pipeline, and extension runtime.
+The full stack suite for Lumiverse, a full-featured AI chat application. Provides the data layer, real-time event bus, LLM generation pipeline, and extension runtime.
 
 ## Tech Stack
 
