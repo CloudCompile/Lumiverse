@@ -9,6 +9,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { homedir } from "os";
 import { join, basename, extname, resolve } from "path";
 import { createInterface } from "readline";
 import {
@@ -988,7 +989,7 @@ async function main() {
   printStepHeader(2, 6, "SillyTavern Directory", "Point to your SillyTavern installation.");
 
   let stPath = await ask("SillyTavern path", "~/SillyTavern");
-  stPath = stPath.replace(/^~/, process.env.HOME || "~");
+  stPath = stPath.replace(/^~/, homedir());
   stPath = resolve(stPath);
 
   if (!existsSync(stPath)) {
