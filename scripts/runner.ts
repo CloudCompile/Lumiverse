@@ -331,11 +331,26 @@ async function checkForUpdates(): Promise<void> {
     stdout: "ignore",
     stderr: "ignore",
   });
-  await fetchProc.exited;
+  const fetchCode = await fetchProc.exited;
+  if (fetchCode !== 0) {
+    addLog("git fetch failed — cannot check for updates.", "system");
+    updateChecking = false;
+    render();
+    return;
+  }
 
-  // Get the tracking branch (e.g. origin/main)
-  const upstream = runGit("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}");
-  if (!upstream.ok) {
+  // Get current branch name, then resolve its upstream tracking ref.
+  // Avoids "@{u}" shorthand which breaks on Windows (curly braces are
+  // mangled during command-line construction on win32).
+  const branch = runGit("rev-parse", "--abbrev-ref", "HEAD");
+  if (!branch.ok || !branch.out) {
+    updateChecking = false;
+    render();
+    return;
+  }
+
+  const upstream = runGit("for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch.out}`);
+  if (!upstream.ok || !upstream.out) {
     updateChecking = false;
     render();
     return;
