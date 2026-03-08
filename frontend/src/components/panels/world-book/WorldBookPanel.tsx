@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Globe, X } from 'lucide-react'
+import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Globe, X, User, FileUp } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import { worldBooksApi } from '@/api/world-books'
@@ -337,6 +337,20 @@ export default function WorldBookPanel() {
             </option>
           ))}
         </select>
+        {(() => {
+          const sel = books.find((b) => b.id === selectedBookId)
+          if (sel?.metadata?.source === 'character') return (
+            <span className={styles.sourceBadge} data-tooltip="From character">
+              <User size={11} />
+            </span>
+          )
+          if (sel?.metadata?.source === 'import') return (
+            <span className={styles.sourceBadge} data-tooltip="Imported from file">
+              <FileUp size={11} />
+            </span>
+          )
+          return null
+        })()}
         <button
           type="button"
           className={styles.iconBtn}

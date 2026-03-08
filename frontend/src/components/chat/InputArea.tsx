@@ -1,13 +1,15 @@
 import { useState, useCallback, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal, FolderOpen, Paperclip, X } from 'lucide-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import { generateApi } from '@/api/generate'
 import { personasApi } from '@/api/personas'
+import { imagesApi } from '@/api/images'
 import { toast } from '@/lib/toast'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
+import type { MessageAttachment } from '@/types/api'
 import styles from './InputArea.module.css'
 import clsx from 'clsx'
 import InputBarExtensionActions from './InputBarExtensionActions'
@@ -25,10 +27,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [popoverClosing, setPopoverClosing] = useState(false)
   const [sendPersonaId, setSendPersonaId] = useState<string | null>(null)
   const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; title: string; avatar_path: string | null; image_id: string | null }>>([])
-  const [characterChats, setCharacterChats] = useState<Array<{ id: string; name: string; updated_at: number }>>([])
+  const [characterName, setCharacterName] = useState('')
+  const [pendingAttachments, setPendingAttachments] = useState<(MessageAttachment & { previewUrl?: string })[]>([])
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const sendingRef = useRef(false)
+  const generationNonceRef = useRef(0)
   const isStreaming = useStore((s) => s.isStreaming)
   const activeGenerationId = useStore((s) => s.activeGenerationId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -41,7 +47,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const personas = useStore((s) => s.personas)
   const messages = useStore((s) => s.messages)
   const addMessage = useStore((s) => s.addMessage)
+  const beginStreaming = useStore((s) => s.beginStreaming)
   const startStreaming = useStore((s) => s.startStreaming)
+  const stopStreaming = useStore((s) => s.stopStreaming)
   const setStreamingError = useStore((s) => s.setStreamingError)
   const openModal = useStore((s) => s.openModal)
   const setSetting = useStore((s) => s.setSetting)
@@ -108,15 +116,19 @@ export default function InputArea({ chatId }: InputAreaProps) {
   // Document-level Escape to stop generation
   useEffect(() => {
     const handleEscape = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape' && isStreaming && activeGenerationId) {
+      if (e.key === 'Escape' && isStreaming) {
         e.preventDefault()
         e.stopPropagation()
-        generateApi.stop(activeGenerationId).catch(console.error)
+        generateApi.stop(activeGenerationId || undefined).catch(console.error)
+        // If in optimistic phase, revert locally
+        if (!activeGenerationId) {
+          stopStreaming()
+        }
       }
     }
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [isStreaming, activeGenerationId])
+  }, [isStreaming, activeGenerationId, stopStreaming])
 
   useEffect(() => {
     if (openPopover !== 'persona') return
@@ -136,18 +148,57 @@ export default function InputArea({ chatId }: InputAreaProps) {
   }, [sendPersonaId, personas])
 
   useEffect(() => {
-    if (openPopover !== 'tools' || !activeCharacterId) return
-    chatsApi.list({ characterId: activeCharacterId, limit: 25 }).then((res) => {
-      setCharacterChats(res.data.map((c) => ({ id: c.id, name: c.name, updated_at: c.updated_at })))
-    }).catch(() => {})
-  }, [openPopover, activeCharacterId])
+    if (!activeCharacterId) return
+    charactersApi.get(activeCharacterId).then((c) => setCharacterName(c.name)).catch(() => {})
+  }, [activeCharacterId])
+
+  const handleAttachFiles = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0) return
+    setUploading(true)
+    try {
+      for (const file of Array.from(files)) {
+        const isImage = file.type.startsWith('image/')
+        const isAudio = file.type.startsWith('audio/')
+        if (!isImage && !isAudio) {
+          toast.error(`Unsupported file type: ${file.type}`, { title: 'Upload Failed' })
+          continue
+        }
+        const image = await imagesApi.upload(file)
+        const att: MessageAttachment & { previewUrl?: string } = {
+          type: isImage ? 'image' : 'audio',
+          image_id: image.id,
+          mime_type: file.type,
+          original_filename: file.name,
+          width: image.width ?? undefined,
+          height: image.height ?? undefined,
+          previewUrl: isImage ? imagesApi.thumbnailUrl(image.id) : undefined,
+        }
+        setPendingAttachments((prev) => [...prev, att])
+      }
+    } catch (err: any) {
+      console.error('[InputArea] Attachment upload failed:', err)
+      toast.error(err?.message || 'Failed to upload attachment', { title: 'Upload Failed' })
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }, [])
+
+  const removeAttachment = useCallback((imageId: string) => {
+    setPendingAttachments((prev) => prev.filter((a) => a.image_id !== imageId))
+  }, [])
 
   const handleSend = useCallback(async () => {
     if (sendingRef.current || isStreaming) return
     const content = text.trim()
+    const attachments = pendingAttachments.length > 0
+      ? pendingAttachments.map(({ previewUrl: _, ...a }) => a)
+      : undefined
 
     sendingRef.current = true
+    const nonce = ++generationNonceRef.current
     setText('')
+    setPendingAttachments([])
     setStreamingError(null)
 
     // Reset textarea height
@@ -172,26 +223,35 @@ export default function InputArea({ chatId }: InputAreaProps) {
       if (isGroupChat && groupCharacterIds.length > 0) {
         genOpts.target_character_id = groupCharacterIds[0]
       }
-      if (content) {
+      if (content || attachments) {
+        const extra: Record<string, any> = {}
+        if (effectivePersonaId) extra.persona_id = effectivePersonaId
+        if (attachments) extra.attachments = attachments
         const msg = await messagesApi.create(chatId, {
           is_user: true,
           name: effectivePersonaName,
-          content,
-          extra: effectivePersonaId ? { persona_id: effectivePersonaId } : undefined,
+          content: content || '(attached)',
+          extra: Object.keys(extra).length > 0 ? extra : undefined,
         })
         // Optimistically add to store so it appears immediately
         addMessage(msg)
+        // Show streaming state immediately so stop button appears during assembly
+        beginStreaming()
         const res = await generateApi.start(genOpts)
+        if (generationNonceRef.current !== nonce) return
         startStreaming(res.generationId)
         consumeOneshotGuides()
         if (sendPersonaId) setSendPersonaId(null)
       } else {
         // Empty send = silent continue (nudge AI to generate)
+        beginStreaming()
         const res = await generateApi.continueGeneration(genOpts)
+        if (generationNonceRef.current !== nonce) return
         startStreaming(res.generationId)
         consumeOneshotGuides()
       }
     } catch (err: any) {
+      if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to send:', err)
       const msg = err?.body?.error || err?.message || 'Failed to start generation'
       setStreamingError(msg)
@@ -199,10 +259,11 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, personas, sendPersonaId, addMessage, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleRegenerate = useCallback(async () => {
     if (isStreaming) return
+    const nonce = ++generationNonceRef.current
     // Find the last assistant message to regenerate
     let targetMessageId: string | undefined
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -211,6 +272,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
         break
       }
     }
+    // Show streaming state immediately so stop button appears and
+    // the target message shows the streaming indicator during assembly
+    beginStreaming(targetMessageId)
     try {
       const res = await generateApi.regenerate({
         chat_id: chatId,
@@ -219,18 +283,22 @@ export default function InputArea({ chatId }: InputAreaProps) {
         persona_id: activePersonaId || undefined,
         preset_id: activeLoomPresetId || undefined,
       })
+      if (generationNonceRef.current !== nonce) return
       startStreaming(res.generationId, targetMessageId)
       consumeOneshotGuides()
     } catch (err: any) {
+      if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to regenerate:', err)
       const msg = err?.body?.error || err?.message || 'Failed to regenerate'
       setStreamingError(msg)
       toast.error(msg, { title: 'Regeneration Failed' })
     }
-  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeLoomPresetId, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeLoomPresetId, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleContinue = useCallback(async () => {
     if (isStreaming) return
+    const nonce = ++generationNonceRef.current
+    beginStreaming()
     try {
       const res = await generateApi.continueGeneration({
         chat_id: chatId,
@@ -238,18 +306,22 @@ export default function InputArea({ chatId }: InputAreaProps) {
         persona_id: activePersonaId || undefined,
         preset_id: activeLoomPresetId || undefined,
       })
+      if (generationNonceRef.current !== nonce) return
       startStreaming(res.generationId)
       consumeOneshotGuides()
     } catch (err: any) {
+      if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to continue:', err)
       const msg = err?.body?.error || err?.message || 'Failed to continue'
       setStreamingError(msg)
       toast.error(msg, { title: 'Continue Failed' })
     }
-  }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleImpersonate = useCallback(async () => {
     if (isStreaming) return
+    const nonce = ++generationNonceRef.current
+    beginStreaming()
     try {
       const res = await generateApi.start({
         chat_id: chatId,
@@ -258,24 +330,32 @@ export default function InputArea({ chatId }: InputAreaProps) {
         preset_id: activeLoomPresetId || undefined,
         generation_type: 'impersonate',
       })
+      if (generationNonceRef.current !== nonce) return
       startStreaming(res.generationId)
       consumeOneshotGuides()
     } catch (err: any) {
+      if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to impersonate:', err)
       const msg = err?.body?.error || err?.message || 'Failed to impersonate'
       setStreamingError(msg)
       toast.error(msg, { title: 'Impersonation Failed' })
     }
-  }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleStop = useCallback(async () => {
-    if (!activeGenerationId) return
+    if (!isStreaming) return
     try {
-      await generateApi.stop(activeGenerationId)
+      // If we have a generation ID, stop that specific generation.
+      // Otherwise (optimistic phase), stop all user generations.
+      await generateApi.stop(activeGenerationId || undefined)
     } catch (err) {
       console.error('[InputArea] Failed to stop:', err)
     }
-  }, [activeGenerationId])
+    // If we're in the optimistic phase (no WS events yet), revert locally
+    if (!activeGenerationId) {
+      stopStreaming()
+    }
+  }, [isStreaming, activeGenerationId, stopStreaming])
 
   const handleNewChat = useCallback(async () => {
     if (!activeCharacterId) return
@@ -535,6 +615,22 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 className={styles.popRowBtn}
                 onClick={() => {
                   setOpenPopover(null)
+                  openModal('manageChats', {
+                    characterId: activeCharacterId,
+                    characterName: characterName || 'Character',
+                  })
+                }}
+              >
+                <span className={styles.personaMain}>
+                  <FolderOpen size={14} />
+                  <span>Manage Chats</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className={styles.popRowBtn}
+                onClick={() => {
+                  setOpenPopover(null)
                   openModal('groupChatCreator')
                 }}
               >
@@ -543,21 +639,6 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   <span>New Group Chat</span>
                 </span>
               </button>
-              <div className={styles.quickSetName}>Other chats for this character</div>
-              {characterChats.filter((c) => c.id !== chatId).slice(0, 12).map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  className={styles.popRowBtn}
-                  onClick={() => {
-                    navigate(`/chat/${c.id}`)
-                    setOpenPopover(null)
-                  }}
-                >
-                  <span>{c.name || `Chat ${new Date(c.updated_at * 1000).toLocaleString()}`}</span>
-                </button>
-              ))}
-              {characterChats.length <= 1 && <div className={styles.popEmpty}>No other chats yet.</div>}
             </div>
           )}
 
@@ -587,7 +668,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 >
                   <span className={styles.personaMain}>
                     <FilePlus size={14} />
-                    <span>New Prompt</span>
+                    <span>New Chat</span>
                   </span>
                 </button>
                 <button
@@ -612,8 +693,54 @@ export default function InputArea({ chatId }: InputAreaProps) {
         </div>
       </div>
 
+      {/* Attachment preview strip */}
+      {pendingAttachments.length > 0 && (
+        <div className={styles.attachmentStrip}>
+          {pendingAttachments.map((att) => (
+            <div key={att.image_id} className={styles.attachmentPreview}>
+              {att.type === 'image' && att.previewUrl ? (
+                <img src={att.previewUrl} alt={att.original_filename} className={styles.attachmentThumb} />
+              ) : (
+                <span className={styles.attachmentLabel}>{att.original_filename}</span>
+              )}
+              <button
+                type="button"
+                className={styles.attachmentRemove}
+                onClick={() => removeAttachment(att.image_id)}
+                aria-label="Remove attachment"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Hidden file input — outside flex row to avoid layout interference on mobile */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*,audio/*"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => handleAttachFiles(e.target.files)}
+      />
+
       {/* Input row */}
       <div className={styles.inputRow}>
+        {!isStreaming && (
+          <button
+            type="button"
+            className={styles.attachBtn}
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            title="Attach image or audio"
+            aria-label="Attach file"
+          >
+            <Paperclip size={16} />
+          </button>
+        )}
+
         <div className={styles.inputWrapper}>
           <textarea
             ref={textareaRef}
@@ -644,8 +771,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
             type="button"
             className={styles.sendBtn}
             onClick={handleSend}
-            title={text.trim() ? 'Send message' : 'Silent continue (nudge)'}
-            aria-label={text.trim() ? 'Send message' : 'Silent continue'}
+            title={text.trim() || pendingAttachments.length > 0 ? 'Send message' : 'Silent continue (nudge)'}
+            aria-label={text.trim() || pendingAttachments.length > 0 ? 'Send message' : 'Silent continue'}
           >
             <Send size={16} />
           </button>

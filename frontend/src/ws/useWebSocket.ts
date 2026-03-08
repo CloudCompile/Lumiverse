@@ -23,7 +23,6 @@ import type { ActivatedWorldInfoEntry } from '@/types/api'
 export function useWebSocket() {
   const store = useStore
   const isAuthenticated = useStore((s) => s.isAuthenticated)
-  const session = useStore((s) => s.session)
   const lastExtensionSyncAtRef = useRef(0)
 
   useEffect(() => {
@@ -36,7 +35,9 @@ export function useWebSocket() {
       store.getState().loadExtensions()
     }
 
-    wsClient.connect(session?.token)
+    // WS auth uses cookies — no token needed in the URL.
+    // Connect only once; the singleton client handles reconnects internally.
+    wsClient.connect()
 
     const unsubs = [
       wsClient.on(EventType.MESSAGE_SENT, (payload: MessageSentPayload) => {
@@ -91,6 +92,14 @@ export function useWebSocket() {
       wsClient.on(EventType.GENERATION_ENDED, (payload: GenerationEndedPayload) => {
         const state = store.getState()
         if (payload.chatId === state.activeChatId) {
+          // Guard: ignore events from stale generations that were replaced by a newer one
+          if (state.activeGenerationId && payload.generationId && payload.generationId !== state.activeGenerationId) return
+          // Mark this generation as ended BEFORE calling endStreaming/setStreamingError,
+          // so a late startStreaming() call (from pending HTTP response) won't resurrect it
+          if (payload.generationId) {
+            state.markGenerationEnded(payload.generationId)
+          }
+
           if (payload.error) {
             state.setStreamingError(payload.error)
             toast.error(payload.error, { title: 'Generation Failed' })
@@ -151,8 +160,26 @@ export function useWebSocket() {
         }
       }),
 
-      wsClient.on(EventType.GENERATION_STOPPED, () => {
-        store.getState().stopStreaming()
+      wsClient.on(EventType.GENERATION_STOPPED, (payload: { generationId?: string; chatId?: string }) => {
+        const state = store.getState()
+        // Guard: only stop streaming if this event matches the active generation
+        // (a newer generation may have already replaced it)
+        if (state.activeGenerationId && payload.generationId && payload.generationId !== state.activeGenerationId) return
+        // Mark as ended to prevent zombie resurrection from late HTTP responses
+        if (payload.generationId) {
+          state.markGenerationEnded(payload.generationId)
+        }
+        state.stopStreaming()
+        // Reconcile message list so partial content saved by backend appears
+        const chatId = payload?.chatId || state.activeChatId
+        if (chatId) {
+          messagesApi.list(chatId, { limit: 200 }).then((res) => {
+            const s = store.getState()
+            if (s.activeChatId === chatId) {
+              s.setMessages(res.data, res.total)
+            }
+          }).catch(() => {})
+        }
       }),
 
       wsClient.on(EventType.GENERATION_ERROR, () => {
@@ -259,5 +286,5 @@ export function useWebSocket() {
       unsubs.forEach(unsub => unsub())
       wsClient.disconnect()
     }
-  }, [isAuthenticated, session?.token])
+  }, [isAuthenticated])
 }

@@ -1,7 +1,37 @@
+// --- Multi-part content types (for multimodal messages) ---
+
+export interface LlmTextPart {
+  type: "text";
+  text: string;
+}
+
+export interface LlmImagePart {
+  type: "image";
+  data: string;      // base64-encoded
+  mime_type: string;  // e.g. "image/png", "image/jpeg"
+}
+
+export interface LlmAudioPart {
+  type: "audio";
+  data: string;      // base64-encoded
+  mime_type: string;  // e.g. "audio/wav", "audio/mp3"
+}
+
+export type LlmMessagePart = LlmTextPart | LlmImagePart | LlmAudioPart;
+
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | LlmMessagePart[];
   name?: string;
+}
+
+/** Helper: extract the text content from an LlmMessage regardless of format. */
+export function getTextContent(msg: LlmMessage): string {
+  if (typeof msg.content === "string") return msg.content;
+  return msg.content
+    .filter((p): p is LlmTextPart => p.type === "text")
+    .map((p) => p.text)
+    .join("");
 }
 
 export interface GenerationRequest {
@@ -32,6 +62,7 @@ export interface GenerationParameters {
 
 export interface GenerationResponse {
   content: string;
+  reasoning?: string;
   finish_reason: string;
   usage?: {
     prompt_tokens: number;
@@ -42,7 +73,13 @@ export interface GenerationResponse {
 
 export interface StreamChunk {
   token: string;
+  reasoning?: string;
   finish_reason?: string;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
 }
 
 // --- Prompt Assembly Types ---

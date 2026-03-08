@@ -34,15 +34,25 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const activePersonaId = useStore((s) => s.activePersonaId)
   const personas = useStore((s) => s.personas)
 
-  // Auto-parse thinking tags from streaming content
+  // Auto-parse thinking tags from streaming content (handles unclosed tags from interrupts)
   const { streamDisplay, streamThoughts } = useMemo(() => {
     if (!autoParse || !streamingContent) return { streamDisplay: streamingContent, streamThoughts: '' }
     const tagPattern = /<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/gi
     let thoughts = ''
-    const cleaned = streamingContent.replace(tagPattern, (_m, _t, inner) => {
+    let cleaned = streamingContent.replace(tagPattern, (_m, _t, inner) => {
       thoughts += (thoughts ? '\n\n' : '') + inner.trim()
       return ''
-    }).trim()
+    })
+    // Handle unclosed reasoning tags (interrupted generation)
+    const unclosedPattern = /<(think|thinking|reasoning)>([\s\S]*)$/i
+    cleaned = cleaned.replace(unclosedPattern, (_m, _t, inner) => {
+      const trimmed = inner.trim()
+      if (trimmed) {
+        thoughts += (thoughts ? '\n\n' : '') + trimmed
+      }
+      return ''
+    })
+    cleaned = cleaned.trim()
     return { streamDisplay: cleaned || streamingContent, streamThoughts: thoughts }
   }, [streamingContent, autoParse])
   const activeCharacterId = useStore((s) => s.activeCharacterId)

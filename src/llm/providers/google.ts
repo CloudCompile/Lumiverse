@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import type { GenerationRequest, GenerationResponse, StreamChunk } from "../types";
+import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type LlmMessage, type LlmMessagePart } from "../types";
 
 export class GoogleProvider implements LlmProvider {
   readonly name = "google";
@@ -47,12 +47,22 @@ export class GoogleProvider implements LlmProvider {
 
     const data = await res.json() as any;
     const candidate = data.candidates?.[0];
-    const content = candidate?.content?.parts
-      ?.map((p: any) => p.text || "")
-      .join("") || "";
+    const parts = candidate?.content?.parts || [];
+
+    // Separate thinking parts from regular text
+    let content = "";
+    let reasoning = "";
+    for (const p of parts) {
+      if (p.thought) {
+        reasoning += p.text || "";
+      } else {
+        content += p.text || "";
+      }
+    }
 
     return {
       content,
+      reasoning: reasoning || undefined,
       finish_reason: candidate?.finishReason || "STOP",
       usage: data.usageMetadata
         ? {
@@ -102,15 +112,38 @@ export class GoogleProvider implements LlmProvider {
         try {
           const data = JSON.parse(trimmed.slice(6));
           const candidate = data.candidates?.[0];
-          const text = candidate?.content?.parts
-            ?.map((p: any) => p.text || "")
-            .join("") || "";
+          const parts = candidate?.content?.parts || [];
           const finishReason = candidate?.finishReason;
 
-          if (text) {
-            yield { token: text, finish_reason: finishReason === "STOP" ? "stop" : undefined };
-          } else if (finishReason) {
-            yield { token: "", finish_reason: finishReason === "STOP" ? "stop" : finishReason };
+          // Separate thinking parts (thought: true) from regular text parts
+          let text = "";
+          let reasoning = "";
+          for (const p of parts) {
+            if (p.thought) {
+              reasoning += p.text || "";
+            } else {
+              text += p.text || "";
+            }
+          }
+
+          // Capture usage metadata (Google includes it in the final streaming chunk)
+          const usage = data.usageMetadata
+            ? {
+                prompt_tokens: data.usageMetadata.promptTokenCount || 0,
+                completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
+                total_tokens: data.usageMetadata.totalTokenCount || 0,
+              }
+            : undefined;
+
+          if (text || reasoning) {
+            yield {
+              token: text,
+              reasoning: reasoning || undefined,
+              finish_reason: finishReason === "STOP" ? "stop" : undefined,
+              usage,
+            };
+          } else if (finishReason || usage) {
+            yield { token: "", finish_reason: finishReason === "STOP" ? "stop" : (finishReason || undefined), usage };
           }
         } catch {
           // Skip malformed SSE lines
@@ -146,6 +179,30 @@ export class GoogleProvider implements LlmProvider {
     }
   }
 
+  /** Format message content into Google Gemini parts array, handling multipart (vision/audio) content. */
+  private formatParts(m: LlmMessage): any[] {
+    if (typeof m.content === "string") return [{ text: m.content }];
+    return m.content.map((part: LlmMessagePart) => {
+      switch (part.type) {
+        case "text":
+          return { text: part.text };
+        case "image":
+        case "audio":
+          return { inlineData: { mimeType: part.mime_type, data: part.data } };
+        default:
+          return { text: "" };
+      }
+    });
+  }
+
+  /** Keys that are internal to Lumiverse and should never be sent to any provider API. */
+  private static readonly INTERNAL_PARAMS = new Set(["max_context_length", "_include_usage"]);
+
+  /** Keys explicitly handled by Google's buildBody — excluded from passthrough. */
+  private static readonly HANDLED_PARAMS = new Set([
+    "temperature", "max_tokens", "top_p", "top_k", "stop", "thinkingConfig",
+  ]);
+
   private buildBody(request: GenerationRequest): any {
     const params = request.parameters || {};
 
@@ -156,13 +213,13 @@ export class GoogleProvider implements LlmProvider {
     const body: any = {
       contents: otherMessages.map((m) => ({
         role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
+        parts: this.formatParts(m),
       })),
     };
 
     if (systemMessages.length > 0) {
       body.systemInstruction = {
-        parts: [{ text: systemMessages.map((m) => m.content).join("\n\n") }],
+        parts: [{ text: systemMessages.map((m) => getTextContent(m)).join("\n\n") }],
       };
     }
 
@@ -173,8 +230,23 @@ export class GoogleProvider implements LlmProvider {
     if (params.top_k !== undefined) generationConfig.topK = params.top_k;
     if (params.stop) generationConfig.stopSequences = params.stop;
 
+    // Thinking configuration for Gemini 2.5+ and 3.x models
+    if (params.thinkingConfig) {
+      generationConfig.thinkingConfig = params.thinkingConfig;
+    }
+
     if (Object.keys(generationConfig).length > 0) {
       body.generationConfig = generationConfig;
+    }
+
+    // Passthrough: inject extra params (e.g. from custom body) directly into the
+    // top-level request body. This enables provider-specific fields like
+    // safetySettings, cachedContent, etc. to reach the API.
+    for (const key of Object.keys(params)) {
+      if (body[key] !== undefined) continue;          // already set (e.g. generationConfig)
+      if (GoogleProvider.HANDLED_PARAMS.has(key)) continue;
+      if (GoogleProvider.INTERNAL_PARAMS.has(key)) continue;
+      body[key] = params[key];
     }
 
     // Inline council tools: pass as Google function calling format

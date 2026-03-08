@@ -158,6 +158,13 @@ export function duplicateCharacter(userId: string, id: string): Character | null
   return character;
 }
 
+export function findCharactersByName(userId: string, name: string): Character[] {
+  const rows = getDb()
+    .query("SELECT * FROM characters WHERE user_id = ? AND name = ? ORDER BY updated_at DESC")
+    .all(userId, name) as any[];
+  return rows.map(rowToCharacter);
+}
+
 export function characterExistsByName(userId: string, name: string): boolean {
   const row = getDb()
     .query("SELECT 1 FROM characters WHERE user_id = ? AND name = ? LIMIT 1")

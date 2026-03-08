@@ -3,6 +3,7 @@ import { initDatabase } from "./db/connection";
 import { runMigrations } from "./db/migrate";
 import { startAllExtensions } from "./spindle/lifecycle";
 import { initIdentity } from "./crypto/init";
+import { eventBus } from "./ws/bus";
 
 // Resolve encryption identity (file > env migration > generate)
 await initIdentity();
@@ -31,9 +32,16 @@ await startAllExtensions().catch((err) => {
 
 console.log(`Lumiverse Backend starting on port ${env.port}...`);
 
-export default {
+// Use explicit Bun.serve() so we get the Server reference for native pub/sub.
+const server = Bun.serve({
   port: env.port,
   hostname: "::",
   fetch: app.fetch,
   websocket,
-};
+  maxRequestBodySize: 512 * 1024 * 1024, // 512 MB (Bun default is 128 MB)
+});
+
+// Give the EventBus access to the server for native topic-based publish().
+eventBus.setServer(server);
+
+console.log(`Lumiverse Backend listening on ${server.hostname}:${server.port}`);

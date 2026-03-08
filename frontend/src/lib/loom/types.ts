@@ -52,6 +52,7 @@ export interface CompletionSettings {
   enableWebSearch: boolean
   sendInlineMedia: boolean
   enableFunctionCalling: boolean
+  includeUsage: boolean
 }
 
 export interface AdvancedSettings {

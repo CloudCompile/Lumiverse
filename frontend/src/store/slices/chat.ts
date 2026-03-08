@@ -16,11 +16,40 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
   // Closure-scoped streaming state (not in zustand — avoids re-renders)
   let streamPhase: StreamPhase = 'content'
   let streamBuffer = ''
-  // Tracks the last generation that ended/stopped/errored, so that a late
-  // `startStreaming()` call (e.g. from an HTTP response arriving after the WS
-  // GENERATION_ENDED event in sidecar-council mode) doesn't restart a zombie
-  // streaming state.
-  let lastEndedGenerationId: string | null = null
+  // Tracks recently ended generation IDs, so that a late `startStreaming()`
+  // call (e.g. from an HTTP response arriving after the WS GENERATION_ENDED
+  // event in sidecar-council mode) doesn't restart a zombie streaming state.
+  // We track a small set rather than a single ID because during rapid
+  // stop→regenerate cycles, multiple generations may end in quick succession.
+  const endedGenerationIds = new Set<string>()
+
+  // ── RAF-throttled streaming buffers ──────────────────────────────────
+  // Tokens accumulate here at full WS throughput (no React re-renders).
+  // A requestAnimationFrame loop flushes to Zustand at display refresh
+  // rate (~60fps), so expensive downstream rendering (markdown, OOC
+  // parsing, DOM walks) runs at most once per frame instead of per-token.
+  let rawStreamContent = ''
+  let rawStreamReasoning = ''
+  let streamFlushRaf = 0
+
+  function scheduleStreamFlush() {
+    if (!streamFlushRaf) {
+      streamFlushRaf = requestAnimationFrame(() => {
+        streamFlushRaf = 0
+        set({
+          streamingContent: rawStreamContent,
+          streamingReasoning: rawStreamReasoning,
+        })
+      }) as unknown as number
+    }
+  }
+
+  function cancelStreamFlush() {
+    if (streamFlushRaf) {
+      cancelAnimationFrame(streamFlushRaf)
+      streamFlushRaf = 0
+    }
+  }
 
   function resetStreamPhase() {
     streamPhase = 'detecting'
@@ -50,7 +79,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
 
     setActiveChat: (chatId, characterId = null) => {
       resetStreamPhase()
-      lastEndedGenerationId = null
+      endedGenerationIds.clear()
       set({
         activeChatId: chatId,
         activeCharacterId: characterId,
@@ -117,16 +146,46 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         return { messages, totalChatLength: messages.length }
       }),
 
+    beginStreaming: (regeneratingMessageId) => {
+      resetStreamPhase()
+      cancelStreamFlush()
+      rawStreamContent = ''
+      rawStreamReasoning = ''
+      set({
+        isStreaming: true,
+        streamingContent: '',
+        streamingReasoning: '',
+        streamingError: null,
+        activeGenerationId: null,
+        regeneratingMessageId: regeneratingMessageId ?? null,
+      })
+    },
+
     startStreaming: (generationId, regeneratingMessageId) => {
       // Guard: don't restart a generation that already completed (race condition
       // in sidecar-council mode where GENERATION_ENDED arrives before the HTTP
       // response that triggers this call from InputArea).
-      if (generationId === lastEndedGenerationId) return
+      if (endedGenerationIds.has(generationId)) return
       // Guard: don't reset content for a generation that's already streaming
       // (WS GENERATION_STARTED may arrive slightly before the HTTP response).
       if (generationId === get().activeGenerationId) return
 
+      const current = get()
+      // If we're already in an optimistic streaming state (beginStreaming was
+      // called), just wire up the generation ID without resetting buffers —
+      // tokens may have already started arriving via WS.
+      if (current.isStreaming && !current.activeGenerationId) {
+        set({
+          activeGenerationId: generationId,
+          regeneratingMessageId: regeneratingMessageId ?? current.regeneratingMessageId,
+        })
+        return
+      }
+
       resetStreamPhase()
+      cancelStreamFlush()
+      rawStreamContent = ''
+      rawStreamReasoning = ''
       set({
         isStreaming: true,
         streamingContent: '',
@@ -143,9 +202,13 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       const settings = fullStore.reasoningSettings
       const autoParse = settings?.autoParse
 
-      // If auto-parse is off, just append normally
+      // All token appends go to closure-scoped buffers (rawStreamContent /
+      // rawStreamReasoning). A RAF loop flushes to Zustand at display refresh
+      // rate so downstream React rendering runs at most once per frame.
+
       if (!autoParse) {
-        set((state) => ({ streamingContent: state.streamingContent + token }))
+        rawStreamContent += token
+        scheduleStreamFlush()
         return
       }
 
@@ -157,76 +220,90 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         const trimmed = streamBuffer.trimStart()
 
         if (trimmed.length >= rawPrefix.length && trimmed.startsWith(rawPrefix)) {
-          // Full prefix matched — transition to reasoning
           streamPhase = 'reasoning'
           const afterPrefix = trimmed.slice(rawPrefix.length)
           streamBuffer = ''
 
           if (afterPrefix) {
-            // Check if the suffix is already in the leftover
             const suffixIdx = afterPrefix.indexOf(rawSuffix)
             if (suffixIdx !== -1) {
               streamPhase = 'content'
-              const reasoning = afterPrefix.slice(0, suffixIdx)
-              const afterSuffix = afterPrefix.slice(suffixIdx + rawSuffix.length)
-              set((state) => ({
-                streamingReasoning: state.streamingReasoning + reasoning,
-                streamingContent: state.streamingContent + afterSuffix,
-              }))
+              rawStreamReasoning += afterPrefix.slice(0, suffixIdx)
+              rawStreamContent += afterPrefix.slice(suffixIdx + rawSuffix.length)
             } else {
-              set((state) => ({ streamingReasoning: state.streamingReasoning + afterPrefix }))
+              rawStreamReasoning += afterPrefix
             }
           }
         } else if (rawPrefix.startsWith(trimmed)) {
-          // Partial match — keep buffering
+          // Partial match — keep buffering (no flush needed yet)
+          return
         } else {
-          // No match — flush buffer to content
           streamPhase = 'content'
-          const flushed = streamBuffer
+          rawStreamContent += streamBuffer
           streamBuffer = ''
-          set((state) => ({ streamingContent: state.streamingContent + flushed }))
         }
       } else if (streamPhase === 'reasoning') {
-        set((state) => {
-          const newReasoning = state.streamingReasoning + token
-          const suffixIdx = newReasoning.indexOf(rawSuffix)
-          if (suffixIdx !== -1) {
-            // Suffix found — split and transition to content
-            streamPhase = 'content'
-            const reasoning = newReasoning.slice(0, suffixIdx)
-            const afterSuffix = newReasoning.slice(suffixIdx + rawSuffix.length)
-            return {
-              streamingReasoning: reasoning,
-              streamingContent: state.streamingContent + afterSuffix,
-            }
-          }
-          return { streamingReasoning: newReasoning }
-        })
+        rawStreamReasoning += token
+        const suffixIdx = rawStreamReasoning.indexOf(rawSuffix)
+        if (suffixIdx !== -1) {
+          streamPhase = 'content'
+          const afterSuffix = rawStreamReasoning.slice(suffixIdx + rawSuffix.length)
+          rawStreamReasoning = rawStreamReasoning.slice(0, suffixIdx)
+          rawStreamContent += afterSuffix
+        }
       } else {
-        // 'content' phase — normal append
-        set((state) => ({ streamingContent: state.streamingContent + token }))
+        rawStreamContent += token
       }
+
+      scheduleStreamFlush()
     },
 
-    appendStreamReasoning: (token) =>
-      set((state) => ({ streamingReasoning: state.streamingReasoning + token })),
+    appendStreamReasoning: (token) => {
+      rawStreamReasoning += token
+      scheduleStreamFlush()
+    },
 
     endStreaming: () => {
-      lastEndedGenerationId = get().activeGenerationId
+      const id = get().activeGenerationId
+      if (id) endedGenerationIds.add(id)
+      // Cap the set size to prevent unbounded growth
+      if (endedGenerationIds.size > 20) {
+        const first = endedGenerationIds.values().next().value
+        if (first) endedGenerationIds.delete(first)
+      }
       streamPhase = 'content'
+      cancelStreamFlush()
+      rawStreamContent = ''
+      rawStreamReasoning = ''
       set({ isStreaming: false, streamingContent: '', streamingReasoning: '', streamingError: null, activeGenerationId: null, regeneratingMessageId: null })
     },
 
     stopStreaming: () => {
-      lastEndedGenerationId = get().activeGenerationId
+      const id = get().activeGenerationId
+      if (id) endedGenerationIds.add(id)
       streamPhase = 'content'
+      cancelStreamFlush()
+      rawStreamContent = ''
+      rawStreamReasoning = ''
       set({ isStreaming: false, streamingContent: '', streamingReasoning: '', streamingError: null, activeGenerationId: null, regeneratingMessageId: null })
     },
 
     setStreamingError: (error) => {
-      lastEndedGenerationId = get().activeGenerationId
+      const id = get().activeGenerationId
+      if (id) endedGenerationIds.add(id)
       streamPhase = 'content'
+      cancelStreamFlush()
+      rawStreamContent = ''
+      rawStreamReasoning = ''
       set({ streamingError: error, isStreaming: false, activeGenerationId: null, regeneratingMessageId: null })
+    },
+
+    markGenerationEnded: (generationId) => {
+      endedGenerationIds.add(generationId)
+      if (endedGenerationIds.size > 20) {
+        const first = endedGenerationIds.values().next().value
+        if (first) endedGenerationIds.delete(first)
+      }
     },
   }
 }

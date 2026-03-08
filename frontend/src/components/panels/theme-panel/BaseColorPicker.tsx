@@ -79,6 +79,7 @@ interface BaseColorPickerProps {
 
 export default function BaseColorPicker({ baseColors, onChange }: BaseColorPickerProps) {
   const [activeKey, setActiveKey] = useState<BaseColorKey>('primary')
+  const [hexDraft, setHexDraft] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const hueRef = useRef<HTMLDivElement>(null)
   const draggingCanvas = useRef(false)
@@ -88,6 +89,11 @@ export default function BaseColorPicker({ baseColors, onChange }: BaseColorPicke
   const currentHex = baseColors[activeKey] || activeDef.defaultColor
   const rgb = hexToRgb(currentHex) || [147, 112, 219]
   const [hue, sat, val] = rgbToHsv(rgb[0], rgb[1], rgb[2])
+
+  // Reset hex draft when active key changes or color is updated externally
+  useEffect(() => {
+    setHexDraft(null)
+  }, [activeKey, currentHex])
 
   // ── Canvas drawing ──
 
@@ -217,12 +223,24 @@ export default function BaseColorPicker({ baseColors, onChange }: BaseColorPicke
 
   // ── Hex / RGB inputs ──
 
-  const handleHexInput = useCallback((val: string) => {
+  const handleHexChange = useCallback((val: string) => {
     const cleaned = val.startsWith('#') ? val : '#' + val
+    setHexDraft(cleaned)
+    // Apply immediately if it's a valid 6-digit hex
     if (/^#[0-9a-fA-F]{6}$/.test(cleaned)) {
       setColor(cleaned.toLowerCase())
     }
   }, [setColor])
+
+  const commitHexDraft = useCallback(() => {
+    if (hexDraft === null) return
+    const cleaned = hexDraft.startsWith('#') ? hexDraft : '#' + hexDraft
+    if (/^#[0-9a-fA-F]{6}$/.test(cleaned)) {
+      setColor(cleaned.toLowerCase())
+    }
+    // Clear draft so the input shows the committed (or reverted) value
+    setHexDraft(null)
+  }, [hexDraft, setColor])
 
   const handleRgbInput = useCallback((channel: 0 | 1 | 2, val: string) => {
     const n = parseInt(val, 10)
@@ -328,8 +346,10 @@ export default function BaseColorPicker({ baseColors, onChange }: BaseColorPicke
           <span className={styles.inputLabel}>Hex</span>
           <input
             className={styles.inputField}
-            value={currentHex.toUpperCase()}
-            onChange={(e) => handleHexInput(e.target.value)}
+            value={hexDraft !== null ? hexDraft.toUpperCase() : currentHex.toUpperCase()}
+            onChange={(e) => handleHexChange(e.target.value)}
+            onBlur={commitHexDraft}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitHexDraft() }}
           />
         </div>
         <div className={styles.inputGroup}>

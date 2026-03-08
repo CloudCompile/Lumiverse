@@ -10,7 +10,7 @@ import * as settingsSvc from "./settings.service";
 import * as personasSvc from "./personas.service";
 import { assemblePrompt } from "./prompt-assembly.service";
 import * as charactersSvc from "./characters.service";
-import type { LlmMessage, GenerationParameters, GenerationResponse, GenerationType, AssemblyBreakdownEntry, ActivatedWorldInfoEntry, ToolDefinition } from "../llm/types";
+import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationResponse, type GenerationType, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
 import { interceptorPipeline } from "../spindle/interceptor-pipeline";
 import { contextHandlerChain } from "../spindle/context-handler";
 import { executeCouncil } from "./council/council-execution.service";
@@ -132,6 +132,32 @@ interface PromptPipelineResult {
   deliberationHandledByMacro?: boolean;
 }
 
+/**
+ * If the generated content contains an unclosed reasoning/thinking tag
+ * (e.g. generation was interrupted mid-thought), append the closing tag
+ * so the frontend can properly collapse the reasoning block.
+ */
+function closeUnterminatedReasoningTags(userId: string, content: string): string {
+  if (!content) return content;
+
+  // Get user's configured reasoning tags, fallback to defaults
+  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
+  const prefix = ((reasoningSetting?.value?.prefix as string) || "<think>\n").replace(/^\n+|\n+$/g, "");
+  const suffix = ((reasoningSetting?.value?.suffix as string) || "\n</think>").replace(/^\n+|\n+$/g, "");
+
+  // Check if content has an opening tag without a matching close
+  const lastOpenIdx = content.lastIndexOf(prefix);
+  if (lastOpenIdx === -1) return content;
+
+  const afterOpen = content.indexOf(suffix, lastOpenIdx + prefix.length);
+  if (afterOpen === -1) {
+    // Unclosed tag — append the suffix
+    return content + suffix;
+  }
+
+  return content;
+}
+
 // Track active generations for stop support
 const activeGenerations = new Map<string, { controller: AbortController; userId: string; chatId: string }>();
 
@@ -241,8 +267,14 @@ async function runPromptPipeline(opts: {
   }
 
   // Run Spindle interceptor pipeline on assembled messages
+  // The pipeline uses LlmMessageDTO (string-only content) — at this stage
+  // multimodal parts have already been serialised so the cast is safe.
   if (interceptorPipeline.count > 0) {
-    messages = await interceptorPipeline.run(messages, spindleContext, opts.userId);
+    messages = await interceptorPipeline.run(
+      messages as import("lumiverse-spindle-types").LlmMessageDTO[],
+      spindleContext,
+      opts.userId
+    ) as unknown as LlmMessage[];
   }
 
   // Apply promptPostProcessing
@@ -345,6 +377,40 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     if (character) characterName = character.name;
   }
 
+  // Resolve target message EARLY (before council) so we can visually clear the
+  // message on the frontend before council tools start executing.
+  const resolvedPersona = personasSvc.resolvePersonaOrDefault(input.userId, input.persona_id);
+
+  const lifecycle: GenerationLifecycle = {
+    characterName,
+    generationType: genType,
+    personaId: resolvedPersona?.id,
+    personaName: resolvedPersona?.name || "User",
+    targetCharacterId: input.target_character_id,
+  };
+
+  let excludeMessageId: string | undefined;
+
+  if (genType === "regenerate") {
+    const targetMsg = input.message_id
+      ? chatsSvc.getMessage(input.userId, input.message_id)
+      : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+    if (targetMsg) {
+      lifecycle.targetMessageId = targetMsg.id;
+      excludeMessageId = targetMsg.id;
+      // Add a blank swipe immediately so the frontend shows cleared content
+      // before council/assembly begins (MESSAGE_SWIPED event fires now).
+      const withBlank = chatsSvc.addSwipe(input.userId, targetMsg.id, "");
+      lifecycle.targetSwipeIdx = withBlank ? withBlank.swipe_id : 0;
+    }
+  } else if (genType === "continue") {
+    const lastMsg = chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+    if (lastMsg) {
+      lifecycle.continueMessageId = lastMsg.id;
+      lifecycle.continueOriginalContent = lastMsg.content;
+    }
+  }
+
   // Execute council if enabled (before prompt assembly so it doesn't slow the critical path visibly)
   const councilSettings = getCouncilSettings(input.userId);
   let councilResult: CouncilExecutionResult | null = null;
@@ -419,42 +485,14 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     }
   }
 
-  // Resolve target message for regenerate/continue BEFORE prompt assembly
-  const resolvedPersona = personasSvc.resolvePersonaOrDefault(input.userId, input.persona_id);
-
-  const lifecycle: GenerationLifecycle = {
-    characterName,
-    generationType: genType,
-    personaId: resolvedPersona?.id,
-    personaName: resolvedPersona?.name || "User",
-    targetCharacterId: input.target_character_id,
-  };
-
   // Wire staged message into lifecycle so GENERATION_STARTED includes it as
   // targetMessageId and runGeneration knows to update instead of create.
   if (stagedMessageId) {
     lifecycle.stagedMessageId = stagedMessageId;
     lifecycle.targetMessageId = stagedMessageId;
-  }
-
-  // Exclude the staged (empty) message from prompt assembly so the LLM
-  // doesn't see a blank assistant turn at the end of the conversation.
-  let excludeMessageId: string | undefined = stagedMessageId;
-
-  if (genType === "regenerate") {
-    const targetMsg = input.message_id
-      ? chatsSvc.getMessage(input.userId, input.message_id)
-      : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
-    if (targetMsg) {
-      lifecycle.targetMessageId = targetMsg.id;
-      excludeMessageId = targetMsg.id;
-    }
-  } else if (genType === "continue") {
-    const lastMsg = chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
-    if (lastMsg) {
-      lifecycle.continueMessageId = lastMsg.id;
-      lifecycle.continueOriginalContent = lastMsg.content;
-    }
+    // Exclude the staged (empty) message from prompt assembly so the LLM
+    // doesn't see a blank assistant turn at the end of the conversation.
+    excludeMessageId = stagedMessageId;
   }
 
   // Extract council results for macro access
@@ -514,17 +552,14 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     });
   }
 
-  // Now add the blank swipe (after prompt assembly excluded the target message)
-  if (lifecycle.targetMessageId) {
-    const withBlank = chatsSvc.addSwipe(input.userId, lifecycle.targetMessageId, "");
-    lifecycle.targetSwipeIdx = withBlank ? withBlank.swipe_id : 0;
-  }
-
   // Attach assembly metadata to lifecycle
   lifecycle.breakdown = breakdown;
   lifecycle.model = connection.model;
   lifecycle.providerName = provider.name;
   lifecycle.maxContext = mergedParams.max_context_length as number | undefined;
+
+  // Strip internal-only keys before they reach the provider
+  delete mergedParams.max_context_length;
 
   // Resolve preset name for breakdown display
   const presetId = input.preset_id || connection.preset_id;
@@ -578,10 +613,21 @@ export async function dryRunGeneration(input: GenerateInput): Promise<DryRunResu
     }
   }
 
+  // Build ground-truth outbound parameters: strip internal-only keys that
+  // never reach the provider, and inject defaults the provider would add.
+  const outboundParams: Record<string, any> = { ...pipeline.parameters };
+  delete outboundParams.max_context_length;
+  delete outboundParams._include_usage;
+
+  // Providers with requiresMaxTokens inject a default when max_tokens is absent
+  if (provider.capabilities.requiresMaxTokens && outboundParams.max_tokens === undefined) {
+    outboundParams.max_tokens = provider.capabilities.parameters.max_tokens?.default ?? 4096;
+  }
+
   return {
     messages: pipeline.messages,
     breakdown: pipeline.breakdown || [],
-    parameters: pipeline.parameters,
+    parameters: outboundParams,
     model: connection.model,
     provider: provider.name,
     tokenCount,
@@ -611,19 +657,59 @@ async function runGeneration(
   }, userId);
 
   let fullContent = "";
+  let fullReasoning = "";
+  let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
 
   try {
     const stream = provider.generateStream(apiKey, apiUrl, { messages, model, parameters, stream: true, tools });
 
     for await (const chunk of stream) {
       if (signal.aborted) {
+        // Close unclosed reasoning tags so the frontend can properly collapse them
+        const closedContent = closeUnterminatedReasoningTags(userId, fullContent);
+
         if (lifecycle.targetMessageId && lifecycle.targetSwipeIdx != null) {
-          chatsSvc.updateSwipe(userId, lifecycle.targetMessageId, lifecycle.targetSwipeIdx, fullContent);
+          chatsSvc.updateSwipe(userId, lifecycle.targetMessageId, lifecycle.targetSwipeIdx, closedContent);
+          // Persist partial reasoning on abort for regenerate
+          if (fullReasoning) {
+            const existingExtra = chatsSvc.getMessage(userId, lifecycle.targetMessageId)?.extra || {};
+            chatsSvc.updateMessage(userId, lifecycle.targetMessageId, { extra: { ...existingExtra, reasoning: fullReasoning } });
+          }
         } else if (lifecycle.stagedMessageId) {
-          chatsSvc.updateMessage(userId, lifecycle.stagedMessageId, { content: fullContent });
+          // Preserve existing extra (character_id etc.) and save partial reasoning
+          const existingStagedExtra = chatsSvc.getMessage(userId, lifecycle.stagedMessageId)?.extra || {};
+          const abortExtra = fullReasoning ? { ...existingStagedExtra, reasoning: fullReasoning } : existingStagedExtra;
+          chatsSvc.updateMessage(userId, lifecycle.stagedMessageId, {
+            content: closedContent,
+            ...(Object.keys(abortExtra).length > 0 ? { extra: abortExtra } : {}),
+          });
+        } else if (closedContent) {
+          // Normal generation with no staged message — save partial content as a new message
+          const isImpersonate = lifecycle.generationType === "impersonate";
+          const extra: Record<string, any> = {};
+          if (isImpersonate && lifecycle.personaId) extra.persona_id = lifecycle.personaId;
+          if (!isImpersonate && lifecycle.targetCharacterId) extra.character_id = lifecycle.targetCharacterId;
+          if (fullReasoning) extra.reasoning = fullReasoning;
+          chatsSvc.createMessage(chatId, {
+            is_user: isImpersonate,
+            name: isImpersonate ? (lifecycle.personaName || "User") : lifecycle.characterName,
+            content: closedContent,
+            extra: Object.keys(extra).length > 0 ? extra : undefined,
+          }, userId);
         }
-        eventBus.emit(EventType.GENERATION_STOPPED, { generationId, chatId, content: fullContent }, userId);
+        eventBus.emit(EventType.GENERATION_STOPPED, { generationId, chatId, content: closedContent }, userId);
         break;
+      }
+
+      // Emit reasoning tokens (provider thinking/extended thinking)
+      if (chunk.reasoning) {
+        fullReasoning += chunk.reasoning;
+        eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
+          generationId,
+          chatId,
+          token: chunk.reasoning,
+          type: "reasoning",
+        }, userId);
       }
 
       if (chunk.token) {
@@ -633,6 +719,11 @@ async function runGeneration(
           chatId,
           token: chunk.token,
         }, userId);
+      }
+
+      // Capture provider usage data (token counts) from the stream
+      if (chunk.usage) {
+        streamUsage = chunk.usage;
       }
 
       if (chunk.finish_reason) {
@@ -647,14 +738,25 @@ async function runGeneration(
         // Regenerate: fill in the blank swipe that was created at generation start
         const updated = chatsSvc.updateSwipe(userId, lifecycle.targetMessageId, lifecycle.targetSwipeIdx, fullContent);
         messageId = updated?.id ?? lifecycle.targetMessageId;
+        // Persist API reasoning in message extra
+        if (fullReasoning) {
+          chatsSvc.updateMessage(userId, messageId, { extra: { ...chatsSvc.getMessage(userId, messageId)?.extra, reasoning: fullReasoning } });
+        }
       } else if (lifecycle.continueMessageId) {
         // Continue: append generated text to existing assistant message
         const combined = (lifecycle.continueOriginalContent ?? "") + fullContent;
-        const updated = chatsSvc.updateMessage(userId, lifecycle.continueMessageId, { content: combined });
+        const existingExtra = chatsSvc.getMessage(userId, lifecycle.continueMessageId)?.extra;
+        const continueExtra = fullReasoning ? { ...existingExtra, reasoning: fullReasoning } : undefined;
+        const updated = chatsSvc.updateMessage(userId, lifecycle.continueMessageId, { content: combined, ...(continueExtra ? { extra: continueExtra } : {}) });
         messageId = updated?.id ?? lifecycle.continueMessageId;
       } else if (lifecycle.stagedMessageId) {
         // Staged (sidecar council): update the pre-created empty message
-        chatsSvc.updateMessage(userId, lifecycle.stagedMessageId, { content: fullContent });
+        // Merge with existing extra to preserve character_id etc. set during staging
+        const existingStagedExtra = chatsSvc.getMessage(userId, lifecycle.stagedMessageId)?.extra || {};
+        const stagedExtra = fullReasoning
+          ? { ...existingStagedExtra, reasoning: fullReasoning }
+          : (Object.keys(existingStagedExtra).length > 0 ? existingStagedExtra : undefined);
+        chatsSvc.updateMessage(userId, lifecycle.stagedMessageId, { content: fullContent, ...(stagedExtra ? { extra: stagedExtra } : {}) });
         messageId = lifecycle.stagedMessageId;
       } else {
         // Normal / swipe: create assistant message, impersonate: create user message
@@ -662,6 +764,7 @@ async function runGeneration(
         const extra: Record<string, any> = {};
         if (isImpersonate && lifecycle.personaId) extra.persona_id = lifecycle.personaId;
         if (!isImpersonate && lifecycle.targetCharacterId) extra.character_id = lifecycle.targetCharacterId;
+        if (fullReasoning) extra.reasoning = fullReasoning;
 
         const message = chatsSvc.createMessage(chatId, {
           is_user: isImpersonate,
@@ -670,6 +773,12 @@ async function runGeneration(
           extra: Object.keys(extra).length > 0 ? extra : undefined,
         }, userId);
         messageId = message.id;
+      }
+
+      // Persist provider usage (token counts) in message extra when available
+      if (streamUsage) {
+        const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
+        chatsSvc.updateMessage(userId, messageId, { extra: { ...existing, usage: streamUsage } });
       }
 
       // Compute and store breakdown for the generated message
@@ -698,6 +807,7 @@ async function runGeneration(
         messageId,
         content: fullContent,
         breakdown: breakdownPayload,
+        usage: streamUsage,
       }, userId);
     }
   } catch (err: any) {
@@ -798,7 +908,7 @@ function applyPostProcessing(messages: LlmMessage[], mode: string): void {
       if (messages[i].role === messages[i - 1].role) {
         messages[i - 1] = {
           ...messages[i - 1],
-          content: messages[i - 1].content + "\n\n" + messages[i].content,
+          content: getTextContent(messages[i - 1]) + "\n\n" + getTextContent(messages[i]),
         };
         messages.splice(i, 1);
       } else {
@@ -807,7 +917,7 @@ function applyPostProcessing(messages: LlmMessage[], mode: string): void {
     }
   } else if (mode === "single") {
     if (messages.length > 1) {
-      const combined = messages.map((m) => m.content).join("\n\n");
+      const combined = messages.map((m) => getTextContent(m)).join("\n\n");
       messages.length = 0;
       messages.push({ role: "system", content: combined });
     }

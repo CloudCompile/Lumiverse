@@ -4,40 +4,53 @@ import { EventType, type EventMessage } from "./events";
 type Listener = (event: EventMessage) => void;
 
 class EventBus {
-  private userClients = new Map<string, Set<ServerWebSocket<unknown>>>();
+  private server: import("bun").Server<unknown> | null = null;
   private clientToUser = new Map<ServerWebSocket<unknown>, string>();
   private sessionToClient = new Map<string, ServerWebSocket<unknown>>();
   private clientToSession = new Map<ServerWebSocket<unknown>, string>();
   private listeners = new Map<EventType, Set<Listener>>();
 
+  /** Store the Bun server reference so we can use native publish(). */
+  setServer(server: import("bun").Server<unknown>): void {
+    this.server = server;
+  }
+
   addClient(ws: ServerWebSocket<unknown>, userId: string, sessionId?: string): void {
-    // If a session ID is provided, evict any existing socket for the same session
-    // This prevents duplicate registrations from reconnects / race conditions
+    // Track session → socket mapping for dedup, but do NOT forcefully evict
+    // the old socket. Stale sockets are cleaned up naturally via onClose →
+    // removeClient. Forceful eviction causes reconnect loops because the
+    // close frame triggers the client to reconnect, which evicts again, etc.
     if (sessionId) {
       const existing = this.sessionToClient.get(sessionId);
       if (existing && existing !== ws) {
-        console.log(`[EventBus] Evicting stale socket for session ${sessionId}`);
+        // Just remove tracking — the old socket's onClose will fire and
+        // call removeClient() to clean up subscriptions.
         this.removeClient(existing);
-        try { existing.close(1000, "Replaced by new connection"); } catch { /* already closed */ }
       }
       this.sessionToClient.set(sessionId, ws);
       this.clientToSession.set(ws, sessionId);
     }
 
-    if (!this.userClients.has(userId)) {
-      this.userClients.set(userId, new Set());
-    }
-    this.userClients.get(userId)!.add(ws);
     this.clientToUser.set(ws, userId);
+
+    // Subscribe to per-user topic and system broadcast topic.
+    // Bun's native pub/sub handles delivery in Zig — no JS iteration needed.
+    try {
+      ws.subscribe(`user:${userId}`);
+      ws.subscribe("system");
+    } catch {
+      // Socket may already be closed
+    }
   }
 
   removeClient(ws: ServerWebSocket<unknown>): void {
     const userId = this.clientToUser.get(ws);
     if (userId) {
-      const userSet = this.userClients.get(userId);
-      if (userSet) {
-        userSet.delete(ws);
-        if (userSet.size === 0) this.userClients.delete(userId);
+      try {
+        ws.unsubscribe(`user:${userId}`);
+        ws.unsubscribe("system");
+      } catch {
+        // Socket may already be closed
       }
       this.clientToUser.delete(ws);
     }
@@ -69,42 +82,25 @@ class EventBus {
 
     const json = JSON.stringify(message);
 
-    if (userId) {
-      // Broadcast only to the specified user's connections
-      const userSet = this.userClients.get(userId);
-      if (!userSet || userSet.size === 0) {
-        if (event !== EventType.SETTINGS_UPDATED) {
-          console.warn(`[EventBus] No WS clients for user ${userId} — ${event} not delivered`);
-        }
-      } else {
-        for (const ws of userSet) {
-          try {
-            ws.send(json);
-          } catch {
-            this.removeClient(ws);
-          }
-        }
-      }
-    } else {
-      // Broadcast to all connected WebSocket clients (system events)
-      for (const [ws] of this.clientToUser) {
-        try {
-          ws.send(json);
-        } catch {
-          this.removeClient(ws);
-        }
-      }
+    // Use Bun's native pub/sub for WebSocket delivery — single native call
+    // instead of iterating over JS Maps and calling ws.send() per-socket.
+    if (this.server) {
+      const topic = userId ? `user:${userId}` : "system";
+      this.server.publish(topic, json);
     }
 
-    // Fire in-process listeners
+    // Fire in-process listeners asynchronously so extension worker IPC
+    // doesn't block the streaming hot path.
     const eventListeners = this.listeners.get(event);
     if (eventListeners) {
       for (const listener of eventListeners) {
-        try {
-          listener(message);
-        } catch (err) {
-          console.error(`Event listener error for ${event}:`, err);
-        }
+        queueMicrotask(() => {
+          try {
+            listener(message);
+          } catch (err) {
+            console.error(`Event listener error for ${event}:`, err);
+          }
+        });
       }
     }
   }

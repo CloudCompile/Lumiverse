@@ -13,6 +13,7 @@
     backend-only - Start backend only, skip frontend serving
     dev          - Start backend in watch mode
     setup        - Run setup wizard only
+    migrate-st   - Run SillyTavern migration helper
 
 .PARAMETER Build
     Rebuild the frontend before starting the backend
@@ -25,11 +26,14 @@
 #>
 
 param(
-    [ValidateSet("all", "build-only", "backend-only", "dev", "setup")]
+    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "migrate-st")]
     [string]$Mode = "all",
 
     [Alias("b")]
     [switch]$Build,
+
+    [Alias("m")]
+    [switch]$MigrateST,
 
     [string]$FrontendPath,
 
@@ -139,6 +143,13 @@ function Invoke-Setup {
     try { & bun run scripts/setup-wizard.ts } finally { Pop-Location }
 }
 
+function Invoke-MigrateST {
+    Install-Deps $BackendDir "backend"
+    Write-Info "Launching SillyTavern migration helper..."
+    Push-Location $BackendDir
+    try { & bun run migrate:st } finally { Pop-Location }
+}
+
 # ─── Load .env into current process ─────────────────────────────────────────
 
 function Load-EnvFile {
@@ -234,6 +245,9 @@ Write-Host ""
 
 Ensure-Bun
 
+# Allow -MigrateST switch as shorthand for -Mode migrate-st
+if ($MigrateST) { $Mode = "migrate-st" }
+
 switch ($Mode) {
     "all" {
         Invoke-SetupIfNeeded
@@ -255,5 +269,8 @@ switch ($Mode) {
     }
     "setup" {
         Invoke-Setup
+    }
+    "migrate-st" {
+        Invoke-MigrateST
     }
 }

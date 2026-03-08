@@ -24,10 +24,13 @@
   padding: 10px 18px;
   min-width: 100px;
   min-height: 48px;
+  background: var(--lumiverse-bg, rgba(28, 24, 38, 0.95));
   background: linear-gradient(135deg, color-mix(in srgb, var(--lumiverse-bg) 95%, transparent) 0%, var(--lumiverse-fill) 100%);
+  border: 1px solid var(--lumiverse-primary-050, rgba(147, 112, 219, 0.5));
   border: 1px solid color-mix(in srgb, var(--lumiverse-primary) 40%, transparent);
   border-radius: 24px;
   /* backdrop-filter applied only when glass is enabled — see below */
+  box-shadow: var(--lumiverse-shadow-md);
   box-shadow: var(--lumiverse-shadow-md), 0 2px 12px color-mix(in srgb, var(--lumiverse-primary) 20%, transparent);
   position: relative;
   overflow: hidden;

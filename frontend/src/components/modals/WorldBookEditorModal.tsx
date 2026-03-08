@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
-import { X, Plus, Trash2, BookOpen, Upload } from 'lucide-react'
+import { X, Plus, Trash2, BookOpen, Upload, User, FileUp } from 'lucide-react'
 import { useStore } from '@/store'
 import { worldBooksApi } from '@/api/world-books'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -288,6 +288,16 @@ export default function WorldBookEditorModal() {
                 >
                   <BookOpen size={13} />
                   <span className={styles.bookName}>{book.name}</span>
+                  {book.metadata?.source === 'character' && (
+                    <span className={styles.sourceBadge} data-tooltip={`From character${book.metadata.source_character_id ? '' : ''}`}>
+                      <User size={10} />
+                    </span>
+                  )}
+                  {book.metadata?.source === 'import' && (
+                    <span className={styles.sourceBadge} data-tooltip="Imported from file">
+                      <FileUp size={10} />
+                    </span>
+                  )}
                   <span
                     className={styles.bookDeleteBtn}
                     role="button"

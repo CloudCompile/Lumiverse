@@ -77,8 +77,8 @@ export const generateApi = {
     return post<GenerateResponse>('/generate', request)
   },
 
-  stop(generationId: string) {
-    return post<void>('/generate/stop', { generation_id: generationId })
+  stop(generationId?: string) {
+    return post<void>('/generate/stop', generationId ? { generation_id: generationId } : {})
   },
 
   regenerate(request: GenerateRequest) {

@@ -131,16 +131,15 @@ function SortableCategoryItem({
       ref={setNodeRef}
       className={clsx(s.item, s.categoryHeader, isDragging && s.itemDragging, isDisabled && s.itemDisabled)}
       style={style}
-      {...attributes}
     >
-      <span {...listeners} className={s.dragHandle} title="Drag to reorder (moves all items in this category)">
+      <span {...attributes} {...listeners} className={s.dragHandle} title="Drag to reorder (moves all items in this category)">
         <GripVertical size={14} />
       </span>
       <button className={s.iconBtn} onClick={onToggleCollapse} title={isCollapsed ? 'Expand category' : 'Collapse category'} type="button">
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </button>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }} onClick={onToggleCollapse}>
-        <span className={s.categoryName}>{displayName}</span>
+        <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>{displayName}</span>
         <span className={s.categoryCount}>({childCount})</span>
       </div>
       <button className={s.iconBtn} onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'} type="button">
@@ -180,12 +179,11 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented }: Sort
       ref={setNodeRef}
       className={clsx(s.item, isDragging && s.itemDragging, isMarker && s.marker, indented && s.itemIndented, isDisabled && s.itemDisabled)}
       style={style}
-      {...attributes}
     >
-      <span {...listeners} className={s.dragHandle} title="Drag to reorder">
+      <span {...attributes} {...listeners} className={s.dragHandle} title="Drag to reorder">
         <GripVertical size={14} />
       </span>
-      <div className={s.blockContent}>
+      <div className={clsx(s.blockContent, s.truncTooltip)} data-tooltip={block.name}>
         <div className={s.blockNameRow}>
           <span className={s.blockName}>
             {isMarker && <Hash size={12} style={{ marginRight: '4px', opacity: 0.6 }} />}
@@ -945,6 +943,10 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
               <input type="checkbox" className={s.checkbox} checked={!!(settings.enableFunctionCalling ?? defaults.enableFunctionCalling)} onChange={e => handleChange('enableFunctionCalling', e.target.checked)} />
               Enable Function Calling
             </label>
+            <label className={s.checkboxLabel} title="Request token usage data from the provider and attach it to the message">
+              <input type="checkbox" className={s.checkbox} checked={!!(settings.includeUsage ?? defaults.includeUsage)} onChange={e => handleChange('includeUsage', e.target.checked)} />
+              Include Usage
+            </label>
           </div>
         </div>
       )}
@@ -1335,71 +1337,74 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         )
       })()}
 
-      {/* Settings accordion sections */}
-      {activePreset && (
-        <GenerationSettings
-          samplerOverrides={activePreset.samplerOverrides}
-          customBody={activePreset.customBody}
-          connectionProfile={connectionProfile}
-          samplerParams={samplerParams}
-          onSaveSamplers={saveSamplerOverrides}
-          onSaveCustomBody={saveCustomBody}
-          onRefreshProfile={refreshConnectionProfile}
-        />
-      )}
-      {activePreset && <PromptBehaviorSettings promptBehavior={activePreset.promptBehavior} onSave={savePromptBehavior} />}
-      {activePreset && <CompletionSettingsPanel completionSettings={activePreset.completionSettings} onSave={saveCompletionSettings} />}
-      {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} onSave={saveAdvancedSettings} />}
-      {activePreset && <ContextMeter />}
-
-      {/* Block list or empty state */}
+      {/* Scrollable content: settings + block list */}
       <div className={s.scrollArea}>
-        {isLoading ? (
-          <div className={s.emptyState}>Loading...</div>
-        ) : !activePreset ? (
-          <div className={s.emptyState}>
-            <Layers size={40} style={{ opacity: 0.3 }} />
-            <div style={{ fontSize: '14px', fontWeight: 500 }}>No Preset Selected</div>
-            <div style={{ fontSize: '12px' }}>Create a new preset or select an existing one to start building.</div>
-          </div>
-        ) : activePreset.blocks.length === 0 ? (
-          <div className={s.emptyState}>
-            <div style={{ fontSize: '14px' }}>No blocks yet</div>
-            <div style={{ fontSize: '12px' }}>Add a prompt block or marker to get started.</div>
-          </div>
-        ) : (
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-            <SortableContext items={visibleBlockIds} strategy={verticalListSortingStrategy}>
-              {groups.map(group => (
-                <Fragment key={group.categoryBlock?.id || 'ungrouped'}>
-                  {group.categoryBlock && (
-                    <SortableCategoryItem
-                      block={group.categoryBlock}
-                      isCollapsed={collapsedCategories.has(group.categoryBlock.id)}
-                      onToggleCollapse={() => toggleCollapse(group.categoryBlock!.id)}
-                      onEdit={handleEdit}
-                      onDelete={handleDelete}
-                      onToggle={toggleBlock}
-                      childCount={group.children.length}
-                    />
-                  )}
-                  {(!group.categoryBlock || !collapsedCategories.has(group.categoryBlock.id)) &&
-                    group.children.map(block => (
-                      <SortableBlockItem
-                        key={block.id}
-                        block={block}
+        {/* Settings accordion sections */}
+        {activePreset && (
+          <GenerationSettings
+            samplerOverrides={activePreset.samplerOverrides}
+            customBody={activePreset.customBody}
+            connectionProfile={connectionProfile}
+            samplerParams={samplerParams}
+            onSaveSamplers={saveSamplerOverrides}
+            onSaveCustomBody={saveCustomBody}
+            onRefreshProfile={refreshConnectionProfile}
+          />
+        )}
+        {activePreset && <PromptBehaviorSettings promptBehavior={activePreset.promptBehavior} onSave={savePromptBehavior} />}
+        {activePreset && <CompletionSettingsPanel completionSettings={activePreset.completionSettings} onSave={saveCompletionSettings} />}
+        {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} onSave={saveAdvancedSettings} />}
+        {activePreset && <ContextMeter />}
+
+        {/* Block list or empty state */}
+        <div className={s.blockList}>
+          {isLoading ? (
+            <div className={s.emptyState}>Loading...</div>
+          ) : !activePreset ? (
+            <div className={s.emptyState}>
+              <Layers size={40} style={{ opacity: 0.3 }} />
+              <div style={{ fontSize: '14px', fontWeight: 500 }}>No Preset Selected</div>
+              <div style={{ fontSize: '12px' }}>Create a new preset or select an existing one to start building.</div>
+            </div>
+          ) : activePreset.blocks.length === 0 ? (
+            <div className={s.emptyState}>
+              <div style={{ fontSize: '14px' }}>No blocks yet</div>
+              <div style={{ fontSize: '12px' }}>Add a prompt block or marker to get started.</div>
+            </div>
+          ) : (
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={visibleBlockIds} strategy={verticalListSortingStrategy}>
+                {groups.map(group => (
+                  <Fragment key={group.categoryBlock?.id || 'ungrouped'}>
+                    {group.categoryBlock && (
+                      <SortableCategoryItem
+                        block={group.categoryBlock}
+                        isCollapsed={collapsedCategories.has(group.categoryBlock.id)}
+                        onToggleCollapse={() => toggleCollapse(group.categoryBlock!.id)}
                         onEdit={handleEdit}
                         onDelete={handleDelete}
                         onToggle={toggleBlock}
-                        indented={!!group.categoryBlock}
+                        childCount={group.children.length}
                       />
-                    ))
-                  }
-                </Fragment>
-              ))}
-            </SortableContext>
-          </DndContext>
-        )}
+                    )}
+                    {(!group.categoryBlock || !collapsedCategories.has(group.categoryBlock.id)) &&
+                      group.children.map(block => (
+                        <SortableBlockItem
+                          key={block.id}
+                          block={block}
+                          onEdit={handleEdit}
+                          onDelete={handleDelete}
+                          onToggle={toggleBlock}
+                          indented={!!group.categoryBlock}
+                        />
+                      ))
+                    }
+                  </Fragment>
+                ))}
+              </SortableContext>
+            </DndContext>
+          )}
+        </div>
       </div>
 
       {/* Action bar */}

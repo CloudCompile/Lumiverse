@@ -30,6 +30,7 @@ import { embeddingsRoutes } from "./routes/embeddings.routes";
 import { tokenizersRoutes } from "./routes/tokenizers.routes";
 import { spindleOAuthRoutes } from "./routes/spindle-oauth.routes";
 import { systemRoutes } from "./routes/system.routes";
+import { migrateRoutes } from "./routes/migrate.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -37,11 +38,19 @@ const app = new Hono();
 
 app.use("*", compress());
 
-// Body size limit — 10 MB default for API routes
-app.use("/api/*", bodyLimit({
-  maxSize: 10 * 1024 * 1024,
-  onError: (c) => c.json({ error: "Request body too large" }, 413),
-}));
+// Body size limit — 10 MB default for API routes.
+// Bulk import routes (migrate/*, characters/import-bulk) are excluded here;
+// the Bun server-level maxRequestBodySize (512 MB in index.ts) covers them.
+app.use("/api/*", async (c, next) => {
+  const path = c.req.path;
+  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk") {
+    return next();
+  }
+  return bodyLimit({
+    maxSize: 10 * 1024 * 1024,
+    onError: (c) => c.json({ error: "Request body too large" }, 413),
+  })(c, next);
+});
 
 // Host header validation — prevents DNS rebinding attacks
 const allowedHosts = new Set<string>();
@@ -108,6 +117,7 @@ app.route("/api/v1/characters/:characterId/gallery", characterGalleryRoutes);
 app.route("/api/v1/embeddings", embeddingsRoutes);
 app.route("/api/v1/tokenizers", tokenizersRoutes);
 app.route("/api/v1/system", systemRoutes);
+app.route("/api/v1/migrate", migrateRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

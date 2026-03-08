@@ -10,6 +10,7 @@
   left: 12px;
   right: 12px;
   z-index: 20;
+  background: var(--lumiverse-bg, rgba(28, 24, 38, 0.95));
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--lcs-glass-bg) 78%, var(--lumiverse-bg-elevated) 22%),
@@ -158,6 +159,7 @@
 .popover {
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
   border-radius: 10px;
+  background: var(--lumiverse-bg-elevated, rgba(35, 30, 48, 0.9));
   background: color-mix(in srgb, var(--lumiverse-bg-elevated) 88%, var(--lcs-glass-bg) 12%);
   display: flex;
   flex-direction: column;
@@ -318,6 +320,93 @@
   background: var(--lumiverse-danger, #ef4444);
 }
 
+/* ── Attachment preview strip ── */
+.attachmentStrip {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 0 2px;
+}
+
+.attachmentPreview {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.1));
+  border-radius: var(--lcs-radius-xs, 6px);
+  overflow: hidden;
+  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04));
+  max-height: 56px;
+}
+
+.attachmentThumb {
+  display: block;
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+}
+
+.attachmentLabel {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.65));
+  padding: 4px 22px 4px 8px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachmentRemove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--lcs-transition-fast, 120ms ease);
+}
+
+.attachmentRemove:hover {
+  background: var(--lumiverse-danger, #ef4444);
+}
+
+/* ── Attach button ── */
+.attachBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--lcs-radius, 14px);
+  background: transparent;
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.4));
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition:
+    color var(--lcs-transition-fast, 120ms ease),
+    background var(--lcs-transition-fast, 120ms ease);
+}
+
+.attachBtn:hover {
+  color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
+  background: var(--lumiverse-fill, rgba(255, 255, 255, 0.06));
+}
+
+.attachBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ── Input row — textarea + send button ── */
 .inputRow {
   display: flex;
@@ -448,6 +537,7 @@
   color: rgb(45, 212, 191);
   padding: 2px 6px;
   padding-bottom: 3px;
+  border-bottom: 1px solid rgba(45, 212, 191, 0.3);
   border-bottom: 1px solid color-mix(in srgb, rgb(45, 212, 191) 30%, var(--lumiverse-border));
 }
 
@@ -458,8 +548,10 @@
   letter-spacing: 0.4px;
   padding: 1px 5px;
   border-radius: 4px;
+  background: rgba(45, 212, 191, 0.14);
   background: color-mix(in srgb, rgb(45, 212, 191) 14%, transparent);
   color: rgb(45, 212, 191);
+  border: 1px solid rgba(45, 212, 191, 0.25);
   border: 1px solid color-mix(in srgb, rgb(45, 212, 191) 25%, transparent);
 }
 
@@ -482,5 +574,19 @@
   /* Prevent iOS Safari auto-zoom on input focus (triggers when font-size < 16px) */
   .textarea {
     font-size: max(16px, calc(14px * var(--lumiverse-font-scale, 1)));
+  }
+
+  .inputRow {
+    gap: 4px;
+  }
+
+  .attachBtn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .sendBtn {
+    width: 36px;
+    height: 36px;
   }
 }

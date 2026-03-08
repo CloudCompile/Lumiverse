@@ -1,3 +1,12 @@
+export interface MessageAttachment {
+  type: "image" | "audio";
+  image_id: string;           // FK to images table (used for both image and audio)
+  mime_type: string;          // e.g. "image/png", "audio/wav"
+  original_filename: string;
+  width?: number;             // images only
+  height?: number;            // images only
+}
+
 export interface Message {
   id: string;
   chat_id: string;

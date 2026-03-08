@@ -10,6 +10,7 @@ import ToolEditorModal from '@/components/panels/creator-workshop/ToolEditorModa
 import DryRunModal from './DryRunModal'
 import PromptItemizerModal from './PromptItemizerModal'
 import GroupChatCreatorModal from './GroupChatCreatorModal'
+import ManageChatsModal from './ManageChatsModal'
 import PermissionRequestModal from './PermissionRequestModal'
 
 export default function ModalContainer() {
@@ -44,6 +45,12 @@ export default function ModalContainer() {
             closeModal()
           }}
           onCancel={closeModal}
+          secondaryText={modalProps.secondaryText}
+          onSecondary={modalProps.onSecondary ? () => {
+            modalProps.onSecondary?.()
+            closeModal()
+          } : undefined}
+          secondaryVariant={modalProps.secondaryVariant}
         />
       )}
 
@@ -63,6 +70,7 @@ export default function ModalContainer() {
       {activeModal === 'dryRun' && <DryRunModal />}
       {activeModal === 'promptItemizer' && <PromptItemizerModal />}
       {activeModal === 'groupChatCreator' && <GroupChatCreatorModal />}
+      {activeModal === 'manageChats' && <ManageChatsModal />}
       {activeModal === 'lumiaEditor' && <LumiaEditorModal />}
       {activeModal === 'loomEditor' && <LoomEditorModal />}
       {activeModal === 'toolEditor' && <ToolEditorModal />}

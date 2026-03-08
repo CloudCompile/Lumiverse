@@ -35,6 +35,12 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
     try {
       const text = await file.text()
       const payload = JSON.parse(text)
+      if (!payload.name) {
+        payload.originalName = file.name.replace(/\.[^.]+$/, '')
+      }
+      if (!payload.description) {
+        payload.description = `Uploaded at ${new Date().toLocaleString()}`
+      }
       const result = await worldBooksApi.importJson(payload)
       onImport(result.world_book)
     } catch (e: any) {

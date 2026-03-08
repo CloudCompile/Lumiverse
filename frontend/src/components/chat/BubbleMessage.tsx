@@ -1,6 +1,7 @@
 import { useMessageCard } from '@/hooks/useMessageCard'
 import MessageContent from './MessageContent'
 import MessageEditArea from './MessageEditArea'
+import MessageAttachments from './MessageAttachments'
 import SwipeControls from './SwipeControls'
 import GreetingNav from './GreetingNav'
 import ReasoningBlock from './ReasoningBlock'
@@ -29,6 +30,9 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
     isEditing,
     editContent,
     setEditContent,
+    editReasoning,
+    setEditReasoning,
+    showReasoningEditor,
     isUser,
     isLastMessage,
     isActivelyStreaming,
@@ -102,14 +106,21 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
           </div>
         </div>
 
-        {/* Reasoning block */}
-        {reasoning && (
+        {/* Reasoning block — hidden during editing since the edit area shows it inline */}
+        {reasoning && !isEditing && (
           <ReasoningBlock
             reasoning={reasoning}
             reasoningDuration={reasoningDuration}
             isStreaming={isActivelyStreaming}
             variant="bubble"
           />
+        )}
+
+        {/* Inline attachments — before content for assistant, after for user */}
+        {!isUser && message.extra?.attachments && message.extra.attachments.length > 0 && !isEditing && (
+          <div className={styles.content}>
+            <MessageAttachments attachments={message.extra.attachments} isUser={false} />
+          </div>
         )}
 
         {/* Content */}
@@ -120,6 +131,8 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
               onChangeContent={setEditContent}
               onSave={handleSaveEdit}
               onCancel={handleCancelEdit}
+              editReasoning={showReasoningEditor ? editReasoning : undefined}
+              onChangeReasoning={showReasoningEditor ? setEditReasoning : undefined}
             />
           ) : displayContent ? (
             <MessageContent
@@ -134,6 +147,13 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
             <StreamingIndicator />
           ) : null}
         </div>
+
+        {/* User attachments render after content so they sit below text on mobile */}
+        {isUser && message.extra?.attachments && message.extra.attachments.length > 0 && !isEditing && (
+          <div className={styles.content}>
+            <MessageAttachments attachments={message.extra.attachments} isUser={true} />
+          </div>
+        )}
 
         {/* Swipe controls */}
         {!isUser && (message.swipes?.length > 1 || isLastMessage) && !isEditing && (

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { useStore } from '@/store'
 import { messagesApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
@@ -8,25 +8,41 @@ import type { Message } from '@/types/api'
 /**
  * Strip thinking/reasoning tags from content and extract the thoughts.
  * Handles <think>, <thinking>, <reasoning> and their closing variants.
+ * Also handles unclosed tags (e.g. when generation was interrupted mid-thought).
  * Returns the cleaned content and extracted reasoning text.
  */
 function parseThinkingTags(content: string): { cleaned: string; thoughts: string } {
-  // Match reasoning tags and consume surrounding whitespace so it doesn't
-  // leak into the prompt or display as blank lines.
-  const tagPattern = /\s*<(think|thinking|reasoning)>([\s\S]*?)<\/\1>\s*/gi
   let thoughts = ''
-  const cleaned = content.replace(tagPattern, (_match, _tag, inner) => {
+
+  // First pass: extract complete (closed) reasoning blocks
+  const tagPattern = /\s*<(think|thinking|reasoning)>([\s\S]*?)<\/\1>\s*/gi
+  let cleaned = content.replace(tagPattern, (_match, _tag, inner) => {
     thoughts += (thoughts ? '\n\n' : '') + inner.trim()
     return ''
-  }).trim()
-  return { cleaned, thoughts }
+  })
+
+  // Second pass: handle unclosed reasoning tags (interrupted generation)
+  const unclosedPattern = /\s*<(think|thinking|reasoning)>([\s\S]*)$/i
+  cleaned = cleaned.replace(unclosedPattern, (_match, _tag, inner) => {
+    const trimmed = inner.trim()
+    if (trimmed) {
+      thoughts += (thoughts ? '\n\n' : '') + trimmed
+    }
+    return ''
+  })
+
+  return { cleaned: cleaned.trim(), thoughts }
 }
 
 export function useMessageCard(message: Message, chatId: string) {
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
+  const [editReasoning, setEditReasoning] = useState('')
+  const [showReasoningEditor, setShowReasoningEditor] = useState(false)
+  const hadReasoningRef = useRef(false)
   const updateMessage = useStore((s) => s.updateMessage)
   const removeMessage = useStore((s) => s.removeMessage)
+  const openModal = useStore((s) => s.openModal)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const isStreaming = useStore((s) => s.isStreaming)
@@ -111,26 +127,55 @@ export function useMessageCard(message: Message, chatId: string) {
   }, [messages, message.id, message.name, isUser, personas, activePersonaId])
 
   const handleEdit = useCallback(() => {
-    setEditContent(message.content)
+    if (!message.is_user) {
+      // For assistant messages, separate reasoning from content
+      const apiReasoning = typeof message.extra?.reasoning === 'string' ? message.extra.reasoning : ''
+      const { cleaned, thoughts } = parseThinkingTags(message.content)
+      const reasoningText = apiReasoning || thoughts
+      const hasReasoning = !!reasoningText
+      hadReasoningRef.current = hasReasoning
+      setShowReasoningEditor(hasReasoning)
+      setEditReasoning(reasoningText)
+      // Clean content: strip think tags and leading blank lines
+      setEditContent(cleaned.replace(/^\n{2,}/, ''))
+    } else {
+      setEditContent(message.content)
+      setEditReasoning('')
+      setShowReasoningEditor(false)
+      hadReasoningRef.current = false
+    }
     setIsEditing(true)
-  }, [message.content])
+  }, [message.content, message.is_user, message.extra])
 
   const handleSaveEdit = useCallback(async () => {
     try {
-      await messagesApi.update(chatId, message.id, { content: editContent })
-      updateMessage(message.id, { content: editContent })
+      const trimmedReasoning = editReasoning.trim()
+      const cleanContent = editContent.trim()
+
+      if (!message.is_user && hadReasoningRef.current) {
+        // Save clean content (no think tags) and reasoning in extra
+        const extra = { ...(message.extra || {}), reasoning: trimmedReasoning || undefined }
+        await messagesApi.update(chatId, message.id, { content: cleanContent, extra })
+        updateMessage(message.id, { content: cleanContent, extra })
+      } else {
+        await messagesApi.update(chatId, message.id, { content: cleanContent })
+        updateMessage(message.id, { content: cleanContent })
+      }
       setIsEditing(false)
     } catch (err) {
       console.error('[MessageCard] Failed to save edit:', err)
     }
-  }, [chatId, message.id, editContent, updateMessage])
+  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, updateMessage])
 
   const handleCancelEdit = useCallback(() => {
     setIsEditing(false)
     setEditContent('')
+    setEditReasoning('')
+    setShowReasoningEditor(false)
+    hadReasoningRef.current = false
   }, [])
 
-  const handleDelete = useCallback(async () => {
+  const doDeleteMessage = useCallback(async () => {
     try {
       await messagesApi.delete(chatId, message.id)
       removeMessage(message.id)
@@ -139,10 +184,52 @@ export function useMessageCard(message: Message, chatId: string) {
     }
   }, [chatId, message.id, removeMessage])
 
+  const doDeleteSwipe = useCallback(async () => {
+    try {
+      const updated = await messagesApi.deleteSwipe(chatId, message.id, message.swipe_id)
+      updateMessage(message.id, updated)
+    } catch (err) {
+      console.error('[MessageCard] Failed to delete swipe:', err)
+    }
+  }, [chatId, message.id, message.swipe_id, updateMessage])
+
+  const handleDelete = useCallback(() => {
+    const hasSwipes = message.swipes && message.swipes.length > 1
+
+    if (!message.is_user && hasSwipes) {
+      // Assistant message with swipes: offer Swipe vs Message deletion
+      openModal('confirm', {
+        title: 'Delete',
+        message: 'Delete just this swipe, or the entire message with all swipes?',
+        variant: 'danger',
+        confirmText: 'Message',
+        onConfirm: doDeleteMessage,
+        secondaryText: 'Swipe',
+        onSecondary: doDeleteSwipe,
+        secondaryVariant: 'warning',
+      })
+    } else if (!message.is_user) {
+      // Assistant message without swipes: simple confirm
+      openModal('confirm', {
+        title: 'Delete Message',
+        message: 'This will permanently remove this message from the chat.',
+        variant: 'danger',
+        confirmText: 'Delete',
+        onConfirm: doDeleteMessage,
+      })
+    } else {
+      // User messages: delete directly (existing behavior)
+      doDeleteMessage()
+    }
+  }, [message.is_user, message.swipes, openModal, doDeleteMessage, doDeleteSwipe])
+
   return {
     isEditing,
     editContent,
     setEditContent,
+    editReasoning,
+    setEditReasoning,
+    showReasoningEditor,
     isUser,
     isLastMessage,
     isActivelyStreaming,

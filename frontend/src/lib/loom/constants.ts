@@ -120,6 +120,7 @@ export const DEFAULT_COMPLETION_SETTINGS: CompletionSettings = {
   enableWebSearch: false,
   sendInlineMedia: true,
   enableFunctionCalling: true,
+  includeUsage: false,
 }
 
 export const DEFAULT_ADVANCED_SETTINGS: AdvancedSettings = {

@@ -95,7 +95,9 @@
 }
 
 .primaryBtn {
+  background: var(--lumiverse-bg-elevated, rgba(35, 30, 48, 0.9));
   background: color-mix(in srgb, var(--lumiverse-primary) 20%, var(--lumiverse-bg-elevated));
+  border-color: var(--lumiverse-primary-050, rgba(147, 112, 219, 0.5));
   border-color: color-mix(in srgb, var(--lumiverse-primary) 50%, transparent);
 }
 

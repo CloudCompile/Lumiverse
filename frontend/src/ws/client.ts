@@ -18,15 +18,24 @@ export class WebSocketClient {
     this.url = url || `${protocol}//${window.location.host}${basePath}/ws`
   }
 
-  connect(token?: string) {
-    if (this.ws?.readyState === WebSocket.OPEN) return
+  connect() {
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return
 
     this.shouldReconnect = true
-    const url = token ? `${this.url}?token=${encodeURIComponent(token)}` : this.url
-    this.ws = new WebSocket(url)
+    // Cancel any pending reconnect — we're connecting now
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.ws = new WebSocket(this.url)
 
     this.ws.onopen = () => {
       console.log('[WS] Connected to', this.url)
+      // Cancel any stale reconnect timer from a prior socket's onclose
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = null
+      }
       this.startPing()
       this.emit(EventType.CONNECTED, {})
     }
@@ -50,10 +59,13 @@ export class WebSocketClient {
       }
     }
 
+    const thisSocket = this.ws
     this.ws.onclose = (e) => {
       console.log('[WS] Closed:', e.code, e.reason)
       this.stopPing()
-      if (this.shouldReconnect) {
+      // Only reconnect if this is still the active socket — a newer socket
+      // may have already replaced us (e.g. server-side session eviction).
+      if (this.shouldReconnect && this.ws === thisSocket) {
         this.scheduleReconnect()
       }
     }

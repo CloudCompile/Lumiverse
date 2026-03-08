@@ -763,10 +763,16 @@ function setupInput(): void {
         const url = `http://localhost:${port}`;
         addLog(`Opening ${url}...`, "system");
         // Cross-platform browser open
-        const cmd = process.platform === "darwin" ? "open"
-          : process.platform === "win32" ? "start"
-          : "xdg-open";
-        Bun.spawn([cmd, url], { stdout: "ignore", stderr: "ignore" });
+        // Windows: "start" is a cmd.exe built-in, not a standalone executable,
+        // so it must be invoked via "cmd /c start". The empty "" is the window
+        // title argument — without it, cmd treats a quoted URL as the title.
+        if (process.platform === "darwin") {
+          Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" });
+        } else if (process.platform === "win32") {
+          Bun.spawn(["cmd", "/c", "start", "", url], { stdout: "ignore", stderr: "ignore" });
+        } else {
+          Bun.spawn(["xdg-open", url], { stdout: "ignore", stderr: "ignore" });
+        }
         break;
       }
 

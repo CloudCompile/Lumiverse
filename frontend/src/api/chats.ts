@@ -1,7 +1,8 @@
 import { get, post, put, del } from './client'
 import type {
   Chat, CreateChatInput, CreateGroupChatInput, RecentChat, Message,
-  CreateMessageInput, UpdateMessageInput, PaginatedResult
+  CreateMessageInput, UpdateMessageInput, PaginatedResult,
+  GroupedRecentChat, ChatSummary
 } from '@/types/api'
 
 export const chatsApi = {
@@ -11,6 +12,14 @@ export const chatsApi = {
 
   listRecent(params?: { limit?: number; offset?: number }) {
     return get<PaginatedResult<RecentChat>>('/chats/recent', params)
+  },
+
+  listRecentGrouped(params?: { limit?: number; offset?: number }) {
+    return get<PaginatedResult<GroupedRecentChat>>('/chats/recent-grouped', params)
+  },
+
+  listCharacterChats(characterId: string) {
+    return get<ChatSummary[]>('/chats/character-chats/' + characterId)
   },
 
   get(id: string) {
@@ -64,5 +73,9 @@ export const messagesApi = {
 
   swipe(chatId: string, messageId: string, direction: 'left' | 'right') {
     return post<Message>(`/chats/${chatId}/messages/${messageId}/swipe`, { direction })
+  },
+
+  deleteSwipe(chatId: string, messageId: string, swipeIdx: number) {
+    return del<Message>(`/chats/${chatId}/messages/${messageId}/swipe/${swipeIdx}`)
   },
 }

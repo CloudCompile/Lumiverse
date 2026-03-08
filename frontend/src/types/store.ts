@@ -18,12 +18,15 @@ export interface ChatSlice {
   addMessage: (message: Message) => void
   updateMessage: (id: string, updates: Partial<Message>) => void
   removeMessage: (id: string) => void
+  beginStreaming: (regeneratingMessageId?: string) => void
   startStreaming: (generationId: string, regeneratingMessageId?: string) => void
   appendStreamToken: (token: string) => void
   appendStreamReasoning: (token: string) => void
   endStreaming: () => void
   stopStreaming: () => void
   setStreamingError: (error: string | null) => void
+  /** Mark a generation ID as ended (prevents zombie resurrection from late HTTP responses) */
+  markGenerationEnded: (generationId: string) => void
 }
 
 // ---- Characters Slice ----
@@ -173,7 +176,7 @@ export interface ReasoningSettings {
   suffix: string
   autoParse: boolean
   apiReasoning: boolean
-  reasoningEffort: 'auto' | 'low' | 'medium' | 'high'
+  reasoningEffort: 'auto' | 'low' | 'medium' | 'high' | 'max'
   /** How many recent reasoning blocks to keep in assembled prompt history.
    *  0 = strip all, -1 = keep all (unlimited), N = keep last N. */
   keepInHistory: number

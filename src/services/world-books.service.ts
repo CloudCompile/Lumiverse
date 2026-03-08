@@ -344,6 +344,111 @@ export function importWorldBook(
   return { worldBook, entryCount };
 }
 
+/**
+ * Bulk import variant that skips per-entry embedding indexing and
+ * runs all inserts in a single transaction. Used by migration endpoints.
+ */
+export function importWorldBookBulk(
+  userId: string,
+  payload: any
+): { worldBook: WorldBook; entryCount: number } {
+  const bookName = payload.name || payload.originalName || "Imported World Book";
+  const description = payload.description || "";
+
+  const worldBook = createWorldBook(userId, {
+    name: bookName,
+    description,
+    metadata: { source: "import" },
+  });
+
+  let rawEntries: any[] = [];
+  const src = payload.entries;
+  if (Array.isArray(src)) {
+    rawEntries = src;
+  } else if (src && typeof src === "object") {
+    rawEntries = Object.values(src);
+  }
+
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+
+  const insert = db.query(
+    `INSERT INTO world_book_entries (
+      id, world_book_id, uid, key, keysecondary, content, comment,
+      position, depth, role, order_value, selective, constant, disabled,
+      group_name, group_override, group_weight, probability, scan_depth,
+      case_sensitive, match_whole_words, automation_id,
+      use_regex, prevent_recursion, exclude_recursion, delay_until_recursion,
+      priority, sticky, cooldown, delay, selective_logic, use_probability,
+      vectorized, extensions, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  let entryCount = 0;
+
+  const tx = db.transaction(() => {
+    for (const raw of rawEntries) {
+      const keys: string[] = Array.isArray(raw.keys) ? raw.keys
+        : Array.isArray(raw.key) ? raw.key
+        : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
+        : typeof raw.keys === "string" ? raw.keys.split(",").map((k: string) => k.trim()).filter(Boolean)
+        : [];
+      const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys
+        : Array.isArray(raw.keysecondary) ? raw.keysecondary
+        : typeof raw.secondary_keys === "string" ? raw.secondary_keys.split(",").map((k: string) => k.trim()).filter(Boolean)
+        : [];
+
+      const comment = raw.comment || raw.name || "";
+      const enabled = raw.enabled !== undefined ? raw.enabled : (raw.disabled !== undefined ? !raw.disabled : true);
+
+      insert.run(
+        crypto.randomUUID(), worldBook.id, crypto.randomUUID(),
+        JSON.stringify(keys),
+        JSON.stringify(secondaryKeys),
+        raw.content || "",
+        comment,
+        raw.position ?? 0,
+        raw.depth ?? 4,
+        raw.role || null,
+        raw.insertion_order ?? raw.order_value ?? 100,
+        raw.selective ? 1 : 0,
+        raw.constant ? 1 : 0,
+        !enabled ? 1 : 0,
+        raw.group || raw.group_name || "",
+        raw.group_override ? 1 : 0,
+        raw.group_weight ?? 100,
+        raw.probability ?? 100,
+        raw.scan_depth ?? null,
+        raw.case_sensitive ? 1 : 0,
+        raw.match_whole_words ? 1 : 0,
+        raw.automation_id || null,
+        raw.use_regex ? 1 : 0,
+        raw.prevent_recursion ? 1 : 0,
+        raw.exclude_recursion ? 1 : 0,
+        raw.delay_until_recursion ? 1 : 0,
+        raw.priority ?? 10,
+        raw.sticky ?? 0,
+        raw.cooldown ?? 0,
+        raw.delay ?? 0,
+        raw.selectiveLogic ?? raw.selective_logic ?? 0,
+        (raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true)) ? 1 : 0,
+        0, // vectorized — always false for bulk import, user can re-enable
+        JSON.stringify(raw.extensions || {}),
+        now, now
+      );
+      entryCount++;
+    }
+  });
+
+  tx();
+
+  if (entryCount > 0) {
+    db.query("UPDATE world_books SET updated_at = ? WHERE id = ?").run(now, worldBook.id);
+  }
+
+  return { worldBook, entryCount };
+}
+
 // --- Character Book Import ---
 
 export function importCharacterBook(
@@ -354,10 +459,11 @@ export function importCharacterBook(
 ): { worldBook: WorldBook; entryCount: number } {
   const bookName = characterBook.name || `${characterName}'s Lorebook`;
   const importedAt = new Date().toLocaleString();
+  const description = characterBook.description || `Imported from ${characterName} at ${importedAt}`;
   const worldBook = createWorldBook(userId, {
     name: bookName,
-    description: `Imported from ${characterName} at ${importedAt}`,
-    metadata: { source_character_id: characterId },
+    description,
+    metadata: { source: "character", source_character_id: characterId },
   });
 
   const entries = characterBook.entries || [];

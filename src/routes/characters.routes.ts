@@ -133,7 +133,8 @@ app.post("/import-bulk", async (c) => {
 
         // Deduplication check
         if (skipDuplicates && svc.characterExistsByName(userId, cardInput.name)) {
-          results.push({ filename, success: true, skipped: true });
+          const existing = svc.findCharactersByName(userId, cardInput.name);
+          results.push({ filename, success: true, skipped: true, character: existing[0] });
           continue;
         }
 

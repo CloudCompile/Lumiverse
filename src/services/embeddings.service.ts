@@ -1,9 +1,11 @@
 import { connect, type Connection, type Table } from "@lancedb/lancedb";
 import { join } from "path";
 import { env } from "../env";
+import { getDb } from "../db/connection";
 import * as settingsSvc from "./settings.service";
 import * as secretsSvc from "./secrets.service";
 import type { WorldBookEntry } from "../types/world-book";
+import { embeddingCache, computeCacheKey, type ModelFingerprint } from "./embedding-cache";
 
 const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
@@ -264,6 +266,18 @@ export async function updateEmbeddingConfig(
     }
   }
 
+  // Detect model change and invalidate stale vectors
+  const oldFp = getModelFingerprint(current);
+  const newFp = getModelFingerprint(merged);
+  if (
+    oldFp.provider !== newFp.provider ||
+    oldFp.model !== newFp.model ||
+    oldFp.dimensions !== newFp.dimensions ||
+    oldFp.api_url !== newFp.api_url
+  ) {
+    await invalidateAllVectors(userId);
+  }
+
   const has_api_key = await secretsSvc.validateSecret(userId, EMBEDDING_SECRET_KEY);
   return { ...merged, has_api_key };
 }
@@ -312,6 +326,45 @@ export async function embedTexts(userId: string, texts: string[]): Promise<numbe
   return requestEmbeddings(userId, texts);
 }
 
+function getModelFingerprint(cfg: EmbeddingConfig): ModelFingerprint {
+  return { provider: cfg.provider, model: cfg.model, dimensions: cfg.dimensions, api_url: cfg.api_url };
+}
+
+/**
+ * Cache-aware embedding. Checks in-memory LRU cache first, batches only
+ * uncached texts to the upstream API, then stores results.
+ */
+export async function cachedEmbedTexts(userId: string, texts: string[]): Promise<number[][]> {
+  if (!texts.length) return [];
+  const cfg = await getEmbeddingConfig(userId);
+  const fingerprint = getModelFingerprint(cfg);
+
+  const results: (number[] | null)[] = new Array(texts.length).fill(null);
+  const uncachedIndices: number[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const key = computeCacheKey(texts[i], fingerprint);
+    const cached = embeddingCache.get(key);
+    if (cached) {
+      results[i] = cached;
+    } else {
+      uncachedIndices.push(i);
+    }
+  }
+
+  if (uncachedIndices.length > 0) {
+    const uncachedTexts = uncachedIndices.map((i) => texts[i]);
+    const vectors = await requestEmbeddings(userId, uncachedTexts);
+    for (let j = 0; j < uncachedIndices.length; j++) {
+      const idx = uncachedIndices[j];
+      results[idx] = vectors[j];
+      embeddingCache.set(computeCacheKey(texts[idx], fingerprint), vectors[j]);
+    }
+  }
+
+  return results as number[][];
+}
+
 export async function testEmbeddingConfig(
   userId: string,
   text: string
@@ -343,6 +396,26 @@ export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: st
   scheduleOptimize();
 }
 
+async function getExistingEntryContent(userId: string, entryId: string): Promise<string | null> {
+  try {
+    const table = await getOrCreateTable();
+    const rows = await table
+      .query()
+      .where(
+        `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
+      )
+      .select(["content"])
+      .limit(1)
+      .toArray();
+    if (rows.length > 0 && typeof (rows[0] as any).content === "string") {
+      return (rows[0] as any).content;
+    }
+  } catch {
+    // Table may not exist yet
+  }
+  return null;
+}
+
 export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBookEntry): Promise<void> {
   const cfg = await getEmbeddingConfig(userId);
   if (!cfg.enabled || !cfg.vectorize_world_books || entry.disabled) {
@@ -355,7 +428,11 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
     return;
   }
 
-  const [vector] = await embedTexts(userId, [content]);
+  // Skip re-embedding if content hasn't changed
+  const existing = await getExistingEntryContent(userId, entry.id);
+  if (existing === content) return;
+
+  const [vector] = await cachedEmbedTexts(userId, [content]);
   const now = Math.floor(Date.now() / 1000);
   const row: EmbeddingRow = {
     id: rowId(userId, "world_book_entry", entry.id, 0),
@@ -442,7 +519,7 @@ export async function reindexWorldBookEntries(
       }
 
       const texts = batch.map((e) => (e.content || "").trim());
-      const vectors = await embedTexts(userId, texts);
+      const vectors = await cachedEmbedTexts(userId, texts);
       const now = Math.floor(Date.now() / 1000);
 
       const rows: EmbeddingRow[] = batch.map((entry, idx) => ({
@@ -504,7 +581,7 @@ export async function searchWorldBookEntries(
   if (!text) return [];
 
   const table = await getOrCreateTable();
-  const [vector] = await embedTexts(userId, [text]);
+  const [vector] = await cachedEmbedTexts(userId, [text]);
   const rows = await table
     .query()
     .nearestTo(vector)
@@ -520,4 +597,59 @@ export async function searchWorldBookEntries(
     score: typeof row._distance === "number" ? row._distance : 0,
     content: String(row.content || ""),
   }));
+}
+
+/**
+ * Search world book entries using a pre-computed vector, skipping the embedding step.
+ */
+export async function searchWorldBookEntriesWithVector(
+  userId: string,
+  worldBookId: string,
+  vector: number[],
+  limit = 8
+): Promise<Array<{ entry_id: string; score: number; content: string }>> {
+  const table = await getOrCreateTable();
+  const rows = await table
+    .query()
+    .nearestTo(vector)
+    .where(
+      `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND owner_id = ${sqlValue(worldBookId)}`
+    )
+    .select(["source_id", "content", "_distance"])
+    .limit(Math.max(1, Math.min(limit, 50)))
+    .toArray();
+
+  return rows.map((row: any) => ({
+    entry_id: String(row.source_id),
+    score: typeof row._distance === "number" ? row._distance : 0,
+    content: String(row.content || ""),
+  }));
+}
+
+/**
+ * Invalidate all vectors for a user when their embedding model changes.
+ * Clears in-memory cache, deletes LanceDB rows, and resets vectorized flags.
+ */
+export async function invalidateAllVectors(userId: string): Promise<void> {
+  embeddingCache.clear();
+
+  try {
+    const table = await getOrCreateTable();
+    await table.delete(`user_id = ${sqlValue(userId)}`);
+    scheduleOptimize();
+  } catch (err) {
+    console.warn("[embeddings] Failed to delete LanceDB rows during invalidation:", err);
+  }
+
+  try {
+    const db = getDb();
+    db.run(
+      `UPDATE world_book_entries SET vectorized = 0 WHERE world_book_id IN (SELECT id FROM world_books WHERE user_id = ?)`,
+      [userId]
+    );
+  } catch (err) {
+    console.warn("[embeddings] Failed to reset vectorized flags:", err);
+  }
+
+  vectorIndexReady = false;
 }

@@ -9,6 +9,7 @@ set -euo pipefail
 #   ./start.sh --backend-only   Start backend only, skip frontend serving
 #   ./start.sh --dev            Start backend in watch mode (no frontend build)
 #   ./start.sh --setup          Run setup wizard only
+#   ./start.sh -m|--migrate-st  Run SillyTavern migration helper
 #   ./start.sh --no-runner      Start without the visual runner
 #
 # Environment overrides:
@@ -29,7 +30,7 @@ err()   { echo -e "${RED}[error]${NC} $*" >&2; }
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
-MODE="all"  # all | build-only | backend-only | dev | setup
+MODE="all"  # all | build-only | backend-only | dev | setup | migrate-st
 USE_RUNNER=true
 FORCE_BUILD=false
 for arg in "$@"; do
@@ -39,9 +40,10 @@ for arg in "$@"; do
     --backend-only) MODE="backend-only" ;;
     --dev)          MODE="dev" ;;
     --setup)        MODE="setup" ;;
+    --migrate-st|-m) MODE="migrate-st" ;;
     --no-runner)    USE_RUNNER=false ;;
     --help|-h)
-      sed -n '3,14p' "$0" | sed 's/^# \?//'
+      sed -n '3,15p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *) err "Unknown argument: $arg"; exit 1 ;;
@@ -125,6 +127,12 @@ run_setup_if_needed() {
 run_setup() {
   install_deps "$BACKEND_DIR" "backend"
   (cd "$BACKEND_DIR" && bun run scripts/setup-wizard.ts)
+}
+
+run_migrate_st() {
+  install_deps "$BACKEND_DIR" "backend"
+  info "Launching SillyTavern migration helper..."
+  (cd "$BACKEND_DIR" && bun run migrate:st)
 }
 
 # ─── Install dependencies ───────────────────────────────────────────────────
@@ -231,5 +239,8 @@ case "$MODE" in
     ;;
   setup)
     run_setup
+    ;;
+  migrate-st)
+    run_migrate_st
     ;;
 esac

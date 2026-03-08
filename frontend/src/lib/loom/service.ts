@@ -49,7 +49,7 @@ function generateId(): string {
 export function createBlock(overrides: Partial<PromptBlock> = {}): PromptBlock {
   return {
     id: generateId(),
-    name: 'New Prompt',
+    name: 'New Chat',
     content: '',
     role: 'system',
     enabled: true,

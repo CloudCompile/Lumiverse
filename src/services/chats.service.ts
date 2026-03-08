@@ -2,8 +2,9 @@ import { getDb } from "../db/connection";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { getCharacter } from "./characters.service";
-import type { Chat, CreateChatInput, CreateGroupChatInput, UpdateChatInput, RecentChat } from "../types/chat";
+import type { Chat, CreateChatInput, CreateGroupChatInput, UpdateChatInput, RecentChat, GroupedRecentChat, ChatSummary } from "../types/chat";
 import type { Message, CreateMessageInput, UpdateMessageInput } from "../types/message";
+import type { BulkMessageInput } from "../types/migrate";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 
@@ -67,6 +68,89 @@ export function listRecentChats(userId: string, pagination: PaginationParams): P
     pagination,
     rowToRecentChat
   );
+}
+
+export function listRecentChatsGrouped(userId: string, pagination: PaginationParams): PaginatedResult<GroupedRecentChat> {
+  const db = getDb();
+
+  // Count distinct characters (for pagination total)
+  const countRow = db.query(
+    `SELECT COUNT(DISTINCT character_id) as count FROM chats WHERE user_id = ?`
+  ).get(userId) as { count: number } | null;
+  const total = countRow?.count ?? 0;
+
+  const rows = db.query(`
+    WITH ranked AS (
+      SELECT
+        c.id,
+        c.character_id,
+        c.name,
+        c.metadata,
+        c.updated_at,
+        ROW_NUMBER() OVER (PARTITION BY c.character_id ORDER BY c.updated_at DESC) as rn,
+        COUNT(*) OVER (PARTITION BY c.character_id) as chat_count
+      FROM chats c
+      WHERE c.user_id = ?
+    )
+    SELECT
+      r.id as latest_chat_id,
+      r.character_id,
+      r.name as latest_chat_name,
+      r.metadata,
+      r.updated_at,
+      r.chat_count,
+      ch.name AS character_name,
+      ch.avatar_path AS character_avatar_path,
+      ch.image_id AS character_image_id
+    FROM ranked r
+    LEFT JOIN characters ch ON ch.id = r.character_id
+    WHERE r.rn = 1
+    ORDER BY r.updated_at DESC
+    LIMIT ? OFFSET ?
+  `).all(userId, pagination.limit, pagination.offset) as any[];
+
+  return {
+    data: rows.map((row: any) => {
+      const metadata = JSON.parse(row.metadata || '{}');
+      return {
+        character_id: row.character_id,
+        character_name: row.character_name || '',
+        character_avatar_path: row.character_avatar_path || null,
+        character_image_id: row.character_image_id || null,
+        latest_chat_id: row.latest_chat_id,
+        latest_chat_name: row.latest_chat_name || '',
+        updated_at: row.updated_at,
+        chat_count: row.chat_count,
+        is_group: metadata?.group === true,
+      };
+    }),
+    total,
+    limit: pagination.limit,
+    offset: pagination.offset,
+  };
+}
+
+export function listChatSummaries(userId: string, characterId: string): ChatSummary[] {
+  const db = getDb();
+  const rows = db.query(`
+    SELECT
+      c.id,
+      c.name,
+      c.created_at,
+      c.updated_at,
+      (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) as message_count
+    FROM chats c
+    WHERE c.user_id = ? AND c.character_id = ?
+    ORDER BY c.updated_at DESC
+  `).all(userId, characterId) as any[];
+
+  return rows.map((row: any) => ({
+    id: row.id,
+    name: row.name || '',
+    message_count: row.message_count || 0,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
 }
 
 export function getChat(userId: string, id: string): Chat | null {
@@ -323,6 +407,33 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
   return updated;
 }
 
+export function deleteSwipe(userId: string, messageId: string, swipeIdx: number): Message | null {
+  const msg = getMessage(userId, messageId);
+  if (!msg || msg.swipes.length <= 1) return null; // can't delete last swipe
+  if (swipeIdx < 0 || swipeIdx >= msg.swipes.length) return null;
+
+  const swipes = [...msg.swipes];
+  swipes.splice(swipeIdx, 1);
+
+  // Adjust swipe_id: if deleted swipe was before or at current, shift back (min 0)
+  let newSwipeId = msg.swipe_id;
+  if (swipeIdx < msg.swipe_id) {
+    newSwipeId = msg.swipe_id - 1;
+  } else if (swipeIdx === msg.swipe_id) {
+    newSwipeId = Math.min(msg.swipe_id, swipes.length - 1);
+  }
+
+  const newContent = swipes[newSwipeId] ?? swipes[0];
+
+  getDb()
+    .query("UPDATE messages SET swipes = ?, swipe_id = ?, content = ? WHERE id = ?")
+    .run(JSON.stringify(swipes), newSwipeId, newContent, messageId);
+
+  const updated = getMessage(userId, messageId)!;
+  eventBus.emit(EventType.MESSAGE_SWIPED, { chatId: updated.chat_id, message: updated }, userId);
+  return updated;
+}
+
 export function cycleSwipe(userId: string, messageId: string, direction: "left" | "right"): Message | null {
   const msg = getMessage(userId, messageId);
   if (!msg || msg.swipes.length <= 1) return msg;
@@ -375,6 +486,66 @@ export function branchChat(userId: string, chatId: string, atMessageId: string):
   }
 
   return getChat(userId, newChat.id)!;
+}
+
+// --- Migration helpers ---
+
+export function createChatRaw(userId: string, input: { character_id: string; name?: string; metadata?: Record<string, any>; created_at?: number; updated_at?: number }): Chat {
+  const id = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  const createdAt = input.created_at ?? now;
+  const updatedAt = input.updated_at ?? createdAt;
+
+  getDb()
+    .query("INSERT INTO chats (id, user_id, character_id, name, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, userId, input.character_id, input.name || "", JSON.stringify(input.metadata || {}), createdAt, updatedAt);
+
+  return getChat(userId, id)!;
+}
+
+export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[]): number {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+
+  const insert = db.query(
+    `INSERT INTO messages (id, chat_id, index_in_chat, is_user, name, content, send_date, swipe_id, swipes, extra, parent_message_id, branch_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const tx = db.transaction(() => {
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      const swipes = m.swipes && m.swipes.length > 0 ? m.swipes : [m.content];
+      const swipeId = m.swipe_id ?? 0;
+      const sendDate = m.send_date ?? now;
+
+      insert.run(
+        crypto.randomUUID(),
+        chatId,
+        i,
+        m.is_user ? 1 : 0,
+        m.name,
+        m.content,
+        sendDate,
+        swipeId,
+        JSON.stringify(swipes),
+        JSON.stringify(m.extra || {}),
+        null,
+        null,
+        sendDate
+      );
+    }
+  });
+
+  tx();
+
+  // Update chat's updated_at to last message timestamp
+  if (messages.length > 0) {
+    const lastDate = messages[messages.length - 1].send_date ?? now;
+    db.query("UPDATE chats SET updated_at = ? WHERE id = ?").run(lastDate, chatId);
+  }
+
+  return messages.length;
 }
 
 // --- Export ---

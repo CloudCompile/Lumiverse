@@ -12,7 +12,7 @@ const REASONING_PRESETS: { label: string; prefix: string; suffix: string }[] = [
   { label: 'o1', prefix: '<reasoning>\n', suffix: '\n</reasoning>' },
 ]
 
-const EFFORT_OPTIONS = ['auto', 'low', 'medium', 'high'] as const
+const EFFORT_OPTIONS = ['auto', 'low', 'medium', 'high', 'max'] as const
 
 export default function PresetManager() {
   const reasoningSettings = useStore((s) => s.reasoningSettings)
@@ -87,7 +87,7 @@ export default function PresetManager() {
         <div className={styles.toggleRow}>
           <div>
             <div className={styles.toggleLabel}>API Reasoning</div>
-            <div className={styles.toggleDesc}>For o1, DeepSeek R1, Claude extended thinking</div>
+            <div className={styles.toggleDesc}>For o1, DeepSeek R1, Claude extended/adaptive thinking</div>
           </div>
           <button
             type="button"
@@ -105,7 +105,7 @@ export default function PresetManager() {
             onChange={(e) => updateReasoning({ reasoningEffort: e.target.value as ReasoningSettings['reasoningEffort'] })}
           >
             {EFFORT_OPTIONS.map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
+              <option key={opt} value={opt}>{opt}{opt === 'max' ? ' (Opus 4.6 only)' : ''}</option>
             ))}
           </select>
         </div>

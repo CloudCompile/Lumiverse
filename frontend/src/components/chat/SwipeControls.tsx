@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { messagesApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
@@ -17,6 +17,7 @@ export default function SwipeControls({ message, chatId, variant = 'default' }: 
   const updateMessage = useStore((s) => s.updateMessage)
   const messages = useStore((s) => s.messages)
   const isStreaming = useStore((s) => s.isStreaming)
+  const beginStreaming = useStore((s) => s.beginStreaming)
   const startStreaming = useStore((s) => s.startStreaming)
   const setStreamingError = useStore((s) => s.setStreamingError)
   const activeProfileId = useStore((s) => s.activeProfileId)
@@ -24,9 +25,13 @@ export default function SwipeControls({ message, chatId, variant = 'default' }: 
   const activeLoomPresetId = useStore((s) => s.activeLoomPresetId)
 
   const isLastAssistantMessage = !message.is_user && messages.length > 0 && messages[messages.length - 1].id === message.id
+  const regenerateNonceRef = useRef(0)
 
   const handleRegenerate = useCallback(async () => {
     if (isStreaming) return
+    const nonce = ++regenerateNonceRef.current
+    // Show streaming state immediately so the message shows the indicator
+    beginStreaming(message.id)
     try {
       const res = await generateApi.regenerate({
         chat_id: chatId,
@@ -35,8 +40,10 @@ export default function SwipeControls({ message, chatId, variant = 'default' }: 
         persona_id: activePersonaId || undefined,
         preset_id: activeLoomPresetId || undefined,
       })
+      if (regenerateNonceRef.current !== nonce) return // stale response — a newer action took over
       startStreaming(res.generationId, message.id)
     } catch (err: any) {
+      if (regenerateNonceRef.current !== nonce) return // stale error — a newer action took over
       const msg = err?.body?.error || err?.message || 'Failed to regenerate'
       setStreamingError(msg)
     }
@@ -47,6 +54,7 @@ export default function SwipeControls({ message, chatId, variant = 'default' }: 
     activeProfileId,
     activePersonaId,
     activeLoomPresetId,
+    beginStreaming,
     startStreaming,
     setStreamingError,
   ])

@@ -1,4 +1,4 @@
-import type { LlmMessage, AssemblyContext, AssemblyResult, AssemblyBreakdownEntry, GenerationType, ActivatedWorldInfoEntry } from "../llm/types";
+import { getTextContent, type LlmMessage, type AssemblyContext, type AssemblyResult, type AssemblyBreakdownEntry, type GenerationType, type ActivatedWorldInfoEntry } from "../llm/types";
 import type { PromptBlock, PromptBehavior, CompletionSettings, SamplerOverrides, AuthorsNote } from "../types/preset";
 import type { WorldInfoCache } from "../types/world-book";
 import type { Character } from "../types/character";
@@ -19,7 +19,24 @@ import * as worldBooksSvc from "./world-books.service";
 import * as settingsSvc from "./settings.service";
 import * as packsSvc from "./packs.service";
 import * as embeddingsSvc from "./embeddings.service";
+import * as imagesSvc from "./images.service";
 import { getCouncilSettings } from "./council/council-settings.service";
+import { readFileSync } from "fs";
+
+// ---------------------------------------------------------------------------
+// Attachment resolution — read image/audio files from disk into base64
+// ---------------------------------------------------------------------------
+
+function resolveAttachmentBase64(userId: string, imageId: string): string | null {
+  const filePath = imagesSvc.getImageFilePath(userId, imageId, false);
+  if (!filePath) return null;
+  try {
+    const buffer = readFileSync(filePath);
+    return buffer.toString("base64");
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Structural / content marker sets (mirrors frontend loom/constants.ts)
@@ -63,6 +80,21 @@ const SAMPLER_KEY_MAP: Record<string, string> = {
   frequencyPenalty: "frequency_penalty",
   presencePenalty: "presence_penalty",
   repetitionPenalty: "repetition_penalty",
+};
+
+/**
+ * Default sampler values — mirrors the frontend's `defaultHint` from SAMPLER_PARAMS.
+ * When samplerOverrides is enabled but a value is null, these are sent to ensure
+ * generation behavior matches what the user sees in the UI sliders.
+ *
+ * Only includes params that should ALWAYS be sent when enabled. Opt-in params
+ * (frequencyPenalty, presencePenalty, repetitionPenalty) are excluded — a null
+ * value means the user hasn't opted in, so we don't send them.
+ */
+const SAMPLER_DEFAULTS: Record<string, number> = {
+  maxTokens: 16384,
+  temperature: 1.0,
+  topP: 0.95,
 };
 
 interface GuidedGeneration {
@@ -266,7 +298,23 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         if (ctx.excludeMessageId && msg.id === ctx.excludeMessageId) continue;
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
         const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
-        result.push({ role, content: resolvedContent });
+        const attachments = Array.isArray(msg.extra?.attachments) ? msg.extra.attachments : [];
+        if (attachments.length > 0) {
+          // Build multipart content: text + attachment parts
+          const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolvedContent }];
+          for (const att of attachments) {
+            const b64 = resolveAttachmentBase64(ctx.userId, att.image_id);
+            if (!b64) continue;
+            if (att.type === "image") {
+              parts.push({ type: "image", data: b64, mime_type: att.mime_type });
+            } else if (att.type === "audio") {
+              parts.push({ type: "audio", data: b64, mime_type: att.mime_type });
+            }
+          }
+          result.push({ role, content: parts });
+        } else {
+          result.push({ role, content: resolvedContent });
+        }
         historyCount++;
       }
       breakdown.push({ type: "chat_history", name: "Chat History", messageCount: historyCount });
@@ -457,7 +505,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // sendIfEmpty: if last message in result is assistant role and content is blank-ish
   if (promptBehavior.sendIfEmpty && result.length > 0) {
     const last = result[result.length - 1];
-    if (last.role === "assistant" && !last.content.trim()) {
+    if (last.role === "assistant" && typeof last.content === "string" && !last.content.trim()) {
       const resolved = (await evaluate(promptBehavior.sendIfEmpty, macroEnv, registry)).text;
       if (resolved) {
         result.push({ role: "user", content: resolved });
@@ -516,8 +564,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     applyAppendBlock(result, breakdown, append);
   }
 
-  // ---- Build parameters from sampler overrides + advanced settings + custom body ----
-  const parameters = buildParameters(samplerOverrides, preset);
+  // ---- Build parameters from sampler overrides + advanced settings + reasoning + custom body ----
+  const parameters = buildParameters(samplerOverrides, preset, reasoningVal, connection?.provider, connection?.model);
+
+  // Include Usage: internal flag so providers request token usage data in streams
+  if (completionSettings.includeUsage) {
+    parameters._include_usage = true;
+  }
 
   return {
     messages: result,
@@ -582,7 +635,20 @@ async function applyGuidedGenerations(
       if (result[i].role !== "user") continue;
       const prefix = prefixes.length > 0 ? `${prefixes.join("\n")}\n` : "";
       const suffix = suffixes.length > 0 ? `\n${suffixes.join("\n")}` : "";
-      result[i] = { ...result[i], content: `${prefix}${result[i].content}${suffix}` };
+      if (typeof result[i].content === "string") {
+        result[i] = { ...result[i], content: `${prefix}${result[i].content}${suffix}` };
+      } else {
+        // Multipart: prepend/append to the text part
+        const parts = [...result[i].content as import("../llm/types").LlmMessagePart[]];
+        const textIdx = parts.findIndex((p) => p.type === "text");
+        if (textIdx >= 0) {
+          const tp = parts[textIdx] as import("../llm/types").LlmTextPart;
+          parts[textIdx] = { type: "text", text: `${prefix}${tp.text}${suffix}` };
+        } else {
+          parts.unshift({ type: "text", text: `${prefix}${suffix}` });
+        }
+        result[i] = { ...result[i], content: parts };
+      }
       breakdown.push({ type: "utility", name: "Guided Generations (user)", role: "user" });
       break;
     }
@@ -770,25 +836,35 @@ async function collectVectorActivatedWorldInfo(
   const queryText = messages.slice(-contextSize).map((m) => m.content).join("\n").trim();
   if (!queryText) return [];
 
+  // Embed query once (or hit cache), regardless of how many world books
+  const [queryVector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText]);
+  if (!queryVector || queryVector.length === 0) return [];
+
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const out: VectorActivatedEntry[] = [];
   const scored: Array<{ entry: import("../types/world-book").WorldBookEntry; score: number }> = [];
   const seen = new Set<string>();
   const topK = Math.max(1, cfg.retrieval_top_k || 4);
 
-  for (const worldBookId of worldBookIds) {
-    try {
-      const results = await embeddingsSvc.searchWorldBookEntries(userId, worldBookId, queryText, topK);
-      for (const result of results) {
-        const entry = byId.get(result.entry_id);
-        if (!entry) continue;
-        if (seen.has(entry.id)) continue;
-        if (entry.disabled || !entry.content.trim()) continue;
-        scored.push({ entry, score: result.score });
-        seen.add(entry.id);
-      }
-    } catch (err) {
-      console.warn(`[WI] Vector search failed for book ${worldBookId}:`, err);
+  // Search all world books in parallel using the pre-computed vector
+  const searchResults = await Promise.allSettled(
+    worldBookIds.map((worldBookId) =>
+      embeddingsSvc.searchWorldBookEntriesWithVector(userId, worldBookId, queryVector, topK)
+    )
+  );
+
+  for (const result of searchResults) {
+    if (result.status === "rejected") {
+      console.warn("[WI] Vector search failed:", result.reason);
+      continue;
+    }
+    for (const hit of result.value) {
+      const entry = byId.get(hit.entry_id);
+      if (!entry) continue;
+      if (seen.has(entry.id)) continue;
+      if (entry.disabled || !entry.content.trim()) continue;
+      scored.push({ entry, score: hit.score });
+      seen.add(entry.id);
     }
   }
 
@@ -875,7 +951,20 @@ function applyAppendBlock(
   for (let i = result.length - 1; i >= 0; i--) {
     if (result[i].role === append.baseRole) {
       if (roleCount === append.depth) {
-        result[i] = { ...result[i], content: result[i].content + "\n" + append.content };
+        if (typeof result[i].content === "string") {
+          result[i] = { ...result[i], content: result[i].content + "\n" + append.content };
+        } else {
+          // Multipart: append to the text part
+          const parts = [...result[i].content as import("../llm/types").LlmMessagePart[]];
+          const textIdx = parts.findIndex((p) => p.type === "text");
+          if (textIdx >= 0) {
+            const tp = parts[textIdx] as import("../llm/types").LlmTextPart;
+            parts[textIdx] = { type: "text", text: tp.text + "\n" + append.content };
+          } else {
+            parts.unshift({ type: "text", text: append.content });
+          }
+          result[i] = { ...result[i], content: parts };
+        }
         breakdown.push({
           type: "append",
           name: `${append.blockName} → ${append.baseRole}@${append.depth}`,
@@ -920,9 +1009,11 @@ function stripReasoningFromChatHistory(
 
   for (let i = endIdx - 1; i >= firstChatIdx; i--) {
     if (result[i].role !== "assistant") continue;
+    const content = result[i].content;
+    if (typeof content !== "string") continue;
 
-    const stripped = result[i].content.replace(pattern, "").trim();
-    if (stripped === result[i].content.trim()) continue; // No reasoning found
+    const stripped = content.replace(pattern, "").trim();
+    if (stripped === content.trim()) continue; // No reasoning found
 
     reasoningBlocksSeen++;
     if (reasoningBlocksSeen > keepInHistory) {
@@ -971,7 +1062,17 @@ function applyCompletionSettings(
       result[i] = { ...result[i], name };
     } else if (namesBehavior === 2 && (msg.role === "user" || msg.role === "assistant")) {
       const name = msg.role === "user" ? (persona?.name ?? "User") : character.name;
-      result[i] = { ...result[i], content: `${name}: ${result[i].content}` };
+      if (typeof result[i].content === "string") {
+        result[i] = { ...result[i], content: `${name}: ${result[i].content}` };
+      } else {
+        const parts = [...result[i].content as import("../llm/types").LlmMessagePart[]];
+        const textIdx = parts.findIndex((p) => p.type === "text");
+        if (textIdx >= 0) {
+          const tp = parts[textIdx] as import("../llm/types").LlmTextPart;
+          parts[textIdx] = { type: "text", text: `${name}: ${tp.text}` };
+        }
+        result[i] = { ...result[i], content: parts };
+      }
     }
 
     i++;
@@ -981,17 +1082,29 @@ function applyCompletionSettings(
 }
 
 /**
- * Map SamplerOverrides + advanced settings + customBody to API-compatible parameter object.
+ * Map SamplerOverrides + advanced settings + reasoning + customBody to API-compatible parameter object.
+ *
+ * Priority (lowest → highest): sampler overrides → advanced settings → reasoning settings → custom body.
+ * Request-level overrides (merged by the caller) take the highest priority.
  */
-function buildParameters(overrides: SamplerOverrides | null, preset: Preset | null): Record<string, any> {
+function buildParameters(
+  overrides: SamplerOverrides | null,
+  preset: Preset | null,
+  reasoningSettings?: { apiReasoning?: boolean; reasoningEffort?: string } | null,
+  providerName?: string | null,
+  modelName?: string | null,
+): Record<string, any> {
   const params: Record<string, any> = {};
 
-  // Sampler overrides
+  // Sampler overrides — when enabled, apply user values (or defaults for core params)
   if (overrides?.enabled) {
     for (const [camelKey, apiKey] of Object.entries(SAMPLER_KEY_MAP)) {
       const val = (overrides as any)[camelKey];
       if (val !== null && val !== undefined) {
         params[apiKey] = val;
+      } else if (camelKey in SAMPLER_DEFAULTS) {
+        // Core params: use the visual default so the request matches what the UI shows
+        params[apiKey] = SAMPLER_DEFAULTS[camelKey];
       }
     }
   }
@@ -1007,6 +1120,15 @@ function buildParameters(overrides: SamplerOverrides | null, preset: Preset | nu
     }
   }
 
+  // API-level reasoning: inject provider-specific params when enabled.
+  // Placed before custom body so custom body can override with more specific config.
+  if (reasoningSettings?.apiReasoning && providerName) {
+    const effort = reasoningSettings.reasoningEffort || "auto";
+    if (effort !== "auto") {
+      injectReasoningParams(params, providerName, effort, modelName || undefined);
+    }
+  }
+
   // Custom body from preset.parameters.customBody
   const customBody = preset?.parameters?.customBody;
   if (customBody?.enabled && customBody.rawJson) {
@@ -1019,6 +1141,47 @@ function buildParameters(overrides: SamplerOverrides | null, preset: Preset | nu
   }
 
   return params;
+}
+
+/**
+ * Inject provider-specific reasoning/thinking parameters based on the
+ * user's reasoning effort setting. Does NOT override if the parameter
+ * is already set (e.g. by a prior custom body or explicit override).
+ */
+function injectReasoningParams(params: Record<string, any>, providerName: string, effort: string, model?: string): void {
+  if (providerName === "anthropic") {
+    if (!params.thinking) {
+      // Claude 4.6 models support adaptive thinking (recommended over manual budget)
+      const isAdaptiveModel = model && /claude-(opus|sonnet)-4-6/i.test(model);
+      if (isAdaptiveModel) {
+        // Adaptive thinking: Claude decides when/how much to think
+        params.thinking = { type: "adaptive" };
+        // Map effort to output_config.effort — "max" is gated to Opus 4.6 only
+        const isOpus46 = model && /claude-opus-4-6/i.test(model);
+        let mappedEffort = effort;
+        if (effort === "max" && !isOpus46) mappedEffort = "high";
+        params.output_config = { effort: mappedEffort };
+      } else {
+        // Legacy extended thinking for older Claude models
+        const budgetMap: Record<string, number> = { low: 2048, medium: 8192, high: 16384 };
+        const budget = budgetMap[effort] || 8192;
+        params.thinking = { type: "enabled", budget_tokens: budget };
+      }
+    }
+  } else if (providerName === "google") {
+    // Google Gemini: thinkingConfig with thinkingLevel (3.x) or thinkingBudget (2.5.x)
+    // Use thinkingLevel as it covers both model generations.
+    if (!params.thinkingConfig) {
+      const levelMap: Record<string, string> = { low: "low", medium: "medium", high: "high" };
+      params.thinkingConfig = { thinkingLevel: levelMap[effort] || "medium" };
+    }
+  } else {
+    // OpenAI-compatible providers (OpenAI, OpenRouter, NanoGPT, Moonshot, Z.AI, etc.)
+    // reasoning: { effort } is the standard format for reasoning-capable models.
+    if (!params.reasoning) {
+      params.reasoning = { effort };
+    }
+  }
 }
 
 /**
@@ -1093,10 +1256,30 @@ async function legacyAssembly(
   const legacyFirstChatIdx = llmMessages.length;
   let legacyHistoryCount = 0;
   for (const m of messages) {
-    llmMessages.push({
-      role: (m.is_user ? "user" : "assistant") as LlmMessage["role"],
-      content: await resolveMacros(m.content),
-    });
+    const resolved = await resolveMacros(m.content);
+    const attachments = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];
+    if (attachments.length > 0) {
+      const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolved }];
+      for (const att of attachments) {
+        if (!att.image_id || !userId) continue;
+        const b64 = resolveAttachmentBase64(userId, att.image_id as string);
+        if (!b64) continue;
+        if (att.type === "image") {
+          parts.push({ type: "image", data: b64, mime_type: att.mime_type });
+        } else if (att.type === "audio") {
+          parts.push({ type: "audio", data: b64, mime_type: att.mime_type });
+        }
+      }
+      llmMessages.push({
+        role: (m.is_user ? "user" : "assistant") as LlmMessage["role"],
+        content: parts,
+      });
+    } else {
+      llmMessages.push({
+        role: (m.is_user ? "user" : "assistant") as LlmMessage["role"],
+        content: resolved,
+      });
+    }
     legacyHistoryCount++;
   }
   breakdown.push({ type: "chat_history", name: "Chat History (legacy)", messageCount: legacyHistoryCount });

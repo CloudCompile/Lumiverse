@@ -95,3 +95,31 @@ select:focus-visible,
 .lce-hl-quote { color: #a78bfa; font-style: italic; }
 .lce-hl-bold { font-weight: 700; }
 .lce-hl-action { color: #fbbf24; font-style: italic; }
+
+/* ── PWA standalone mode hardening ──
+   Chromium PWAs in standalone display-mode can exhibit rendering
+   differences: pull-to-refresh interference, viewport sizing quirks,
+   and backdrop-filter compositing issues. These rules normalise
+   the standalone viewport so overlays, popovers, and glassmorphic
+   elements render identically to the in-browser experience. */
+@media (display-mode: standalone) {
+  html {
+    /* Prevent overscroll bounce / pull-to-refresh in the PWA shell */
+    overscroll-behavior: none;
+    /* Use dynamic viewport so 100vh stays accurate with virtual keyboards */
+    height: 100dvh;
+  }
+
+  body {
+    height: 100dvh;
+    overscroll-behavior: none;
+    /* Force GPU compositing layer — fixes backdrop-filter not painting
+       in some Chromium PWA renderers (particularly Android WebAPK). */
+    -webkit-transform: translateZ(0);
+    transform: translateZ(0);
+  }
+
+  #root {
+    height: 100dvh;
+  }
+}

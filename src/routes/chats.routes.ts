@@ -21,6 +21,18 @@ app.get("/recent", (c) => {
   return c.json(svc.listRecentChats(userId, pagination));
 });
 
+app.get("/recent-grouped", (c) => {
+  const userId = c.get("userId");
+  const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"), RECENT_CHATS_DEFAULT_LIMIT);
+  return c.json(svc.listRecentChatsGrouped(userId, pagination));
+});
+
+app.get("/character-chats/:characterId", (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("characterId");
+  return c.json(svc.listChatSummaries(userId, characterId));
+});
+
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
@@ -161,6 +173,14 @@ app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
   const idx = parseInt(c.req.param("idx"), 10);
   const msg = svc.updateSwipe(userId, c.req.param("id"), idx, body.content);
   if (!msg) return c.json({ error: "Not found or invalid swipe index" }, 404);
+  return c.json(msg);
+});
+
+app.delete("/:chatId/messages/:id/swipe/:idx", (c) => {
+  const userId = c.get("userId");
+  const idx = parseInt(c.req.param("idx"), 10);
+  const msg = svc.deleteSwipe(userId, c.req.param("id"), idx);
+  if (!msg) return c.json({ error: "Not found, invalid index, or last swipe" }, 404);
   return c.json(msg);
 });
 

@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { motion, AnimatePresence } from 'motion/react'
-import { RefreshCw, MessageSquarePlus, Trash2, Loader2, Users } from 'lucide-react'
+import { RefreshCw, MessageSquarePlus, Loader2, MessageSquare } from 'lucide-react'
 import { chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import { useStore } from '@/store'
 import { useScrollGate } from '@/hooks/useScrollGate'
 import LazyImage from '@/components/shared/LazyImage'
-import ConfirmationModal from '@/components/shared/ConfirmationModal'
-import type { RecentChat } from '@/types/api'
+import type { GroupedRecentChat } from '@/types/api'
 import styles from './LandingPage.module.css'
 import clsx from 'clsx'
 
@@ -74,28 +73,13 @@ const cardVariants = {
 }
 
 interface ChatCardProps {
-  chat: RecentChat
+  item: GroupedRecentChat
   onClick: () => void
-  onDelete: (chat: RecentChat) => void
 }
 
-function ChatCard({ chat, onClick, onDelete }: ChatCardProps) {
-  const isGroup = chat.metadata?.group === true
-  const groupCharacterIds: string[] = isGroup ? (chat.metadata?.character_ids ?? []) : []
-
-  if (isGroup) {
-    return (
-      <GroupChatCard
-        chat={chat}
-        characterIds={groupCharacterIds}
-        onClick={onClick}
-        onDelete={onDelete}
-      />
-    )
-  }
-
-  const avatarUrl = chat.character_id
-    ? charactersApi.avatarUrl(chat.character_id)
+function ChatCard({ item, onClick }: ChatCardProps) {
+  const avatarUrl = item.character_id
+    ? charactersApi.avatarUrl(item.character_id)
     : null
 
   return (
@@ -109,98 +93,27 @@ function ChatCard({ chat, onClick, onDelete }: ChatCardProps) {
         <div className={styles.cardImage}>
           <LazyImage
             src={avatarUrl}
-            alt={chat.character_name}
+            alt={item.character_name}
             fallback={
               <div className={styles.cardAvatarFallback}>
-                {chat.character_name?.[0]?.toUpperCase() || '?'}
+                {item.character_name?.[0]?.toUpperCase() || '?'}
               </div>
             }
           />
           <div className={styles.cardImageOverlay} />
         </div>
         <div className={styles.cardContent}>
-          <h3 className={styles.cardName}>{chat.character_name}</h3>
-          <span className={styles.cardTime}>{formatRelativeTime(chat.updated_at)}</span>
-        </div>
-      </button>
-      <button
-        type="button"
-        className={styles.deleteBtn}
-        onClick={(e) => {
-          e.stopPropagation()
-          onDelete(chat)
-        }}
-        aria-label="Delete chat"
-      >
-        <Trash2 size={14} />
-      </button>
-    </motion.div>
-  )
-}
-
-interface GroupChatCardProps {
-  chat: RecentChat
-  characterIds: string[]
-  onClick: () => void
-  onDelete: (chat: RecentChat) => void
-}
-
-function GroupChatCard({ chat, characterIds, onClick, onDelete }: GroupChatCardProps) {
-  const displayIds = characterIds.slice(0, 4)
-  const count = characterIds.length
-
-  const mosaicClass =
-    count === 2
-      ? styles.groupMosaic2
-      : count === 3
-        ? styles.groupMosaic3
-        : styles.groupMosaic4
-
-  return (
-    <motion.div
-      className={clsx(styles.card, styles.groupCard)}
-      variants={cardVariants}
-      whileHover={{ y: -3 }}
-      transition={{ duration: 0.2 }}
-    >
-      <button type="button" className={styles.cardBtn} onClick={onClick}>
-        <div className={clsx(styles.cardImage, styles.groupMosaic, mosaicClass)}>
-          {displayIds.map((id) => (
-            <div key={id} className={styles.mosaicCell}>
-              <LazyImage
-                src={charactersApi.avatarUrl(id)}
-                alt=""
-                fallback={
-                  <div className={styles.mosaicFallback}>
-                    <Users size={20} strokeWidth={1.5} />
-                  </div>
-                }
-              />
-            </div>
-          ))}
-        </div>
-        <div className={styles.groupOverlay} />
-        <div className={styles.cardContent}>
-          <h3 className={styles.cardName}>{chat.name || 'Group Chat'}</h3>
-          <div className={styles.groupMeta}>
-            <span className={styles.groupBadge}>
-              <Users size={10} strokeWidth={2} />
-              {count} members
-            </span>
-            <span className={styles.cardTime}>{formatRelativeTime(chat.updated_at)}</span>
+          <h3 className={styles.cardName}>{item.character_name}</h3>
+          <div className={styles.cardMeta}>
+            {item.chat_count > 1 && (
+              <span className={styles.chatCountBadge}>
+                <MessageSquare size={10} strokeWidth={2} />
+                {item.chat_count}
+              </span>
+            )}
+            <span className={styles.cardTime}>{formatRelativeTime(item.updated_at)}</span>
           </div>
         </div>
-      </button>
-      <button
-        type="button"
-        className={styles.deleteBtn}
-        onClick={(e) => {
-          e.stopPropagation()
-          onDelete(chat)
-        }}
-        aria-label="Delete chat"
-      >
-        <Trash2 size={14} />
       </button>
     </motion.div>
   )
@@ -210,13 +123,11 @@ export default function LandingPage() {
   const navigate = useNavigate()
   const landingPageChatsDisplayed = useStore((s) => s.landingPageChatsDisplayed)
 
-  const [items, setItems] = useState<RecentChat[]>([])
+  const [items, setItems] = useState<GroupedRecentChat[]>([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [total, setTotal] = useState(0)
-  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
-  const [pendingDeleteItem, setPendingDeleteItem] = useState<RecentChat | null>(null)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -227,7 +138,7 @@ export default function LandingPage() {
     setLoading(true)
     setError(null)
     try {
-      const result = await chatsApi.listRecent({ limit: landingPageChatsDisplayed })
+      const result = await chatsApi.listRecentGrouped({ limit: landingPageChatsDisplayed })
       setItems(result.data)
       setTotal(result.total)
     } catch (err: any) {
@@ -242,7 +153,7 @@ export default function LandingPage() {
     if (loadingMore || items.length >= total) return
     setLoadingMore(true)
     try {
-      const result = await chatsApi.listRecent({
+      const result = await chatsApi.listRecentGrouped({
         limit: landingPageChatsDisplayed,
         offset: items.length,
       })
@@ -276,30 +187,11 @@ export default function LandingPage() {
   }, [items.length, total, loading, loadMore])
 
   const handleChatClick = useCallback(
-    (chat: RecentChat) => {
-      navigate(`/chat/${chat.id}`)
+    (item: GroupedRecentChat) => {
+      navigate(`/chat/${item.latest_chat_id}`)
     },
     [navigate]
   )
-
-  const handleDeleteChat = useCallback((chat: RecentChat) => {
-    setPendingDeleteItem(chat)
-    setDeleteModalOpen(true)
-  }, [])
-
-  const confirmDelete = useCallback(async () => {
-    if (!pendingDeleteItem) return
-    setDeleteModalOpen(false)
-    const deletedId = pendingDeleteItem.id
-    setPendingDeleteItem(null)
-    try {
-      await chatsApi.delete(deletedId)
-      setItems((prev) => prev.filter((c) => c.id !== deletedId))
-      setTotal((prev) => Math.max(0, prev - 1))
-    } catch (err: any) {
-      console.error('[Lumiverse] Error deleting chat:', err)
-    }
-  }, [pendingDeleteItem])
 
   const handleNewChat = useCallback(() => {
     navigate('/characters')
@@ -405,12 +297,11 @@ export default function LandingPage() {
               <EmptyState key="empty" />
             ) : (
               <motion.div key="chats" className={styles.gridCards} variants={containerVariants} initial="hidden" animate="visible" exit="exit">
-                {items.map((chat) => (
+                {items.map((item) => (
                   <ChatCard
-                    key={chat.id}
-                    chat={chat}
-                    onClick={() => handleChatClick(chat)}
-                    onDelete={handleDeleteChat}
+                    key={item.character_id}
+                    item={item}
+                    onClick={() => handleChatClick(item)}
                   />
                 ))}
               </motion.div>
@@ -441,19 +332,6 @@ export default function LandingPage() {
         </motion.footer>
       </motion.div>
 
-      <ConfirmationModal
-        isOpen={deleteModalOpen}
-        onConfirm={confirmDelete}
-        onCancel={() => { setDeleteModalOpen(false); setPendingDeleteItem(null) }}
-        title="Delete Chat"
-        message={
-          pendingDeleteItem ? (
-            <>Are you sure you want to delete the chat with <strong>"{pendingDeleteItem.character_name}"</strong>?</>
-          ) : 'Are you sure?'
-        }
-        variant="danger"
-        confirmText="Delete"
-      />
     </div>
   )
 }

@@ -58,6 +58,7 @@ export class PollinationsProvider extends OpenAICompatibleProvider {
     const choice = data.choices?.[0];
     return {
       content: choice?.message?.content || "",
+      reasoning: choice?.message?.reasoning || choice?.message?.reasoning_content || undefined,
       finish_reason: choice?.finish_reason || "stop",
       usage: data.usage
         ? {
@@ -93,6 +94,7 @@ export class PollinationsProvider extends OpenAICompatibleProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let reasoningKey: "reasoning" | "reasoning_content" | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -113,8 +115,20 @@ export class PollinationsProvider extends OpenAICompatibleProvider {
           const delta = parsed.choices?.[0]?.delta;
           const finishReason = parsed.choices?.[0]?.finish_reason;
 
-          if (delta?.content) {
-            yield { token: delta.content, finish_reason: finishReason || undefined };
+          let reasoning: string | undefined;
+          if (reasoningKey) {
+            reasoning = delta?.[reasoningKey];
+          } else if (delta?.reasoning !== undefined) {
+            reasoningKey = "reasoning";
+            reasoning = delta.reasoning;
+          } else if (delta?.reasoning_content !== undefined) {
+            reasoningKey = "reasoning_content";
+            reasoning = delta.reasoning_content;
+          }
+          const content = delta?.content;
+
+          if (reasoning || content) {
+            yield { token: content || "", reasoning: reasoning || undefined, finish_reason: finishReason || undefined };
           } else if (finishReason) {
             yield { token: "", finish_reason: finishReason };
           }

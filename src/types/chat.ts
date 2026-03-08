@@ -37,3 +37,23 @@ export interface RecentChat {
   character_avatar_path: string | null;
   character_image_id: string | null;
 }
+
+export interface GroupedRecentChat {
+  character_id: string;
+  character_name: string;
+  character_avatar_path: string | null;
+  character_image_id: string | null;
+  latest_chat_id: string;
+  latest_chat_name: string;
+  updated_at: number;
+  chat_count: number;
+  is_group: boolean;
+}
+
+export interface ChatSummary {
+  id: string;
+  name: string;
+  message_count: number;
+  created_at: number;
+  updated_at: number;
+}

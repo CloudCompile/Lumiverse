@@ -274,6 +274,27 @@
   margin: 0;
 }
 
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chatCountBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--lumiverse-primary-muted);
+  background: rgba(147, 112, 219, 0.12);
+  border: 1px solid var(--lumiverse-primary-020);
+  padding: 1px 6px;
+  border-radius: 20px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 .cardTime {
   font-size: 11px;
   color: var(--lumiverse-text-dim);

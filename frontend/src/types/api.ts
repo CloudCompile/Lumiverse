@@ -71,6 +71,26 @@ export interface RecentChat {
   character_image_id: string | null;
 }
 
+export interface GroupedRecentChat {
+  character_id: string;
+  character_name: string;
+  character_avatar_path: string | null;
+  character_image_id: string | null;
+  latest_chat_id: string;
+  latest_chat_name: string;
+  updated_at: number;
+  chat_count: number;
+  is_group: boolean;
+}
+
+export interface ChatSummary {
+  id: string;
+  name: string;
+  message_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
 // ---- Group Chat ----
 export interface CreateGroupChatInput {
   character_ids: string[];
@@ -86,6 +106,16 @@ export interface GroupChatMetadata {
   concatenation_mode?: boolean;
 }
 
+// ---- Message Attachment ----
+export interface MessageAttachment {
+  type: "image" | "audio";
+  image_id: string;
+  mime_type: string;
+  original_filename: string;
+  width?: number;
+  height?: number;
+}
+
 // ---- Message ----
 export interface MessageExtra {
   persona_id?: string;
@@ -94,6 +124,7 @@ export interface MessageExtra {
    *  hidden from the chat list but still included in prompt assembly. */
   _loom_inject?: import('@/lib/loom/types').LoomInjectTag;
   _loom_block_id?: string;
+  attachments?: MessageAttachment[];
   [key: string]: any;
 }
 

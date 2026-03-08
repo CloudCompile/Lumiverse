@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import type { GenerationRequest, GenerationResponse, StreamChunk } from "../types";
+import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type LlmMessage, type LlmMessagePart } from "../types";
 
 const API_VERSION = "2023-06-01";
 
@@ -57,13 +57,19 @@ export class AnthropicProvider implements LlmProvider {
     }
 
     const data = await res.json() as any;
-    const textContent = (data.content || [])
+    const blocks = data.content || [];
+    const textContent = blocks
       .filter((c: any) => c.type === "text")
       .map((c: any) => c.text)
+      .join("");
+    const thinkingContent = blocks
+      .filter((c: any) => c.type === "thinking")
+      .map((c: any) => c.thinking)
       .join("");
 
     return {
       content: textContent,
+      reasoning: thinkingContent || undefined,
       finish_reason: data.stop_reason || "end_turn",
       usage: data.usage
         ? {
@@ -97,6 +103,7 @@ export class AnthropicProvider implements LlmProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let streamInputTokens = 0;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -113,10 +120,29 @@ export class AnthropicProvider implements LlmProvider {
         try {
           const data = JSON.parse(trimmed.slice(6));
 
-          if (data.type === "content_block_delta" && data.delta?.type === "text_delta") {
-            yield { token: data.delta.text };
-          } else if (data.type === "message_delta" && data.delta?.stop_reason) {
-            yield { token: "", finish_reason: data.delta.stop_reason };
+          if (data.type === "message_start" && data.message?.usage) {
+            // Capture input token count from message_start (output tokens arrive in message_delta)
+            streamInputTokens = data.message.usage.input_tokens || 0;
+          } else if (data.type === "content_block_delta") {
+            if (data.delta?.type === "thinking_delta") {
+              yield { token: "", reasoning: data.delta.thinking };
+            } else if (data.delta?.type === "text_delta") {
+              yield { token: data.delta.text };
+            }
+          } else if (data.type === "message_delta") {
+            const outputTokens = data.usage?.output_tokens || 0;
+            const usage = (streamInputTokens || outputTokens)
+              ? {
+                  prompt_tokens: streamInputTokens,
+                  completion_tokens: outputTokens,
+                  total_tokens: streamInputTokens + outputTokens,
+                }
+              : undefined;
+            if (data.delta?.stop_reason) {
+              yield { token: "", finish_reason: data.delta.stop_reason, usage };
+            } else if (usage) {
+              yield { token: "", usage };
+            }
           } else if (data.type === "message_stop") {
             return;
           }
@@ -159,6 +185,32 @@ export class AnthropicProvider implements LlmProvider {
     }
   }
 
+  /** Format message content for the Anthropic API, handling multipart (vision) content. */
+  private formatContent(m: LlmMessage): string | any[] {
+    if (typeof m.content === "string") return m.content;
+    return m.content.map((part: LlmMessagePart) => {
+      switch (part.type) {
+        case "text":
+          return { type: "text", text: part.text };
+        case "image":
+          return { type: "image", source: { type: "base64", media_type: part.mime_type, data: part.data } };
+        case "audio":
+          // Anthropic doesn't support native audio content blocks — include as text note
+          return { type: "text", text: `[Audio attachment: ${part.mime_type}]` };
+        default:
+          return { type: "text", text: "" };
+      }
+    });
+  }
+
+  /** Keys that are internal to Lumiverse and should never be sent to any provider API. */
+  private static readonly INTERNAL_PARAMS = new Set(["max_context_length", "_include_usage"]);
+
+  /** Keys explicitly handled by Anthropic's buildBody — excluded from passthrough. */
+  private static readonly HANDLED_PARAMS = new Set([
+    "temperature", "max_tokens", "top_p", "top_k", "stop", "thinking", "output_config",
+  ]);
+
   private buildBody(request: GenerationRequest, stream: boolean): any {
     const params = request.parameters || {};
 
@@ -168,19 +220,37 @@ export class AnthropicProvider implements LlmProvider {
 
     const body: any = {
       model: request.model,
-      messages: otherMessages.map((m) => ({ role: m.role, content: m.content })),
+      messages: otherMessages.map((m) => ({ role: m.role, content: this.formatContent(m) })),
       max_tokens: params.max_tokens || 4096,
       stream,
     };
 
     if (systemMessages.length > 0) {
-      body.system = systemMessages.map((m) => m.content).join("\n\n");
+      body.system = systemMessages.map((m) => getTextContent(m)).join("\n\n");
     }
 
     if (params.temperature !== undefined) body.temperature = params.temperature;
     if (params.top_p !== undefined) body.top_p = params.top_p;
     if (params.top_k !== undefined) body.top_k = params.top_k;
     if (params.stop) body.stop_sequences = params.stop;
+
+    // Extended/adaptive thinking
+    if (params.thinking) {
+      body.thinking = params.thinking;
+    }
+    // Adaptive thinking effort: { effort: "low" | "medium" | "high" | "max" }
+    if (params.output_config) {
+      body.output_config = params.output_config;
+    }
+
+    // Passthrough: include extra params (e.g. from custom body) not already
+    // handled explicitly. This enables provider-specific params to reach the API.
+    for (const key of Object.keys(params)) {
+      if (body[key] !== undefined) continue;
+      if (AnthropicProvider.HANDLED_PARAMS.has(key)) continue;
+      if (AnthropicProvider.INTERNAL_PARAMS.has(key)) continue;
+      body[key] = params[key];
+    }
 
     // Inline council tools: pass as Anthropic tool_use format
     if (request.tools && request.tools.length > 0) {
