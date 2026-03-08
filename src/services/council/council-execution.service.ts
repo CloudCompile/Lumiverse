@@ -30,6 +30,8 @@ interface ExecuteInput {
   connectionId?: string;
   /** Pre-resolved settings — avoids re-fetching and ensures consistency with caller. */
   settings?: CouncilSettings;
+  /** Abort signal — when fired, stops executing further council tools. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -94,8 +96,13 @@ export async function executeCouncil(
   // Build shared context once
   const contextMessages = buildContextMessages(input, settings);
 
-  // Execute members sequentially
+  // Execute members sequentially (abort-aware)
   for (const member of activeMembers) {
+    if (input.signal?.aborted) {
+      console.debug("[council] Aborted before member '%s'", member.itemName);
+      break;
+    }
+
     const memberResults = await executeMemberTools(
       input,
       settings,
@@ -158,6 +165,11 @@ async function executeMemberTools(
   const identityMsg = buildMemberIdentity(input.userId, member);
 
   for (const toolName of member.tools) {
+    if (input.signal?.aborted) {
+      console.debug("[council] Aborted before tool '%s' for member '%s'", toolName, member.itemName);
+      break;
+    }
+
     const toolDef = tools.get(toolName);
     if (!toolDef) continue;
 

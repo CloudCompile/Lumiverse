@@ -133,7 +133,12 @@ interface PromptPipelineResult {
 }
 
 // Track active generations for stop support
-const activeGenerations = new Map<string, { controller: AbortController; userId: string }>();
+const activeGenerations = new Map<string, { controller: AbortController; userId: string; chatId: string }>();
+
+// Per-chat generation lock: prevents concurrent generations (including council) in the same chat.
+// Keyed by `${userId}:${chatId}` → generationId. Registered BEFORE council execution so that
+// a second request for the same chat will abort the in-flight one (including its council tools).
+const activeChatGenerations = new Map<string, string>();
 
 /** Resolve connection profile by ID or fall back to the user's default. */
 function resolveConnection(userId: string, connectionId?: string) {
@@ -299,6 +304,35 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     }
   }
 
+  // --- Per-chat generation lock ---
+  // Stop any existing generation for this chat (including in-flight council tools)
+  // before proceeding. This prevents council re-firing and generation interruption.
+  const chatKey = `${input.userId}:${input.chat_id}`;
+  const existingGenId = activeChatGenerations.get(chatKey);
+  if (existingGenId) {
+    const existing = activeGenerations.get(existingGenId);
+    if (existing) {
+      console.debug("[generate] Aborting existing generation %s for chat %s before starting new one", existingGenId, input.chat_id);
+      existing.controller.abort();
+    }
+    activeGenerations.delete(existingGenId);
+    activeChatGenerations.delete(chatKey);
+  }
+
+  // Register this generation early (before council) so it can be tracked and aborted
+  const abortController = new AbortController();
+  activeGenerations.set(generationId, { controller: abortController, userId: input.userId, chatId: input.chat_id });
+  activeChatGenerations.set(chatKey, generationId);
+
+  // Helper: bail out cleanly if aborted during the setup phase
+  const checkAborted = () => {
+    if (abortController.signal.aborted) {
+      throw new Error("Generation aborted");
+    }
+  };
+
+  try {
+
   const connection = resolveConnection(input.userId, input.connection_id);
   const { provider, apiKey, apiUrl } = await resolveProviderAndKey(input.userId, connection.id);
 
@@ -369,14 +403,19 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         stagedMessageId = stagedMsg.id;
       }
 
-      // Execute pre-generation tool calls
+      checkAborted();
+
+      // Execute pre-generation tool calls (abort-aware)
       councilResult = await executeCouncil({
         userId: input.userId,
         chatId: input.chat_id,
         personaId: input.persona_id,
         connectionId: input.connection_id,
         settings: councilSettings,
+        signal: abortController.signal,
       });
+
+      checkAborted();
     }
   }
 
@@ -494,13 +533,17 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     if (preset) lifecycle.presetName = preset.name;
   }
 
-  const abortController = new AbortController();
-  activeGenerations.set(generationId, { controller: abortController, userId: input.userId });
-
   // Run generation in the background
   runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools);
 
   return { generationId, status: "streaming" };
+
+  } catch (err: any) {
+    // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted
+    activeGenerations.delete(generationId);
+    activeChatGenerations.delete(chatKey);
+    throw err;
+  }
 }
 
 /**
@@ -665,6 +708,14 @@ async function runGeneration(
     }, userId);
   } finally {
     activeGenerations.delete(generationId);
+    // Clean up per-chat lock (only if this generation still owns it — a newer
+    // generation may have already replaced it via startGeneration).
+    for (const [key, id] of activeChatGenerations) {
+      if (id === generationId) {
+        activeChatGenerations.delete(key);
+        break;
+      }
+    }
   }
 }
 
@@ -683,11 +734,21 @@ export function stopUserGenerations(userId: string): void {
   }
 }
 
+export function stopChatGenerations(userId: string, chatId: string): void {
+  const chatKey = `${userId}:${chatId}`;
+  const genId = activeChatGenerations.get(chatKey);
+  if (genId) {
+    const entry = activeGenerations.get(genId);
+    if (entry) entry.controller.abort();
+  }
+}
+
 export function stopAllGenerations(): void {
   for (const [id, entry] of activeGenerations) {
     entry.controller.abort();
   }
   activeGenerations.clear();
+  activeChatGenerations.clear();
 }
 
 // --- Extension generation (stateless, synchronous, no WS events) ---

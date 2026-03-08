@@ -23,7 +23,8 @@ function getViewer(c: any): { userId: string; role: string } {
   };
 }
 
-function getVisibleExtension(c: any, id: string): ExtensionInfo | null {
+function getVisibleExtension(c: any, id: string | undefined): ExtensionInfo | null {
+  if (!id) return null;
   const viewer = getViewer(c);
   return managerSvc.getExtensionForUser(id, viewer.userId, viewer.role);
 }

@@ -288,7 +288,7 @@ export class WorkerHost {
 
   sendOAuthCallback(
     params: Record<string, string>
-  ): Promise<{ html?: string }> {
+  ): Promise<{ html?: string; message?: string }> {
     const requestId = crypto.randomUUID();
 
     this.postToWorker({
@@ -306,7 +306,7 @@ export class WorkerHost {
       this.pendingRequests.set(requestId, {
         resolve: (value) => {
           clearTimeout(timeout);
-          resolve(value as { html?: string });
+          resolve(value as { html?: string; message?: string });
         },
         reject: (reason) => {
           clearTimeout(timeout);
