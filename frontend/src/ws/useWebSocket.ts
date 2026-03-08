@@ -5,6 +5,7 @@ import { useStore } from '@/store'
 import { routeBackendMessage } from '@/lib/spindle/loader'
 import { messagesApi } from '@/api/chats'
 import { imageGenApi } from '@/api/image-gen'
+import { toast } from '@/lib/toast'
 import type {
   StreamTokenPayload,
   GenerationStartedPayload,
@@ -92,6 +93,7 @@ export function useWebSocket() {
         if (payload.chatId === state.activeChatId) {
           if (payload.error) {
             state.setStreamingError(payload.error)
+            toast.error(payload.error, { title: 'Generation Failed' })
           } else {
             // Cache breakdown data from WS event if present
             if (payload.messageId && (payload as any).breakdown) {
@@ -235,6 +237,7 @@ export function useWebSocket() {
 
       wsClient.on(EventType.SPINDLE_EXTENSION_ERROR, (payload: { extensionId: string; error: string }) => {
         console.error(`[Spindle] Extension error (${payload.extensionId}):`, payload.error)
+        toast.error(payload.error, { title: 'Extension Error' })
         syncExtensions()
       }),
 

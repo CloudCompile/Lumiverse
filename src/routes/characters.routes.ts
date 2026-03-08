@@ -96,6 +96,90 @@ app.post("/:id/avatar", async (c) => {
   return c.json({ image_id: image.id, avatar_path: image.filename });
 });
 
+app.post("/import-bulk", async (c) => {
+  const userId = c.get("userId");
+
+  try {
+    const formData = await c.req.formData();
+    const files = formData.getAll("files") as File[];
+    if (!files.length) return c.json({ error: "files are required" }, 400);
+    if (files.length > 500) return c.json({ error: "Maximum 500 files per bulk import" }, 400);
+
+    const skipDuplicates = formData.get("skip_duplicates") === "true";
+
+    const results: Array<{
+      filename: string;
+      success: boolean;
+      character?: any;
+      lorebook?: { name: string; entryCount: number };
+      error?: string;
+      skipped?: boolean;
+    }> = [];
+
+    for (const file of files) {
+      const filename = file.name || "unknown";
+      try {
+        let cardInput;
+        let isPng = false;
+
+        if (file.type === "image/png" || filename.endsWith(".png")) {
+          cardInput = await cardSvc.extractCardFromPng(file);
+          isPng = true;
+        } else {
+          const text = await file.text();
+          const json = JSON.parse(text);
+          cardInput = cardSvc.parseCardJson(json);
+        }
+
+        // Deduplication check
+        if (skipDuplicates && svc.characterExistsByName(userId, cardInput.name)) {
+          results.push({ filename, success: true, skipped: true });
+          continue;
+        }
+
+        const character = svc.createCharacter(userId, cardInput);
+
+        if (isPng) {
+          const image = await images.uploadImage(userId, file);
+          svc.setCharacterImage(userId, character.id, image.id);
+          svc.setCharacterAvatar(userId, character.id, image.filename);
+        }
+
+        const imported = svc.getCharacter(userId, character.id)!;
+
+        // Check for embedded lorebook
+        let lorebook: { name: string; entryCount: number } | undefined;
+        const charBook = imported.extensions?.character_book;
+        if (charBook?.entries?.length) {
+          const entries = Array.isArray(charBook.entries)
+            ? charBook.entries
+            : Object.values(charBook.entries);
+          lorebook = {
+            name: charBook.name || `${imported.name}'s Lorebook`,
+            entryCount: entries.length,
+          };
+        }
+
+        results.push({ filename, success: true, character: imported, lorebook });
+      } catch (err: any) {
+        results.push({
+          filename,
+          success: false,
+          error: err.message || "Failed to import",
+        });
+      }
+    }
+
+    const imported = results.filter((r) => r.success && !r.skipped && r.character).length;
+    const skipped = results.filter((r) => r.skipped).length;
+    const failed = results.filter((r) => !r.success).length;
+
+    return c.json({ results, summary: { total: files.length, imported, skipped, failed } }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Bulk import failed" }, 400);
+  }
+});
+
 app.post("/import", async (c) => {
   const userId = c.get("userId");
   const contentType = c.req.header("content-type") || "";

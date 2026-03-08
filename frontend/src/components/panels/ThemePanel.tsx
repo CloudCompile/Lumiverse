@@ -17,7 +17,13 @@ export default function ThemePanel() {
 
   const update = useCallback(
     (patch: Partial<ThemeConfig>) => {
-      setTheme({ ...current, ...patch, id: 'custom' } as ThemeConfig)
+      const next = { ...current, ...patch }
+      // characterAware themes dynamically derive accent/baseColors from the
+      // active character, so keep the preset id so the selection is preserved
+      if (!next.characterAware) {
+        next.id = 'custom'
+      }
+      setTheme(next as ThemeConfig)
     },
     [current, setTheme]
   )

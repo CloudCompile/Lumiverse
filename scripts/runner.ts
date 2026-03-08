@@ -12,13 +12,14 @@
  * Keyboard:
  *   R - Restart server
  *   U - Update from GitHub (when available)
+ *   T - Toggle remote/mobile access (TRUST_ANY_ORIGIN)
  *   O - Open in browser
  *   C - Clear log
  *   Q / Ctrl+C - Quit
  */
 
 import { resolve, join } from "path";
-import { existsSync } from "fs";
+import { existsSync, watch, type FSWatcher } from "fs";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -135,11 +136,23 @@ let updateInProgress = false;
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
-// Load port from .env
+// Remote access state
+let trustAnyOrigin = false;
+
+// Self-restart state (watches runner's own source files)
+const SELF_WATCH_FILES = [
+  join(PROJECT_ROOT, "scripts/runner.ts"),
+  join(PROJECT_ROOT, "scripts/ui.ts"),
+];
+let selfWatchers: FSWatcher[] = [];
+let selfRestartPending = false;
+
+// Load port and trust state from .env
 if (existsSync(ENV_FILE)) {
   const envContent = await Bun.file(ENV_FILE).text();
   const portMatch = envContent.match(/^PORT=(\d+)/m);
   if (portMatch) port = parseInt(portMatch[1], 10);
+  trustAnyOrigin = /^TRUST_ANY_ORIGIN=true$/m.test(envContent);
 }
 
 // ─── Log management ─────────────────────────────────────────────────────────
@@ -459,6 +472,142 @@ function startUpdateChecker(): void {
   updateCheckInterval = setInterval(() => checkForUpdates(), UPDATE_CHECK_INTERVAL_MS);
 }
 
+// ─── Self-restart (watch runner source files) ────────────────────────────────
+
+function startSelfWatcher(): void {
+  for (const file of SELF_WATCH_FILES) {
+    if (!existsSync(file)) continue;
+    const watcher = watch(file, { persistent: false }, () => {
+      if (selfRestartPending) return;
+      selfRestartPending = true;
+      addLog(`Runner source changed: ${file.split("/").pop()}`, "system");
+      // Debounce — editors may fire multiple events per save
+      setTimeout(() => selfRestart(), 500);
+    });
+    selfWatchers.push(watcher);
+  }
+}
+
+function stopSelfWatcher(): void {
+  for (const w of selfWatchers) w.close();
+  selfWatchers = [];
+}
+
+async function selfRestart(): Promise<void> {
+  addLog("Restarting runner process...", "system");
+
+  // Stop file watchers
+  stopSelfWatcher();
+
+  // Stop the backend server
+  await stopServer();
+
+  // Tear down TUI
+  if (tickInterval) clearInterval(tickInterval);
+  if (updateCheckInterval) clearInterval(updateCheckInterval);
+  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  leaveAltScreen();
+
+  console.log("Runner restarting due to source change...");
+
+  // Re-exec ourselves with the same arguments
+  const child = Bun.spawn([process.execPath, ...process.argv.slice(1)], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+    cwd: PROJECT_ROOT,
+  });
+
+  // Act as a transparent wrapper — propagate the child's exit code
+  const code = await child.exited;
+  process.exit(code);
+}
+
+// ─── Remote access toggle ────────────────────────────────────────────────────
+
+async function toggleTrustAnyOrigin(): Promise<void> {
+  if (!existsSync(ENV_FILE)) {
+    addLog("No .env file found — cannot toggle remote access.", "system");
+    return;
+  }
+
+  const enabling = !trustAnyOrigin;
+
+  if (enabling) {
+    addLog("", "system");
+    addLog("╔══════════════════════════════════════════════════════════════╗", "system");
+    addLog("║  ⚠  SECURITY WARNING — Remote / Mobile Access             ║", "system");
+    addLog("║                                                            ║", "system");
+    addLog("║  This disables CORS origin and host checking, allowing     ║", "system");
+    addLog("║  ANY device on your network (or the internet, if port-     ║", "system");
+    addLog("║  forwarded) to connect to this Lumiverse instance.         ║", "system");
+    addLog("║                                                            ║", "system");
+    addLog("║  Only enable this on trusted networks.                     ║", "system");
+    addLog("║  Press T again within 10 seconds to confirm, or wait       ║", "system");
+    addLog("║  to cancel.                                                ║", "system");
+    addLog("╚══════════════════════════════════════════════════════════════╝", "system");
+    addLog("", "system");
+
+    // Set a flag and wait for confirmation
+    pendingTrustToggle = true;
+    render();
+
+    // Auto-cancel after 10 seconds
+    pendingTrustTimer = setTimeout(() => {
+      if (pendingTrustToggle) {
+        pendingTrustToggle = false;
+        addLog("Remote access toggle cancelled (timed out).", "system");
+        render();
+      }
+    }, 10_000);
+    return;
+  }
+
+  // Disabling — no confirmation needed
+  await writeTrustAnyOrigin(false);
+}
+
+async function confirmTrustToggle(): Promise<void> {
+  pendingTrustToggle = false;
+  if (pendingTrustTimer) {
+    clearTimeout(pendingTrustTimer);
+    pendingTrustTimer = null;
+  }
+  await writeTrustAnyOrigin(true);
+}
+
+async function writeTrustAnyOrigin(enable: boolean): Promise<void> {
+  let envContent = await Bun.file(ENV_FILE).text();
+
+  if (enable) {
+    // Add or update TRUST_ANY_ORIGIN=true
+    if (/^#?\s*TRUST_ANY_ORIGIN=/m.test(envContent)) {
+      envContent = envContent.replace(/^#?\s*TRUST_ANY_ORIGIN=.*/m, "TRUST_ANY_ORIGIN=true");
+    } else {
+      // Append to file
+      envContent = envContent.trimEnd() + "\n\n# Remote / mobile access (managed by runner)\nTRUST_ANY_ORIGIN=true\n";
+    }
+    addLog("Remote access ENABLED — TRUST_ANY_ORIGIN=true written to .env", "system");
+    addLog("Any device can now connect. Restart in progress...", "system");
+  } else {
+    // Comment out or remove TRUST_ANY_ORIGIN
+    envContent = envContent.replace(/^TRUST_ANY_ORIGIN=true.*$/m, "# TRUST_ANY_ORIGIN=true");
+    addLog("Remote access DISABLED — TRUST_ANY_ORIGIN reverted in .env", "system");
+    addLog("Only localhost connections allowed. Restarting...", "system");
+  }
+
+  await Bun.write(ENV_FILE, envContent);
+  trustAnyOrigin = enable;
+
+  // Restart server to pick up the change
+  restartCount++;
+  await stopServer();
+  await startServer();
+}
+
+let pendingTrustToggle = false;
+let pendingTrustTimer: ReturnType<typeof setTimeout> | null = null;
+
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
 function formatUptime(ms: number): string {
@@ -503,7 +652,11 @@ function render(): void {
     ? `${C.bgBar} ${updateStr} ${C.bgBar}${C.gray}│${C.R}`
     : "";
 
-  out.push(`${C.bgBar}${ansi.bold} ${MINI_LOGO} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${getStatusIndicator()} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${C.gray}Port${C.R}${C.bgBar} ${C.white}${port}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}PID${C.R}${C.bgBar} ${C.white}${pidStr}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}Uptime${C.R}${C.bgBar} ${C.white}${uptime}${C.R}${C.bgBar} ${C.gray}│${C.R}${updateSegment}${C.bgBar} ${modeStr} ${C.bgBar}${" ".repeat(Math.max(0, cols - 75))}${C.R}`);
+  const trustSegment = trustAnyOrigin
+    ? `${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${C.yellow}⚠ REMOTE${C.R}${C.bgBar} `
+    : "";
+
+  out.push(`${C.bgBar}${ansi.bold} ${MINI_LOGO} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${getStatusIndicator()} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${C.gray}Port${C.R}${C.bgBar} ${C.white}${port}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}PID${C.R}${C.bgBar} ${C.white}${pidStr}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}Uptime${C.R}${C.bgBar} ${C.white}${uptime}${C.R}${C.bgBar} ${C.gray}│${C.R}${updateSegment}${C.bgBar} ${modeStr} ${trustSegment}${C.bgBar}${" ".repeat(Math.max(0, cols - 75))}${C.R}`);
 
   // Separator
   out.push(`${C.darkGray}${"─".repeat(cols)}${C.R}`);
@@ -539,9 +692,16 @@ function render(): void {
   out.push(`${C.darkGray}${"─".repeat(cols)}${C.R}${scrollIndicator}`);
 
   // ─── Action bar ────────────────────────────────────────────────────
+  const trustLabel = pendingTrustToggle
+    ? `${C.yellow}T${C.gray} Confirm Remote`
+    : trustAnyOrigin
+    ? `${C.yellow}T${C.gray} Disable Remote`
+    : `${C.blue}T${C.gray} Remote Access`;
+
   const actionItems = [
     `${C.blue}R${C.gray}estart`,
     ...(updateAvailable ? [`${C.green}U${C.gray}pdate`] : []),
+    trustLabel,
     `${C.blue}O${C.gray}pen Browser`,
     `${C.blue}C${C.gray}lear Log`,
     `${C.blue}↑↓${C.gray} Scroll`,
@@ -588,6 +748,14 @@ function setupInput(): void {
           addLog("Checking for updates...", "system");
           await checkForUpdates();
           if (!updateAvailable) addLog("Already up to date.", "system");
+        }
+        break;
+
+      case "t":
+        if (pendingTrustToggle) {
+          await confirmTrustToggle();
+        } else {
+          await toggleTrustAnyOrigin();
         }
         break;
 
@@ -665,6 +833,7 @@ async function shutdown(): Promise<void> {
   addLog("Shutting down...", "system");
   if (tickInterval) clearInterval(tickInterval);
   if (updateCheckInterval) clearInterval(updateCheckInterval);
+  stopSelfWatcher();
 
   await stopServer();
 
@@ -693,6 +862,7 @@ async function main(): Promise<void> {
   setupInput();
   startTicker();
   startUpdateChecker();
+  startSelfWatcher();
   render();
 
   await startServer();

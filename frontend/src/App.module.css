@@ -3,6 +3,8 @@
   flex-direction: column;
   height: 100dvh;
   background: var(--lumiverse-bg-deep);
+  /* Safe area insets for edge-to-edge rendering (viewport-fit=cover) */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 .main {

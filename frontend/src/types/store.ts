@@ -101,6 +101,19 @@ export interface PersonasSlice {
   setSelectedPersonaId: (id: string | null) => void
 }
 
+// ---- Toast Types ----
+export type ToastType = 'success' | 'warning' | 'error' | 'info'
+export type ToastPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top' | 'bottom'
+
+export interface Toast {
+  id: string
+  type: ToastType
+  title?: string
+  message: string
+  duration?: number
+  dismissible?: boolean
+}
+
 // ---- UI Slice ----
 export interface UISlice {
   activeModal: string | null
@@ -112,6 +125,7 @@ export interface UISlice {
   settingsModalOpen: boolean
   settingsActiveView: string
   portraitPanelOpen: boolean
+  toasts: Toast[]
   openModal: (name: string, props?: Record<string, any>) => void
   closeModal: () => void
   setLoading: (loading: boolean) => void
@@ -122,6 +136,9 @@ export interface UISlice {
   openSettings: (view?: string) => void
   closeSettings: () => void
   togglePortraitPanel: () => void
+  addToast: (toast: Omit<Toast, 'id'>) => string
+  removeToast: (id: string) => void
+  clearToasts: () => void
 }
 
 // ---- OOC Style Type ----
@@ -201,6 +218,7 @@ export interface SettingsSlice {
   portraitPanelSide: 'left' | 'right'
   theme: ThemeConfig | null
   drawerSettings: DrawerSettings
+  toastPosition: ToastPosition
   oocEnabled: boolean
   lumiaOOCStyle: OOCStyleType
   lumiaOOCInterval: number | null
@@ -212,6 +230,7 @@ export interface SettingsSlice {
   contextFilters: ContextFilters
   reasoningSettings: ReasoningSettings
   promptBias: string
+  globalWorldBooks: string[]
   guidedGenerations: GuidedGeneration[]
   quickReplySets: QuickReplySet[]
   setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K]) => void
@@ -325,6 +344,7 @@ export interface CouncilSlice {
   loadAvailableTools: () => Promise<void>
 
   addCouncilMember: (member: CouncilMember) => void
+  addCouncilMembersFromPack: (packId: string) => number
   updateCouncilMember: (id: string, updates: Partial<CouncilMember>) => void
   removeCouncilMember: (id: string) => void
   setCouncilToolsSettings: (partial: Partial<CouncilToolsSettings>) => void
@@ -357,8 +377,17 @@ export interface ImageGenSettings {
 // ---- Spindle Slice ----
 import type { ExtensionInfo, SpindlePermission } from 'lumiverse-spindle-types'
 
+export interface PendingPermissionRequest {
+  id: string
+  extensionId: string
+  extensionName: string
+  permissions: string[]
+  reason?: string
+}
+
 export interface SpindleSlice {
   extensions: ExtensionInfo[]
+  pendingPermissionRequest: PendingPermissionRequest | null
   loadExtensions: () => Promise<void>
   installExtension: (githubUrl: string) => Promise<void>
   updateExtension: (id: string) => Promise<void>
@@ -368,6 +397,8 @@ export interface SpindleSlice {
   restartExtension: (id: string) => Promise<void>
   grantPermission: (id: string, permission: string) => Promise<void>
   revokePermission: (id: string, permission: string) => Promise<void>
+  showPermissionRequest: (request: PendingPermissionRequest) => void
+  resolvePermissionRequest: (id: string, approved: boolean) => Promise<void>
 }
 
 // ---- Summary Slice ----

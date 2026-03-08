@@ -4,14 +4,18 @@
     Lumiverse Launcher (Windows)
 
 .DESCRIPTION
-    Build frontend + start backend (default)
+    Start backend and serve pre-built frontend (default).
+    Use -Build to rebuild the frontend before starting.
 
 .PARAMETER Mode
-    all          - Build frontend + start backend (default)
+    all          - Start backend, serve pre-built frontend (default)
     build-only   - Build frontend only
-    backend-only - Start backend only
+    backend-only - Start backend only, skip frontend serving
     dev          - Start backend in watch mode
     setup        - Run setup wizard only
+
+.PARAMETER Build
+    Rebuild the frontend before starting the backend
 
 .PARAMETER FrontendPath
     Path to frontend directory (default: ./frontend)
@@ -23,6 +27,9 @@
 param(
     [ValidateSet("all", "build-only", "backend-only", "dev", "setup")]
     [string]$Mode = "all",
+
+    [Alias("b")]
+    [switch]$Build,
 
     [string]$FrontendPath,
 
@@ -56,15 +63,30 @@ function Ensure-Bun {
 
     Write-Warn "Bun not found. Installing..."
 
+    # ── Install Bun ──────────────────────────────────────────────────────
+    # Piping directly to iex (irm ... | iex) breaks the installer's
+    # param() block — $Version and other parameters never bind, which
+    # can abort the install entirely.  Wrapping in a scriptblock via
+    # & { ... } lets PowerShell parse param() correctly.
     try {
-        irm bun.sh/install.ps1 | iex
+        iex "& {$(irm https://bun.sh/install.ps1)}"
     } catch {
         Write-Err "Bun installation failed: $_"
         Write-Err "Please install manually: https://bun.sh"
         exit 1
     }
 
-    # Refresh PATH for this session
+    # ── Make bun available in this session ────────────────────────────────
+    # The installer updates the user-level PATH but the current process
+    # still has the stale copy.  Refresh it, then fall back to known
+    # default install locations if Get-Command still can't find bun.
+
+    # Pull in the freshly-updated user PATH so this session sees bun
+    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    $userPath    = [Environment]::GetEnvironmentVariable("PATH", "User")
+    $env:PATH    = "$userPath;$machinePath"
+
+    # Also explicitly prepend the default install bin directory
     $bunInstall = if ($env:BUN_INSTALL) { $env:BUN_INSTALL } else { Join-Path $env:USERPROFILE ".bun" }
     $bunBin = Join-Path $bunInstall "bin"
     if (Test-Path $bunBin) {
@@ -72,13 +94,28 @@ function Ensure-Bun {
     }
 
     $bunCmd = Get-Command bun -ErrorAction SilentlyContinue
-    if (-not $bunCmd) {
-        Write-Err "Bun installation failed. Please install manually: https://bun.sh"
-        exit 1
+    if ($bunCmd) {
+        $version = & bun --version
+        Write-Ok "Bun $version installed successfully"
+        return
     }
 
-    $version = & bun --version
-    Write-Ok "Bun $version installed successfully"
+    # Last resort: check default install locations directly
+    $tryPaths = @(
+        (Join-Path $bunInstall "bin" "bun.exe"),
+        (Join-Path $env:USERPROFILE ".bun" "bin" "bun.exe")
+    )
+    foreach ($tryPath in $tryPaths) {
+        if (Test-Path $tryPath) {
+            $version = & $tryPath --version
+            Write-Ok "Bun $version installed (using direct path: $tryPath)"
+            $env:PATH = "$(Split-Path $tryPath);$env:PATH"
+            return
+        }
+    }
+
+    Write-Err "Bun installation failed. Please install manually: https://bun.sh"
+    exit 1
 }
 
 # ─── First-run setup wizard ─────────────────────────────────────────────────
@@ -121,15 +158,10 @@ function Load-EnvFile {
 function Install-Deps {
     param([string]$Dir, [string]$Name)
 
-    $nodeModules = Join-Path $Dir "node_modules"
-    if (-not (Test-Path $nodeModules)) {
-        Write-Info "Installing $Name dependencies..."
-        Push-Location $Dir
-        try { & bun install } finally { Pop-Location }
-        Write-Ok "$Name dependencies installed"
-    } else {
-        Write-Info "$Name dependencies already installed"
-    }
+    Write-Info "Installing $Name dependencies..."
+    Push-Location $Dir
+    try { & bun install } finally { Pop-Location }
+    Write-Ok "$Name dependencies installed"
 }
 
 # ─── Build frontend ─────────────────────────────────────────────────────────
@@ -205,7 +237,9 @@ Ensure-Bun
 switch ($Mode) {
     "all" {
         Invoke-SetupIfNeeded
-        Build-Frontend
+        if ($Build) {
+            Build-Frontend
+        }
         Start-Backend
     }
     "build-only" {

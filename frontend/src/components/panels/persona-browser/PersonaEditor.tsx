@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare } from 'lucide-react'
+import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { personasApi } from '@/api/personas'
 import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
@@ -51,7 +52,9 @@ export default function PersonaEditor({
   onSwitchTo,
 }: PersonaEditorProps) {
   const [name, setName] = useState(persona.name)
+  const [title, setTitle] = useState(persona.title || '')
   const [description, setDescription] = useState(persona.description)
+  const [folder, setFolder] = useState(persona.folder || '')
   const [descPosition, setDescPosition] = useState<number>(persona.metadata?.description_position ?? 0)
   const [descDepth, setDescDepth] = useState<number>(persona.metadata?.description_depth ?? 4)
   const [descRole, setDescRole] = useState<string>(persona.metadata?.description_role ?? 'system')
@@ -59,19 +62,35 @@ export default function PersonaEditor({
   const activeChatId = useStore((s) => s.activeChatId)
   const messages = useStore((s) => s.messages)
   const setMessages = useStore((s) => s.setMessages)
+  const allPersonas = useStore((s) => s.personas)
   const [worldBooks, setWorldBooks] = useState<WorldBook[]>([])
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showReattributeConfirm, setShowReattributeConfirm] = useState(false)
   const [reattributing, setReattributing] = useState(false)
   const [avatarKey, setAvatarKey] = useState(0)
   const nameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const titleTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const descTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const folderTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const fileRef = useRef<HTMLInputElement>(null)
+  const lastSyncedId = useRef<string | null>(null)
 
-  // Sync from prop changes
+  // Collect unique folder names for datalist suggestions
+  const existingFolders = useMemo(() => {
+    const set = new Set<string>()
+    allPersonas.forEach((p) => { if (p.folder) set.add(p.folder) })
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [allPersonas])
+
+  // Sync from prop changes — only when switching to a different persona,
+  // not when our own save updates the store (which would overwrite in-progress edits)
   useEffect(() => {
+    if (lastSyncedId.current === persona.id) return
+    lastSyncedId.current = persona.id
     setName(persona.name)
+    setTitle(persona.title || '')
     setDescription(persona.description)
+    setFolder(persona.folder || '')
     setDescPosition(persona.metadata?.description_position ?? 0)
     setDescDepth(persona.metadata?.description_depth ?? 4)
     setDescRole(persona.metadata?.description_role ?? 'system')
@@ -92,6 +111,18 @@ export default function PersonaEditor({
       clearTimeout(nameTimer.current)
       nameTimer.current = setTimeout(() => {
         if (value.trim()) onUpdate(persona.id, { name: value.trim() })
+      }, 400)
+    },
+    [persona.id, onUpdate]
+  )
+
+  // Debounced title save
+  const handleTitleChange = useCallback(
+    (value: string) => {
+      setTitle(value)
+      clearTimeout(titleTimer.current)
+      titleTimer.current = setTimeout(() => {
+        onUpdate(persona.id, { title: value })
       }, 400)
     },
     [persona.id, onUpdate]
@@ -137,6 +168,18 @@ export default function PersonaEditor({
       })
     },
     [persona, onUpdate]
+  )
+
+  // Debounced folder save
+  const handleFolderChange = useCallback(
+    (value: string) => {
+      setFolder(value)
+      clearTimeout(folderTimer.current)
+      folderTimer.current = setTimeout(() => {
+        onUpdate(persona.id, { folder: value })
+      }, 400)
+    },
+    [persona.id, onUpdate]
   )
 
   const handleLorebookChange = useCallback(
@@ -233,22 +276,33 @@ export default function PersonaEditor({
           />
         </div>
 
-        {/* Name input */}
-        <input
-          type="text"
-          className={styles.nameInput}
-          value={name}
-          onChange={(e) => handleNameChange(e.target.value)}
-          placeholder="Persona name"
-        />
+        <div className={styles.nameGroup}>
+          {/* Name input */}
+          <input
+            type="text"
+            className={styles.nameInput}
+            value={name}
+            onChange={(e) => handleNameChange(e.target.value)}
+            placeholder="Persona name"
+          />
+          {/* Title input */}
+          <input
+            type="text"
+            className={styles.titleInput}
+            value={title}
+            onChange={(e) => handleTitleChange(e.target.value)}
+            placeholder="Short title / tagline"
+          />
+        </div>
       </div>
 
       {/* Description */}
       <div className={styles.section}>
-        <textarea
+        <ExpandableTextarea
           className={styles.descTextarea}
           value={description}
-          onChange={(e) => handleDescriptionChange(e.target.value)}
+          onChange={handleDescriptionChange}
+          title={`${persona.name} — Description`}
           placeholder="Persona description..."
           rows={4}
         />
@@ -284,6 +338,23 @@ export default function PersonaEditor({
             ))}
           </select>
         </div>
+      </div>
+
+      {/* Folder */}
+      <div className={styles.folderRow}>
+        <input
+          type="text"
+          className={styles.folderInput}
+          value={folder}
+          onChange={(e) => handleFolderChange(e.target.value)}
+          placeholder="Folder"
+          list="persona-folders"
+        />
+        <datalist id="persona-folders">
+          {existingFolders.map((f) => (
+            <option key={f} value={f} />
+          ))}
+        </datalist>
       </div>
 
       {/* Locks section */}

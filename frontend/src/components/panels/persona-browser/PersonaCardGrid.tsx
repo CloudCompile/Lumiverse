@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, type ReactNode } from 'react'
 import { User, UserCheck, Crown, Link2 } from 'lucide-react'
 import { personasApi } from '@/api/personas'
 import LazyImage from '@/components/shared/LazyImage'
@@ -12,6 +12,7 @@ interface PersonaCardGridProps {
   activeId: string | null
   onSelect: (id: string | null) => void
   onDoubleClick: (id: string) => void
+  renderEditor?: (personaId: string) => ReactNode
 }
 
 const PersonaCard = memo(function PersonaCard({
@@ -72,7 +73,10 @@ const PersonaCard = memo(function PersonaCard({
           )}
         </div>
       </div>
-      <span className={styles.name}>{persona.name}</span>
+      <div className={styles.nameGroup}>
+        <span className={styles.name}>{persona.name}</span>
+        {persona.title && <span className={styles.title}>{persona.title}</span>}
+      </div>
     </div>
   )
 })
@@ -83,6 +87,7 @@ export default function PersonaCardGrid({
   activeId,
   onSelect,
   onDoubleClick,
+  renderEditor,
 }: PersonaCardGridProps) {
   if (personas.length === 0) {
     return <div className={styles.empty}>No personas found.</div>
@@ -100,6 +105,11 @@ export default function PersonaCardGrid({
           onDoubleClick={onDoubleClick}
         />
       ))}
+      {renderEditor && selectedId && personas.some((p) => p.id === selectedId) && (
+        <div className={styles.inlineEditor}>
+          {renderEditor(selectedId)}
+        </div>
+      )}
     </div>
   )
 }

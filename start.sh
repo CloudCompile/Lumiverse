@@ -3,9 +3,10 @@ set -euo pipefail
 
 # ─── Lumiverse Launcher (macOS / Linux) ───────────────────────────────────────
 # Usage:
-#   ./start.sh                  Build frontend + start backend (default)
+#   ./start.sh                  Start backend, serve pre-built frontend (default)
+#   ./start.sh -b|--build       Rebuild frontend before starting backend
 #   ./start.sh --build-only     Build frontend only, don't start backend
-#   ./start.sh --backend-only   Start backend only, skip frontend build
+#   ./start.sh --backend-only   Start backend only, skip frontend serving
 #   ./start.sh --dev            Start backend in watch mode (no frontend build)
 #   ./start.sh --setup          Run setup wizard only
 #   ./start.sh --no-runner      Start without the visual runner
@@ -30,15 +31,17 @@ err()   { echo -e "${RED}[error]${NC} $*" >&2; }
 
 MODE="all"  # all | build-only | backend-only | dev | setup
 USE_RUNNER=true
+FORCE_BUILD=false
 for arg in "$@"; do
   case "$arg" in
+    --build|-b)     FORCE_BUILD=true ;;
     --build-only)   MODE="build-only" ;;
     --backend-only) MODE="backend-only" ;;
     --dev)          MODE="dev" ;;
     --setup)        MODE="setup" ;;
     --no-runner)    USE_RUNNER=false ;;
     --help|-h)
-      sed -n '3,13p' "$0" | sed 's/^# \?//'
+      sed -n '3,14p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *) err "Unknown argument: $arg"; exit 1 ;;
@@ -69,16 +72,39 @@ ensure_bun() {
 
   curl -fsSL https://bun.sh/install | bash
 
-  # Add Bun to PATH for this session
+  # ── Make bun available in this session ──────────────────────────────────
+  # The installer modifies shell profiles but we can't rely on re-sourcing
+  # them (non-interactive shells hit the early-exit guard in .bashrc).
+  # Instead we manually wire up the PATH the same way the installer does.
+
   export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
   export PATH="$BUN_INSTALL/bin:$PATH"
 
+  # Newer Bun installers create a dedicated env file — source it if present
+  [[ -f "$BUN_INSTALL/env" ]] && source "$BUN_INSTALL/env"
+
   if command -v bun &>/dev/null; then
     ok "Bun $(bun --version) installed successfully"
-  else
-    err "Bun installation failed. Please install manually: https://bun.sh"
-    exit 1
+    return
   fi
+
+  # Last resort: the binary exists but isn't resolving through PATH.
+  # Try common install locations directly.
+  local try_paths=(
+    "$BUN_INSTALL/bin/bun"
+    "$HOME/.bun/bin/bun"
+  )
+  for try in "${try_paths[@]}"; do
+    if [[ -x "$try" ]]; then
+      ok "Bun $("$try" --version) installed (using direct path: $try)"
+      # Make it available for every subsequent call in this script
+      export PATH="$(dirname "$try"):$PATH"
+      return
+    fi
+  done
+
+  err "Bun installation failed. Please install manually: https://bun.sh"
+  exit 1
 }
 
 # ─── First-run setup wizard ─────────────────────────────────────────────────
@@ -107,13 +133,9 @@ install_deps() {
   local dir="$1"
   local name="$2"
 
-  if [[ ! -d "$dir/node_modules" ]]; then
-    info "Installing $name dependencies..."
-    (cd "$dir" && bun install)
-    ok "$name dependencies installed"
-  else
-    info "$name dependencies already installed"
-  fi
+  info "Installing $name dependencies..."
+  (cd "$dir" && bun install)
+  ok "$name dependencies installed"
 }
 
 # ─── Build frontend ─────────────────────────────────────────────────────────
@@ -191,7 +213,9 @@ ensure_bun
 case "$MODE" in
   all)
     run_setup_if_needed
-    build_frontend
+    if [[ "$FORCE_BUILD" == true ]]; then
+      build_frontend
+    fi
     start_backend
     ;;
   build-only)

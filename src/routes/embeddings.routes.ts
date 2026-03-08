@@ -60,13 +60,20 @@ app.post("/world-books/:bookId/reindex", async (c) => {
       },
     });
 
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    });
+    // Pull CORS headers from the Hono context so this raw Response
+    // mirrors what the middleware would set on a normal c.json() reply.
+    const origin = c.req.header("origin") || "";
+    const corsHeaders: Record<string, string> = {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    };
+    if (origin) {
+      corsHeaders["Access-Control-Allow-Origin"] = origin;
+      corsHeaders["Access-Control-Allow-Credentials"] = "true";
+    }
+
+    return new Response(stream, { headers: corsHeaders });
   }
 
   // Non-streaming fallback

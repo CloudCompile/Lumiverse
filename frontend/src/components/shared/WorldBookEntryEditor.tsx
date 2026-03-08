@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { ChevronRight } from 'lucide-react'
+import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import clsx from 'clsx'
 import type { WorldBookEntry } from '@/types/api'
 import NumberStepper from './NumberStepper'
@@ -38,6 +39,59 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
   const [recursionOpen, setRecursionOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
 
+  // Local state for text fields to prevent prop-sync from overwriting in-progress edits
+  const [content, setContent] = useState(entry.content)
+  const [comment, setComment] = useState(entry.comment)
+  const [primaryKeys, setPrimaryKeys] = useState(entry.key.join(', '))
+  const [secondaryKeys, setSecondaryKeys] = useState(entry.keysecondary.join(', '))
+  const lastSyncedId = useRef<string | null>(null)
+
+  // Sync from entry prop only when switching to a different entry
+  useEffect(() => {
+    if (lastSyncedId.current === entry.id) return
+    lastSyncedId.current = entry.id
+    setContent(entry.content)
+    setComment(entry.comment)
+    setPrimaryKeys(entry.key.join(', '))
+    setSecondaryKeys(entry.keysecondary.join(', '))
+  }, [entry])
+
+  const handleContentChange = useCallback(
+    (v: string) => {
+      setContent(v)
+      onUpdate(entry.id, { content: v })
+    },
+    [entry.id, onUpdate]
+  )
+
+  const handleCommentChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setComment(e.target.value)
+      onUpdate(entry.id, { comment: e.target.value })
+    },
+    [entry.id, onUpdate]
+  )
+
+  const handlePrimaryKeysChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setPrimaryKeys(e.target.value)
+      onUpdate(entry.id, {
+        key: e.target.value.split(',').map((k) => k.trim()).filter(Boolean),
+      })
+    },
+    [entry.id, onUpdate]
+  )
+
+  const handleSecondaryKeysChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setSecondaryKeys(e.target.value)
+      onUpdate(entry.id, {
+        keysecondary: e.target.value.split(',').map((k) => k.trim()).filter(Boolean),
+      })
+    },
+    [entry.id, onUpdate]
+  )
+
   return (
     <div className={styles.entryEditor}>
       {/* Identity & Content */}
@@ -48,8 +102,8 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           <input
             type="text"
             className={styles.entryInput}
-            value={entry.comment}
-            onChange={(e) => onUpdate(entry.id, { comment: e.target.value })}
+            value={comment}
+            onChange={handleCommentChange}
           />
         </div>
         <div className={styles.entryField}>
@@ -57,15 +111,8 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           <input
             type="text"
             className={styles.entryInput}
-            value={entry.key.join(', ')}
-            onChange={(e) =>
-              onUpdate(entry.id, {
-                key: e.target.value
-                  .split(',')
-                  .map((k) => k.trim())
-                  .filter(Boolean),
-              })
-            }
+            value={primaryKeys}
+            onChange={handlePrimaryKeysChange}
           />
         </div>
         <div className={styles.entryField}>
@@ -73,23 +120,17 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           <input
             type="text"
             className={styles.entryInput}
-            value={entry.keysecondary.join(', ')}
-            onChange={(e) =>
-              onUpdate(entry.id, {
-                keysecondary: e.target.value
-                  .split(',')
-                  .map((k) => k.trim())
-                  .filter(Boolean),
-              })
-            }
+            value={secondaryKeys}
+            onChange={handleSecondaryKeysChange}
           />
         </div>
         <div className={styles.entryField}>
           <label className={styles.fieldLabel}>Content</label>
-          <textarea
+          <ExpandableTextarea
             className={styles.entryTextarea}
-            value={entry.content}
-            onChange={(e) => onUpdate(entry.id, { content: e.target.value })}
+            value={content}
+            onChange={handleContentChange}
+            title={comment || 'Entry Content'}
             rows={4}
           />
         </div>

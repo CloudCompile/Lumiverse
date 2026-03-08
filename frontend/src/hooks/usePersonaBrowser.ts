@@ -65,7 +65,7 @@ export function usePersonaBrowser() {
   const fuse = useMemo(
     () =>
       new Fuse(personas, {
-        keys: ['name', 'description'],
+        keys: ['name', 'title', 'description'],
         threshold: 0.3,
       }),
     [personas]
@@ -118,6 +118,28 @@ export function usePersonaBrowser() {
     const start = (safePage - 1) * personasPerPage
     return filteredPersonas.slice(start, start + personasPerPage)
   }, [filteredPersonas, safePage, personasPerPage])
+
+  // Group paginated personas by folder
+  const groupedPersonas = useMemo(() => {
+    const groups: Array<{ folder: string; personas: Persona[] }> = []
+    const folderMap = new Map<string, Persona[]>()
+    for (const p of paginatedPersonas) {
+      const key = p.folder || ''
+      if (!folderMap.has(key)) {
+        folderMap.set(key, [])
+        groups.push({ folder: key, personas: folderMap.get(key)! })
+      }
+      folderMap.get(key)!.push(p)
+    }
+    return groups
+  }, [paginatedPersonas])
+
+  // All unique folders for the filter
+  const allFolders = useMemo(() => {
+    const set = new Set<string>()
+    personas.forEach((p) => { if (p.folder) set.add(p.folder) })
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [personas])
 
   const setPersonasPerPage = useCallback(
     (perPage: number) => {
@@ -224,7 +246,9 @@ export function usePersonaBrowser() {
   return {
     // State
     personas: paginatedPersonas,
+    groupedPersonas,
     allPersonas: personas,
+    allFolders,
     totalFiltered: filteredPersonas.length,
     loading,
     searchQuery,

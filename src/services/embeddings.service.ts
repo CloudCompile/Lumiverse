@@ -57,11 +57,11 @@ function asLanceRows(rows: EmbeddingRow[]): LanceRow[] {
 }
 
 const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
-  "openai-compatible": "https://api.openai.com/v1",
-  openai: "https://api.openai.com/v1",
-  openrouter: "https://openrouter.ai/api/v1",
-  electronhub: "https://api.electronhub.top/v1",
-  nanogpt: "https://nano-gpt.com/api/v1",
+  "openai-compatible": "https://api.openai.com/v1/embeddings",
+  openai: "https://api.openai.com/v1/embeddings",
+  openrouter: "https://openrouter.ai/api/v1/embeddings",
+  electronhub: "https://api.electronhub.top/v1/embeddings",
+  nanogpt: "https://nano-gpt.com/api/v1/embeddings",
 };
 
 let connPromise: Promise<Connection> | null = null;
@@ -133,6 +133,28 @@ function normalizeConfig(input: any): EmbeddingConfig {
     vectorize_chat_documents:
       input?.vectorize_chat_documents !== undefined ? !!input.vectorize_chat_documents : base.vectorize_chat_documents,
   };
+}
+
+/**
+ * Resolve the final embedding request URL from user-provided api_url.
+ *
+ * - No path or just "/" → append /v1/embeddings  (bare base URL)
+ * - Any path present     → use as-is             (user-specified endpoint)
+ */
+function resolveEmbeddingUrl(rawUrl: string): string {
+  const trimmed = rawUrl.replace(/\/+$/, "");
+  try {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname;
+    if (!path || path === "/") {
+      parsed.pathname = "/v1/embeddings";
+      return parsed.toString().replace(/\/+$/, "");
+    }
+    return trimmed;
+  } catch {
+    // Malformed URL — best-effort append
+    return `${trimmed}/v1/embeddings`;
+  }
 }
 
 function sqlValue(value: string): string {
@@ -263,7 +285,8 @@ async function requestEmbeddings(
   };
   if (!options?.omitDimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
 
-  const res = await fetch(`${cfg.api_url.replace(/\/+$/, "")}/embeddings`, {
+  const url = resolveEmbeddingUrl(cfg.api_url);
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

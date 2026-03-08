@@ -10,6 +10,7 @@ import ToolEditorModal from '@/components/panels/creator-workshop/ToolEditorModa
 import DryRunModal from './DryRunModal'
 import PromptItemizerModal from './PromptItemizerModal'
 import GroupChatCreatorModal from './GroupChatCreatorModal'
+import PermissionRequestModal from './PermissionRequestModal'
 
 export default function ModalContainer() {
   const settingsModalOpen = useStore((s) => s.settingsModalOpen)
@@ -65,6 +66,8 @@ export default function ModalContainer() {
       {activeModal === 'lumiaEditor' && <LumiaEditorModal />}
       {activeModal === 'loomEditor' && <LoomEditorModal />}
       {activeModal === 'toolEditor' && <ToolEditorModal />}
+
+      <PermissionRequestModal />
     </>
   )
 }

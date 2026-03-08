@@ -1,4 +1,4 @@
-import type { SpindleManifest, SpindleFrontendContext, SpindleFrontendModule } from 'lumiverse-spindle-types'
+import type { SpindleManifest, SpindleFrontendContext, SpindleFrontendModule, PermissionRequestOptions } from 'lumiverse-spindle-types'
 import { createDOMHelper } from './dom-helper'
 import { registerTagInterceptor, unregisterTagInterceptorsByExtension } from './message-interceptors'
 import {
@@ -11,6 +11,7 @@ import {
 } from './placement-helper'
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
+import { useStore } from '@/store'
 
 interface LoadedExtension {
   id: string
@@ -223,6 +224,36 @@ async function doLoadFrontendExtension(
         async getGranted() {
           const res = await spindleApi.getPermissions(extensionId)
           return res.granted
+        },
+        async request(permissions: string[], options?: PermissionRequestOptions) {
+          // Filter out already-granted permissions — no modal needed if everything is granted
+          const needed = permissions.filter((p) => !cachedGrantedPermissions.includes(p))
+          if (needed.length === 0) return cachedGrantedPermissions
+
+          const requestId = crypto.randomUUID()
+
+          return new Promise<string[]>((resolve, reject) => {
+            const handler = ((e: CustomEvent) => {
+              if (e.detail.requestId !== requestId) return
+              window.removeEventListener('spindle:permission-resolved', handler)
+              if (e.detail.approved) {
+                cachedGrantedPermissions = e.detail.granted
+                resolve(e.detail.granted)
+              } else {
+                reject(new Error('Permission request denied by user'))
+              }
+            }) as EventListener
+
+            window.addEventListener('spindle:permission-resolved', handler)
+
+            useStore.getState().showPermissionRequest({
+              id: requestId,
+              extensionId,
+              extensionName: manifest.name,
+              permissions: needed,
+              reason: options?.reason,
+            })
+          })
         },
       },
       sendToBackend(payload: unknown): void {

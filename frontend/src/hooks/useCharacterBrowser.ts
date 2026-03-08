@@ -5,6 +5,7 @@ import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
 import { useStore } from '@/store'
 import type { Character } from '@/types/api'
+import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
 
 const SEARCH_DEBOUNCE_MS = 150
 
@@ -50,6 +51,10 @@ export function useCharacterBrowser() {
   const [importError, setImportError] = useState<string | null>(null)
   const [batchDeleteProgress, setBatchDeleteProgress] = useState<{ done: number; total: number } | null>(null)
   const [pendingLorebookImport, setPendingLorebookImport] = useState<Character | null>(null)
+  const [bulkImportFiles, setBulkImportFiles] = useState<File[]>([])
+  const [bulkImportOpen, setBulkImportOpen] = useState(false)
+  const [pendingLorebooks, setPendingLorebooks] = useState<LorebookInfo[]>([])
+  const [lorebookModalOpen, setLorebookModalOpen] = useState(false)
   const [debouncedQuery, setDebouncedQuery] = useState(searchQuery)
 
   // Debounced search
@@ -203,30 +208,44 @@ export function useCharacterBrowser() {
     [addCharacter]
   )
 
-  // Import multiple files
+  // Import multiple files — single file uses legacy path, 2+ opens bulk modal
   const importFiles = useCallback(
     async (files: File[]) => {
-      setImportLoading(true)
-      setImportError(null)
-      const imported: Character[] = []
-      const errors: string[] = []
-      for (const file of files) {
-        try {
-          const result = await charactersApi.importFile(file)
-          imported.push(result.character)
-        } catch (err: any) {
-          errors.push(`${file.name}: ${err?.body?.message || err?.message || 'failed'}`)
-        }
+      if (files.length === 1) {
+        return importFile(files[0])
       }
+      // Open bulk import modal
+      setBulkImportFiles(files)
+      setBulkImportOpen(true)
+    },
+    [importFile]
+  )
+
+  // Called by BulkImportProgressModal when all chunks complete
+  const handleBulkImportComplete = useCallback(
+    (imported: Character[], lorebooks: LorebookInfo[]) => {
       if (imported.length > 0) addCharacters(imported)
-      if (errors.length > 0) setImportError(errors.join('\n'))
-      // Prompt for the last imported character that has an embedded lorebook
-      const withLorebook = imported.find((c) => c.extensions?.character_book?.entries?.length > 0)
-      if (withLorebook) setPendingLorebookImport(withLorebook)
-      setImportLoading(false)
+      if (lorebooks.length > 0) {
+        setPendingLorebooks(lorebooks)
+      }
     },
     [addCharacters]
   )
+
+  // Called when bulk progress modal is closed
+  const closeBulkImport = useCallback(() => {
+    setBulkImportOpen(false)
+    setBulkImportFiles([])
+    // If there are pending lorebooks, show the lorebook modal after a brief delay
+    if (pendingLorebooks.length > 0) {
+      setLorebookModalOpen(true)
+    }
+  }, [pendingLorebooks])
+
+  const closeLorebookModal = useCallback(() => {
+    setLorebookModalOpen(false)
+    setPendingLorebooks([])
+  }, [])
 
   // Import URL
   const importUrl = useCallback(
@@ -399,6 +418,10 @@ export function useCharacterBrowser() {
     importError,
     batchDeleteProgress,
     pendingLorebookImport,
+    bulkImportFiles,
+    bulkImportOpen,
+    pendingLorebooks,
+    lorebookModalOpen,
     searchQuery,
     filterTab,
     sortField,
@@ -435,6 +458,9 @@ export function useCharacterBrowser() {
     importFile,
     importFiles,
     importUrl,
+    handleBulkImportComplete,
+    closeBulkImport,
+    closeLorebookModal,
     batchDelete,
     openChat,
     startNewChat,

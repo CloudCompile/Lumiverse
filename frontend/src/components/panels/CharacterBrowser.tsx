@@ -13,6 +13,8 @@ import ImportUrlModal from './character-browser/ImportUrlModal'
 import DragDropOverlay from './character-browser/DragDropOverlay'
 import GroupChatsPanel from './character-browser/GroupChatsPanel'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import BulkImportProgressModal from '@/components/modals/BulkImportProgressModal'
+import LorebookImportModal from '@/components/modals/LorebookImportModal'
 import Pagination from '@/components/shared/Pagination'
 import styles from './CharacterBrowser.module.css'
 
@@ -218,6 +220,19 @@ export default function CharacterBrowser() {
             : ''
         }
         confirmText="Import"
+      />
+
+      <BulkImportProgressModal
+        isOpen={browser.bulkImportOpen}
+        files={browser.bulkImportFiles}
+        onComplete={browser.handleBulkImportComplete}
+        onClose={browser.closeBulkImport}
+      />
+
+      <LorebookImportModal
+        isOpen={browser.lorebookModalOpen}
+        lorebooks={browser.pendingLorebooks}
+        onClose={browser.closeLorebookModal}
       />
 
       <CharacterEditorPage />

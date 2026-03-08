@@ -1,6 +1,8 @@
 import type { StateCreator } from 'zustand'
 import type { UISlice } from '@/types/store'
 
+let toastCounter = 0
+
 export const createUISlice: StateCreator<UISlice> = (set) => ({
   activeModal: null,
   modalProps: {},
@@ -11,6 +13,7 @@ export const createUISlice: StateCreator<UISlice> = (set) => ({
   settingsModalOpen: false,
   settingsActiveView: 'general',
   portraitPanelOpen: false,
+  toasts: [],
 
   openModal: (name, props = {}) => set({ activeModal: name, modalProps: props }),
   closeModal: () => set({ activeModal: null, modalProps: {} }),
@@ -31,4 +34,17 @@ export const createUISlice: StateCreator<UISlice> = (set) => ({
 
   togglePortraitPanel: () =>
     set((state) => ({ portraitPanelOpen: !state.portraitPanelOpen })),
+
+  addToast: (toast) => {
+    const id = `toast-${++toastCounter}-${Date.now()}`
+    set((state) => ({
+      toasts: [...state.toasts, { ...toast, id, dismissible: toast.dismissible ?? true }],
+    }))
+    return id
+  },
+
+  removeToast: (id) =>
+    set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
+
+  clearToasts: () => set({ toasts: [] }),
 })

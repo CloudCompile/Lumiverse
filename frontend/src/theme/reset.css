@@ -40,6 +40,17 @@ select {
   color: inherit;
 }
 
+/* Prevent iOS Safari auto-zoom on input focus — iOS zooms when font-size < 16px.
+   !important is intentional: this is a hard platform constraint that must override
+   all CSS Module class selectors (which have higher specificity than element selectors). */
+@media screen and (max-width: 600px) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 button {
   cursor: pointer;
   border: none;

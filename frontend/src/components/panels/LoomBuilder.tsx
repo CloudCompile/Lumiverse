@@ -49,10 +49,9 @@ import {
   Dice1,
   StopCircle,
   Maximize2,
-  Minimize2,
 } from 'lucide-react'
-import { createPortal } from 'react-dom'
 import clsx from 'clsx'
+import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
 import { resolveMacros as resolveMacrosApi } from '@/api/macros'
 import { useLoomBuilder } from '@/hooks/useLoomBuilder'
 import { createBlock, createMarkerBlock } from '@/lib/loom/service'
@@ -103,183 +102,6 @@ const ROLE_DISPLAY_LABELS: Record<string, string> = {
   assistant: 'assistant',
   user_append: 'user+',
   assistant_append: 'asst+',
-}
-
-// ============================================================================
-// SYNTAX HIGHLIGHTING
-// ============================================================================
-
-function highlightSyntax(text: string): ReactNode[] {
-  // Tokenize: macros ({{...}}), markdown headings, bold, italic, code blocks, inline code
-  const tokens: ReactNode[] = []
-  // Combined regex: match fenced code blocks, macros, bold, italic, headings, inline code
-  const regex = /(```[\s\S]*?```)|(\{\{[^}]*\}\})|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(^#{1,6}\s.+$)|(`[^`\n]+`)/gm
-  let lastIndex = 0
-  let match: RegExpExecArray | null
-
-  while ((match = regex.exec(text)) !== null) {
-    // Push plain text before this match
-    if (match.index > lastIndex) {
-      tokens.push(text.slice(lastIndex, match.index))
-    }
-    const m = match[0]
-    if (match[1]) {
-      // Fenced code block
-      tokens.push(<span key={match.index} className={s.hlCode}>{m}</span>)
-    } else if (match[2]) {
-      // Macro {{...}}
-      tokens.push(<span key={match.index} className={s.hlMacro}>{m}</span>)
-    } else if (match[3]) {
-      // Bold **...**
-      tokens.push(<span key={match.index} className={s.hlBold}>{m}</span>)
-    } else if (match[4]) {
-      // Italic *...*
-      tokens.push(<span key={match.index} className={s.hlItalic}>{m}</span>)
-    } else if (match[5]) {
-      // Heading
-      tokens.push(<span key={match.index} className={s.hlHeading}>{m}</span>)
-    } else if (match[6]) {
-      // Inline code
-      tokens.push(<span key={match.index} className={s.hlInlineCode}>{m}</span>)
-    }
-    lastIndex = match.index + m.length
-  }
-  if (lastIndex < text.length) {
-    tokens.push(text.slice(lastIndex))
-  }
-  return tokens
-}
-
-// ============================================================================
-// EXPANDED EDITOR MODAL
-// ============================================================================
-
-interface ExpandedEditorModalProps {
-  content: string
-  onContentChange: (value: string) => void
-  onClose: () => void
-  blockName: string
-  availableMacros: MacroGroup[]
-  refreshMacros?: () => void
-  onInsertMacro: (syntax: string, textareaRef: React.RefObject<HTMLTextAreaElement | null>) => void
-}
-
-function ExpandedEditorModal({
-  content,
-  onContentChange,
-  onClose,
-  blockName,
-  availableMacros,
-  refreshMacros,
-  onInsertMacro,
-}: ExpandedEditorModalProps) {
-  const [showMacros, setShowMacros] = useState(false)
-  const [macroSearch, setMacroSearch] = useState('')
-  const expandedTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const highlightRef = useRef<HTMLDivElement>(null)
-
-  const filteredMacros = useMemo(() => {
-    if (!macroSearch.trim()) return availableMacros
-    const q = macroSearch.toLowerCase()
-    return availableMacros.map(group => ({
-      ...group,
-      macros: group.macros.filter(m => m.name.toLowerCase().includes(q) || m.syntax.toLowerCase().includes(q) || m.description.toLowerCase().includes(q)),
-    })).filter(g => g.macros.length > 0)
-  }, [availableMacros, macroSearch])
-
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
-    }
-  }, [onClose])
-
-  // Sync scroll between textarea and highlight overlay
-  const handleScroll = useCallback(() => {
-    if (expandedTextareaRef.current && highlightRef.current) {
-      highlightRef.current.scrollTop = expandedTextareaRef.current.scrollTop
-      highlightRef.current.scrollLeft = expandedTextareaRef.current.scrollLeft
-    }
-  }, [])
-
-  const handleInsertMacro = (syntax: string) => {
-    onInsertMacro(syntax, expandedTextareaRef)
-    setShowMacros(false)
-  }
-
-  const highlighted = useMemo(() => highlightSyntax(content), [content])
-
-  return createPortal(
-    <div className={s.expandedOverlay} onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className={s.expandedDialog} onClick={e => e.stopPropagation()}>
-        <div className={s.expandedHeader}>
-          <div className={s.expandedTitleRow}>
-            <Edit2 size={16} style={{ color: 'var(--lumiverse-primary)', flexShrink: 0 }} />
-            <h3 className={s.expandedTitle}>{blockName || 'Edit Block'}</h3>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <button
-              className={clsx(s.btn, s.btnSmall)}
-              onClick={() => { if (!showMacros) refreshMacros?.(); setShowMacros(!showMacros) }}
-              type="button"
-            >
-              <Hash size={12} /> {showMacros ? 'Hide Macros' : 'Insert Macro'}
-            </button>
-            <button className={s.iconBtn} onClick={onClose} title="Close expanded editor" type="button">
-              <Minimize2 size={18} />
-            </button>
-          </div>
-        </div>
-        <div className={s.expandedBody}>
-          {showMacros && (
-            <div className={s.expandedMacroSidebar}>
-              <div className={s.macroSearch}>
-                <div className={s.macroSearchInner}>
-                  <Search size={12} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-                  <input className={s.macroSearchInput} placeholder="Search macros..." value={macroSearch} onChange={e => setMacroSearch(e.target.value)} autoFocus />
-                </div>
-              </div>
-              <div className={s.expandedMacroList}>
-                {filteredMacros.map(group => (
-                  <div key={group.category} className={s.macroGroup}>
-                    <div className={s.macroGroupTitle}>{group.category}</div>
-                    {group.macros.map(macro => (
-                      <div key={macro.syntax} className={s.macroItem} onClick={() => handleInsertMacro(macro.syntax)}>
-                        <span className={s.macroSyntax}>{macro.syntax}</span>
-                        <span className={s.macroDesc}>{macro.description}</span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className={s.expandedEditorArea}>
-            <div className={s.highlightContainer}>
-              <div ref={highlightRef} className={s.highlightBackdrop} aria-hidden="true">
-                <pre className={s.highlightPre}>{highlighted}{'\n'}</pre>
-              </div>
-              <textarea
-                ref={expandedTextareaRef}
-                className={s.expandedTextarea}
-                value={content}
-                onChange={e => onContentChange(e.target.value)}
-                onScroll={handleScroll}
-                placeholder="Enter prompt content... Use {{macros}} for dynamic content."
-                spellCheck={false}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body
-  )
 }
 
 // ============================================================================
@@ -647,14 +469,14 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
         </div>
       </div>
       {showExpandedEditor && (
-        <ExpandedEditorModal
-          content={content}
-          onContentChange={setContent}
+        <ExpandedTextEditor
+          value={content}
+          onChange={setContent}
           onClose={() => setShowExpandedEditor(false)}
-          blockName={name}
-          availableMacros={availableMacros}
-          refreshMacros={refreshMacros}
-          onInsertMacro={insertMacroInto}
+          title={name || 'Edit Block'}
+          placeholder="Enter prompt content... Use {{macros}} for dynamic content."
+          macros={availableMacros}
+          onRefreshMacros={refreshMacros}
         />
       )}
     </div>

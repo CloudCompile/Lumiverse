@@ -1,10 +1,11 @@
 import type { StateCreator } from 'zustand'
-import type { SpindleSlice } from '@/types/store'
+import type { SpindleSlice, PendingPermissionRequest } from '@/types/store'
 import { spindleApi } from '@/api/spindle'
 import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/loader'
 
-export const createSpindleSlice: StateCreator<SpindleSlice> = (set) => ({
+export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
+  pendingPermissionRequest: null,
 
   loadExtensions: async () => {
     try {
@@ -91,5 +92,35 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set) => ({
         e.id === id ? { ...e, granted_permissions: result.granted as any } : e
       ),
     }))
+  },
+
+  showPermissionRequest: (request: PendingPermissionRequest) => {
+    set({ pendingPermissionRequest: request })
+  },
+
+  resolvePermissionRequest: async (id: string, approved: boolean) => {
+    const req = get().pendingPermissionRequest
+    if (!req || req.id !== id) return
+
+    let granted: string[] = []
+    if (approved) {
+      const result = await spindleApi.setPermissions(req.extensionId, { grant: req.permissions })
+      granted = result.granted
+      // Sync the extension's granted_permissions in the store
+      set((state) => ({
+        pendingPermissionRequest: null,
+        extensions: state.extensions.map((e) =>
+          e.id === req.extensionId ? { ...e, granted_permissions: granted as any } : e
+        ),
+      }))
+    } else {
+      set({ pendingPermissionRequest: null })
+    }
+
+    window.dispatchEvent(
+      new CustomEvent('spindle:permission-resolved', {
+        detail: { requestId: id, approved, granted },
+      })
+    )
   },
 })

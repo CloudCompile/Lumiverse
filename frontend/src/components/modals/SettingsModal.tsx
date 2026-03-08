@@ -163,6 +163,7 @@ function DisplaySettings() {
   const landingPageChatsDisplayed = useStore((s) => s.landingPageChatsDisplayed)
   const charactersPerPage = useStore((s) => s.charactersPerPage)
   const personasPerPage = useStore((s) => s.personasPerPage)
+  const toastPosition = useStore((s) => s.toastPosition)
   const setSetting = useStore((s) => s.setSetting)
 
   const updateDrawer = (patch: Partial<DrawerSettings>) => {
@@ -309,6 +310,31 @@ function DisplaySettings() {
           />
         </div>
       )}
+
+      <h3 className={styles.sectionTitle} style={{ marginTop: 12 }}>Notifications</h3>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>TOAST POSITION</label>
+        <div className={styles.segmented}>
+          {([
+            ['top-left', 'TL'],
+            ['top', 'Top'],
+            ['top-right', 'TR'],
+            ['bottom-left', 'BL'],
+            ['bottom', 'Bottom'],
+            ['bottom-right', 'BR'],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={clsx(styles.segmentedBtn, toastPosition === value && styles.segmentedBtnActive)}
+              onClick={() => setSetting('toastPosition', value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <h3 className={styles.sectionTitle} style={{ marginTop: 8 }}>Pagination</h3>
 
@@ -1176,7 +1202,9 @@ function AppearanceSettings() {
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Mode</label>
         <ModeSelector value={current.mode} onChange={(mode) => {
-          setTheme({ ...current, mode, id: 'custom' })
+          const next = { ...current, mode }
+          if (!next.characterAware) next.id = 'custom'
+          setTheme(next)
         }} />
       </div>
 
@@ -1345,6 +1373,9 @@ function EmbeddingsSettings() {
       <div className={styles.field}>
         <label className={styles.fieldLabel}>API URL</label>
         <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} />
+        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
+          Base domain auto-appends /v1/embeddings. Custom paths (e.g. /v1/embeddings) are used as-is.
+        </span>
       </div>
 
       <div className={styles.field}>

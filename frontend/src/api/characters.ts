@@ -5,6 +5,7 @@ import type {
   UpdateCharacterInput,
   PaginatedResult,
   ImportResult,
+  BulkImportResult,
   BatchDeleteResult,
 } from '@/types/api'
 
@@ -51,6 +52,17 @@ export const charactersApi = {
 
   importUrl(url: string) {
     return post<ImportResult>('/characters/import-url', { url })
+  },
+
+  importBulk(files: File[], skipDuplicates = false) {
+    const form = new FormData()
+    for (const file of files) {
+      form.append('files', file)
+    }
+    if (skipDuplicates) {
+      form.append('skip_duplicates', 'true')
+    }
+    return upload<BulkImportResult>('/characters/import-bulk', form)
   },
 
   batchDelete(ids: string[], keepChats = false) {

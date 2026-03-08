@@ -82,6 +82,14 @@
   white-space: nowrap;
 }
 
+.title {
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .desc {
   font-size: 11px;
   color: var(--lumiverse-text-dim);

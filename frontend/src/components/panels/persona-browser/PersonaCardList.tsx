@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, type ReactNode } from 'react'
 import { User, UserCheck, Crown, Link2 } from 'lucide-react'
 import { personasApi } from '@/api/personas'
 import LazyImage from '@/components/shared/LazyImage'
@@ -12,6 +12,7 @@ interface PersonaCardListProps {
   activeId: string | null
   onSelect: (id: string | null) => void
   onDoubleClick: (id: string) => void
+  renderEditor?: (personaId: string) => ReactNode
 }
 
 const PersonaRow = memo(function PersonaRow({
@@ -56,6 +57,7 @@ const PersonaRow = memo(function PersonaRow({
       </div>
       <div className={styles.info}>
         <span className={styles.name}>{persona.name}</span>
+        {persona.title && <span className={styles.title}>{persona.title}</span>}
         {persona.description && (
           <span className={styles.desc}>{persona.description}</span>
         )}
@@ -87,6 +89,7 @@ export default function PersonaCardList({
   activeId,
   onSelect,
   onDoubleClick,
+  renderEditor,
 }: PersonaCardListProps) {
   if (personas.length === 0) {
     return <div className={styles.empty}>No personas found.</div>
@@ -95,14 +98,16 @@ export default function PersonaCardList({
   return (
     <div className={styles.list}>
       {personas.map((persona) => (
-        <PersonaRow
-          key={persona.id}
-          persona={persona}
-          isSelected={selectedId === persona.id}
-          isActive={activeId === persona.id}
-          onSelect={onSelect}
-          onDoubleClick={onDoubleClick}
-        />
+        <div key={persona.id}>
+          <PersonaRow
+            persona={persona}
+            isSelected={selectedId === persona.id}
+            isActive={activeId === persona.id}
+            onSelect={onSelect}
+            onDoubleClick={onDoubleClick}
+          />
+          {renderEditor && selectedId === persona.id && renderEditor(persona.id)}
+        </div>
       ))}
     </div>
   )

@@ -6,6 +6,8 @@ import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import { generateApi } from '@/api/generate'
 import { personasApi } from '@/api/personas'
+import { toast } from '@/lib/toast'
+import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import styles from './InputArea.module.css'
 import clsx from 'clsx'
 import InputBarExtensionActions from './InputBarExtensionActions'
@@ -22,7 +24,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras'>(null)
   const [popoverClosing, setPopoverClosing] = useState(false)
   const [sendPersonaId, setSendPersonaId] = useState<string | null>(null)
-  const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; avatar_path: string | null; image_id: string | null }>>([])
+  const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; title: string; avatar_path: string | null; image_id: string | null }>>([])
   const [characterChats, setCharacterChats] = useState<Array<{ id: string; name: string; updated_at: number }>>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -46,6 +48,15 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
   const isGroupChat = useStore((s) => s.isGroupChat)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
+
+  // iPhone-specific: match input bar bottom corners to device screen curvature
+  const screenCornerRadius = useDeviceFrameRadius()
+  const [inputFocused, setInputFocused] = useState(false)
+
+  // Extra bottom padding to clear the curved corners (geometric: curve depth at content edge)
+  const iphoneBottomPad = screenCornerRadius
+    ? Math.round(screenCornerRadius * 0.3) + 8
+    : 0
 
   const activeGuides = guidedGenerations.filter((g) => g.enabled)
   const activeGuideCount = activeGuides.length
@@ -84,7 +95,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     const update = () => {
       const h = el.offsetHeight
-      parent.style.setProperty('--lcs-input-safe-zone', `${h + 32}px`)
+      const bottomOffset = parseFloat(getComputedStyle(el).bottom) || 12
+      parent.style.setProperty('--lcs-input-safe-zone', `${h + bottomOffset + 16}px`)
     }
 
     const ro = new ResizeObserver(update)
@@ -109,11 +121,11 @@ export default function InputArea({ chatId }: InputAreaProps) {
   useEffect(() => {
     if (openPopover !== 'persona') return
     if (personas.length > 0) {
-      setPersonaList(personas.map((p) => ({ id: p.id, name: p.name, avatar_path: p.avatar_path, image_id: p.image_id })))
+      setPersonaList(personas.map((p) => ({ id: p.id, name: p.name, title: p.title || '', avatar_path: p.avatar_path, image_id: p.image_id })))
       return
     }
     personasApi.list({ limit: 200 }).then((res) => {
-      setPersonaList(res.data.map((p) => ({ id: p.id, name: p.name, avatar_path: p.avatar_path, image_id: p.image_id })))
+      setPersonaList(res.data.map((p) => ({ id: p.id, name: p.name, title: p.title || '', avatar_path: p.avatar_path, image_id: p.image_id })))
     }).catch(() => {})
   }, [openPopover, personas])
 
@@ -183,6 +195,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       console.error('[InputArea] Failed to send:', err)
       const msg = err?.body?.error || err?.message || 'Failed to start generation'
       setStreamingError(msg)
+      toast.error(msg, { title: 'Generation Failed' })
     } finally {
       sendingRef.current = false
     }
@@ -212,6 +225,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       console.error('[InputArea] Failed to regenerate:', err)
       const msg = err?.body?.error || err?.message || 'Failed to regenerate'
       setStreamingError(msg)
+      toast.error(msg, { title: 'Regeneration Failed' })
     }
   }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeLoomPresetId, startStreaming, setStreamingError, consumeOneshotGuides])
 
@@ -230,6 +244,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       console.error('[InputArea] Failed to continue:', err)
       const msg = err?.body?.error || err?.message || 'Failed to continue'
       setStreamingError(msg)
+      toast.error(msg, { title: 'Continue Failed' })
     }
   }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, startStreaming, setStreamingError, consumeOneshotGuides])
 
@@ -249,6 +264,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       console.error('[InputArea] Failed to impersonate:', err)
       const msg = err?.body?.error || err?.message || 'Failed to impersonate'
       setStreamingError(msg)
+      toast.error(msg, { title: 'Impersonation Failed' })
     }
   }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, startStreaming, setStreamingError, consumeOneshotGuides])
 
@@ -342,7 +358,16 @@ export default function InputArea({ chatId }: InputAreaProps) {
   }, [guidedGenerations, setSetting])
 
   return (
-    <div ref={containerRef} className={styles.container}>
+    <div
+      ref={containerRef}
+      className={styles.container}
+      style={screenCornerRadius ? {
+        borderRadius: inputFocused
+          ? 'var(--lcs-radius, 14px)'
+          : `var(--lcs-radius, 14px) var(--lcs-radius, 14px) ${screenCornerRadius}px ${screenCornerRadius}px`,
+        ...(inputFocused ? {} : { paddingBottom: `${iphoneBottomPad}px` }),
+      } : undefined}
+    >
       {/* Action bar — hidden during streaming */}
       <div data-spindle-mount="chat_toolbar">
         {!isStreaming && (
@@ -493,7 +518,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
                         <span className={styles.personaFallback}>{p.name.slice(0, 1).toUpperCase()}</span>
                       )}
                     </span>
-                    <span>{p.name}</span>
+                    <span className={styles.personaNameGroup}>
+                      <span>{p.name}</span>
+                      {p.title && <span className={styles.personaTitle}>{p.title}</span>}
+                    </span>
                   </span>
                 </button>
               ))}
@@ -593,6 +621,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
             value={text}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
             placeholder="Type a message..."
             rows={1}
             disabled={isStreaming}

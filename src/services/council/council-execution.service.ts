@@ -15,6 +15,7 @@ import * as personasSvc from "../personas.service";
 import * as packsSvc from "../packs.service";
 import * as connectionsSvc from "../connections.service";
 import * as worldBooksSvc from "../world-books.service";
+import * as settingsSvc from "../settings.service";
 import { activateWorldInfo } from "../world-info-activation.service";
 import { getCouncilSettings, getAvailableTools } from "./council-settings.service";
 import { BUILTIN_TOOLS_MAP } from "./builtin-tools";
@@ -445,18 +446,33 @@ function formatDeliberation(
   return lines.join("\n");
 }
 
-/** Collect world book entries from character + persona for council WI injection. */
+/** Collect world book entries from character + persona + global world books for council WI injection. */
 function collectWorldInfoForCouncil(
   userId: string,
   character: ReturnType<typeof charactersSvc.getCharacter>,
   persona: ReturnType<typeof personasSvc.resolvePersonaOrDefault>,
 ): import("../../types/world-book").WorldBookEntry[] {
   const entries: import("../../types/world-book").WorldBookEntry[] = [];
+  const seen = new Set<string>();
+
   const charBookId = character?.extensions?.world_book_id as string | undefined;
-  if (charBookId) entries.push(...worldBooksSvc.listEntries(userId, charBookId));
-  if (persona?.attached_world_book_id) {
+  if (charBookId) {
+    seen.add(charBookId);
+    entries.push(...worldBooksSvc.listEntries(userId, charBookId));
+  }
+  if (persona?.attached_world_book_id && !seen.has(persona.attached_world_book_id)) {
+    seen.add(persona.attached_world_book_id);
     entries.push(...worldBooksSvc.listEntries(userId, persona.attached_world_book_id));
   }
+
+  // Global world books (user-wide, always active)
+  const globalWorldBooks = (settingsSvc.getSetting(userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
+  for (const gId of globalWorldBooks) {
+    if (seen.has(gId)) continue;
+    seen.add(gId);
+    entries.push(...worldBooksSvc.listEntries(userId, gId));
+  }
+
   return entries;
 }
 

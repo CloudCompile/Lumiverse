@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload } from 'lucide-react'
+import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Globe, X } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import { worldBooksApi } from '@/api/world-books'
@@ -13,6 +13,8 @@ import clsx from 'clsx'
 export default function WorldBookPanel() {
   const openModal = useStore((s) => s.openModal)
   const isMobile = useIsMobile()
+  const globalWorldBooks = useStore((s) => s.globalWorldBooks)
+  const setSetting = useStore((s) => s.setSetting)
 
   // Book list state
   const [books, setBooks] = useState<WorldBook[]>([])
@@ -127,7 +129,7 @@ export default function WorldBookPanel() {
             prev.map((b) => (b.id === selectedBookId ? { ...b, name: value.trim() } : b))
           )
         }
-      }, 400)
+      }, 2000)
     },
     [selectedBookId]
   )
@@ -140,7 +142,7 @@ export default function WorldBookPanel() {
         if (selectedBookId) {
           worldBooksApi.update(selectedBookId, { description: value })
         }
-      }, 400)
+      }, 2000)
     },
     [selectedBookId]
   )
@@ -212,12 +214,10 @@ export default function WorldBookPanel() {
       clearTimeout(entryTimers.current[key])
       entryTimers.current[key] = setTimeout(() => {
         worldBooksApi.updateEntry(selectedBookId, entryId, updates)
-      }, 400)
+      }, 2000)
     },
     [selectedBookId]
   )
-
-  const selectedEntry = entries.find((e) => e.id === selectedEntryId) || null
 
   const handleImport = useCallback((book: WorldBook) => {
     setBooks((prev) => [book, ...prev])
@@ -229,8 +229,100 @@ export default function WorldBookPanel() {
     openModal('worldBookEditor', { bookId: selectedBookId })
   }, [openModal, selectedBookId])
 
+  // Global world books popover
+  const [globalPopoverOpen, setGlobalPopoverOpen] = useState(false)
+  const globalPopoverRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!globalPopoverOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (globalPopoverRef.current && !globalPopoverRef.current.contains(e.target as Node)) {
+        setGlobalPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [globalPopoverOpen])
+
+  const toggleGlobalBook = (id: string) => {
+    const current = globalWorldBooks ?? []
+    const next = current.includes(id)
+      ? current.filter((x) => x !== id)
+      : [...current, id]
+    setSetting('globalWorldBooks', next)
+  }
+
+  const removeGlobalBook = (id: string) => {
+    setSetting('globalWorldBooks', (globalWorldBooks ?? []).filter((x) => x !== id))
+  }
+
+  const activeGlobalBooks = books.filter((b) => (globalWorldBooks ?? []).includes(b.id))
+
   return (
     <div className={styles.panel}>
+      {/* Global world books section */}
+      <div className={styles.globalSection}>
+        <div className={styles.globalHeader}>
+          <Globe size={12} className={styles.globalIcon} />
+          <span className={styles.globalLabel}>Always Active</span>
+          <div className={styles.globalPopoverWrapper} ref={globalPopoverRef}>
+            <button
+              type="button"
+              className={styles.globalAddBtn}
+              onClick={() => setGlobalPopoverOpen((o) => !o)}
+            >
+              <Plus size={11} />
+              <span>Add</span>
+              <ChevronDown
+                size={10}
+                className={clsx(styles.chevron, globalPopoverOpen && styles.chevronOpen)}
+              />
+            </button>
+            {globalPopoverOpen && (
+              <div className={styles.globalPopover}>
+                {books.length === 0 ? (
+                  <div className={styles.globalPopoverEmpty}>No world books available</div>
+                ) : (
+                  books.map((book) => {
+                    const isActive = (globalWorldBooks ?? []).includes(book.id)
+                    return (
+                      <button
+                        key={book.id}
+                        type="button"
+                        className={clsx(styles.globalPopoverItem, isActive && styles.globalPopoverItemActive)}
+                        onClick={() => toggleGlobalBook(book.id)}
+                      >
+                        <span className={styles.globalPopoverCheck}>{isActive ? '\u2713' : ''}</span>
+                        <span className={styles.globalPopoverName}>{book.name}</span>
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+        {activeGlobalBooks.length > 0 ? (
+          <div className={styles.globalPills}>
+            {activeGlobalBooks.map((book) => (
+              <span key={book.id} className={styles.globalPill}>
+                <span className={styles.globalPillName}>{book.name}</span>
+                <button
+                  type="button"
+                  className={styles.globalPillRemove}
+                  onClick={() => removeGlobalBook(book.id)}
+                  title="Remove from always active"
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <span className={styles.globalHint}>No global world books active</span>
+        )}
+      </div>
+
       {/* Top bar: Book selector + actions */}
       <div className={styles.topBar}>
         <select
@@ -385,8 +477,8 @@ export default function WorldBookPanel() {
                     <Trash2 size={11} />
                   </span>
                 </div>
-                {/* Inline editor on mobile */}
-                {isMobile && selectedEntryId === entry.id && (
+                {/* Inline editor below selected entry */}
+                {selectedEntryId === entry.id && (
                   <WorldBookEntryEditor
                     entry={entry}
                     onUpdate={debouncedUpdateEntry}
@@ -411,14 +503,6 @@ export default function WorldBookPanel() {
             )}
           </div>
 
-          {/* Entry editor (desktop only) */}
-          {!isMobile && selectedEntry && (
-            <WorldBookEntryEditor
-              entry={selectedEntry}
-              onUpdate={debouncedUpdateEntry}
-              onImmediateUpdate={updateEntry}
-            />
-          )}
         </>
       ) : (
         <div className={styles.emptyState}>

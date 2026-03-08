@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link2, Trash2, Edit3, Zap, Check, Loader, Star } from 'lucide-react'
 import { connectionsApi } from '@/api/connections'
-import { generateApi } from '@/api/generate'
 import type { ConnectionProfile, ProviderInfo, CreateConnectionProfileInput } from '@/types/api'
 import ConnectionForm from './ConnectionForm'
 import styles from './ConnectionItem.module.css'
@@ -40,14 +39,8 @@ export default function ConnectionItem({ profile, isActive, providers, onSelect,
     setTesting(true)
     setTestResult(null)
     try {
-      const result = await generateApi.quiet({
-        messages: [
-          { role: 'system', content: 'Respond with a single short sentence confirming you are working.' },
-          { role: 'user', content: 'Are you there?' },
-        ],
-        connection_id: profile.id,
-      })
-      setTestResult({ success: true, message: result.content || 'Connection successful' })
+      const result = await connectionsApi.test(profile.id)
+      setTestResult({ success: result.success, message: result.message })
     } catch (err: any) {
       setTestResult({ success: false, message: err.message || 'Connection failed' })
     } finally {

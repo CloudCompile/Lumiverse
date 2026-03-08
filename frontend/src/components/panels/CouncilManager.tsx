@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Link2, Settings, Users, Plus, Power, AlertTriangle } from 'lucide-react'
+import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle } from 'lucide-react'
 import { useStore } from '@/store'
 import { EditorSection, FormField, TextInput, Select } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import CouncilMemberItem from './council/CouncilMemberItem'
-import CouncilMemberForm from './council/CouncilMemberForm'
+import AddMemberDropdown from './council/AddMemberDropdown'
+import QuickAddPackDropdown from './council/QuickAddPackDropdown'
 import type { CouncilMember } from 'lumiverse-spindle-types'
 import styles from './CouncilManager.module.css'
 
@@ -15,6 +16,7 @@ export default function CouncilManager() {
   const profiles = useStore((s) => s.profiles)
   const saveCouncilSettings = useStore((s) => s.saveCouncilSettings)
   const addCouncilMember = useStore((s) => s.addCouncilMember)
+  const addCouncilMembersFromPack = useStore((s) => s.addCouncilMembersFromPack)
   const updateCouncilMember = useStore((s) => s.updateCouncilMember)
   const removeCouncilMember = useStore((s) => s.removeCouncilMember)
   const setCouncilToolsSettings = useStore((s) => s.setCouncilToolsSettings)
@@ -30,7 +32,7 @@ export default function CouncilManager() {
     return cs?.enableFunctionCalling !== false
   }, [activeLoomPresetId, presets])
 
-  const [showAddForm, setShowAddForm] = useState(false)
+  const [addMode, setAddMode] = useState<'none' | 'member' | 'pack'>('none')
 
   // Refresh available tools (including extension-registered tools) each time the panel mounts
   useEffect(() => {
@@ -52,9 +54,15 @@ export default function CouncilManager() {
   const handleAddMember = useCallback(
     (member: CouncilMember) => {
       addCouncilMember(member)
-      setShowAddForm(false)
     },
     [addCouncilMember]
+  )
+
+  const handleAddPack = useCallback(
+    (packId: string) => {
+      addCouncilMembersFromPack(packId)
+    },
+    [addCouncilMembersFromPack]
   )
 
   if (councilLoading) {
@@ -235,7 +243,30 @@ export default function CouncilManager() {
 
       {/* Council Members */}
       <EditorSection Icon={Users} title="Council Members">
-        {councilSettings.members.length === 0 && !showAddForm && (
+        {addMode === 'member' ? (
+          <AddMemberDropdown
+            existingMembers={councilSettings.members}
+            onAdd={handleAddMember}
+            onClose={() => setAddMode('none')}
+          />
+        ) : addMode === 'pack' ? (
+          <QuickAddPackDropdown
+            existingMembers={councilSettings.members}
+            onAddPack={handleAddPack}
+            onClose={() => setAddMode('none')}
+          />
+        ) : (
+          <div className={styles.addButtons}>
+            <button type="button" className={styles.addBtn} onClick={() => setAddMode('member')}>
+              <Plus size={14} /> Add Member
+            </button>
+            <button type="button" className={styles.addBtnSecondary} onClick={() => setAddMode('pack')}>
+              <Package size={14} /> Quick Add Pack
+            </button>
+          </div>
+        )}
+
+        {councilSettings.members.length === 0 && addMode === 'none' && (
           <div className={styles.emptyState}>No council members yet. Add one to get started.</div>
         )}
 
@@ -248,18 +279,6 @@ export default function CouncilManager() {
             onDelete={() => removeCouncilMember(member.id)}
           />
         ))}
-
-        {showAddForm ? (
-          <CouncilMemberForm
-            availableTools={availableCouncilTools}
-            onSave={handleAddMember}
-            onCancel={() => setShowAddForm(false)}
-          />
-        ) : (
-          <button type="button" className={styles.addBtn} onClick={() => setShowAddForm(true)}>
-            <Plus size={14} /> Add Member
-          </button>
-        )}
       </EditorSection>
     </div>
   )

@@ -474,14 +474,20 @@
   color: var(--lumiverse-text);
 }
 
-/* ── Add Member Button ────────────────────────────── */
+/* ── Add Buttons Row ─────────────────────────────── */
 
-.addBtn {
+.addButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.addBtn,
+.addBtnSecondary {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  width: 100%;
+  flex: 1;
   padding: 10px;
   border-radius: 8px;
   border: 1px dashed var(--lumiverse-border);
@@ -497,6 +503,176 @@
   border-color: var(--lumiverse-primary);
   color: var(--lumiverse-primary);
   background: color-mix(in srgb, var(--lumiverse-primary) 5%, transparent);
+}
+
+.addBtnSecondary:hover {
+  border-color: var(--lumiverse-text-muted);
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-hover);
+}
+
+/* ── Add Dropdown ────────────────────────────────── */
+
+.addDropdown {
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 10px;
+  background: var(--lumiverse-fill);
+  overflow: hidden;
+}
+
+.addDropdownHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--lumiverse-border);
+}
+
+.addSearchWrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--lumiverse-bg);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-dim);
+}
+
+.addSearchInput {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  outline: none;
+}
+
+.addSearchInput::placeholder {
+  color: var(--lumiverse-text-dim);
+}
+
+.addSearchClear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.addSearchClear:hover {
+  color: var(--lumiverse-text);
+}
+
+.addDropdownClose {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+}
+
+.addDropdownClose:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+}
+
+.addDropdownList {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.addDropdownEmpty {
+  padding: 20px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--lumiverse-text-dim);
+}
+
+.addDropdownItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: var(--lumiverse-text);
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.addDropdownItem:hover {
+  background: var(--lumiverse-fill-hover);
+}
+
+.addDropdownAvatar {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 12%, var(--lumiverse-fill));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--lumiverse-primary);
+  overflow: hidden;
+}
+
+.addDropdownAvatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.addDropdownInfo {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.addDropdownName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.addDropdownPack {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.addDropdownPlus {
+  flex-shrink: 0;
+  color: var(--lumiverse-primary);
+  opacity: 0.5;
+  transition: opacity var(--lumiverse-transition-fast);
+}
+
+.addDropdownItem:hover .addDropdownPlus {
+  opacity: 1;
 }
 
 /* ── Tool Selector (checklist) ────────────────────── */

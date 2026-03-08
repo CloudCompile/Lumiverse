@@ -138,7 +138,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   }
 
   // ---- World Info activation ----
-  const wiSources = collectWorldInfoSources(ctx.userId, character, persona);
+  const globalWorldBooks = (settingsSvc.getSetting(ctx.userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
+  const wiSources = collectWorldInfoSources(ctx.userId, character, persona, globalWorldBooks);
   const wiEntries = wiSources.entries;
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
   const wiResult = activateWorldInfo({
@@ -706,14 +707,15 @@ function populateLumiaLoomContext(
 /**
  * Collect all WorldBookEntry[] from character extensions + persona attached book.
  */
-function collectWorldInfoEntries(userId: string, character: Character, persona: Persona | null): import("../types/world-book").WorldBookEntry[] {
-  return collectWorldInfoSources(userId, character, persona).entries;
+function collectWorldInfoEntries(userId: string, character: Character, persona: Persona | null, globalWorldBookIds?: string[]): import("../types/world-book").WorldBookEntry[] {
+  return collectWorldInfoSources(userId, character, persona, globalWorldBookIds).entries;
 }
 
 function collectWorldInfoSources(
   userId: string,
   character: Character,
   persona: Persona | null,
+  globalWorldBookIds?: string[],
 ): { entries: import("../types/world-book").WorldBookEntry[]; worldBookIds: string[] } {
   const entries: import("../types/world-book").WorldBookEntry[] = [];
   const worldBookIds: string[] = [];
@@ -729,6 +731,17 @@ function collectWorldInfoSources(
   if (persona?.attached_world_book_id) {
     worldBookIds.push(persona.attached_world_book_id);
     entries.push(...worldBooksSvc.listEntries(userId, persona.attached_world_book_id));
+  }
+
+  // Global world books (user-wide, always active regardless of character/persona)
+  if (globalWorldBookIds?.length) {
+    const seen = new Set(worldBookIds);
+    for (const gId of globalWorldBookIds) {
+      if (seen.has(gId)) continue; // avoid duplicating a book already attached via character/persona
+      seen.add(gId);
+      worldBookIds.push(gId);
+      entries.push(...worldBooksSvc.listEntries(userId, gId));
+    }
   }
 
   return {

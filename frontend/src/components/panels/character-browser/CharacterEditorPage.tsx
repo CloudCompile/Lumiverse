@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
 import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download } from 'lucide-react'
+import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
 import { worldBooksApi } from '@/api/world-books'
@@ -15,7 +16,7 @@ import type { Character, CharacterGalleryItem } from '@/types/api'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
 
-const DEBOUNCE_MS = 400
+const DEBOUNCE_MS = 2000
 
 type TabId = 'core' | 'system' | 'greetings' | 'identity' | 'gallery' | 'advanced'
 
@@ -58,6 +59,7 @@ export default function CharacterEditorPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const galleryFileRef = useRef<HTMLInputElement>(null)
   const savingTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const lastSyncedId = useRef<string | null>(null)
 
   const close = useCallback(() => setEditingCharacterId(null), [setEditingCharacterId])
 
@@ -71,9 +73,15 @@ export default function CharacterEditorPage() {
     return () => document.removeEventListener('keydown', handleEscape)
   }, [isOpen, close])
 
-  // Sync from character
+  // Sync from character — only when switching to a different character,
+  // not when our own save updates the store (which would overwrite in-progress edits)
   useEffect(() => {
-    if (!character) return
+    if (!character) {
+      lastSyncedId.current = null
+      return
+    }
+    if (lastSyncedId.current === character.id) return
+    lastSyncedId.current = character.id
     setName(character.name)
     setFields({
       description: character.description || '',
@@ -558,11 +566,12 @@ export default function CharacterEditorPage() {
                                 <X size={12} />
                               </button>
                             </div>
-                            <textarea
+                            <ExpandableTextarea
                               className={styles.fieldTextarea}
                               value={greeting}
-                              onChange={(e) => handleGreetingChange(i, e.target.value)}
+                              onChange={(v) => handleGreetingChange(i, v)}
                               rows={3}
+                              title={`Greeting #${i + 1}`}
                               placeholder="Alternate greeting..."
                             />
                           </div>
@@ -815,11 +824,12 @@ function Field({
       <span className={styles.fieldLabel}>{label}</span>
       <span className={styles.fieldHelper}>{helper}</span>
       {multiline ? (
-        <textarea
+        <ExpandableTextarea
           className={styles.fieldTextarea}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={onChange}
           rows={rows}
+          title={label}
           placeholder={`${label}...`}
         />
       ) : (

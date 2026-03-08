@@ -158,6 +158,13 @@ export function duplicateCharacter(userId: string, id: string): Character | null
   return character;
 }
 
+export function characterExistsByName(userId: string, name: string): boolean {
+  const row = getDb()
+    .query("SELECT 1 FROM characters WHERE user_id = ? AND name = ? LIMIT 1")
+    .get(userId, name) as any;
+  return !!row;
+}
+
 export function deleteCharacter(userId: string, id: string): boolean {
   const result = getDb().query("DELETE FROM characters WHERE id = ? AND user_id = ?").run(id, userId);
   if (result.changes > 0) {

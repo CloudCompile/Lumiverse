@@ -17,7 +17,7 @@ interface BubbleMessageProps {
 }
 
 function formatMetaDate(timestamp: number) {
-  const d = new Date(timestamp)
+  const d = new Date(timestamp * 1000)
   const month = d.toLocaleString('en-US', { month: 'short' })
   const day = d.getDate()
   const time = d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })

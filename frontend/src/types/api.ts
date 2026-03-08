@@ -178,10 +178,12 @@ export interface ConnectionModelsResult {
 export interface Persona {
   id: string;
   name: string;
+  title: string;
   description: string;
   avatar_path: string | null;
   image_id: string | null;
   attached_world_book_id: string | null;
+  folder: string;
   is_default: boolean;
   metadata: Record<string, any>;
   created_at: number;
@@ -190,7 +192,9 @@ export interface Persona {
 
 export interface CreatePersonaInput {
   name: string;
+  title?: string;
   description?: string;
+  folder?: string;
   is_default?: boolean;
   attached_world_book_id?: string;
   metadata?: Record<string, any>;
@@ -497,6 +501,20 @@ export type UpdateLoomToolInput = Partial<CreateLoomToolInput>;
 export interface ImportResult {
   character: Character
   message?: string
+}
+
+export interface BulkImportResultItem {
+  filename: string
+  success: boolean
+  character?: Character
+  lorebook?: { name: string; entryCount: number }
+  error?: string
+  skipped?: boolean
+}
+
+export interface BulkImportResult {
+  results: BulkImportResultItem[]
+  summary: { total: number; imported: number; skipped: number; failed: number }
 }
 
 export interface BatchDeleteResult {

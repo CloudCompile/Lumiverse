@@ -48,6 +48,8 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'selectedDefinition',
   'selectedBehaviors',
   'selectedPersonalities',
+  // Global world books (always active regardless of character)
+  'globalWorldBooks',
   // Image generation settings
   'imageGeneration',
   // Summarization settings
@@ -57,6 +59,7 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'promptBias',
   'guidedGenerations',
   'quickReplySets',
+  'toastPosition',
 ])
 
 // ── Debounced batch persistence ──────────────────────────────────────────
@@ -173,9 +176,11 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     reasoningEffort: 'auto',
     keepInHistory: 0,
   },
+  globalWorldBooks: [],
   promptBias: '',
   guidedGenerations: [],
   quickReplySets: [],
+  toastPosition: 'bottom-right',
 
   setSetting: (key, value) => {
     set({ [key]: value } as any)

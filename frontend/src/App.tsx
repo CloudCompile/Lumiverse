@@ -10,6 +10,7 @@ import AuthGuard from '@/components/auth/AuthGuard'
 import ViewportDrawer from '@/components/panels/ViewportDrawer'
 import ModalContainer from '@/components/modals/ModalContainer'
 import SpindleUIManager from '@/components/spindle/SpindleUIManager'
+import ToastContainer from '@/components/shared/ToastContainer'
 import styles from './App.module.css'
 
 export default function App() {
@@ -56,6 +57,7 @@ export default function App() {
           <ViewportDrawer />
           <ModalContainer />
           <SpindleUIManager />
+          <ToastContainer />
         </ErrorBoundary>
       </div>
     </AuthGuard>

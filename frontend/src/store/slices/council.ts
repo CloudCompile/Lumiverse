@@ -126,6 +126,37 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
     debouncedSave(settings)
   },
 
+  addCouncilMembersFromPack: (packId: string): number => {
+    const state = get() as any
+    const packData = state.packsWithItems?.[packId]
+    if (!packData?.lumia_items) return 0
+
+    const settings = { ...state.councilSettings }
+    const existingSet = new Set(settings.members.map((m: CouncilMember) => `${m.packId}:${m.itemId}`))
+
+    const newMembers: CouncilMember[] = []
+    for (const item of packData.lumia_items) {
+      if (!item.definition) continue
+      if (existingSet.has(`${packId}:${item.id}`)) continue
+      newMembers.push({
+        id: crypto.randomUUID(),
+        packId,
+        packName: packData.name,
+        itemId: item.id,
+        itemName: item.name,
+        tools: [],
+        role: '',
+        chance: 100,
+      })
+    }
+
+    if (newMembers.length === 0) return 0
+    settings.members = [...settings.members, ...newMembers]
+    set({ councilSettings: settings })
+    debouncedSave(settings)
+    return newMembers.length
+  },
+
   updateCouncilMember: (id: string, updates: Partial<CouncilMember>) => {
     const settings = { ...get().councilSettings }
     settings.members = settings.members.map((m) =>
