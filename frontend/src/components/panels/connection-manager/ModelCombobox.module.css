@@ -53,11 +53,13 @@
   margin-top: 4px;
   max-height: 200px;
   overflow-y: auto;
-  background: var(--lumiverse-fill-subtle);
+  background: var(--lumiverse-bg-elevated);
+  backdrop-filter: blur(16px);
   border: 1px solid var(--lumiverse-border);
   border-radius: 8px;
   z-index: 10;
   padding: 4px;
+  box-shadow: var(--lumiverse-shadow-md);
 }
 
 .dropdownItem {

@@ -42,8 +42,9 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel }:
     try {
       const result = await connectionsApi.models(profile.id)
       setModels(result.models)
-    } catch (err) {
-      console.error('[ConnectionForm] Failed to fetch models:', err)
+    } catch {
+      // Auth or network errors — silently return empty list
+      setModels([])
     } finally {
       setModelsLoading(false)
     }
@@ -79,13 +80,14 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel }:
       <FormField label="API URL" hint="Leave empty for default provider URL">
         <TextInput value={apiUrl} onChange={setApiUrl} placeholder={urlPlaceholder} />
       </FormField>
-      <FormField label="Model">
+      <FormField label="Model" hint={!profile?.id ? 'Save connection first to fetch model list' : undefined}>
         <ModelCombobox
           value={model}
           onChange={setModel}
           models={models}
           loading={modelsLoading}
-          onRefresh={profile?.id ? fetchModels : undefined}
+          onRefresh={fetchModels}
+          disabled={!profile?.id}
           placeholder="gpt-4o"
         />
       </FormField>

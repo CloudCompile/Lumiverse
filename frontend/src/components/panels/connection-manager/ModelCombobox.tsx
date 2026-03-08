@@ -9,10 +9,11 @@ interface ModelComboboxProps {
   models: string[]
   loading: boolean
   onRefresh?: () => void
+  disabled?: boolean
   placeholder?: string
 }
 
-export default function ModelCombobox({ value, onChange, models, loading, onRefresh, placeholder }: ModelComboboxProps) {
+export default function ModelCombobox({ value, onChange, models, loading, onRefresh, disabled, placeholder }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -41,7 +42,7 @@ export default function ModelCombobox({ value, onChange, models, loading, onRefr
           onFocus={() => models.length > 0 && setOpen(true)}
         />
         {onRefresh && (
-          <button type="button" className={styles.refreshBtn} onClick={onRefresh} disabled={loading} title="Refresh models">
+          <button type="button" className={styles.refreshBtn} onClick={onRefresh} disabled={loading || disabled} title={disabled ? 'Save connection to fetch models' : 'Refresh models'}>
             {loading ? <Loader size={14} className={styles.spinner} /> : <RefreshCw size={14} />}
           </button>
         )}
