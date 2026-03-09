@@ -79,7 +79,7 @@ export const wsHandler = upgradeWebSocket((c) => {
         ws.send(
           JSON.stringify({
             event: EventType.CONNECTED,
-            payload: { message: "Connected to Lumiverse event bus" },
+            payload: { message: "Connected to Lumiverse event bus", userId, role: userRole },
             timestamp: Date.now(),
           })
         );

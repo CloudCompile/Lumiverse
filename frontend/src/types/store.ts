@@ -11,6 +11,7 @@ export interface ChatSlice {
   streamingError: string | null
   activeGenerationId: string | null
   regeneratingMessageId: string | null
+  streamingGenerationType: string | null
   totalChatLength: number
   setActiveChat: (chatId: string | null, characterId?: string | null) => void
   setMessages: (messages: Message[], total?: number) => void
@@ -18,13 +19,15 @@ export interface ChatSlice {
   addMessage: (message: Message) => void
   updateMessage: (id: string, updates: Partial<Message>) => void
   removeMessage: (id: string) => void
-  beginStreaming: (regeneratingMessageId?: string) => void
+  beginStreaming: (regeneratingMessageId?: string, generationType?: string) => void
   startStreaming: (generationId: string, regeneratingMessageId?: string) => void
   appendStreamToken: (token: string) => void
   appendStreamReasoning: (token: string) => void
   endStreaming: () => void
   stopStreaming: () => void
   setStreamingError: (error: string | null) => void
+  /** Set the regenerating message ID independently (e.g. when council sidecar stages a message after streaming started) */
+  setRegeneratingMessageId: (messageId: string | null) => void
   /** Mark a generation ID as ended (prevents zombie resurrection from late HTTP responses) */
   markGenerationEnded: (generationId: string) => void
 }
@@ -447,6 +450,8 @@ export interface AuthSlice {
   banUser: (userId: string) => Promise<void>
   unbanUser: (userId: string) => Promise<void>
   deleteUser: (userId: string) => Promise<void>
+  /** Reconcile user role from a trusted source (e.g. WS CONNECTED event) */
+  reconcileRole: (role: string) => void
 }
 
 // ---- World Info Slice ----

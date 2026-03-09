@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef } from 'react'
+import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
-import { messagesApi } from '@/api/chats'
+import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import { personasApi } from '@/api/personas'
 import type { Message } from '@/types/api'
@@ -35,6 +36,7 @@ function parseThinkingTags(content: string): { cleaned: string; thoughts: string
 }
 
 export function useMessageCard(message: Message, chatId: string) {
+  const navigate = useNavigate()
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [editReasoning, setEditReasoning] = useState('')
@@ -193,6 +195,36 @@ export function useMessageCard(message: Message, chatId: string) {
     }
   }, [chatId, message.id, message.swipe_id, updateMessage])
 
+  const isHidden = message.extra?.hidden === true
+
+  const handleToggleHidden = useCallback(async () => {
+    try {
+      const newHidden = !message.extra?.hidden
+      const extra = { ...(message.extra || {}), hidden: newHidden || undefined }
+      if (!newHidden) delete extra.hidden
+      await messagesApi.update(chatId, message.id, { extra })
+      updateMessage(message.id, { extra })
+    } catch (err) {
+      console.error('[MessageCard] Failed to toggle hidden:', err)
+    }
+  }, [chatId, message.id, message.extra, updateMessage])
+
+  const handleFork = useCallback(() => {
+    openModal('confirm', {
+      title: 'Fork Chat',
+      message: 'Create a new chat branch at this message? All messages up to this point will be copied.',
+      confirmText: 'Fork',
+      onConfirm: async () => {
+        try {
+          const newChat = await chatsApi.branch(chatId, message.id)
+          navigate(`/chat/${newChat.id}`)
+        } catch (err) {
+          console.error('[MessageCard] Failed to fork chat:', err)
+        }
+      },
+    })
+  }, [chatId, message.id, openModal, navigate])
+
   const handleDelete = useCallback(() => {
     const hasSwipes = message.swipes && message.swipes.length > 1
 
@@ -240,9 +272,12 @@ export function useMessageCard(message: Message, chatId: string) {
     avatarUrl,
     displayName,
     macroUserName,
+    isHidden,
     handleEdit,
     handleSaveEdit,
     handleCancelEdit,
     handleDelete,
+    handleToggleHidden,
+    handleFork,
   }
 }

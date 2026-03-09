@@ -73,13 +73,21 @@ export default function CharacterEditorPage() {
     return () => document.removeEventListener('keydown', handleEscape)
   }, [isOpen, close])
 
-  // Sync from character — only when switching to a different character,
-  // not when our own save updates the store (which would overwrite in-progress edits)
+  // Reset tab and force re-sync when switching to a different character.
+  // Keyed on editingCharacterId (a stable string) so store-driven object
+  // reference changes can never accidentally reset the active tab.
   useEffect(() => {
-    if (!character) {
-      lastSyncedId.current = null
-      return
+    lastSyncedId.current = null
+    if (editingCharacterId) {
+      setActiveTab('core')
     }
+  }, [editingCharacterId])
+
+  // Sync form fields from character data — runs when the character object
+  // changes, but the lastSyncedId guard skips redundant syncs for the same
+  // character (e.g. after our own debounced save updates the store).
+  useEffect(() => {
+    if (!character) return
     if (lastSyncedId.current === character.id) return
     lastSyncedId.current = character.id
     setName(character.name)
@@ -100,7 +108,6 @@ export default function CharacterEditorPage() {
     setJsonError(null)
     setLorebookImporting(false)
     setLorebookResult(null)
-    setActiveTab('core')
   }, [character])
 
   const showSaving = useCallback(() => {
@@ -787,6 +794,8 @@ export default function CharacterEditorPage() {
         </motion.div>
       )}
     </AnimatePresence>
+
+    <ImageCropModal {...cropModalProps} />
 
     {showDeleteConfirm && (
       <ConfirmationModal

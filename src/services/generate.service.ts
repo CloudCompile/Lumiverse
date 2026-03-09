@@ -10,7 +10,7 @@ import * as settingsSvc from "./settings.service";
 import * as personasSvc from "./personas.service";
 import { assemblePrompt } from "./prompt-assembly.service";
 import * as charactersSvc from "./characters.service";
-import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationResponse, type GenerationType, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
+import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationResponse, type GenerationType, type ImpersonateMode, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
 import { interceptorPipeline } from "../spindle/interceptor-pipeline";
 import { contextHandlerChain } from "../spindle/context-handler";
 import { executeCouncil } from "./council/council-execution.service";
@@ -29,6 +29,7 @@ interface GenerateInput {
   messages?: LlmMessage[];
   parameters?: GenerationParameters;
   generation_type?: GenerationType;
+  impersonate_mode?: ImpersonateMode;
   target_character_id?: string;
 }
 
@@ -211,6 +212,7 @@ async function runPromptPipeline(opts: {
   presetId?: string;
   personaId?: string;
   generationType: string;
+  impersonateMode?: ImpersonateMode;
   inputMessages?: LlmMessage[];
   inputParameters?: GenerationParameters;
   excludeMessageId?: string;
@@ -248,6 +250,7 @@ async function runPromptPipeline(opts: {
       presetId: opts.presetId,
       personaId: opts.personaId,
       generationType: opts.generationType as GenerationType,
+      impersonateMode: opts.impersonateMode,
       excludeMessageId: opts.excludeMessageId,
       targetCharacterId: opts.targetCharacterId,
       councilToolResults: opts.councilToolResults,
@@ -516,6 +519,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     presetId: input.preset_id,
     personaId: input.persona_id,
     generationType: genType,
+    impersonateMode: genType === "impersonate" ? (input.impersonate_mode || "prompts") : undefined,
     inputMessages: input.messages,
     inputParameters: input.parameters,
     excludeMessageId,
@@ -599,6 +603,7 @@ export async function dryRunGeneration(input: GenerateInput): Promise<DryRunResu
     presetId: input.preset_id,
     personaId: input.persona_id,
     generationType: genType,
+    impersonateMode: genType === "impersonate" ? (input.impersonate_mode || "prompts") : undefined,
     inputMessages: input.messages,
     inputParameters: input.parameters,
   });
@@ -660,11 +665,102 @@ async function runGeneration(
   let fullReasoning = "";
   let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
 
+  // ── Guided CoT detection ───────────────────────────────────────────
+  // When autoParse is enabled, detect the user's configured reasoning
+  // prefix/suffix in the content stream. Separates guided CoT (prompt-
+  // engineered reasoning tags) into fullReasoning + reasoning WS events,
+  // keeping fullContent clean. Native provider reasoning (chunk.reasoning)
+  // bypasses this — it's already separated at the provider level.
+  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
+  const cotAutoParse = reasoningSetting?.value?.autoParse === true;
+  const cotPrefix = cotAutoParse
+    ? ((reasoningSetting?.value?.prefix as string) || "<think>\n").replace(/^\n+|\n+$/g, "")
+    : "";
+  const cotSuffix = cotAutoParse
+    ? ((reasoningSetting?.value?.suffix as string) || "\n</think>").replace(/^\n+|\n+$/g, "")
+    : "";
+  let cotPhase: "detecting" | "reasoning" | "content" = cotAutoParse && cotPrefix ? "detecting" : "content";
+  let cotDetectBuffer = "";
+  let cotSuffixBuffer = "";
+
+  function emitContentToken(text: string) {
+    if (!text) return;
+    fullContent += text;
+    eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
+      generationId, chatId, token: text,
+    }, userId);
+  }
+
+  function emitReasoningToken(text: string) {
+    if (!text) return;
+    fullReasoning += text;
+    eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
+      generationId, chatId, token: text, type: "reasoning",
+    }, userId);
+  }
+
+  function processReasoningChunk(token: string) {
+    cotSuffixBuffer += token;
+    const suffixIdx = cotSuffixBuffer.indexOf(cotSuffix);
+    if (suffixIdx !== -1) {
+      emitReasoningToken(cotSuffixBuffer.slice(0, suffixIdx));
+      const afterSuffix = cotSuffixBuffer.slice(suffixIdx + cotSuffix.length);
+      cotPhase = "content";
+      cotSuffixBuffer = "";
+      if (afterSuffix) emitContentToken(afterSuffix);
+    } else {
+      // Emit chars that can't be part of the suffix (safe lookback)
+      const safe = cotSuffixBuffer.length - cotSuffix.length;
+      if (safe > 0) {
+        emitReasoningToken(cotSuffixBuffer.slice(0, safe));
+        cotSuffixBuffer = cotSuffixBuffer.slice(safe);
+      }
+    }
+  }
+
+  function processContentToken(token: string) {
+    if (cotPhase === "content") {
+      emitContentToken(token);
+      return;
+    }
+    if (cotPhase === "detecting") {
+      cotDetectBuffer += token;
+      const trimmed = cotDetectBuffer.trimStart();
+      if (trimmed.length >= cotPrefix.length && trimmed.startsWith(cotPrefix)) {
+        cotPhase = "reasoning";
+        const afterPrefix = trimmed.slice(cotPrefix.length);
+        cotDetectBuffer = "";
+        if (afterPrefix) processReasoningChunk(afterPrefix);
+      } else if (cotPrefix.startsWith(trimmed)) {
+        // Partial match — keep buffering
+      } else {
+        cotPhase = "content";
+        emitContentToken(cotDetectBuffer);
+        cotDetectBuffer = "";
+      }
+      return;
+    }
+    processReasoningChunk(token);
+  }
+
+  function flushCotBuffers() {
+    if (cotPhase === "detecting" && cotDetectBuffer) {
+      emitContentToken(cotDetectBuffer);
+      cotDetectBuffer = "";
+    } else if (cotPhase === "reasoning" && cotSuffixBuffer) {
+      emitReasoningToken(cotSuffixBuffer);
+      cotSuffixBuffer = "";
+    }
+    cotPhase = "content";
+  }
+
   try {
     const stream = provider.generateStream(apiKey, apiUrl, { messages, model, parameters, stream: true, tools });
 
     for await (const chunk of stream) {
       if (signal.aborted) {
+        // Flush any buffered CoT tokens before saving partial content
+        flushCotBuffers();
         // Close unclosed reasoning tags so the frontend can properly collapse them
         const closedContent = closeUnterminatedReasoningTags(userId, fullContent);
 
@@ -713,12 +809,7 @@ async function runGeneration(
       }
 
       if (chunk.token) {
-        fullContent += chunk.token;
-        eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
-          generationId,
-          chatId,
-          token: chunk.token,
-        }, userId);
+        processContentToken(chunk.token);
       }
 
       // Capture provider usage data (token counts) from the stream
@@ -732,6 +823,8 @@ async function runGeneration(
     }
 
     if (!signal.aborted) {
+      // Flush any remaining CoT detection buffers before saving
+      flushCotBuffers();
       let messageId: string;
 
       if (lifecycle.targetMessageId && lifecycle.targetSwipeIdx != null) {

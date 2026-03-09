@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback, useMemo } from 'react'
 import { useChunkedMessages } from '@/hooks/useChunkedMessages'
 import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
+import { personasApi } from '@/api/personas'
 import MessageCard from './MessageCard'
 import MessageContent from './MessageContent'
 import ReasoningBlock from './ReasoningBlock'
@@ -33,28 +34,13 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const displayMode = useStore((s) => s.chatSheldDisplayMode)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const personas = useStore((s) => s.personas)
+  const streamingGenerationType = useStore((s) => s.streamingGenerationType)
+  const isImpersonateStream = streamingGenerationType === 'impersonate'
 
-  // Auto-parse thinking tags from streaming content (handles unclosed tags from interrupts)
-  const { streamDisplay, streamThoughts } = useMemo(() => {
-    if (!autoParse || !streamingContent) return { streamDisplay: streamingContent, streamThoughts: '' }
-    const tagPattern = /<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/gi
-    let thoughts = ''
-    let cleaned = streamingContent.replace(tagPattern, (_m, _t, inner) => {
-      thoughts += (thoughts ? '\n\n' : '') + inner.trim()
-      return ''
-    })
-    // Handle unclosed reasoning tags (interrupted generation)
-    const unclosedPattern = /<(think|thinking|reasoning)>([\s\S]*)$/i
-    cleaned = cleaned.replace(unclosedPattern, (_m, _t, inner) => {
-      const trimmed = inner.trim()
-      if (trimmed) {
-        thoughts += (thoughts ? '\n\n' : '') + trimmed
-      }
-      return ''
-    })
-    cleaned = cleaned.trim()
-    return { streamDisplay: cleaned || streamingContent, streamThoughts: thoughts }
-  }, [streamingContent, autoParse])
+  // The store's appendStreamToken state machine already separates reasoning
+  // from content during streaming. Skip the redundant per-frame regex scan
+  // that was re-extracting <think> tags from already-clean streamingContent.
+  const streamDisplay = streamingContent
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const isGroupChat = useStore((s) => s.isGroupChat)
@@ -78,8 +64,11 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
 
     return 'Assistant'
   }, [streamCharacter?.name, activeCharacter?.name, messages])
-  const userName = personas.find((p) => p.id === activePersonaId)?.name ?? 'User'
-  const avatarUrl = streamCharacterId ? charactersApi.avatarUrl(streamCharacterId) : null
+  const activePersona = personas.find((p) => p.id === activePersonaId)
+  const userName = activePersona?.name ?? 'User'
+  const avatarUrl = isImpersonateStream
+    ? (activePersonaId ? personasApi.avatarUrl(activePersonaId) : null)
+    : (streamCharacterId ? charactersApi.avatarUrl(streamCharacterId) : null)
 
   // Intersection observer for loading more
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -182,58 +171,64 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       {isGroupChat && isNudgeLoopActive && <GroupChatProgressBar />}
 
       {/* Streaming message bubble — shows tokens as they arrive (only for new messages, not regeneration) */}
-      {isStreaming && !regeneratingMessageId && (streamDisplay || !streamingError) && (
-        <div className={`${bubbleStyles.card} ${bubbleStyles.character} ${bubbleStyles.streaming}`} data-in-viewport>
-          <div className={bubbleStyles.bubble}>
-            <div className={bubbleStyles.header}>
-              <div className={bubbleStyles.headerLeft}>
-                <div className={bubbleStyles.avatar}>
-                  {avatarUrl ? (
-                    <LazyImage
-                      src={avatarUrl}
-                      alt={streamDisplayName}
-                      fallback={
-                        <div className={bubbleStyles.avatarFallback}>
-                          {streamDisplayName?.[0]?.toUpperCase() || '?'}
-                        </div>
-                      }
-                    />
-                  ) : (
-                    <div className={bubbleStyles.avatarFallback}>
-                      {streamDisplayName?.[0]?.toUpperCase() || '?'}
-                    </div>
-                  )}
-                </div>
-                <div className={bubbleStyles.metaWrap}>
-                  <span className={`${bubbleStyles.name} ${bubbleStyles.nameChar}`}>
-                    {streamDisplayName}
-                  </span>
+      {isStreaming && !regeneratingMessageId && (streamDisplay || !streamingError) && (() => {
+        const bubbleName = isImpersonateStream ? userName : streamDisplayName
+        const bubbleStyleClass = isImpersonateStream ? bubbleStyles.user : bubbleStyles.character
+        const nameStyleClass = isImpersonateStream ? bubbleStyles.nameUser : bubbleStyles.nameChar
+        return (
+          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${bubbleStyles.streaming}`} data-in-viewport>
+            <div className={bubbleStyles.bubble}>
+              <div className={bubbleStyles.header}>
+                <div className={bubbleStyles.headerLeft}>
+                  <div className={bubbleStyles.avatar}>
+                    {avatarUrl ? (
+                      <LazyImage
+                        src={avatarUrl}
+                        alt={bubbleName}
+                        fallback={
+                          <div className={bubbleStyles.avatarFallback}>
+                            {bubbleName?.[0]?.toUpperCase() || '?'}
+                          </div>
+                        }
+                      />
+                    ) : (
+                      <div className={bubbleStyles.avatarFallback}>
+                        {bubbleName?.[0]?.toUpperCase() || '?'}
+                      </div>
+                    )}
+                  </div>
+                  <div className={bubbleStyles.metaWrap}>
+                    <span className={`${bubbleStyles.name} ${nameStyleClass}`}>
+                      {bubbleName}
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
-            {(streamingReasoning || streamThoughts) && (
-              <ReasoningBlock
-                reasoning={streamingReasoning || streamThoughts}
-                isStreaming
-                variant="bubble"
-              />
-            )}
-            <div className={bubbleStyles.content}>
-              {streamDisplay ? (
-                <MessageContent
-                  content={streamDisplay}
-                  isUser={false}
-                  userName={userName}
+              {streamingReasoning && (
+                <ReasoningBlock
+                  reasoning={streamingReasoning}
                   isStreaming
-                  chatId={chatId}
+                  variant="bubble"
+                  align={isImpersonateStream ? 'right' : undefined}
                 />
-              ) : (
-                <StreamingIndicator />
               )}
+              <div className={bubbleStyles.content}>
+                {streamDisplay ? (
+                  <MessageContent
+                    content={streamDisplay}
+                    isUser={isImpersonateStream}
+                    userName={userName}
+                    isStreaming
+                    chatId={chatId}
+                  />
+                ) : (
+                  <StreamingIndicator />
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Generation error display */}
       {streamingError && (

@@ -48,6 +48,10 @@ export const chatsApi = {
       { persona_id: personaId }
     )
   },
+
+  branch(chatId: string, messageId: string) {
+    return post<Chat>(`/chats/${chatId}/branch`, { message_id: messageId })
+  },
 }
 
 export const messagesApi = {

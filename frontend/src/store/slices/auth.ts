@@ -95,4 +95,12 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set) => ({
   deleteUser: async (userId: string) => {
     await del(`/users/${userId}`)
   },
+
+  reconcileRole: (role: string) => {
+    set((state) => {
+      if (!state.user) return state
+      if (state.user.role === role) return state
+      return { user: { ...state.user, role } }
+    })
+  },
 })

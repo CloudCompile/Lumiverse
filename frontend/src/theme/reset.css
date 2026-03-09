@@ -8,6 +8,8 @@
 
 html {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -16,11 +18,14 @@ html {
 body {
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
   font-family: var(--lumiverse-font-family);
   font-size: calc(14px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text);
   background: var(--lumiverse-bg-deep);
   line-height: 1.5;
+  /* Prevent double-tap zoom and pinch zoom; still allows pan/scroll */
+  touch-action: manipulation;
 }
 
 img,

@@ -1,10 +1,14 @@
 .app {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  /* Use 100% to inherit from the fixed html/body chain in PWA mode,
+     with 100dvh as fallback for in-browser rendering */
+  height: 100%;
+  max-height: 100dvh;
   background: var(--lumiverse-bg-deep);
   /* Safe area insets for edge-to-edge rendering (viewport-fit=cover) */
   padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .main {

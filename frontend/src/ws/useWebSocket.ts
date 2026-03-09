@@ -43,6 +43,25 @@ export function useWebSocket() {
       wsClient.on(EventType.MESSAGE_SENT, (payload: MessageSentPayload) => {
         const state = store.getState()
         if (payload.chatId === state.activeChatId) {
+          // Suppress completed assistant messages while streaming — the streaming
+          // card already displays the content. GENERATION_ENDED will reconcile
+          // the full message list, preventing a duplicate bubble flash.
+          if (state.isStreaming && !payload.message.is_user && payload.message.content) return
+
+          // If streaming with a placeholder (regeneration), replace it with the
+          // real staged message from the backend instead of adding a duplicate.
+          if (
+            state.isStreaming &&
+            state.regeneratingMessageId?.startsWith('__regen_placeholder_') &&
+            !payload.message.is_user &&
+            !payload.message.content
+          ) {
+            state.removeMessage(state.regeneratingMessageId)
+            state.addMessage(payload.message)
+            state.setRegeneratingMessageId(payload.message.id)
+            return
+          }
+
           state.addMessage(payload.message)
         }
       }),
@@ -70,11 +89,18 @@ export function useWebSocket() {
 
       wsClient.on(EventType.GENERATION_STARTED, (payload: GenerationStartedPayload) => {
         const state = store.getState()
-        if (payload.chatId === state.activeChatId && state.activeGenerationId !== payload.generationId) {
+        if (payload.chatId === state.activeChatId) {
           if (state.isGroupChat && payload.characterId) {
             state.setActiveGroupCharacter(payload.characterId)
           }
-          state.startStreaming(payload.generationId, payload.targetMessageId)
+          if (state.activeGenerationId !== payload.generationId) {
+            state.startStreaming(payload.generationId, payload.targetMessageId)
+          } else if (payload.targetMessageId && state.regeneratingMessageId !== payload.targetMessageId) {
+            // Generation already wired via HTTP response — just set the target message.
+            // This happens when council sidecar stages a message after startStreaming was
+            // called without a targetMessageId (e.g. regeneration flow).
+            state.setRegeneratingMessageId(payload.targetMessageId)
+          }
         }
       }),
 
@@ -101,6 +127,11 @@ export function useWebSocket() {
           }
 
           if (payload.error) {
+            // Remove placeholder if regeneration failed before backend saved a real message
+            const regenId = state.regeneratingMessageId
+            if (regenId?.startsWith('__regen_placeholder_')) {
+              state.removeMessage(regenId)
+            }
             state.setStreamingError(payload.error)
             toast.error(payload.error, { title: 'Generation Failed' })
           } else {
@@ -169,21 +200,35 @@ export function useWebSocket() {
         if (payload.generationId) {
           state.markGenerationEnded(payload.generationId)
         }
-        state.stopStreaming()
-        // Reconcile message list so partial content saved by backend appears
+        // Delay stopStreaming until after message reconciliation completes.
+        // This keeps the streaming bubble visible while the HTTP fetch runs,
+        // then both updates (stop streaming + set messages) happen in a single
+        // React render — no flash of empty content.
         const chatId = payload?.chatId || state.activeChatId
         if (chatId) {
           messagesApi.list(chatId, { limit: 200 }).then((res) => {
             const s = store.getState()
             if (s.activeChatId === chatId) {
+              s.stopStreaming()
               s.setMessages(res.data, res.total)
+            } else {
+              s.stopStreaming()
             }
-          }).catch(() => {})
+          }).catch(() => {
+            store.getState().stopStreaming()
+          })
+        } else {
+          state.stopStreaming()
         }
       }),
 
       wsClient.on(EventType.GENERATION_ERROR, () => {
-        store.getState().stopStreaming()
+        const state = store.getState()
+        const regenId = state.regeneratingMessageId
+        if (regenId?.startsWith('__regen_placeholder_')) {
+          state.removeMessage(regenId)
+        }
+        state.stopStreaming()
       }),
 
       // Group chat events
@@ -214,7 +259,13 @@ export function useWebSocket() {
         }
       }),
 
-      wsClient.on(EventType.CONNECTED, () => {
+      wsClient.on(EventType.CONNECTED, (payload: { role?: string }) => {
+        // Reconcile user role from the backend's DB-authoritative source.
+        // This ensures the frontend never falls out of sync with the actual
+        // role (e.g. if the HTTP session response omitted it).
+        if (payload?.role) {
+          store.getState().reconcileRole(payload.role)
+        }
         syncExtensions(true)
       }),
 

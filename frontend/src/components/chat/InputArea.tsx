@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal, FolderOpen, Paperclip, X } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare } from 'lucide-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
@@ -10,6 +10,7 @@ import { imagesApi } from '@/api/images'
 import { toast } from '@/lib/toast'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import type { MessageAttachment } from '@/types/api'
+import AuthorsNotePanel from './AuthorsNotePanel'
 import styles from './InputArea.module.css'
 import clsx from 'clsx'
 import InputBarExtensionActions from './InputBarExtensionActions'
@@ -22,6 +23,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const navigate = useNavigate()
   const [text, setText] = useState('')
   const [dryRunning, setDryRunning] = useState(false)
+  const [authorsNoteOpen, setAuthorsNoteOpen] = useState(false)
   const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras'>(null)
   const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras'>(null)
   const [popoverClosing, setPopoverClosing] = useState(false)
@@ -264,36 +266,66 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const handleRegenerate = useCallback(async () => {
     if (isStreaming) return
     const nonce = ++generationNonceRef.current
-    // Find the last assistant message to regenerate
-    let targetMessageId: string | undefined
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (!messages[i].is_user) {
-        targetMessageId = messages[i].id
-        break
+
+    // 1. Delete the last assistant message (if after the latest user turn)
+    const lastMsg = messages[messages.length - 1]
+    let nextIndex = 0
+    if (lastMsg && !lastMsg.is_user) {
+      nextIndex = lastMsg.index_in_chat
+      try {
+        await messagesApi.delete(chatId, lastMsg.id)
+        useStore.getState().removeMessage(lastMsg.id)
+      } catch (err) {
+        console.error('[InputArea] Failed to delete before regenerate:', err)
       }
+    } else {
+      nextIndex = (lastMsg?.index_in_chat ?? -1) + 1
     }
-    // Show streaming state immediately so stop button appears and
-    // the target message shows the streaming indicator during assembly
-    beginStreaming(targetMessageId)
+
+    // 2. Insert a blank placeholder message immediately so there's a card to stream into
+    const placeholderId = `__regen_placeholder_${Date.now()}`
+    const placeholder: import('@/types/api').Message = {
+      id: placeholderId,
+      chat_id: chatId,
+      index_in_chat: nextIndex,
+      is_user: false,
+      name: '',
+      content: '',
+      send_date: Math.floor(Date.now() / 1000),
+      swipe_id: 0,
+      swipes: [''],
+      extra: {},
+      parent_message_id: null,
+      branch_id: null,
+      created_at: Math.floor(Date.now() / 1000),
+    }
+    addMessage(placeholder)
+
+    // 3. Begin streaming, targeting the placeholder card
+    beginStreaming(placeholderId)
+
+    // 4. Fire generation
     try {
-      const res = await generateApi.regenerate({
+      const res = await generateApi.start({
         chat_id: chatId,
-        message_id: targetMessageId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         preset_id: activeLoomPresetId || undefined,
+        generation_type: 'normal',
       })
       if (generationNonceRef.current !== nonce) return
-      startStreaming(res.generationId, targetMessageId)
+      startStreaming(res.generationId)
       consumeOneshotGuides()
     } catch (err: any) {
       if (generationNonceRef.current !== nonce) return
+      // Remove the placeholder on failure
+      useStore.getState().removeMessage(placeholderId)
       console.error('[InputArea] Failed to regenerate:', err)
       const msg = err?.body?.error || err?.message || 'Failed to regenerate'
       setStreamingError(msg)
       toast.error(msg, { title: 'Regeneration Failed' })
     }
-  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeLoomPresetId, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeLoomPresetId, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleContinue = useCallback(async () => {
     if (isStreaming) return
@@ -318,10 +350,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
   }, [chatId, isStreaming, activeProfileId, activePersonaId, activeLoomPresetId, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
-  const handleImpersonate = useCallback(async () => {
+  const handleImpersonate = useCallback(async (mode: import('@/api/generate').ImpersonateMode) => {
     if (isStreaming) return
     const nonce = ++generationNonceRef.current
-    beginStreaming()
+    beginStreaming(undefined, 'impersonate')
     try {
       const res = await generateApi.start({
         chat_id: chatId,
@@ -329,6 +361,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         persona_id: activePersonaId || undefined,
         preset_id: activeLoomPresetId || undefined,
         generation_type: 'impersonate',
+        impersonate_mode: mode,
       })
       if (generationNonceRef.current !== nonce) return
       startStreaming(res.generationId)
@@ -448,6 +481,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
         ...(inputFocused ? {} : { paddingBottom: `${iphoneBottomPad}px` }),
       } : undefined}
     >
+      {/* Author's Note Panel */}
+      <AuthorsNotePanel
+        chatId={chatId}
+        isOpen={authorsNoteOpen}
+        onClose={() => setAuthorsNoteOpen(false)}
+      />
+
       {/* Action bar — hidden during streaming */}
       <div data-spindle-mount="chat_toolbar">
         {!isStreaming && (
@@ -639,23 +679,71 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   <span>New Group Chat</span>
                 </span>
               </button>
+              <button
+                type="button"
+                className={styles.popRowBtn}
+                onClick={() => {
+                  setOpenPopover(null)
+                  setAuthorsNoteOpen(true)
+                }}
+              >
+                <span className={styles.personaMain}>
+                  <StickyNote size={14} />
+                  <span>Author's Note</span>
+                </span>
+              </button>
             </div>
           )}
 
           {renderPopover === 'extras' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
               <div className={styles.extrasSection}>
+                <div className={styles.quickSetName}>Impersonate</div>
                 <button
                   type="button"
                   className={styles.popRowBtn}
                   onClick={() => {
                     setOpenPopover(null)
-                    handleImpersonate()
+                    handleImpersonate('prompts')
                   }}
                 >
                   <span className={styles.personaMain}>
-                    <UserRound size={14} />
-                    <span>Impersonate</span>
+                    <ScrollText size={14} />
+                    <span className={styles.personaNameGroup}>
+                      <span>Preset Prompts</span>
+                      <span className={styles.personaTitle}>Full assembly with impersonate-triggered blocks</span>
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.popRowBtn}
+                  onClick={() => {
+                    setOpenPopover(null)
+                    handleImpersonate('oneliner')
+                  }}
+                >
+                  <span className={styles.personaMain}>
+                    <MessageSquare size={14} />
+                    <span className={styles.personaNameGroup}>
+                      <span>One-liner</span>
+                      <span className={styles.personaTitle}>Chat history + impersonation nudge only</span>
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.popRowBtn}
+                  disabled
+                  style={{ opacity: 0.4 }}
+                  title="Coming soon"
+                >
+                  <span className={styles.personaMain}>
+                    <Crown size={14} />
+                    <span className={styles.personaNameGroup}>
+                      <span>Sovereign Hand</span>
+                      <span className={styles.personaTitle}>Co-pilot guided impersonation (coming soon)</span>
+                    </span>
                   </span>
                 </button>
                 <button

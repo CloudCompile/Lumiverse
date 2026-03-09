@@ -2,6 +2,8 @@ import { get, post } from './client'
 
 export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate' | 'quiet'
 
+export type ImpersonateMode = 'prompts' | 'oneliner' | 'sovereign_hand'
+
 export interface GenerateRequest {
   chat_id: string
   connection_id?: string
@@ -11,6 +13,7 @@ export interface GenerateRequest {
   continue_from?: string
   force_name?: string
   generation_type?: GenerationType
+  impersonate_mode?: ImpersonateMode
   target_character_id?: string
 }
 

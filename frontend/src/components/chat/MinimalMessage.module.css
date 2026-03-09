@@ -58,6 +58,25 @@
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.04);
 }
 
+/* Hidden draft message — dimmed, darkened, dashed border */
+.hidden {
+  opacity: 0.4;
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.12);
+  filter: brightness(0.6) saturate(0.5);
+  transition:
+    opacity var(--lcs-transition),
+    filter var(--lcs-transition),
+    background var(--lcs-transition-fast),
+    border-color var(--lcs-transition-fast),
+    box-shadow var(--lcs-transition-fast);
+}
+
+.hidden:hover {
+  opacity: 0.65;
+  filter: brightness(0.75) saturate(0.7);
+}
+
 /* Streaming state — GPU optimization */
 .streaming {
   will-change: opacity, transform;

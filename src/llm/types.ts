@@ -86,6 +86,8 @@ export interface StreamChunk {
 
 export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate' | 'quiet';
 
+export type ImpersonateMode = 'prompts' | 'oneliner' | 'sovereign_hand';
+
 export interface AssemblyContext {
   userId: string;
   chatId: string;
@@ -93,6 +95,8 @@ export interface AssemblyContext {
   presetId?: string;
   generationType: GenerationType;
   personaId?: string;
+  /** For impersonate: controls how much of the preset is included. */
+  impersonateMode?: ImpersonateMode;
   /** For regenerate: exclude this message from chat history (it has a blank swipe). */
   excludeMessageId?: string;
   /** For group chats: generate a response as this specific character. */

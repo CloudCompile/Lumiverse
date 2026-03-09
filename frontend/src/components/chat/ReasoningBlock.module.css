@@ -8,6 +8,10 @@
   background: var(--lumiverse-bg, #0a0a0c);
 }
 
+.alignRight {
+  text-align: right;
+}
+
 .toggle {
   display: flex;
   align-items: center;

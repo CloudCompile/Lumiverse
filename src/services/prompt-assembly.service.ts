@@ -254,6 +254,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // Populate Lumia / Loom / Council / OOC / Sovereign Hand context for macros
   populateLumiaLoomContext(macroEnv, ctx.userId, chat, ctx, settingsMap);
 
+  // ---- Impersonate one-liner mode: skip preset blocks, just chat history + impersonation prompt ----
+  if (ctx.generationType === "impersonate" && ctx.impersonateMode === "oneliner") {
+    return await onelinerImpersonation(messages, character, persona, chat, connection, preset, promptBehavior, completionSettings, samplerOverrides, ctx, macroEnv);
+  }
+
   // ---- Assembly loop ----
   const result: LlmMessage[] = [];
   const breakdown: AssemblyBreakdownEntry[] = [];
@@ -293,9 +298,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
       // Insert all chat messages — evaluate macros in each message's content
       // For regenerate: skip the target message (it has a blank swipe)
+      // Also skip messages marked as hidden drafts (extra.hidden === true)
       let historyCount = 0;
       for (const msg of messages) {
         if (ctx.excludeMessageId && msg.id === ctx.excludeMessageId) continue;
+        if (msg.extra?.hidden === true) continue;
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
         const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
         const attachments = Array.isArray(msg.extra?.attachments) ? msg.extra.attachments : [];
@@ -404,7 +411,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // Count how many chat messages were inserted (from chat_history block)
   const chatMsgCount = messages.filter((m) =>
-    !(ctx.excludeMessageId && m.id === ctx.excludeMessageId)
+    !(ctx.excludeMessageId && m.id === ctx.excludeMessageId) && !(m.extra?.hidden === true)
   ).length;
   const lastChatIdx = firstChatIdx >= 0 ? firstChatIdx + chatMsgCount : result.length;
 
@@ -1185,6 +1192,65 @@ function injectReasoningParams(params: Record<string, any>, providerName: string
 }
 
 /**
+ * One-liner impersonation: skip all preset blocks, include only chat history
+ * and the impersonation prompt from preset behaviors. Optionally includes the
+ * assistantImpersonation prefill nudge.
+ */
+async function onelinerImpersonation(
+  messages: Message[],
+  character: Character,
+  persona: Persona | null,
+  chat: Chat,
+  connection: ConnectionProfile | null,
+  preset: Preset | null,
+  promptBehavior: PromptBehavior,
+  completionSettings: CompletionSettings,
+  samplerOverrides: SamplerOverrides | null,
+  ctx: AssemblyContext,
+  macroEnv: MacroEnv,
+): Promise<AssemblyResult> {
+  const result: LlmMessage[] = [];
+  const breakdown: AssemblyBreakdownEntry[] = [];
+
+  // Chat history
+  let messageCount = 0;
+  for (const msg of messages) {
+    if (msg.extra?.hidden === true) continue;
+    const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
+    const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
+    result.push({ role, content: resolvedContent });
+    messageCount++;
+  }
+  breakdown.push({ type: "chat_history", name: "Chat History", messageCount });
+
+  // Impersonation prompt
+  const prompt = promptBehavior.impersonationPrompt;
+  if (prompt) {
+    const resolved = (await evaluate(prompt, macroEnv, registry)).text;
+    if (resolved) {
+      result.push({ role: "system", content: resolved });
+      breakdown.push({ type: "utility", name: "Impersonation Prompt", role: "system", content: resolved });
+    }
+  }
+
+  // assistantImpersonation prefill nudge
+  const csPrefill = completionSettings.assistantImpersonation || completionSettings.assistantPrefill;
+  if (csPrefill) {
+    const resolvedPrefill = (await evaluate(csPrefill, macroEnv, registry)).text;
+    if (resolvedPrefill) {
+      const nudgeContent = `Begin your reply with: ${resolvedPrefill}`;
+      result.push({ role: "user", content: nudgeContent });
+      breakdown.push({ type: "utility", name: "User Nudge", role: "user", content: nudgeContent });
+    }
+  }
+
+  // Build parameters from sampler overrides
+  const parameters = buildParameters(samplerOverrides, preset, null, connection?.provider, connection?.model);
+
+  return { messages: result, breakdown, parameters };
+}
+
+/**
  * Legacy assembly: simple message mapping with no preset.
  * Includes character card as system prompt for usable generation.
  */
@@ -1253,9 +1319,11 @@ async function legacyAssembly(
   }
 
   // Chat history — evaluate macros in each message
+  // Skip messages marked as hidden drafts (extra.hidden === true)
   const legacyFirstChatIdx = llmMessages.length;
   let legacyHistoryCount = 0;
   for (const m of messages) {
+    if (m.extra?.hidden === true) continue;
     const resolved = await resolveMacros(m.content);
     const attachments = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];
     if (attachments.length > 0) {

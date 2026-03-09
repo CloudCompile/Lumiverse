@@ -43,10 +43,13 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
     avatarUrl,
     displayName,
     macroUserName,
+    isHidden,
     handleEdit,
     handleSaveEdit,
     handleCancelEdit,
     handleDelete,
+    handleToggleHidden,
+    handleFork,
   } = useMessageCard(message, chatId)
 
   return (
@@ -55,6 +58,7 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
         styles.card,
         isUser ? styles.user : styles.character,
         isActivelyStreaming && styles.streaming,
+        isHidden && styles.hidden,
       )}
       data-message-id={message.id}
     >
@@ -101,6 +105,12 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
                     {tokenCount}t
                   </>
                 )}
+                {isHidden && (
+                  <>
+                    <span className={styles.metaDot}>&middot;</span>
+                    <span className={styles.hiddenBadge}>Hidden</span>
+                  </>
+                )}
               </span>
             </div>
           </div>
@@ -113,6 +123,7 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
             reasoningDuration={reasoningDuration}
             isStreaming={isActivelyStreaming}
             variant="bubble"
+            align={isUser ? 'right' : undefined}
           />
         )}
 
@@ -168,7 +179,15 @@ export default function BubbleMessage({ message, chatId }: BubbleMessageProps) {
 
       {/* Actions — inline pill for bubble mode */}
       {!isEditing && (
-        <BubbleActions onEdit={handleEdit} onDelete={handleDelete} className={styles.actionsPill} />
+        <BubbleActions
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onToggleHidden={handleToggleHidden}
+          onFork={handleFork}
+          isHidden={isHidden}
+          content={message.content}
+          className={styles.actionsPill}
+        />
       )}
     </div>
   )

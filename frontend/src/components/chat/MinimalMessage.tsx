@@ -35,10 +35,13 @@ export default function MinimalMessage({ message, chatId }: MinimalMessageProps)
     avatarUrl,
     displayName,
     macroUserName,
+    isHidden,
     handleEdit,
     handleSaveEdit,
     handleCancelEdit,
     handleDelete,
+    handleToggleHidden,
+    handleFork,
   } = useMessageCard(message, chatId)
 
   const openModal = useStore((s) => s.openModal)
@@ -52,6 +55,7 @@ export default function MinimalMessage({ message, chatId }: MinimalMessageProps)
         styles.card,
         isUser ? styles.user : styles.character,
         isActivelyStreaming && styles.streaming,
+        isHidden && styles.hidden,
       )}
       data-message-id={message.id}
     >
@@ -134,8 +138,12 @@ export default function MinimalMessage({ message, chatId }: MinimalMessageProps)
         <MessageActions
           onEdit={handleEdit}
           onDelete={handleDelete}
+          onToggleHidden={handleToggleHidden}
+          onFork={handleFork}
           onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
           isUser={isUser}
+          isHidden={isHidden}
+          content={message.content}
         />
       )}
     </div>

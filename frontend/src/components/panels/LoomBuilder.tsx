@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect, type ReactNode, Fragment } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, type ReactNode, Fragment } from 'react'
 import {
   DndContext,
   closestCenter,
@@ -1140,6 +1140,23 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importTypeRef = useRef<string>('json')
   const lastCollapsedPresetRef = useRef<string | null>(null)
+  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const scrollTopRef = useRef(0)
+
+  // Track scroll position so we can restore it after state-driven re-renders
+  // (block saves, toggles, reorders) and after returning from the block editor.
+  const handleScrollCapture = useCallback(() => {
+    if (scrollAreaRef.current) scrollTopRef.current = scrollAreaRef.current.scrollTop
+  }, [])
+
+  // Restore scroll position after the DOM updates from block/preset changes or
+  // switching back from the block-edit view. useLayoutEffect fires before paint
+  // so the user never sees a scroll jump.
+  useLayoutEffect(() => {
+    if (scrollAreaRef.current && scrollTopRef.current > 0) {
+      scrollAreaRef.current.scrollTop = scrollTopRef.current
+    }
+  }, [activePreset?.blocks, view])
 
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
@@ -1338,7 +1355,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       })()}
 
       {/* Scrollable content: settings + block list */}
-      <div className={s.scrollArea}>
+      <div className={s.scrollArea} ref={scrollAreaRef} onScroll={handleScrollCapture}>
         {/* Settings accordion sections */}
         {activePreset && (
           <GenerationSettings

@@ -15,6 +15,19 @@ if (window.matchMedia('(display-mode: standalone)').matches) {
   document.documentElement.setAttribute('data-pwa', '')
 }
 
+// ── Viewport lock: prevent pinch-zoom and elastic overscroll ──
+// Safari ignores user-scalable=no and maximum-scale in the viewport meta tag
+// since iOS 10. These JS handlers catch the gestures that CSS alone cannot.
+
+// Prevent Safari gesturestart/gesturechange (pinch zoom)
+document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false })
+document.addEventListener('gesturechange', (e) => e.preventDefault(), { passive: false })
+
+// Prevent multi-finger zoom on all browsers (2+ touch points = pinch gesture)
+document.addEventListener('touchmove', (e) => {
+  if (e.touches.length > 1) e.preventDefault()
+}, { passive: false })
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <RouterProvider router={router} />

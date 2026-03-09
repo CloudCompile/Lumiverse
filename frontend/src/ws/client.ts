@@ -50,7 +50,7 @@ export class WebSocketClient {
           return
         }
         const eventName = data.event || data.type
-        if (eventName !== 'CONNECTED') {
+        if (eventName !== 'CONNECTED' && eventName !== 'STREAM_TOKEN_RECEIVED') {
           console.debug('[WS] ←', eventName, data.payload)
         }
         this.emit(eventName, data.payload)

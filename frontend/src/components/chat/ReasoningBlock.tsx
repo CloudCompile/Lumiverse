@@ -10,6 +10,7 @@ interface ReasoningBlockProps {
   reasoningDuration?: number
   isStreaming: boolean
   variant?: 'default' | 'bubble'
+  align?: 'left' | 'right'
 }
 
 const md = new Marked({
@@ -31,7 +32,7 @@ function formatDuration(ms: number) {
   return remainMins > 0 ? `${hours}h ${remainMins}m` : `${hours}h`
 }
 
-export default function ReasoningBlock({ reasoning, reasoningDuration, isStreaming, variant = 'default' }: ReasoningBlockProps) {
+export default function ReasoningBlock({ reasoning, reasoningDuration, isStreaming, variant = 'default', align }: ReasoningBlockProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [liveElapsed, setLiveElapsed] = useState(0)
   const timerRef = useRef<number | null>(null)
@@ -76,13 +77,16 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, isStreami
       ? `Thinking for ${formatDuration(liveElapsed)}`
       : 'Thinking'
 
+  // Skip markdown parsing when the block is collapsed during streaming —
+  // the rendered HTML isn't visible so parsing is pure waste. Parse once
+  // the user expands or when streaming ends (final content).
   const html = useMemo(
-    () => md.parse(reasoning) as string,
-    [reasoning]
+    () => (isStreaming && !isOpen) ? '' : md.parse(reasoning) as string,
+    [reasoning, isStreaming, isOpen]
   )
 
   return (
-    <div className={clsx(styles.container, variant === 'bubble' && styles.bubble)}>
+    <div className={clsx(styles.container, variant === 'bubble' && styles.bubble, align === 'right' && styles.alignRight)}>
       <button
         type="button"
         className={styles.toggle}

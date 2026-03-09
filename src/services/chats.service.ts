@@ -462,13 +462,14 @@ export function branchChat(userId: string, chatId: string, atMessageId: string):
   if (!msg || msg.chat_id !== chatId) return null;
 
   const branchId = crypto.randomUUID();
+  const newChatId = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
-  const newChat = createChat(userId, {
-    character_id: chat.character_id,
-    name: `${chat.name || "Chat"} (branch)`,
-    metadata: { ...chat.metadata, branched_from: chatId, branch_at_message: atMessageId },
-  });
+  // Create the chat row directly — skip createChat() which auto-inserts a greeting
+  const metadata = { ...chat.metadata, branched_from: chatId, branch_at_message: atMessageId };
+  getDb()
+    .query("INSERT INTO chats (id, user_id, character_id, name, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(newChatId, userId, chat.character_id, `${chat.name || "Chat"} (branch)`, JSON.stringify(metadata), now, now);
 
   // Copy messages up to and including the branch point
   const messages = getDb()
@@ -482,10 +483,10 @@ export function branchChat(userId: string, chatId: string, atMessageId: string):
         `INSERT INTO messages (id, chat_id, index_in_chat, is_user, name, content, send_date, swipe_id, swipes, extra, branch_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(newMsgId, newChat.id, m.index_in_chat, m.is_user, m.name, m.content, m.send_date, m.swipe_id, m.swipes, m.extra, branchId, now);
+      .run(newMsgId, newChatId, m.index_in_chat, m.is_user, m.name, m.content, m.send_date, m.swipe_id, m.swipes, m.extra, branchId, now);
   }
 
-  return getChat(userId, newChat.id)!;
+  return getChat(userId, newChatId)!;
 }
 
 // --- Migration helpers ---
