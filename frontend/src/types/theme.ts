@@ -20,7 +20,10 @@ export interface ThemeConfig {
   mode: ThemeMode
   accent: { h: number; s: number; l: number }
   statusColors?: { danger?: string; success?: string; warning?: string }
+  /** @deprecated Use baseColorsByMode for mode-aware overrides. Kept as fallback for existing configs. */
   baseColors?: BaseColors
+  /** Per-mode base color overrides. Priority over legacy baseColors. */
+  baseColorsByMode?: { dark?: BaseColors; light?: BaseColors }
   radiusScale: number
   enableGlass: boolean
   fontScale: number

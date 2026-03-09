@@ -246,8 +246,8 @@ export function generateThemeVariables(
   vars['--lumiverse-prose-blockquote'] = 'var(--lumiverse-text-muted)'
   vars['--lumiverse-prose-link'] = hsla(h, s + 10, pL + 15, 0.9)
 
-  // ── Base color overrides ──
-  const bc = config.baseColors
+  // ── Base color overrides (mode-aware, falls back to legacy baseColors) ──
+  const bc = config.baseColorsByMode?.[mode] ?? config.baseColors
   if (bc) {
     if (bc.primary) {
       vars['--lumiverse-primary'] = bc.primary
