@@ -13,7 +13,8 @@ import * as charactersSvc from "./characters.service";
 import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationResponse, type GenerationType, type ImpersonateMode, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
 import { interceptorPipeline } from "../spindle/interceptor-pipeline";
 import { contextHandlerChain } from "../spindle/context-handler";
-import { executeCouncil } from "./council/council-execution.service";
+import { executeCouncil, collectWorldInfoForCouncil, type CouncilEnrichment } from "./council/council-execution.service";
+import { activateWorldInfo } from "./world-info-activation.service";
 import type { CouncilExecutionResult } from "lumiverse-spindle-types";
 import { getCouncilSettings, getAvailableTools } from "./council/council-settings.service";
 import * as tokenizerSvc from "./tokenizer.service";
@@ -474,6 +475,40 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
 
       checkAborted();
 
+      // Pre-compute enrichment for council tools — resolve world info at the
+      // top of the generation chain so tools receive proper world book context.
+      // Also filters out the staged empty message and excluded (regenerated)
+      // message so council doesn't see blank assistant turns.
+      const fullCharacter = chat
+        ? charactersSvc.getCharacter(input.userId, targetCharId || chat.character_id)
+        : null;
+      const councilMessages = chatsSvc.getMessages(input.userId, input.chat_id)
+        .filter(m => m.id !== excludeMessageId && m.id !== stagedMessageId);
+      const wiEntries = collectWorldInfoForCouncil(input.userId, fullCharacter, resolvedPersona);
+      let councilWiActivated = wiEntries.length > 0
+        ? activateWorldInfo({
+            entries: wiEntries,
+            messages: councilMessages,
+            chatTurn: councilMessages.length,
+            wiState: {},
+          }).activatedEntries
+        : [];
+      console.debug(
+        "[generate] Council enrichment: char=%s, persona=%s, messages=%d, wi=%d/%d",
+        fullCharacter?.name ?? "none",
+        resolvedPersona?.name ?? "none",
+        councilMessages.length,
+        councilWiActivated.length,
+        wiEntries.length,
+      );
+
+      const councilEnrichment: CouncilEnrichment = {
+        character: fullCharacter,
+        persona: resolvedPersona,
+        messages: councilMessages,
+        activatedWorldInfoEntries: councilWiActivated,
+      };
+
       // Execute pre-generation tool calls (abort-aware)
       councilResult = await executeCouncil({
         userId: input.userId,
@@ -482,6 +517,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         connectionId: input.connection_id,
         settings: councilSettings,
         signal: abortController.signal,
+        enrichment: councilEnrichment,
       });
 
       checkAborted();

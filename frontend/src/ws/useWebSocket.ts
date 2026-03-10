@@ -62,6 +62,20 @@ export function useWebSocket() {
             return
           }
 
+          // Normal send: backend stages an empty assistant message before generation.
+          // Add it to the store and set it as the regenerating target so streaming
+          // renders in-place on this card instead of spawning a duplicate ephemeral bubble.
+          if (
+            state.isStreaming &&
+            !state.regeneratingMessageId &&
+            !payload.message.is_user &&
+            !payload.message.content
+          ) {
+            state.addMessage(payload.message)
+            state.setRegeneratingMessageId(payload.message.id)
+            return
+          }
+
           state.addMessage(payload.message)
         }
       }),
@@ -127,13 +141,23 @@ export function useWebSocket() {
           }
 
           if (payload.error) {
-            // Remove placeholder if regeneration failed before backend saved a real message
+            // Remove client-side placeholder if regeneration failed before backend saved a real message
             const regenId = state.regeneratingMessageId
             if (regenId?.startsWith('__regen_placeholder_')) {
               state.removeMessage(regenId)
             }
             state.setStreamingError(payload.error)
             toast.error(payload.error, { title: 'Generation Failed' })
+            // Reconcile message list on error so any backend-staged empty messages
+            // are reflected (or removed if the backend cleaned them up).
+            if (payload.chatId) {
+              messagesApi.list(payload.chatId, { limit: 200 }).then((res) => {
+                const s = store.getState()
+                if (s.activeChatId === payload.chatId) {
+                  s.setMessages(res.data, res.total)
+                }
+              }).catch(() => { /* ignore */ })
+            }
           } else {
             // Cache breakdown data from WS event if present
             if (payload.messageId && (payload as any).breakdown) {

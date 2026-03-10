@@ -24,6 +24,19 @@ import { getWorkerHost } from "../../spindle/lifecycle";
 
 const MAX_RETRIES = 3;
 
+/** Pre-computed enrichment context from the generation chain. When provided,
+ *  council tools use this data instead of independently loading and activating
+ *  character/persona/world info. This ensures world info resolution happens at
+ *  the top of the generation pipeline, giving council tools the same context. */
+export interface CouncilEnrichment {
+  character: import("../../types/character").Character | null;
+  persona: import("../../types/persona").Persona | null;
+  /** Chat messages with staged/excluded messages already filtered out. */
+  messages: import("../../types/message").Message[];
+  /** World info entries activated via keyword matching at the top of the generation chain. */
+  activatedWorldInfoEntries: import("../../types/world-book").WorldBookEntry[];
+}
+
 interface ExecuteInput {
   userId: string;
   chatId: string;
@@ -33,6 +46,9 @@ interface ExecuteInput {
   settings?: CouncilSettings;
   /** Abort signal — when fired, stops executing further council tools. */
   signal?: AbortSignal;
+  /** Pre-computed enrichment from the generation chain. When provided, council tools
+   *  use this data instead of independently loading character/persona/WI. */
+  enrichment?: CouncilEnrichment;
 }
 
 /**
@@ -305,17 +321,27 @@ ${tool.prompt}${brevityNote}`;
   return response.content || "";
 }
 
-/** Build the shared context messages (chat history, character info, world info, etc.). */
+/** Build the shared context messages (chat history, character info, world info, etc.).
+ *  When enrichment is provided via input.enrichment, pre-loaded data is used instead
+ *  of independent lookups — this ensures council tools receive the same world info
+ *  that was resolved at the top of the generation chain. */
 function buildContextMessages(input: ExecuteInput, settings: CouncilSettings): LlmMessage[] {
   const msgs: LlmMessage[] = [];
   const ts = settings.toolsSettings;
 
   const chat = chatsSvc.getChat(input.userId, input.chatId);
-  let character: ReturnType<typeof charactersSvc.getCharacter> = null;
+
+  // Prefer pre-loaded enrichment data; fall back to independent lookups.
+  let character = input.enrichment?.character ?? null;
+  const persona = input.enrichment?.persona ?? (
+    ts.includeUserPersona
+      ? personasSvc.resolvePersonaOrDefault(input.userId, input.personaId)
+      : null
+  );
 
   // Character info
   if (ts.includeCharacterInfo && chat) {
-    character = charactersSvc.getCharacter(input.userId, chat.character_id);
+    if (!character) character = charactersSvc.getCharacter(input.userId, chat.character_id);
     if (character) {
       const charInfo = [
         character.name && `Name: ${character.name}`,
@@ -332,9 +358,6 @@ function buildContextMessages(input: ExecuteInput, settings: CouncilSettings): L
   }
 
   // User persona
-  const persona = ts.includeUserPersona
-    ? personasSvc.resolvePersonaOrDefault(input.userId, input.personaId)
-    : null;
   if (persona) {
     msgs.push({
       role: "system",
@@ -342,32 +365,49 @@ function buildContextMessages(input: ExecuteInput, settings: CouncilSettings): L
     });
   }
 
-  // World info — run keyword activation on recent messages and inject entries
+  // World info — use pre-activated entries from enrichment when available,
+  // otherwise run independent activation as a fallback.
   if (ts.includeWorldInfo && chat) {
-    if (!character) character = charactersSvc.getCharacter(input.userId, chat.character_id);
-    const wiEntries = collectWorldInfoForCouncil(input.userId, character, persona);
-    if (wiEntries.length > 0) {
-      const allMessages = chatsSvc.getMessages(input.userId, input.chatId);
-      const wiResult = activateWorldInfo({
-        entries: wiEntries,
-        messages: allMessages,
-        chatTurn: allMessages.length,
-        wiState: {},
-      });
-      if (wiResult.activatedEntries.length > 0) {
-        const wiContent = wiResult.activatedEntries
-          .map((e: any) => {
-            const label = e.comment || e.key?.join(", ") || "entry";
-            return `[${label}]: ${e.content}`;
-          })
-          .join("\n\n");
-        msgs.push({ role: "system", content: `## Activated World Info\n${wiContent}` });
+    let activatedEntries: import("../../types/world-book").WorldBookEntry[] | null = null;
+
+    if (input.enrichment) {
+      // Use pre-activated entries from the generation chain (resolved at the
+      // top of the pipeline with staged/excluded messages filtered out).
+      activatedEntries = input.enrichment.activatedWorldInfoEntries;
+      console.debug("[council] Using %d pre-activated world info entries from enrichment", activatedEntries.length);
+    } else {
+      // Fallback: independently activate WI (for callers without enrichment)
+      if (!character) character = charactersSvc.getCharacter(input.userId, chat.character_id);
+      const wiEntries = collectWorldInfoForCouncil(input.userId, character, persona);
+      if (wiEntries.length > 0) {
+        const allMsgs = chatsSvc.getMessages(input.userId, input.chatId);
+        const wiResult = activateWorldInfo({
+          entries: wiEntries,
+          messages: allMsgs,
+          chatTurn: allMsgs.length,
+          wiState: {},
+        });
+        activatedEntries = wiResult.activatedEntries;
+        console.debug("[council] Independently activated %d/%d world info entries", activatedEntries.length, wiEntries.length);
+      } else {
+        console.debug("[council] No world info entries found to activate");
       }
+    }
+
+    if (activatedEntries && activatedEntries.length > 0) {
+      const wiContent = activatedEntries
+        .map((e) => {
+          const label = e.comment || e.key?.join(", ") || "entry";
+          return `[${label}]: ${e.content}`;
+        })
+        .join("\n\n");
+      msgs.push({ role: "system", content: `## Activated World Info\n${wiContent}` });
     }
   }
 
-  // Recent chat history (take last N messages from the full list)
-  const allMessages = chatsSvc.getMessages(input.userId, input.chatId);
+  // Recent chat history — prefer enrichment messages (which exclude
+  // staged/regenerated messages) to avoid empty assistant turns.
+  const allMessages = input.enrichment?.messages ?? chatsSvc.getMessages(input.userId, input.chatId);
   const recentMessages = allMessages.slice(-ts.sidecarContextWindow);
   for (const msg of recentMessages) {
     msgs.push({
@@ -447,7 +487,7 @@ function formatDeliberation(
 }
 
 /** Collect world book entries from character + persona + global world books for council WI injection. */
-function collectWorldInfoForCouncil(
+export function collectWorldInfoForCouncil(
   userId: string,
   character: ReturnType<typeof charactersSvc.getCharacter>,
   persona: ReturnType<typeof personasSvc.resolvePersonaOrDefault>,
