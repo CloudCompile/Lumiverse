@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { useStore } from '@/store'
 import { DEFAULT_THEME } from '@/theme/presets'
+import { resolveMode } from '@/hooks/useThemeApplicator'
 import type { ThemeConfig, ThemeMode, BaseColors } from '@/types/theme'
 import ModeSelector from './theme-panel/ModeSelector'
 import PresetGrid from './theme-panel/PresetGrid'
@@ -58,9 +59,13 @@ export default function ThemePanel() {
     [update]
   )
 
+  const resolvedMode = resolveMode(current)
+
   const handleBaseColorsChange = useCallback(
-    (baseColors: BaseColors) => update({ baseColors }),
-    [update]
+    (baseColors: BaseColors) => update({
+      baseColorsByMode: { ...current.baseColorsByMode, [resolvedMode]: baseColors },
+    }),
+    [update, current.baseColorsByMode, resolvedMode]
   )
 
   return (
@@ -87,7 +92,7 @@ export default function ThemePanel() {
       <section className={styles.section}>
         <h4 className={styles.sectionLabel}>Base Colors</h4>
         <BaseColorPicker
-          baseColors={current.baseColors ?? {}}
+          baseColors={current.baseColorsByMode?.[resolvedMode] ?? current.baseColors ?? {}}
           onChange={handleBaseColorsChange}
         />
       </section>

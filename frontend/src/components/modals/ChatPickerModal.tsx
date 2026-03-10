@@ -98,10 +98,15 @@ export default function ChatPickerModal({
         onDismiss()
       }
     }
+    const handleClickOutside = () => {
+      if (activeMenuId) setActiveMenuId(null)
+    }
     document.addEventListener('keydown', handleEscape)
+    document.addEventListener('click', handleClickOutside)
     document.body.style.overflow = 'hidden'
     return () => {
       document.removeEventListener('keydown', handleEscape)
+      document.removeEventListener('click', handleClickOutside)
       document.body.style.overflow = ''
     }
   }, [onDismiss, renamingId, activeMenuId, deleteTarget])
@@ -228,6 +233,7 @@ export default function ChatPickerModal({
             </button>
 
             {/* List of existing chats */}
+            <AnimatePresence initial={false}>
             {!loading && items.map((item, i) => {
               const isActive = i === 0 // The first one is implicitly the most recent
               const isRenaming = renamingId === item.id
@@ -237,12 +243,13 @@ export default function ChatPickerModal({
                 <motion.button
                   key={item.id}
                   className={clsx(styles.card, isActive && styles.cardActive)}
-                  style={{ animationDelay: `${Math.min(i * 40, 200)}ms` }}
+                  style={{ animationDelay: `${Math.min(i * 40, 200)}ms`, zIndex: isMenuOpen ? 10 : undefined }}
                   onClick={() => {
-                    if (!isRenaming) onSelect(item.id)
+                    if (!isRenaming && !isMenuOpen) onSelect(item.id)
                   }}
-                  whileHover={{ scale: 1.01 }}
-                  whileTap={{ scale: 0.99 }}
+                  exit={{ opacity: 0, x: -16, transition: { duration: 0.18 } }}
+                  whileHover={{ scale: isMenuOpen ? 1 : 1.01 }}
+                  whileTap={{ scale: isMenuOpen ? 1 : 0.99 }}
                 >
                   <div className={styles.cardHeader}>
                     {isRenaming ? (
@@ -350,6 +357,7 @@ export default function ChatPickerModal({
                 </motion.button>
               )
             })}
+            </AnimatePresence>
           </div>
         </motion.div>
       </motion.div>

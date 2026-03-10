@@ -4,7 +4,7 @@ import { generateThemeVariables } from '@/theme/engine'
 import { DEFAULT_THEME } from '@/theme/presets'
 import type { ResolvedMode, ThemeConfig } from '@/types/theme'
 
-function resolveMode(config: ThemeConfig): ResolvedMode {
+export function resolveMode(config: ThemeConfig): ResolvedMode {
   if (config.mode !== 'system') return config.mode
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
