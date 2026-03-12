@@ -21,6 +21,7 @@ import * as packsSvc from "./packs.service";
 import * as embeddingsSvc from "./embeddings.service";
 import * as imagesSvc from "./images.service";
 import { getCouncilSettings } from "./council/council-settings.service";
+import { getDb } from "../db/connection";
 import { readFileSync } from "fs";
 
 // ---------------------------------------------------------------------------
@@ -284,6 +285,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     // ---- Handle by marker type ----
 
     if (block.marker === "chat_history") {
+      const chatVectorMemories = await collectChatVectorMemory(ctx.userId, ctx.chatId, messages);
+      if (chatVectorMemories.length > 0) {
+        const memoryContent = "Past Memories (for context only):\n" + chatVectorMemories.join("\n\n");
+        result.push({ role: "system", content: memoryContent });
+        breakdown.push({ type: "long_term_memory", name: "Long-Term Memory", role: "system", content: memoryContent });
+      }
+
       // Insert new-chat separator if configured
       const newChatPrompt = promptBehavior.newChatPrompt;
       if (newChatPrompt) {
@@ -839,63 +847,215 @@ async function collectVectorActivatedWorldInfo(
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
   if (!cfg.enabled || !cfg.vectorize_world_books) return [];
 
-  const contextSize = Math.max(1, cfg.preferred_context_size || 6);
-  const queryText = messages.slice(-contextSize).map((m) => m.content).join("\n").trim();
+  const contextSize = Math.max(1, cfg.preferred_context_size || 3);
+  const queryMessages = messages.filter(m => !(m.extra?.hidden) && m.content.trim().length > 0).slice(-contextSize);
+  const queryText = queryMessages.map((m) => `[${m.name}]: ${m.content}`).join("\n").trim();
   if (!queryText) return [];
 
-  // Embed query once (or hit cache), regardless of how many world books
-  const [queryVector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText]);
-  if (!queryVector || queryVector.length === 0) return [];
+  try {
+    // Embed query once (or hit cache), regardless of how many world books
+    const [queryVector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText]);
+    if (!queryVector || queryVector.length === 0) return [];
 
-  const byId = new Map(entries.map((entry) => [entry.id, entry]));
-  const out: VectorActivatedEntry[] = [];
-  const scored: Array<{ entry: import("../types/world-book").WorldBookEntry; score: number }> = [];
-  const seen = new Set<string>();
-  const topK = Math.max(1, cfg.retrieval_top_k || 4);
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const out: VectorActivatedEntry[] = [];
+    const scored: Array<{ entry: import("../types/world-book").WorldBookEntry; score: number }> = [];
+    const seen = new Set<string>();
+    const topK = Math.max(1, cfg.retrieval_top_k || 4);
 
-  // Search all world books in parallel using the pre-computed vector
-  const searchResults = await Promise.allSettled(
-    worldBookIds.map((worldBookId) =>
-      embeddingsSvc.searchWorldBookEntriesWithVector(userId, worldBookId, queryVector, topK)
+    // Search all world books in parallel using the pre-computed vector
+    const searchResults = await Promise.allSettled(
+      worldBookIds.map((worldBookId) =>
+        embeddingsSvc.searchWorldBookEntriesWithVector(userId, worldBookId, queryVector, topK)
+      )
+    );
+
+    for (const result of searchResults) {
+      if (result.status === "rejected") {
+        console.warn("[WI] Vector search failed:", result.reason);
+        continue;
+      }
+      for (const hit of result.value) {
+        const entry = byId.get(hit.entry_id);
+        if (!entry) continue;
+        if (seen.has(entry.id)) continue;
+        if (entry.disabled || !entry.content.trim()) continue;
+        scored.push({ entry, score: hit.score });
+        seen.add(entry.id);
+      }
+    }
+
+    // Filter by similarity threshold 
+    if (cfg.similarity_threshold > 0) {
+      const cutoff = cfg.similarity_threshold;
+      scored.splice(0, scored.length, ...scored.filter((s) => s.score <= cutoff));
+    }
+
+    scored.sort((a, b) => a.score - b.score);
+
+    let cap = topK;
+    if (cfg.hybrid_weight_mode === "keyword_first") {
+      cap = Math.max(1, Math.ceil(topK / 2));
+    } else if (cfg.hybrid_weight_mode === "vector_first") {
+      cap = Math.min(24, topK * 2);
+    }
+
+    for (const item of scored.slice(0, cap)) {
+      out.push({ entry: item.entry, score: item.score });
+    }
+
+    return out;
+  } catch (err) {
+    console.warn("[prompt] Vector activated world info retrieval failed:", err);
+    return [];
+  }
+}
+
+/**
+ * Retrieve relevant memories from vectorized chat history for long-term context.
+ *
+ * What i went with:
+ * 1. Take the most recent N messages as a query (based on preferred_context_size)
+ * 2. Checks for cached query vector first (fast path)
+ * 3. If chunks aren't vectorized yet, falls back to SQLite recency-based retrieval
+ * 4. Excludes recent messages (within exclusionWindow) to avoid redundancy
+ * 5. Returns the most semantically relevant past memories
+ */
+async function collectChatVectorMemory(
+  userId: string,
+  chatId: string,
+  messages: Message[],
+): Promise<string[]> {
+  const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
+  if (!cfg.enabled || !cfg.vectorize_chat_messages) return [];
+
+  const params = embeddingsSvc.getChatMemoryParams(cfg.chat_memory_mode);
+  const contextSize = Math.max(1, cfg.preferred_context_size || 3);
+  const visibleMessages = messages.filter(m => !(m.extra?.hidden) && m.content.trim().length > 0);
+  const queryMessages = visibleMessages.slice(-contextSize);
+  const queryText = queryMessages.map((m) => `[${m.name}]: ${m.content}`).join("\n").trim();
+  if (!queryText) return [];
+
+  try {
+    const queryHash = hashQueryText(queryText);
+    const cachedVector = await getQueryVectorFromCache(chatId, queryHash);
+
+    let queryVector: number[];
+
+    if (cachedVector) {
+      queryVector = cachedVector;
+    } else {
+      const chunks = chatsSvc.getChatChunks(userId, chatId);
+      const pendingChunks = chunks.filter(c => !c.vectorized_at);
+
+      if (pendingChunks.length > 0) {
+        // Chunks not ready - use SQLite fallback
+        return getRecentRelevantChunks(userId, chatId, queryText, cfg.retrieval_top_k);
+      }
+
+      // Generate query vector and cache it
+      const [vector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText]);
+      if (!vector || vector.length === 0) return [];
+
+      queryVector = vector;
+      await cacheQueryVector(chatId, queryHash, queryText, queryVector);
+    }
+
+    // Build exclusion set: exclude recent messages within the exclusion window
+    const excludeIds = new Set<string>();
+    const exclusionWindow = params.exclusionWindow;
+    const recentMessages = visibleMessages.slice(-exclusionWindow);
+    for (const m of recentMessages) {
+      excludeIds.add(m.id);
+    }
+
+    const limit = cfg.retrieval_top_k;
+    const hits = await embeddingsSvc.searchChatChunks(userId, chatId, queryVector, excludeIds, limit);
+
+    // Apply similarity threshold filtering
+    let filteredHits = hits;
+    if (cfg.similarity_threshold > 0) {
+      filteredHits = hits.filter(h => h.score <= cfg.similarity_threshold);
+    }
+
+    if (filteredHits.length > 0) {
+      console.info(`[chat-memory] Retrieved ${filteredHits.length} memory chunk(s) from past conversation`);
+    }
+
+    return filteredHits.map(h => h.content);
+  } catch (err) {
+    console.warn("[prompt] Chat memory retrieval failed:", err);
+    return [];
+  }
+}
+
+/**
+ * Hash query text for cache lookup.
+ */
+function hashQueryText(text: string): string {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash.toString(36);
+}
+
+/**
+ * Get cached query vector from SQLite.
+ */
+async function getQueryVectorFromCache(chatId: string, queryHash: string): Promise<number[] | null> {
+  const now = Math.floor(Date.now() / 1000);
+  const row = getDb()
+    .query("SELECT vector_json, expires_at FROM query_vector_cache WHERE chat_id = ? AND query_hash = ? AND expires_at > ?")
+    .get(chatId, queryHash, now) as any;
+
+  if (!row) return null;
+
+  try {
+    const vector = JSON.parse(row.vector_json);
+    // Update hit count and last used
+    getDb()
+      .query("UPDATE query_vector_cache SET hit_count = hit_count + 1, last_used_at = ? WHERE chat_id = ? AND query_hash = ?")
+      .run(now, chatId, queryHash);
+    return vector;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cache a query vector in SQLite.
+ */
+async function cacheQueryVector(chatId: string, queryHash: string, queryText: string, vector: number[]): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + 300; // 5 minutes
+
+  getDb()
+    .query(
+      `INSERT INTO query_vector_cache (id, chat_id, query_hash, query_text, vector_json, hit_count, created_at, last_used_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+       ON CONFLICT(chat_id, query_hash) DO UPDATE SET
+         vector_json = excluded.vector_json,
+         last_used_at = excluded.last_used_at,
+         expires_at = excluded.expires_at`
     )
-  );
+    .run(crypto.randomUUID(), chatId, queryHash, queryText, JSON.stringify(vector), now, now, expiresAt);
+}
 
-  for (const result of searchResults) {
-    if (result.status === "rejected") {
-      console.warn("[WI] Vector search failed:", result.reason);
-      continue;
-    }
-    for (const hit of result.value) {
-      const entry = byId.get(hit.entry_id);
-      if (!entry) continue;
-      if (seen.has(entry.id)) continue;
-      if (entry.disabled || !entry.content.trim()) continue;
-      scored.push({ entry, score: hit.score });
-      seen.add(entry.id);
-    }
-  }
+/**
+ * Fallback retrieval using SQLite when vectors aren't ready.
+ * Returns recent chunks that might be relevant based on recency.
+ */
+function getRecentRelevantChunks(userId: string, chatId: string, queryText: string, limit: number): string[] {
+  const chunks = chatsSvc.getChatChunks(userId, chatId);
 
-  // Filter by similarity threshold (LanceDB distance: lower = more similar).
-  // Threshold of 0 means no filtering.
-  if (cfg.similarity_threshold > 0) {
-    const cutoff = cfg.similarity_threshold;
-    scored.splice(0, scored.length, ...scored.filter((s) => s.score <= cutoff));
-  }
+  // Simple recency-based retrieval
+  const sorted = chunks.sort((a, b) => b.created_at - a.created_at);
+  const topChunks = sorted.slice(0, limit);
 
-  scored.sort((a, b) => a.score - b.score);
-
-  let cap = topK;
-  if (cfg.hybrid_weight_mode === "keyword_first") {
-    cap = Math.max(1, Math.ceil(topK / 2));
-  } else if (cfg.hybrid_weight_mode === "vector_first") {
-    cap = Math.min(24, topK * 2);
-  }
-
-  for (const item of scored.slice(0, cap)) {
-    out.push({ entry: item.entry, score: item.score });
-  }
-
-  return out;
+  return topChunks.map(c => c.content);
 }
 
 function injectEntryIntoCache(cache: WorldInfoCache, entry: import("../types/world-book").WorldBookEntry): void {
@@ -1315,6 +1475,15 @@ async function legacyAssembly(
       const resolvedExamples = await resolveMacros(`Example dialogue:\n${examples}`);
       llmMessages.push({ role: "system", content: resolvedExamples });
       breakdown.push({ type: "block", name: "Dialogue Examples (legacy)", role: "system", content: resolvedExamples });
+    }
+  }
+
+  if (userId && chat) {
+    const chatVectorMemories = await collectChatVectorMemory(userId, chat.id, messages);
+    if (chatVectorMemories.length > 0) {
+      const memoryContent = "Past Memories (for context only):\n" + chatVectorMemories.join("\n\n");
+      llmMessages.push({ role: "system", content: memoryContent });
+      breakdown.push({ type: "long_term_memory", name: "Long-Term Memory", role: "system", content: memoryContent });
     }
   }
 

@@ -1306,6 +1306,7 @@ function EmbeddingsSettings() {
         vectorize_world_books: cfg.vectorize_world_books,
         vectorize_chat_messages: cfg.vectorize_chat_messages,
         vectorize_chat_documents: cfg.vectorize_chat_documents,
+        chat_memory_mode: cfg.chat_memory_mode,
         api_key: apiKey.trim() ? apiKey.trim() : undefined,
       })
       setCfg(saved)
@@ -1345,7 +1346,7 @@ function EmbeddingsSettings() {
   return (
     <div className={styles.settingsSection}>
       <h3 className={styles.sectionTitle}>Embeddings</h3>
-      <p className={styles.placeholder}>Configure your per-user embedding provider for vectorized world books and future chat/doc retrieval.</p>
+      <p className={styles.placeholder}>Configure vector embeddings for long-term memory retrieval. Vectorizes world books, chat messages, and documents for semantic search during generation.</p>
 
       {error && <p className={styles.errorText}>{error}</p>}
       {success && <p className={styles.successText}>{success}</p>}
@@ -1461,7 +1462,23 @@ function EmbeddingsSettings() {
           Maximum distance for vector matches (0 = no filtering, lower = stricter). LanceDB distance where 0 is identical.
         </span>
       </div>
-
+      {cfg.vectorize_chat_messages && (
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Memory Retrieval Mode</label>
+          <select
+            className={styles.select}
+            value={cfg.chat_memory_mode}
+            onChange={(e) => update({ chat_memory_mode: e.target.value as EmbeddingConfig['chat_memory_mode'] })}
+          >
+            <option value="conservative">Conservative - Fewer, high-quality memories</option>
+            <option value="balanced">Balanced - Standard retrieval (recommended)</option>
+            <option value="aggressive">Aggressive - More memories, lower threshold</option>
+          </select>
+          <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
+            Controls how many memories are retrieved and quality threshold. All chunking parameters are automatically optimized based on this mode.
+          </span>
+        </div>
+      )}
       <div className={styles.field}>
         <label className={styles.fieldLabel}>API Key {cfg.has_api_key ? '(configured)' : '(not configured)'}</label>
         <input
@@ -1497,7 +1514,7 @@ function EmbeddingsSettings() {
           checked={cfg.vectorize_chat_messages}
           onChange={(e) => update({ vectorize_chat_messages: e.target.checked })}
         />
-        <span>Vectorize chat messages (optional scaffold)</span>
+        <span>Vectorize chat messages (long-term memory)</span>
       </label>
 
       <div className={styles.drawerRow}>
