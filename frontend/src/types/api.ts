@@ -405,6 +405,7 @@ export interface EmbeddingConfig {
   vectorize_world_books: boolean;
   vectorize_chat_messages: boolean;
   vectorize_chat_documents: boolean;
+  chat_memory_mode: 'conservative' | 'balanced' | 'aggressive';
   has_api_key: boolean;
 }
 
