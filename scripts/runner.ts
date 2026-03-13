@@ -12,6 +12,7 @@
  * Keyboard:
  *   R - Restart server
  *   U - Update from GitHub (when available)
+ *   B - Switch branch (main ↔ staging, confirmation required)
  *   T - Toggle remote/mobile access (TRUST_ANY_ORIGIN)
  *   V - Force reset LanceDB vector store (confirmation required)
  *   O - Open in browser
@@ -140,6 +141,14 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // Remote access state
 let trustAnyOrigin = false;
 
+// Branch switching state
+const AVAILABLE_BRANCHES = ["main", "staging"] as const;
+let currentBranch = "";
+let pendingBranchSwitch = false;
+let pendingBranchTarget = "";
+let pendingBranchTimer: ReturnType<typeof setTimeout> | null = null;
+let branchSwitchInProgress = false;
+
 // Self-restart state (watches runner's own source files)
 const SELF_WATCH_FILES = [
   join(PROJECT_ROOT, "scripts/runner.ts"),
@@ -154,6 +163,16 @@ if (existsSync(ENV_FILE)) {
   const portMatch = envContent.match(/^PORT=(\d+)/m);
   if (portMatch) port = parseInt(portMatch[1], 10);
   trustAnyOrigin = /^TRUST_ANY_ORIGIN=true$/m.test(envContent);
+}
+
+// Detect current branch at startup
+{
+  const branchResult = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: PROJECT_ROOT, stdout: "pipe", stderr: "pipe",
+  });
+  if (branchResult.exitCode === 0) {
+    currentBranch = branchResult.stdout.toString().trim();
+  }
 }
 
 // ─── Log management ─────────────────────────────────────────────────────────
@@ -691,6 +710,157 @@ async function executeVectorReset(): Promise<void> {
   await startServer();
 }
 
+// ─── Branch switching ─────────────────────────────────────────────────────────
+
+async function switchBranch(): Promise<void> {
+  if (branchSwitchInProgress) return;
+
+  // Determine the target branch (toggle between main/staging)
+  const target = currentBranch === "main" ? "staging" : "main";
+
+  if (pendingBranchSwitch && pendingBranchTarget === target) {
+    // Second press — confirmed
+    pendingBranchSwitch = false;
+    if (pendingBranchTimer) {
+      clearTimeout(pendingBranchTimer);
+      pendingBranchTimer = null;
+    }
+    await executeBranchSwitch(target);
+    return;
+  }
+
+  const label = target === "staging" ? "unstable (staging)" : "stable (main)";
+
+  addLog("", "system");
+  addLog("╔══════════════════════════════════════════════════════════════╗", "system");
+  addLog(`║  ⚠  SWITCH BRANCH — ${label.padEnd(39)}║`, "system");
+  addLog("║                                                            ║", "system");
+  addLog(`║  This will switch from '${currentBranch}' to '${target}'.`.padEnd(63) + "║", "system");
+  addLog("║  The server will be stopped, branch switched, latest       ║", "system");
+  addLog("║  changes pulled, dependencies installed if needed, the     ║", "system");
+  addLog("║  frontend rebuilt, and the server restarted.               ║", "system");
+  addLog("║                                                            ║", "system");
+  addLog("║  Press B again within 10 seconds to confirm, or wait      ║", "system");
+  addLog("║  to cancel.                                                ║", "system");
+  addLog("╚══════════════════════════════════════════════════════════════╝", "system");
+  addLog("", "system");
+
+  pendingBranchSwitch = true;
+  pendingBranchTarget = target;
+  render();
+
+  pendingBranchTimer = setTimeout(() => {
+    if (pendingBranchSwitch) {
+      pendingBranchSwitch = false;
+      pendingBranchTarget = "";
+      addLog("Branch switch cancelled (timed out).", "system");
+      render();
+    }
+  }, 10_000);
+}
+
+async function executeBranchSwitch(target: string): Promise<void> {
+  branchSwitchInProgress = true;
+  render();
+
+  addLog(`Switching to branch '${target}'...`, "system");
+
+  // Stop the server first
+  await stopServer();
+
+  // Stash any local changes
+  const status = runGit("status", "--porcelain");
+  if (status.ok && status.out) {
+    addLog("Stashing local changes...", "system");
+    runGit("stash", "push", "-m", `lumiverse-branch-switch-${currentBranch}`);
+  }
+
+  // Checkout target branch
+  const checkout = runGit("checkout", target);
+  if (!checkout.ok) {
+    addLog(`Failed to checkout '${target}': ${checkout.out}`, "system");
+    addLog("Restarting server on current branch...", "system");
+    branchSwitchInProgress = false;
+    await startServer();
+    render();
+    return;
+  }
+
+  currentBranch = target;
+  addLog(`Checked out '${target}'.`, "system");
+
+  // Pull latest changes
+  addLog("Pulling latest changes...", "system");
+  const pullProc = Bun.spawn(["git", "pull", "--ff-only"], {
+    cwd: PROJECT_ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const pullOut = await new Response(pullProc.stdout).text();
+  const pullErr = await new Response(pullProc.stderr).text();
+  const pullCode = await pullProc.exited;
+
+  if (pullCode !== 0) {
+    addLog(`Pull failed (non-fatal): ${pullErr.trim() || pullOut.trim()}`, "system");
+  } else {
+    const lines = pullOut.trim().split("\n").filter((l: string) => l.trim());
+    for (const line of lines) {
+      addLog(`  ${line.trim()}`, "system");
+    }
+  }
+
+  // Reinstall backend dependencies
+  addLog("Installing backend dependencies...", "system");
+  const backendInstall = Bun.spawn(["bun", "install"], {
+    cwd: PROJECT_ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await backendInstall.exited;
+  addLog("Backend dependencies updated.", "system");
+
+  // Reinstall frontend dependencies
+  const frontendDir = join(PROJECT_ROOT, "frontend");
+  addLog("Installing frontend dependencies...", "system");
+  const feInstall = Bun.spawn(["bun", "install"], {
+    cwd: frontendDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await feInstall.exited;
+  addLog("Frontend dependencies updated.", "system");
+
+  // Rebuild frontend
+  addLog("Rebuilding frontend...", "system");
+  const buildProc = Bun.spawn(["bun", "run", "build"], {
+    cwd: frontendDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const buildOut = await new Response(buildProc.stdout).text();
+  const buildErr = await new Response(buildProc.stderr).text();
+  const buildCode = await buildProc.exited;
+
+  if (buildCode !== 0) {
+    addLog(`Frontend build failed: ${buildErr.trim() || buildOut.trim()}`, "system");
+  } else {
+    addLog("Frontend rebuilt successfully.", "system");
+  }
+
+  // Clear update state (different branch may have different upstream)
+  updateAvailable = false;
+  updateCommitsBehind = 0;
+  updateLatestMessage = "";
+
+  addLog(`Branch switch complete. Now on '${target}'. Restarting server...`, "system");
+  branchSwitchInProgress = false;
+  restartCount++;
+  await startServer();
+
+  // Re-check for updates on the new branch
+  setTimeout(() => checkForUpdates(), 5000);
+}
+
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
 function formatUptime(ms: number): string {
@@ -722,6 +892,11 @@ function render(): void {
   const uptime = startedAt ? formatUptime(Date.now() - startedAt) : "—";
   const pidStr = serverPid ? String(serverPid) : "—";
   const modeStr = isDev ? `${C.yellow}DEV${C.R}` : `${C.green}PROD${C.R}`;
+  const branchStr = currentBranch === "main"
+    ? `${C.green}${currentBranch}${C.R}`
+    : currentBranch === "staging"
+    ? `${C.yellow}${currentBranch}${C.R}`
+    : `${C.gray}${currentBranch || "?"}${C.R}`;
 
   const updateStr = updateInProgress
     ? `${C.yellow}⟳ Updating…${C.R}`
@@ -739,7 +914,7 @@ function render(): void {
     ? `${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${C.yellow}⚠ REMOTE${C.R}${C.bgBar} `
     : "";
 
-  out.push(`${C.bgBar}${ansi.bold} ${MINI_LOGO} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${getStatusIndicator()} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${C.gray}Port${C.R}${C.bgBar} ${C.white}${port}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}PID${C.R}${C.bgBar} ${C.white}${pidStr}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}Uptime${C.R}${C.bgBar} ${C.white}${uptime}${C.R}${C.bgBar} ${C.gray}│${C.R}${updateSegment}${C.bgBar} ${modeStr} ${trustSegment}${C.bgBar}${" ".repeat(Math.max(0, cols - 75))}${C.R}`);
+  out.push(`${C.bgBar}${ansi.bold} ${MINI_LOGO} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${getStatusIndicator()} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${C.gray}Port${C.R}${C.bgBar} ${C.white}${port}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}PID${C.R}${C.bgBar} ${C.white}${pidStr}${C.R}${C.bgBar} ${C.gray}│${C.R}${C.bgBar} ${C.gray}Uptime${C.R}${C.bgBar} ${C.white}${uptime}${C.R}${C.bgBar} ${C.gray}│${C.R}${updateSegment}${C.bgBar} ${modeStr} ${C.bgBar}${C.gray}│${C.R}${C.bgBar} ${branchStr} ${trustSegment}${C.bgBar}${" ".repeat(Math.max(0, cols - 85))}${C.R}`);
 
   // Separator
   out.push(`${C.darkGray}${"─".repeat(cols)}${C.R}`);
@@ -785,9 +960,16 @@ function render(): void {
     ? `${C.yellow}V${C.gray} Confirm Reset`
     : `${C.red}V${C.gray} Reset Vectors`;
 
+  const branchSwitchLabel = pendingBranchSwitch
+    ? `${C.yellow}B${C.gray} Confirm → ${pendingBranchTarget}`
+    : branchSwitchInProgress
+    ? `${C.yellow}B${C.gray} Switching…`
+    : `${C.blue}B${C.gray}ranch`;
+
   const actionItems = [
     `${C.blue}R${C.gray}estart`,
     ...(updateAvailable ? [`${C.green}U${C.gray}pdate`] : []),
+    branchSwitchLabel,
     trustLabel,
     vectorResetLabel,
     `${C.blue}O${C.gray}pen Browser`,
@@ -837,6 +1019,10 @@ function setupInput(): void {
           await checkForUpdates();
           if (!updateAvailable) addLog("Already up to date.", "system");
         }
+        break;
+
+      case "b":
+        await switchBranch();
         break;
 
       case "t":

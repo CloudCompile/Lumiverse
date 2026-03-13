@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cpus, totalmem, freemem, platform, arch, release, hostname } from "os";
-import { readFileSync } from "fs";
+import { readFileSync, execSync } from "fs";
 import { join } from "path";
 
 const app = new Hono();
@@ -11,6 +11,17 @@ function getBackendVersion(): string {
     return pkg.version ?? "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+function getGitInfo(): { branch: string; commit: string } {
+  const projectRoot = join(import.meta.dir, "../..");
+  try {
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: projectRoot, encoding: "utf-8" }).trim();
+    const commit = execSync("git rev-parse --short HEAD", { cwd: projectRoot, encoding: "utf-8" }).trim();
+    return { branch, commit };
+  } catch {
+    return { branch: "unknown", commit: "unknown" };
   }
 }
 
@@ -50,6 +61,7 @@ app.get("/info", (c) => {
       version: getBackendVersion(),
       runtime: `Bun ${Bun.version}`,
     },
+    git: getGitInfo(),
   });
 });
 
