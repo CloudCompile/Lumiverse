@@ -63,7 +63,17 @@ export const wsHandler = upgradeWebSocket((c) => {
           }
 
           userId = session.user.id;
-          userRole = session.user.role || "user";
+          userRole = session.user.role || null;
+
+          // Same as requireAuth: if BetterAuth omitted the role, read from DB
+          if (!userRole) {
+            const { getDb } = await import("../db/connection");
+            const row = getDb()
+              .query('SELECT role FROM "user" WHERE id = ?')
+              .get(userId) as { role: string } | null;
+            userRole = row?.role || "user";
+          }
+
           sessionId = session.session.id;
         }
         console.log(`[WS] Authenticated as user ${userId}, session ${sessionId}`);

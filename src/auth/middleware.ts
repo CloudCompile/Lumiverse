@@ -1,5 +1,6 @@
 import type { Context, Next } from "hono";
 import { auth } from "./index";
+import { getDb } from "../db/connection";
 
 // Augment Hono's context variables
 declare module "hono" {
@@ -32,6 +33,20 @@ export async function requireAuth(c: Context, next: Next) {
 
   if (!session) {
     return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  // BetterAuth's admin plugin adds the `role` field to the user schema, but
+  // getSession() sometimes omits it (adapter/transform quirks with plugin-
+  // defined columns).  When missing, read it directly from the DB so every
+  // downstream handler (spindle privilege check, requireOwner, etc.) sees the
+  // real role instead of the "user" fallback.
+  if (!session.user.role) {
+    const row = getDb()
+      .query('SELECT role FROM "user" WHERE id = ?')
+      .get(session.user.id) as { role: string } | null;
+    if (row?.role) {
+      session.user.role = row.role;
+    }
   }
 
   c.set("session", session);
