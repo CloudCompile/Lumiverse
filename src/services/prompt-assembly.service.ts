@@ -264,7 +264,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // ---- Impersonate one-liner mode: skip preset blocks, just chat history + impersonation prompt ----
   if (ctx.generationType === "impersonate" && ctx.impersonateMode === "oneliner") {
-    return await onelinerImpersonation(messages, character, persona, chat, connection, preset, promptBehavior, completionSettings, samplerOverrides, ctx, macroEnv);
+    return await onelinerImpersonation(messages, character, persona, chat, connection, preset, promptBehavior, completionSettings, samplerOverrides, ctx, macroEnv, reasoningVal);
   }
 
   // ---- Assembly loop ----
@@ -1326,7 +1326,7 @@ function buildParameters(
  * user's reasoning effort setting. Does NOT override if the parameter
  * is already set (e.g. by a prior custom body or explicit override).
  */
-function injectReasoningParams(params: Record<string, any>, providerName: string, effort: string, model?: string): void {
+export function injectReasoningParams(params: Record<string, any>, providerName: string, effort: string, model?: string): void {
   if (providerName === "anthropic") {
     if (!params.thinking) {
       // Claude 4.6 models support adaptive thinking (recommended over manual budget)
@@ -1379,6 +1379,7 @@ async function onelinerImpersonation(
   samplerOverrides: SamplerOverrides | null,
   ctx: AssemblyContext,
   macroEnv: MacroEnv,
+  reasoningSettings?: { apiReasoning?: boolean; reasoningEffort?: string } | null,
 ): Promise<AssemblyResult> {
   const result: LlmMessage[] = [];
   const breakdown: AssemblyBreakdownEntry[] = [];
@@ -1417,8 +1418,8 @@ async function onelinerImpersonation(
     }
   }
 
-  // Build parameters from sampler overrides
-  const parameters = buildParameters(samplerOverrides, preset, null, connection?.provider, connection?.model);
+  // Build parameters from sampler overrides + reasoning settings
+  const parameters = buildParameters(samplerOverrides, preset, reasoningSettings, connection?.provider, connection?.model);
 
   return { messages: result, breakdown, parameters };
 }
@@ -1542,12 +1543,17 @@ async function legacyAssembly(
   breakdown.push({ type: "chat_history", name: "Chat History (legacy)", messageCount: legacyHistoryCount, content: legacyHistoryParts.join("\n") });
 
   // Strip reasoning from older chat history messages based on keepInHistory
+  let reasoningVal: { apiReasoning?: boolean; reasoningEffort?: string } | null = null;
   if (userId) {
     const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
     if (reasoningSetting?.value) {
       stripReasoningFromChatHistory(llmMessages, legacyFirstChatIdx, legacyHistoryCount, reasoningSetting.value);
+      reasoningVal = reasoningSetting.value;
     }
   }
 
-  return { messages: llmMessages, breakdown, parameters: {} };
+  // Build parameters with reasoning settings so API-level reasoning is injected
+  const parameters = buildParameters(null, null, reasoningVal, connection?.provider, connection?.model);
+
+  return { messages: llmMessages, breakdown, parameters };
 }

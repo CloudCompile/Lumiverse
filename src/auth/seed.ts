@@ -20,37 +20,43 @@ export async function seedOwner(): Promise<void> {
 
   const userCount = db.query('SELECT COUNT(*) as count FROM "user"').get() as { count: number } | null;
   if (userCount && userCount.count > 0) {
-    console.log("[Auth] Owner already exists, skipping seed.");
-    return;
+    // Users exist — skip initial seed but still enforce the owner role below.
+  } else {
+    // First run: create the owner account.
+    console.log(`[Auth] Seeding owner account: ${env.ownerUsername}`);
+
+    allowCreation();
+
+    try {
+      await auth.api.signUpEmail({
+        body: {
+          email: `${env.ownerUsername}@lumiverse.local`,
+          password: env.ownerPassword,
+          name: env.ownerUsername,
+          username: env.ownerUsername,
+        },
+      });
+    } catch (err) {
+      console.error("[Auth] Failed to seed owner:", err);
+      throw err;
+    }
   }
 
-  console.log(`[Auth] Seeding owner account: ${env.ownerUsername}`);
-
-  allowCreation();
-
-  try {
-    await auth.api.signUpEmail({
-      body: {
-        email: `${env.ownerUsername}@lumiverse.local`,
-        password: env.ownerPassword,
-        name: env.ownerUsername,
-        username: env.ownerUsername,
-      },
-    });
-  } catch (err) {
-    console.error("[Auth] Failed to seed owner:", err);
-    throw err;
-  }
-
-  // Set role to owner
+  // Always ensure the designated owner has role = "owner".
+  // signUpEmail() creates users with role = "user" (admin plugin default).
+  // The UPDATE is a separate step — if the process crashed between the
+  // INSERT and this UPDATE on a previous run, the owner would be stuck
+  // as "user" forever since the count-guard above would skip re-seeding.
   const owner = db
-    .query('SELECT id FROM "user" WHERE username = ?')
-    .get(env.ownerUsername) as { id: string } | null;
+    .query('SELECT id, role FROM "user" WHERE username = ?')
+    .get(env.ownerUsername) as { id: string; role: string } | null;
 
   if (owner) {
-    db.run('UPDATE "user" SET role = ? WHERE id = ?', ["owner", owner.id]);
+    if (owner.role !== "owner") {
+      db.run('UPDATE "user" SET role = ? WHERE id = ?', ["owner", owner.id]);
+      console.log(`[Auth] Promoted ${env.ownerUsername} to owner role (was "${owner.role}")`);
+    }
     provisionUserDirectories(owner.id);
-    console.log(`[Auth] Owner seeded with id: ${owner.id}`);
   }
 }
 

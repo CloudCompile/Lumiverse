@@ -8,7 +8,7 @@ import * as chatsSvc from "./chats.service";
 import * as presetsSvc from "./presets.service";
 import * as settingsSvc from "./settings.service";
 import * as personasSvc from "./personas.service";
-import { assemblePrompt } from "./prompt-assembly.service";
+import { assemblePrompt, injectReasoningParams } from "./prompt-assembly.service";
 import * as charactersSvc from "./characters.service";
 import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationResponse, type GenerationType, type ImpersonateMode, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
 import { interceptorPipeline } from "../spindle/interceptor-pipeline";
@@ -1034,6 +1034,15 @@ export async function quietGenerate(userId: string, input: QuietGenerateInput): 
     const preset = presetsSvc.getPreset(userId, connection.preset_id);
     if (preset) {
       mergedParams = { ...preset.parameters, ...mergedParams };
+    }
+  }
+
+  // Inject API-level reasoning params from user settings
+  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
+  if (reasoningSetting?.value?.apiReasoning) {
+    const effort = reasoningSetting.value.reasoningEffort || "auto";
+    if (effort !== "auto") {
+      injectReasoningParams(mergedParams, provider.name, effort, connection.model || undefined);
     }
   }
 
