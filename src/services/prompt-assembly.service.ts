@@ -242,6 +242,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     "sovereignHand",
     "selectedLoomStyles", "selectedLoomUtils", "selectedLoomRetrofits",
     "guidedGenerations", "promptBias",
+    "theme",
   ];
   const settingsMap = settingsSvc.getSettingsByKeys(ctx.userId, settingsKeys);
 
@@ -250,6 +251,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   if (reasoningVal) {
     macroEnv.extra.reasoningPrefix = reasoningVal.prefix ?? "";
     macroEnv.extra.reasoningSuffix = reasoningVal.suffix ?? "";
+  }
+
+  // Populate theme info for {{userColorMode}} macro
+  const themeVal = settingsMap.get("theme");
+  if (themeVal) {
+    macroEnv.extra.theme = { mode: themeVal.mode ?? "dark" };
   }
 
   // Populate Lumia / Loom / Council / OOC / Sovereign Hand context for macros
@@ -308,11 +315,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       // For regenerate: skip the target message (it has a blank swipe)
       // Also skip messages marked as hidden drafts (extra.hidden === true)
       let historyCount = 0;
+      const historyParts: string[] = [];
       for (const msg of messages) {
         if (ctx.excludeMessageId && msg.id === ctx.excludeMessageId) continue;
         if (msg.extra?.hidden === true) continue;
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
         const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
+        historyParts.push(resolvedContent);
         const attachments = Array.isArray(msg.extra?.attachments) ? msg.extra.attachments : [];
         if (attachments.length > 0) {
           // Build multipart content: text + attachment parts
@@ -332,7 +341,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         }
         historyCount++;
       }
-      breakdown.push({ type: "chat_history", name: "Chat History", messageCount: historyCount });
+      breakdown.push({ type: "chat_history", name: "Chat History", messageCount: historyCount, content: historyParts.join("\n") });
       chatHistoryInserted = true;
 
       // Strip reasoning from older chat history messages based on keepInHistory
@@ -383,14 +392,16 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
     // Content-bearing markers and regular blocks → resolve block.content
     const content = block.content || "";
-    const resolved = (await evaluate(content, macroEnv, registry)).text.trim();
+    const rawResolved = (await evaluate(content, macroEnv, registry)).text;
+    const resolved = rawResolved.trim();
     if (resolved) {
       // Append roles: collect for deferred application after full assembly
+      // Preserve original whitespace (especially leading newlines) for formatting
       if (isAppendRole(block.role)) {
         pendingAppends.push({
           baseRole: appendBaseRole(block.role),
           depth: block.depth || 0,
-          content: resolved,
+          content: rawResolved,
           blockName: block.name,
           blockId: block.id,
         });
@@ -1374,14 +1385,16 @@ async function onelinerImpersonation(
 
   // Chat history
   let messageCount = 0;
+  const historyParts: string[] = [];
   for (const msg of messages) {
     if (msg.extra?.hidden === true) continue;
     const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
     const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
     result.push({ role, content: resolvedContent });
+    historyParts.push(resolvedContent);
     messageCount++;
   }
-  breakdown.push({ type: "chat_history", name: "Chat History", messageCount });
+  breakdown.push({ type: "chat_history", name: "Chat History", messageCount, content: historyParts.join("\n") });
 
   // Impersonation prompt
   const prompt = promptBehavior.impersonationPrompt;
@@ -1445,6 +1458,11 @@ async function legacyAssembly(
         macroEnv.extra.reasoningPrefix = reasoningSetting.value.prefix ?? "";
         macroEnv.extra.reasoningSuffix = reasoningSetting.value.suffix ?? "";
       }
+      // Populate theme info for {{userColorMode}} macro (legacy path)
+      const themeSetting = settingsSvc.getSetting(userId, "theme");
+      if (themeSetting?.value) {
+        macroEnv.extra.theme = { mode: themeSetting.value.mode ?? "dark" };
+      }
       // Populate Lumia / Loom context (legacy path)
       if (chat) populateLumiaLoomContext(macroEnv, userId, chat as Chat);
     }
@@ -1491,9 +1509,11 @@ async function legacyAssembly(
   // Skip messages marked as hidden drafts (extra.hidden === true)
   const legacyFirstChatIdx = llmMessages.length;
   let legacyHistoryCount = 0;
+  const legacyHistoryParts: string[] = [];
   for (const m of messages) {
     if (m.extra?.hidden === true) continue;
     const resolved = await resolveMacros(m.content);
+    legacyHistoryParts.push(resolved);
     const attachments = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];
     if (attachments.length > 0) {
       const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolved }];
@@ -1519,7 +1539,7 @@ async function legacyAssembly(
     }
     legacyHistoryCount++;
   }
-  breakdown.push({ type: "chat_history", name: "Chat History (legacy)", messageCount: legacyHistoryCount });
+  breakdown.push({ type: "chat_history", name: "Chat History (legacy)", messageCount: legacyHistoryCount, content: legacyHistoryParts.join("\n") });
 
   // Strip reasoning from older chat history messages based on keepInHistory
   if (userId) {

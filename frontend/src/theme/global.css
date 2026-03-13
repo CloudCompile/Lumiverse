@@ -1,3 +1,31 @@
+/* Theme-aware color-scheme — tells the browser to render native form
+   controls (select dropdowns, scrollbars, date pickers) using the
+   correct light/dark system chrome. */
+[data-theme-mode="dark"] {
+  color-scheme: dark;
+}
+
+[data-theme-mode="light"] {
+  color-scheme: light;
+}
+
+/* Global select/option theming — native <option> dropdowns render
+   outside the DOM with browser defaults. These rules ensure the
+   popup menu matches the active theme. */
+select {
+  background-color: var(--lumiverse-bg-deep, #0a0812);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+}
+
+select option {
+  background-color: var(--lumiverse-bg-deep, #0a0812);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+}
+
+select option:checked {
+  background-color: var(--lumiverse-primary-015, rgba(147, 112, 219, 0.15));
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;

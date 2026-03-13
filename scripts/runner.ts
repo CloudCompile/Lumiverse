@@ -13,6 +13,7 @@
  *   R - Restart server
  *   U - Update from GitHub (when available)
  *   T - Toggle remote/mobile access (TRUST_ANY_ORIGIN)
+ *   V - Force reset LanceDB vector store (confirmation required)
  *   O - Open in browser
  *   C - Clear log
  *   Q / Ctrl+C - Quit
@@ -623,6 +624,73 @@ async function writeTrustAnyOrigin(enable: boolean): Promise<void> {
 let pendingTrustToggle = false;
 let pendingTrustTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ─── Force reset LanceDB ────────────────────────────────────────────────────
+
+let pendingVectorReset = false;
+let pendingVectorResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function forceResetLanceDB(): Promise<void> {
+  if (pendingVectorReset) {
+    // Second press — confirmed
+    pendingVectorReset = false;
+    if (pendingVectorResetTimer) {
+      clearTimeout(pendingVectorResetTimer);
+      pendingVectorResetTimer = null;
+    }
+    await executeVectorReset();
+    return;
+  }
+
+  addLog("", "system");
+  addLog("╔══════════════════════════════════════════════════════════════╗", "system");
+  addLog("║  ⚠  FORCE RESET — LanceDB Vector Store                    ║", "system");
+  addLog("║                                                            ║", "system");
+  addLog("║  This will STOP the server, completely delete the LanceDB  ║", "system");
+  addLog("║  directory, and restart. All vector embeddings will be     ║", "system");
+  addLog("║  lost and must be re-indexed.                              ║", "system");
+  addLog("║                                                            ║", "system");
+  addLog("║  Press V again within 10 seconds to confirm, or wait      ║", "system");
+  addLog("║  to cancel.                                                ║", "system");
+  addLog("╚══════════════════════════════════════════════════════════════╝", "system");
+  addLog("", "system");
+
+  pendingVectorReset = true;
+  render();
+
+  pendingVectorResetTimer = setTimeout(() => {
+    if (pendingVectorReset) {
+      pendingVectorReset = false;
+      addLog("LanceDB reset cancelled (timed out).", "system");
+      render();
+    }
+  }, 10_000);
+}
+
+async function executeVectorReset(): Promise<void> {
+  const lanceDir = join(PROJECT_ROOT, "data", "lancedb");
+
+  addLog("Stopping server for LanceDB reset...", "system");
+  await stopServer();
+
+  // Delete the LanceDB directory
+  try {
+    if (existsSync(lanceDir)) {
+      const { rmSync } = await import("fs");
+      rmSync(lanceDir, { recursive: true, force: true });
+      addLog(`Deleted LanceDB directory: ${lanceDir}`, "system");
+    } else {
+      addLog("No LanceDB directory found — nothing to delete.", "system");
+    }
+  } catch (err: any) {
+    addLog(`Failed to delete LanceDB directory: ${err.message}`, "stderr");
+  }
+
+  addLog("LanceDB reset complete. Restarting server...", "system");
+  addLog("Note: SQLite vectorization flags will be reset on first access.", "system");
+  restartCount++;
+  await startServer();
+}
+
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
 function formatUptime(ms: number): string {
@@ -713,10 +781,15 @@ function render(): void {
     ? `${C.yellow}T${C.gray} Disable Remote`
     : `${C.blue}T${C.gray} Remote Access`;
 
+  const vectorResetLabel = pendingVectorReset
+    ? `${C.yellow}V${C.gray} Confirm Reset`
+    : `${C.red}V${C.gray} Reset Vectors`;
+
   const actionItems = [
     `${C.blue}R${C.gray}estart`,
     ...(updateAvailable ? [`${C.green}U${C.gray}pdate`] : []),
     trustLabel,
+    vectorResetLabel,
     `${C.blue}O${C.gray}pen Browser`,
     `${C.blue}C${C.gray}lear Log`,
     `${C.blue}↑↓${C.gray} Scroll`,
@@ -772,6 +845,10 @@ function setupInput(): void {
         } else {
           await toggleTrustAnyOrigin();
         }
+        break;
+
+      case "v":
+        await forceResetLanceDB();
         break;
 
       case "o": {

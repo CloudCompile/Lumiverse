@@ -1,5 +1,6 @@
 import { connect, type Connection, type Table } from "@lancedb/lancedb";
 import { join } from "path";
+import { rmSync, existsSync } from "fs";
 import { env } from "../env";
 import { getDb } from "../db/connection";
 import * as settingsSvc from "./settings.service";
@@ -697,6 +698,47 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
   }
 
   vectorIndexReady = false;
+}
+
+/**
+ * Force reset the entire LanceDB vector store.
+ * Nukes the on-disk LanceDB directory, resets all module state, clears caches,
+ * and resets vectorized flags in SQLite. This is the nuclear option for
+ * recovering from corruption (e.g. "vector not divisible by 8" errors).
+ */
+export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: string }> {
+  // 1. Cancel any pending optimize
+  if (optimizeTimer) {
+    clearTimeout(optimizeTimer);
+    optimizeTimer = null;
+  }
+
+  // 2. Clear in-memory caches
+  embeddingCache.clear();
+
+  // 3. Reset connection state so next access creates a fresh connection
+  connPromise = null;
+  vectorIndexReady = false;
+
+  // 4. Delete the entire LanceDB directory from disk
+  const deleted = existsSync(LANCEDB_PATH);
+  if (deleted) {
+    rmSync(LANCEDB_PATH, { recursive: true, force: true });
+    console.info(`[embeddings] Force-deleted LanceDB directory: ${LANCEDB_PATH}`);
+  }
+
+  // 5. Reset all vectorized flags in SQLite
+  try {
+    const db = getDb();
+    db.run(`UPDATE world_book_entries SET vectorized = 0`);
+    db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
+    db.run(`DELETE FROM query_vector_cache`);
+  } catch (err) {
+    console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
+  }
+
+  console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
+  return { deleted, path: LANCEDB_PATH };
 }
 
 // --- Chat Vectorization ---

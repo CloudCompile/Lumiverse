@@ -396,6 +396,7 @@ export interface PendingPermissionRequest {
 
 export interface SpindleSlice {
   extensions: ExtensionInfo[]
+  spindlePrivileged: boolean
   pendingPermissionRequest: PendingPermissionRequest | null
   loadExtensions: () => Promise<void>
   installExtension: (githubUrl: string) => Promise<void>

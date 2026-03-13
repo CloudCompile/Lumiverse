@@ -86,12 +86,12 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
       const [councilTools, spindleTools, extensionList] = await Promise.all([
         councilApi.getTools(),
         spindleApi.getTools().catch(() => []),
-        spindleApi.list().catch(() => []),
+        spindleApi.list().catch(() => ({ extensions: [], isPrivileged: false })),
       ])
 
       // Build extension_id → display name lookup
       const extNameMap = new Map<string, string>()
-      for (const ext of extensionList) {
+      for (const ext of extensionList.extensions) {
         extNameMap.set(ext.id, ext.name)
       }
 

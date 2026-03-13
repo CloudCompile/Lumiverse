@@ -1542,10 +1542,81 @@ function AdvancedSettings() {
 }
 
 function DangerZone() {
+  const [resetting, setResetting] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [resetResult, setResetResult] = useState<string | null>(null)
+
+  const handleForceResetLanceDB = async () => {
+    if (!confirmReset) {
+      setConfirmReset(true)
+      return
+    }
+    setResetting(true)
+    setResetResult(null)
+    setConfirmReset(false)
+    try {
+      const res = await embeddingsApi.forceReset()
+      setResetResult(
+        res.deleted
+          ? 'LanceDB vector store deleted and reset. It will reinitialize on next use.'
+          : 'No LanceDB directory found — nothing to delete. SQLite flags reset.'
+      )
+    } catch (err: any) {
+      setResetResult(`Reset failed: ${err.body?.error || err.message || 'Unknown error'}`)
+    } finally {
+      setResetting(false)
+    }
+  }
+
   return (
     <div className={styles.settingsSection}>
       <h3 className={clsx(styles.sectionTitle, styles.danger)}>Danger Zone</h3>
-      <p className={styles.placeholder}>Destructive operations (clear cache, reset settings) will be available here.</p>
+
+      <div className={styles.field}>
+        <span className={styles.fieldLabel}>Force Reset LanceDB Vector Store</span>
+        <p style={{ fontSize: 12, color: 'var(--lumiverse-text-dim)', margin: 0 }}>
+          Completely wipes the LanceDB directory, clears all cached embeddings, and resets vectorization
+          flags. Useful for recovering from corruption (e.g. &quot;vector not divisible by 8&quot; errors).
+          The vector store will reinitialize automatically on next use.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+          <button
+            className={clsx(styles.smallBtn, styles.textBtnDanger)}
+            onClick={handleForceResetLanceDB}
+            disabled={resetting}
+            style={{
+              border: '1px solid var(--lumiverse-error)',
+              padding: '6px 12px',
+              opacity: resetting ? 0.5 : 1,
+            }}
+          >
+            {resetting
+              ? 'Resetting...'
+              : confirmReset
+              ? 'Are you sure? Click again to confirm'
+              : 'Reset LanceDB'}
+          </button>
+          {confirmReset && (
+            <button
+              className={styles.smallBtn}
+              onClick={() => setConfirmReset(false)}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+        {resetResult && (
+          <p style={{
+            fontSize: 12,
+            color: resetResult.startsWith('Reset failed')
+              ? 'var(--lumiverse-error)'
+              : 'var(--lumiverse-success, #4ade80)',
+            margin: 0,
+          }}>
+            {resetResult}
+          </p>
+        )}
+      </div>
     </div>
   )
 }
