@@ -55,6 +55,8 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'imageGeneration',
   // Summarization settings
   'summarization',
+  // Wallpaper settings
+  'wallpaper',
   // Reasoning / CoT settings
   'reasoningSettings',
   'promptBias',
@@ -183,6 +185,18 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   guidedGenerations: [],
   quickReplySets: [],
   toastPosition: 'bottom-right',
+  wallpaper: {
+    global: null,
+    opacity: 0.3,
+    fit: 'cover',
+  },
+
+  setWallpaper: (partial) =>
+    set((state) => {
+      const wallpaper = { ...state.wallpaper, ...partial }
+      persistKey('wallpaper', wallpaper)
+      return { wallpaper }
+    }),
 
   setSetting: (key, value) => {
     set({ [key]: value } as any)

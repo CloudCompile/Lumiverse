@@ -3,7 +3,7 @@ import type { ComponentType } from 'react'
 import {
   User, Wand2, GitFork, Link2, Package, Users, Drama, Library,
   PenTool, MessageCircle, FileText, Brain, ScrollText, MessageSquareReply,
-  Globe, Image, GitBranch, Palette, Puzzle,
+  Globe, Image, GitBranch, Palette, Puzzle, Wallpaper,
   Settings, PanelRight, MessageSquare, Compass, Reply, Sliders,
   Plus,
 } from 'lucide-react'
@@ -178,6 +178,15 @@ export const COMMANDS: Command[] = [
     keywords: ['image', 'generation', 'scene', 'art', 'picture', 'ai', 'background'],
     group: 'Panels',
     run: () => openPanel('imagegen'),
+  },
+  {
+    id: 'panel-wallpaper',
+    label: 'Wallpaper',
+    description: 'Set global or per-chat background wallpapers',
+    icon: Wallpaper,
+    keywords: ['wallpaper', 'background', 'backdrop', 'image', 'video', 'animated', 'mp4', 'webm'],
+    group: 'Panels',
+    run: () => openPanel('wallpaper'),
   },
   {
     id: 'panel-branches',
