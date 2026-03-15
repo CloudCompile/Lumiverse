@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useStore } from '@/store'
 import { presetProfilesApi, type PresetProfileBinding } from '@/api/preset-profiles'
 import type { PromptBlock } from '@/lib/loom/types'
@@ -37,6 +37,7 @@ export function usePresetProfiles(presetId: string | null, blocks: PromptBlock[]
   // Load chat binding when chat changes
   useEffect(() => {
     if (!activeChatId || !presetId) { setChatBinding(null); return }
+    setChatBinding(null) // Clear stale binding before fetching new one
     presetProfilesApi.getChatBinding(activeChatId)
       .then((b) => setChatBinding(b))
       .catch(() => setChatBinding(null))
@@ -45,6 +46,7 @@ export function usePresetProfiles(presetId: string | null, blocks: PromptBlock[]
   // Load character binding when character changes
   useEffect(() => {
     if (!activeCharacterId || !presetId) { setCharacterBinding(null); return }
+    setCharacterBinding(null) // Clear stale binding before fetching new one
     presetProfilesApi.getCharacterBinding(activeCharacterId)
       .then((b) => setCharacterBinding(b))
       .catch(() => setCharacterBinding(null))
@@ -139,6 +141,14 @@ export function usePresetProfiles(presetId: string | null, blocks: PromptBlock[]
     }
   }, [activeCharacterId, addToast])
 
+  // Resolved active binding (chat > character > defaults > none)
+  const activeBinding = useMemo(() => {
+    if (chatBinding && chatBinding.preset_id === presetId) return chatBinding
+    if (characterBinding && characterBinding.preset_id === presetId) return characterBinding
+    if (defaults && defaults.preset_id === presetId) return defaults
+    return null
+  }, [chatBinding, characterBinding, defaults, presetId])
+
   // Determine active source
   const activeSource: 'chat' | 'character' | 'defaults' | 'none' = (() => {
     if (chatBinding && chatBinding.preset_id === presetId) return 'chat'
@@ -156,6 +166,7 @@ export function usePresetProfiles(presetId: string | null, blocks: PromptBlock[]
     hasChatBinding,
     hasCharacterBinding,
     activeSource,
+    activeBinding,
     isLoading,
     defaults,
     chatBinding,

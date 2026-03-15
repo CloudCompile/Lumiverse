@@ -1137,6 +1137,29 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
 
   const presetProfiles = usePresetProfiles(activePresetId, activePreset?.blocks)
 
+  // Apply preset profile binding when the resolved binding changes (chat/character/default switch).
+  // Uses refs for values we read but don't want to trigger the effect on.
+  const saveBlocksRef = useRef(saveBlocks)
+  saveBlocksRef.current = saveBlocks
+  const activePresetRef = useRef(activePreset)
+  activePresetRef.current = activePreset
+
+  useEffect(() => {
+    const binding = presetProfiles.activeBinding
+    const currentBlocks = activePresetRef.current?.blocks
+    if (!binding || !currentBlocks?.length) return
+
+    const updatedBlocks = currentBlocks.map(b =>
+      b.id in binding.block_states ? { ...b, enabled: binding.block_states[b.id] } : b
+    )
+
+    // Only save if something actually changed
+    const changed = updatedBlocks.some((b, i) => b.enabled !== currentBlocks[i].enabled)
+    if (changed) {
+      saveBlocksRef.current(updatedBlocks)
+    }
+  }, [presetProfiles.activeBinding])
+
   const [view, setView] = useState<'list' | 'edit'>('list')
   const [editingBlock, setEditingBlock] = useState<PromptBlock | null>(null)
   const [promptMenuOpen, setPromptMenuOpen] = useState(false)
