@@ -11,14 +11,11 @@
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
-/* In standalone PWA mode, use JS-measured --app-height (set from
-   visualViewport.height in main.tsx) so the app tracks the actual
-   visible area — shrinks when the iOS keyboard opens, ensuring the
-   input bar stays above the keyboard. Falls back to 100% if JS
-   hasn't set the variable yet. */
+/* In standalone PWA mode, iOS can miscalculate 100dvh.
+   Remove the dvh clamp — height:100% from the fixed html/body
+   chain is the correct constraint. */
 :global(html[data-pwa]) .app {
   max-height: none;
-  height: var(--app-height, 100%);
 }
 
 .main {

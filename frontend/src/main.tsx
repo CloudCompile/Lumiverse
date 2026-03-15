@@ -19,20 +19,6 @@ const isStandalone =
 
 if (isStandalone) {
   document.documentElement.setAttribute('data-pwa', '')
-
-  // Track the visual viewport height — visualViewport.height is the actual
-  // visible area and updates when the iOS keyboard opens/closes (unlike
-  // window.innerHeight which may not fire resize events in PWA mode).
-  const setAppHeight = () => {
-    const vh = window.visualViewport?.height ?? window.innerHeight
-    document.documentElement.style.setProperty('--app-height', `${vh}px`)
-  }
-  setAppHeight()
-
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', setAppHeight)
-  }
-  window.addEventListener('resize', setAppHeight)
 }
 
 // ── Viewport lock: prevent pinch-zoom and elastic overscroll ──
