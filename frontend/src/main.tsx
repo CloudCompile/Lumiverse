@@ -20,12 +20,18 @@ const isStandalone =
 if (isStandalone) {
   document.documentElement.setAttribute('data-pwa', '')
 
-  // Measure actual viewport height — works around WebKit bug #237961 where
-  // CSS viewport units (dvh/vh/%) miscalculate in standalone + viewport-fit=cover.
+  // Track the visual viewport height — visualViewport.height is the actual
+  // visible area and updates when the iOS keyboard opens/closes (unlike
+  // window.innerHeight which may not fire resize events in PWA mode).
   const setAppHeight = () => {
-    document.documentElement.style.setProperty('--app-height', `${window.innerHeight}px`)
+    const vh = window.visualViewport?.height ?? window.innerHeight
+    document.documentElement.style.setProperty('--app-height', `${vh}px`)
   }
   setAppHeight()
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', setAppHeight)
+  }
   window.addEventListener('resize', setAppHeight)
 }
 

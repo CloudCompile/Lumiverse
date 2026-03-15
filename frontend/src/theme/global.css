@@ -125,19 +125,21 @@ select:focus-visible,
 .lce-hl-action { color: #fbbf24; font-style: italic; }
 
 /* ── PWA standalone mode hardening ──
-   Avoids position:fixed + inset:0 which triggers WebKit bug #237961
-   (leaves a bottom gap when viewport-fit=cover is active in standalone
-   mode on iOS). Instead, use JS-measured --app-height (set in main.tsx)
-   for the actual viewport height, with 100% as the initial fallback.
+   Uses position:fixed + inset:0 to create a truly locked viewport that
+   cannot be scrolled out of bounds. The html background is set to match
+   the app background so any sub-pixel gaps from WebKit rendering bugs
+   (e.g. bug #237961 with viewport-fit=cover) are invisible.
 
    iOS may not match the display-mode CSS media query in its PWA shell,
    so html[data-pwa] selectors (set via navigator.standalone in main.tsx)
    provide a JS-driven fallback. */
 @media (display-mode: standalone) {
   html {
-    height: var(--app-height, 100%);
+    position: fixed;
+    inset: 0;
     overflow: hidden;
     overscroll-behavior: none;
+    background: var(--lumiverse-bg-deep, #0a0812);
   }
 
   body {
@@ -160,9 +162,11 @@ select:focus-visible,
 /* JS-driven fallback for iOS — navigator.standalone may be true even
    when the display-mode CSS media query does not match. */
 html[data-pwa] {
-  height: var(--app-height, 100%);
+  position: fixed;
+  inset: 0;
   overflow: hidden;
   overscroll-behavior: none;
+  background: var(--lumiverse-bg-deep, #0a0812);
 }
 
 html[data-pwa] body {
