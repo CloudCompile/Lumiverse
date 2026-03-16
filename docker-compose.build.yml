@@ -1,6 +1,6 @@
 services:
   lumiverse:
-    image: ghcr.io/prolix-oc/lumiverse:latest
+    build: .
     container_name: lumiverse
     ports:
       - "7860:7860"
