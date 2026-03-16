@@ -296,6 +296,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       send_date: Math.floor(Date.now() / 1000),
       swipe_id: 0,
       swipes: [''],
+      swipe_dates: [Math.floor(Date.now() / 1000)],
       extra: {},
       parent_message_id: null,
       branch_id: null,
