@@ -201,6 +201,34 @@ function grantRequestedPermissionsByDefault(
   }
 }
 
+/**
+ * Sync extension_grants with the current manifest permissions:
+ * - Grant new non-privileged permissions automatically
+ * - Revoke grants for permissions no longer declared in the manifest
+ */
+function syncPermissionGrants(
+  identifier: string,
+  manifestPermissions: readonly string[],
+  previousPermissions: readonly string[]
+): void {
+  const manifestSet = new Set(manifestPermissions);
+  const previousSet = new Set(previousPermissions);
+
+  // Grant newly-requested non-privileged permissions
+  const newlyRequested = manifestPermissions.filter(
+    (perm) => !previousSet.has(perm)
+  );
+  grantRequestedPermissionsByDefault(identifier, newlyRequested);
+
+  // Revoke grants for permissions removed from the manifest
+  const granted = getGrantedPermissions(identifier);
+  for (const perm of granted) {
+    if (!manifestSet.has(perm)) {
+      revokePermission(identifier, perm);
+    }
+  }
+}
+
 function resolveWithin(base: string, requestedPath: string, label: string): string {
   const baseAbs = resolve(base);
   const resolved = resolve(baseAbs, requestedPath);
@@ -530,10 +558,11 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
     ]
   );
 
-  const newlyRequested = (manifest.permissions || []).filter(
-    (perm) => !existingPermissionSet.has(perm)
+  syncPermissionGrants(
+    identifier,
+    manifest.permissions || [],
+    existingPermissions
   );
-  grantRequestedPermissionsByDefault(identifier, newlyRequested);
 
   return getExtensionByIdentifier(identifier)!;
 }
@@ -961,6 +990,14 @@ export async function switchBranch(
   // Re-read manifest
   const manifest = readManifest(identifier);
 
+  const db = getDb();
+  const existing = db
+    .query("SELECT permissions FROM extensions WHERE identifier = ?")
+    .get(identifier) as { permissions: string } | null;
+  const existingPermissions = existing
+    ? (JSON.parse(existing.permissions || "[]") as string[])
+    : [];
+
   // Rebuild — only delete dist/ if it was locally built (not tracked in git).
   // Repos that ship pre-built dist/ should have those files preserved.
   const srcDir = join(repo, "src");
@@ -985,7 +1022,6 @@ export async function switchBranch(
   applyStorageSeeds(identifier, manifest);
 
   // Update DB
-  const db = getDb();
   db.run(
     `UPDATE extensions SET name = ?, version = ?, author = ?, description = ?,
      github = ?, homepage = ?, permissions = ?, branch = ?, updated_at = unixepoch()
@@ -1001,6 +1037,12 @@ export async function switchBranch(
       branch,
       identifier,
     ]
+  );
+
+  syncPermissionGrants(
+    identifier,
+    manifest.permissions || [],
+    existingPermissions
   );
 
   return getExtensionByIdentifier(identifier)!;
