@@ -1,5 +1,5 @@
 import { getTextContent, type LlmMessage, type AssemblyContext, type AssemblyResult, type AssemblyBreakdownEntry, type GenerationType, type ActivatedWorldInfoEntry } from "../llm/types";
-import type { PromptBlock, PromptBehavior, CompletionSettings, SamplerOverrides, AuthorsNote } from "../types/preset";
+import type { PromptBlock, PromptBehavior, CompletionSettings, SamplerOverrides, AuthorsNote, AdvancedSettings } from "../types/preset";
 import type { WorldInfoCache } from "../types/world-book";
 import type { Character } from "../types/character";
 import type { Persona } from "../types/persona";
@@ -650,6 +650,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // ---- Apply pending append blocks ----
   for (const append of pendingAppends) {
     applyAppendBlock(result, breakdown, append);
+  }
+
+  // ---- Collapse all messages into a single user message (if enabled) ----
+  const advSettings: AdvancedSettings | undefined = prompts.advancedSettings;
+  if (advSettings?.collapseMessages) {
+    collapseToSingleUserMessage(result);
   }
 
   // ---- Build parameters from sampler overrides + advanced settings + reasoning + custom body ----
@@ -1528,6 +1534,53 @@ function applyCompletionSettings(
   }
 
   // NOTE: assistantPrefill is now folded into the user nudge by assemblePrompt().
+}
+
+/**
+ * Collapse all assembled messages into a single `user` message.
+ *
+ * Concatenates text content from every message with double-newline separators.
+ * Media parts (images/audio) are collected into a single multipart message.
+ * Best used alongside `namesBehavior: 2` ("In Content") so user/assistant turns
+ * are visually separated by name prefixes within the collapsed text.
+ *
+ * Mutates the `result` array in place.
+ */
+function collapseToSingleUserMessage(result: LlmMessage[]): void {
+  if (result.length <= 1) return;
+
+  const textChunks: string[] = [];
+  const mediaParts: import("../llm/types").LlmMessagePart[] = [];
+
+  for (const msg of result) {
+    if (typeof msg.content === "string") {
+      if (msg.content) textChunks.push(msg.content);
+    } else {
+      // Multipart: collect text and media separately
+      for (const part of msg.content) {
+        if (part.type === "text") {
+          if (part.text) textChunks.push(part.text);
+        } else {
+          mediaParts.push(part);
+        }
+      }
+    }
+  }
+
+  const collapsed = textChunks.join("\n\n");
+
+  // Replace entire array with a single user message
+  result.length = 0;
+  if (mediaParts.length > 0) {
+    // Multipart: text first, then media
+    const parts: import("../llm/types").LlmMessagePart[] = [
+      { type: "text", text: collapsed },
+      ...mediaParts,
+    ];
+    result.push({ role: "user", content: parts });
+  } else {
+    result.push({ role: "user", content: collapsed });
+  }
 }
 
 /**

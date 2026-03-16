@@ -76,6 +76,12 @@ export interface SamplerOverrides {
   repetitionPenalty: number | null;
 }
 
+export interface AdvancedSettings {
+  seed: number;
+  customStopStrings: string[];
+  collapseMessages: boolean;
+}
+
 export interface AuthorsNote {
   content: string;
   position: number;

@@ -269,7 +269,7 @@ export async function buildExtension(identifier: string): Promise<void> {
   const backendEntry = manifest.entry_backend || "dist/backend.js";
   const frontendEntry = manifest.entry_frontend || "dist/frontend.js";
 
-  // Always install dependencies if package.json exists
+  // Always install dependencies first if package.json exists
   const pkgJson = join(repo, "package.json");
   if (existsSync(pkgJson)) {
     const install = Bun.spawnSync({
@@ -283,15 +283,27 @@ export async function buildExtension(identifier: string): Promise<void> {
     }
   }
 
+  // If the repo ships pre-built dist/ (files tracked in git), skip build entirely
+  const distDir = join(repo, "dist");
+  if (existsSync(distDir)) {
+    const lsFiles = Bun.spawnSync({
+      cmd: ["git", "ls-files", "dist"],
+      cwd: repo,
+    });
+    if (lsFiles.exitCode === 0 && lsFiles.stdout.toString().trim().length > 0) {
+      return;
+    }
+  }
+
   // Look for src/ to build from
   const srcDir = join(repo, "src");
   if (!existsSync(srcDir)) return;
 
-  const distDir = join(repo, "dist");
+  const buildDistDir = join(repo, "dist");
   const backendOut = resolveWithin(repo, backendEntry, "entry_backend");
   const frontendOut = resolveWithin(repo, frontendEntry, "entry_frontend");
 
-  mkdirSync(distDir, { recursive: true });
+  mkdirSync(buildDistDir, { recursive: true });
 
   // Determine what needs building
   const backendSrc = join(srcDir, "backend.ts");
@@ -478,7 +490,8 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
     : [];
   const existingPermissionSet = new Set(existingPermissions);
 
-  // Rebuild — only delete dist/ if we can rebuild from source
+  // Rebuild — only delete dist/ if it was locally built (not tracked in git).
+  // Repos that ship pre-built dist/ should have those files preserved.
   const srcDir = join(repo, "src");
   const hasBuildableSrc =
     existsSync(srcDir) &&
@@ -487,7 +500,14 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
   if (hasBuildableSrc) {
     const distDir = join(repo, "dist");
     if (existsSync(distDir)) {
-      rmSync(distDir, { recursive: true });
+      const lsFiles = Bun.spawnSync({
+        cmd: ["git", "ls-files", "dist"],
+        cwd: repo,
+      });
+      const distIsTracked = lsFiles.exitCode === 0 && lsFiles.stdout.toString().trim().length > 0;
+      if (!distIsTracked) {
+        rmSync(distDir, { recursive: true });
+      }
     }
   }
   await buildExtension(identifier);
@@ -941,9 +961,8 @@ export async function switchBranch(
   // Re-read manifest
   const manifest = readManifest(identifier);
 
-  // Rebuild — only delete dist/ if we can rebuild from source.
-  // Extensions that ship pre-built dist/ or use custom build scripts
-  // would lose their bundles otherwise.
+  // Rebuild — only delete dist/ if it was locally built (not tracked in git).
+  // Repos that ship pre-built dist/ should have those files preserved.
   const srcDir = join(repo, "src");
   const hasBuildableSrc =
     existsSync(srcDir) &&
@@ -952,7 +971,14 @@ export async function switchBranch(
   if (hasBuildableSrc) {
     const distDir = join(repo, "dist");
     if (existsSync(distDir)) {
-      rmSync(distDir, { recursive: true });
+      const lsFiles = Bun.spawnSync({
+        cmd: ["git", "ls-files", "dist"],
+        cwd: repo,
+      });
+      const distIsTracked = lsFiles.exitCode === 0 && lsFiles.stdout.toString().trim().length > 0;
+      if (!distIsTracked) {
+        rmSync(distDir, { recursive: true });
+      }
     }
   }
   await buildExtension(identifier);

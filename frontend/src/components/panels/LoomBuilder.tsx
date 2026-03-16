@@ -970,8 +970,9 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
 
   const seed = settings.seed ?? defaults.seed
   const stopStrings: string[] = settings.customStopStrings ?? defaults.customStopStrings
+  const collapseMessages: boolean = settings.collapseMessages ?? defaults.collapseMessages
 
-  const isActive = seed >= 0 || stopStrings.length > 0
+  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages
 
   const handleSeedChange = (value: string) => {
     const num = parseInt(value)
@@ -994,7 +995,7 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
       <div className={clsx(s.accordionHeader, isActive && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <Wrench size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
         <span className={s.accordionTitle}>Advanced</span>
-        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0)}</span>}
+        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0)}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
@@ -1028,6 +1029,13 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
               </div>
             )}
             <span className={s.settingsHint}>Appended to the request stop sequences</span>
+          </div>
+          <div className={s.settingsField}>
+            <label className={s.checkboxLabel}>
+              <input type="checkbox" className={s.checkbox} checked={collapseMessages} onChange={e => onSave({ collapseMessages: e.target.checked })} />
+              Collapse into single user message
+            </label>
+            <span className={s.settingsHint}>Merges all prompt blocks and chat history into one user message. Use with "Names in Messages: In Content" for turn separation.</span>
           </div>
         </div>
       )}
