@@ -269,6 +269,20 @@ export async function buildExtension(identifier: string): Promise<void> {
   const backendEntry = manifest.entry_backend || "dist/backend.js";
   const frontendEntry = manifest.entry_frontend || "dist/frontend.js";
 
+  // Always install dependencies if package.json exists
+  const pkgJson = join(repo, "package.json");
+  if (existsSync(pkgJson)) {
+    const install = Bun.spawnSync({
+      cmd: ["bun", "install"],
+      cwd: repo,
+    });
+    if (install.exitCode !== 0) {
+      throw new Error(
+        `Dependency install failed: ${install.stderr.toString()}`
+      );
+    }
+  }
+
   // Look for src/ to build from
   const srcDir = join(repo, "src");
   if (!existsSync(srcDir)) return;
@@ -284,22 +298,6 @@ export async function buildExtension(identifier: string): Promise<void> {
   const frontendSrc = join(srcDir, "frontend.ts");
   const needsBackendBuild = existsSync(backendSrc) && !existsSync(backendOut);
   const needsFrontendBuild = existsSync(frontendSrc) && !existsSync(frontendOut);
-
-  // Install dependencies before building (only if there's something to build)
-  if (needsBackendBuild || needsFrontendBuild) {
-    const pkgJson = join(repo, "package.json");
-    if (existsSync(pkgJson)) {
-      const install = Bun.spawnSync({
-        cmd: ["bun", "install"],
-        cwd: repo,
-      });
-      if (install.exitCode !== 0) {
-        throw new Error(
-          `Dependency install failed: ${install.stderr.toString()}`
-        );
-      }
-    }
-  }
 
   // Build backend entry if source exists
   if (needsBackendBuild) {
@@ -348,7 +346,7 @@ export async function buildExtension(identifier: string): Promise<void> {
 
 export async function install(
   githubUrl: string,
-  options?: { installScope?: InstallScope; installedByUserId?: string | null }
+  options?: { installScope?: InstallScope; installedByUserId?: string | null; branch?: string | null }
 ): Promise<ExtensionInfo> {
   const baseDir = extensionsDir();
   mkdirSync(baseDir, { recursive: true });
@@ -357,11 +355,17 @@ export async function install(
     options?.installedByUserId && options.installedByUserId.trim()
       ? options.installedByUserId.trim()
       : null;
+  const branch = options?.branch && options.branch.trim() ? options.branch.trim() : null;
 
   // Clone to a temp dir first so we can read the manifest
   const tempDir = join(baseDir, `_temp_${Date.now()}`);
+  const cloneCmd = ["git", "clone", "--depth", "1"];
+  if (branch) {
+    cloneCmd.push("--branch", branch);
+  }
+  cloneCmd.push(githubUrl, tempDir);
   const cloneProc = Bun.spawnSync({
-    cmd: ["git", "clone", "--depth", "1", githubUrl, tempDir],
+    cmd: cloneCmd,
   });
   if (cloneProc.exitCode !== 0) {
     rmSync(tempDir, { recursive: true, force: true });
@@ -420,9 +424,9 @@ export async function install(
   db.run(
     `INSERT INTO extensions (
       id, identifier, name, version, author, description, github, homepage,
-      permissions, enabled, metadata, install_scope, installed_by_user_id
+      permissions, enabled, metadata, install_scope, installed_by_user_id, branch
     )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', ?, ?, ?)`,
     [
       id,
       manifest.identifier,
@@ -435,6 +439,7 @@ export async function install(
       JSON.stringify(manifest.permissions || []),
       installScope,
       installedByUserId,
+      branch,
     ]
   );
 
@@ -473,10 +478,17 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
     : [];
   const existingPermissionSet = new Set(existingPermissions);
 
-  // Rebuild
-  const distDir = join(repo, "dist");
-  if (existsSync(distDir)) {
-    rmSync(distDir, { recursive: true });
+  // Rebuild — only delete dist/ if we can rebuild from source
+  const srcDir = join(repo, "src");
+  const hasBuildableSrc =
+    existsSync(srcDir) &&
+    (existsSync(join(srcDir, "backend.ts")) || existsSync(join(srcDir, "frontend.ts")));
+
+  if (hasBuildableSrc) {
+    const distDir = join(repo, "dist");
+    if (existsSync(distDir)) {
+      rmSync(distDir, { recursive: true });
+    }
   }
   await buildExtension(identifier);
   applyStorageSeeds(identifier, manifest);
@@ -834,6 +846,140 @@ export async function importLocalExtensions(): Promise<{
   return { imported, skipped };
 }
 
+// ─── Branch Management ────────────────────────────────────────────────────
+
+/** List remote branches from a GitHub URL (pre-install discovery). */
+export function listRemoteBranches(githubUrl: string): string[] {
+  const proc = Bun.spawnSync({
+    cmd: ["git", "ls-remote", "--heads", githubUrl],
+    timeout: 15_000,
+  });
+  if (proc.exitCode !== 0) {
+    throw new Error(`Failed to list remote branches: ${proc.stderr.toString()}`);
+  }
+  const output = proc.stdout.toString().trim();
+  if (!output) return [];
+  return output
+    .split("\n")
+    .map((line) => line.replace(/^.*refs\/heads\//, ""))
+    .filter(Boolean);
+}
+
+/** List branches for an already-installed extension by querying its remote. */
+export function getBranches(identifier: string): { current: string | null; branches: string[] } {
+  const repo = repoDir(identifier);
+  if (!existsSync(repo)) {
+    throw new Error(`Extension repo not found: ${identifier}`);
+  }
+
+  // Get current branch
+  const headProc = Bun.spawnSync({
+    cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+    cwd: repo,
+  });
+  const current = headProc.exitCode === 0 ? headProc.stdout.toString().trim() : null;
+
+  // List remote branches
+  const proc = Bun.spawnSync({
+    cmd: ["git", "ls-remote", "--heads", "origin"],
+    cwd: repo,
+    timeout: 15_000,
+  });
+  if (proc.exitCode !== 0) {
+    return { current, branches: current ? [current] : [] };
+  }
+  const output = proc.stdout.toString().trim();
+  const branches = output
+    ? output
+        .split("\n")
+        .map((line) => line.replace(/^.*refs\/heads\//, ""))
+        .filter(Boolean)
+    : [];
+
+  return { current, branches };
+}
+
+/** Switch an installed extension to a different branch, rebuild, and update DB. */
+export async function switchBranch(
+  identifier: string,
+  branch: string
+): Promise<ExtensionInfo> {
+  const repo = repoDir(identifier);
+  if (!existsSync(repo)) {
+    throw new Error(`Extension repo not found: ${identifier}`);
+  }
+
+  // Clean working tree
+  Bun.spawnSync({ cmd: ["git", "checkout", "."], cwd: repo });
+  Bun.spawnSync({ cmd: ["git", "clean", "-fd"], cwd: repo });
+
+  // Widen the fetch refspec — shallow/single-branch clones only track one branch
+  Bun.spawnSync({
+    cmd: ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+    cwd: repo,
+  });
+
+  // Fetch the target branch (--depth=1 to keep it shallow)
+  const fetchProc = Bun.spawnSync({
+    cmd: ["git", "fetch", "--depth", "1", "origin", branch],
+    cwd: repo,
+    timeout: 30_000,
+  });
+  if (fetchProc.exitCode !== 0) {
+    throw new Error(`git fetch failed: ${fetchProc.stderr.toString()}`);
+  }
+
+  // Checkout the branch
+  const checkoutProc = Bun.spawnSync({
+    cmd: ["git", "checkout", "-B", branch, `origin/${branch}`],
+    cwd: repo,
+  });
+  if (checkoutProc.exitCode !== 0) {
+    throw new Error(`git checkout failed: ${checkoutProc.stderr.toString()}`);
+  }
+
+  // Re-read manifest
+  const manifest = readManifest(identifier);
+
+  // Rebuild — only delete dist/ if we can rebuild from source.
+  // Extensions that ship pre-built dist/ or use custom build scripts
+  // would lose their bundles otherwise.
+  const srcDir = join(repo, "src");
+  const hasBuildableSrc =
+    existsSync(srcDir) &&
+    (existsSync(join(srcDir, "backend.ts")) || existsSync(join(srcDir, "frontend.ts")));
+
+  if (hasBuildableSrc) {
+    const distDir = join(repo, "dist");
+    if (existsSync(distDir)) {
+      rmSync(distDir, { recursive: true });
+    }
+  }
+  await buildExtension(identifier);
+  applyStorageSeeds(identifier, manifest);
+
+  // Update DB
+  const db = getDb();
+  db.run(
+    `UPDATE extensions SET name = ?, version = ?, author = ?, description = ?,
+     github = ?, homepage = ?, permissions = ?, branch = ?, updated_at = unixepoch()
+     WHERE identifier = ?`,
+    [
+      manifest.name,
+      manifest.version,
+      manifest.author,
+      manifest.description || "",
+      manifest.github,
+      manifest.homepage || "",
+      JSON.stringify(manifest.permissions || []),
+      branch,
+      identifier,
+    ]
+  );
+
+  return getExtensionByIdentifier(identifier)!;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 function rowToExtensionInfo(row: any): ExtensionInfo {
@@ -859,6 +1005,7 @@ function rowToExtensionInfo(row: any): ExtensionInfo {
 
   metadata.install_scope = row.install_scope || "operator";
   metadata.installed_by_user_id = row.installed_by_user_id || null;
+  metadata.branch = row.branch || null;
 
   return {
     id: row.id,

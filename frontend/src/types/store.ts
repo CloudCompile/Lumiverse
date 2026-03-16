@@ -426,8 +426,9 @@ export interface SpindleSlice {
   spindlePrivileged: boolean
   pendingPermissionRequest: PendingPermissionRequest | null
   loadExtensions: () => Promise<void>
-  installExtension: (githubUrl: string) => Promise<void>
+  installExtension: (githubUrl: string, branch?: string | null) => Promise<void>
   updateExtension: (id: string) => Promise<void>
+  switchBranch: (id: string, branch: string) => Promise<void>
   removeExtension: (id: string) => Promise<void>
   enableExtension: (id: string) => Promise<void>
   disableExtension: (id: string) => Promise<void>
