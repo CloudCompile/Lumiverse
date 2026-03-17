@@ -34,6 +34,7 @@ nav = [
     { "Variables" = "backend-api/variables.md" },
     { "Characters" = "backend-api/characters.md" },
     { "Chats" = "backend-api/chats.md" },
+    { "World Books" = "backend-api/world-books.md" },
     { "Chat Mutation" = "backend-api/chat-mutation.md" },
     { "Event Tracking" = "backend-api/event-tracking.md" },
     { "Secure Enclave" = "backend-api/secure-enclave.md" },

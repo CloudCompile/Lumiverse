@@ -17,6 +17,12 @@ import type {
   CharacterUpdateDTO,
   ChatDTO,
   ChatUpdateDTO,
+  WorldBookDTO,
+  WorldBookCreateDTO,
+  WorldBookUpdateDTO,
+  WorldBookEntryDTO,
+  WorldBookEntryCreateDTO,
+  WorldBookEntryUpdateDTO,
 } from "lumiverse-spindle-types";
 
 // ─── State ───────────────────────────────────────────────────────────────
@@ -692,6 +698,74 @@ const spindleApi: SpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "chats_delete", requestId, chatId, userId });
       return result as boolean;
+    },
+  },
+
+  world_books: {
+    async list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: WorldBookDTO[]; total: number }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "world_books_list",
+        requestId,
+        limit: options?.limit,
+        offset: options?.offset,
+        userId: options?.userId,
+      });
+      return result as { data: WorldBookDTO[]; total: number };
+    },
+    async get(worldBookId: string, userId?: string): Promise<WorldBookDTO | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_get", requestId, worldBookId, userId });
+      return result as WorldBookDTO | null;
+    },
+    async create(input: WorldBookCreateDTO, userId?: string): Promise<WorldBookDTO> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_create", requestId, input, userId });
+      return result as WorldBookDTO;
+    },
+    async update(worldBookId: string, input: WorldBookUpdateDTO, userId?: string): Promise<WorldBookDTO> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_update", requestId, worldBookId, input, userId });
+      return result as WorldBookDTO;
+    },
+    async delete(worldBookId: string, userId?: string): Promise<boolean> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_delete", requestId, worldBookId, userId });
+      return result as boolean;
+    },
+    entries: {
+      async list(worldBookId: string, options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: WorldBookEntryDTO[]; total: number }> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "world_book_entries_list",
+          requestId,
+          worldBookId,
+          limit: options?.limit,
+          offset: options?.offset,
+          userId: options?.userId,
+        });
+        return result as { data: WorldBookEntryDTO[]; total: number };
+      },
+      async get(entryId: string, userId?: string): Promise<WorldBookEntryDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "world_book_entries_get", requestId, entryId, userId });
+        return result as WorldBookEntryDTO | null;
+      },
+      async create(worldBookId: string, input: WorldBookEntryCreateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "world_book_entries_create", requestId, worldBookId, input, userId });
+        return result as WorldBookEntryDTO;
+      },
+      async update(entryId: string, input: WorldBookEntryUpdateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "world_book_entries_update", requestId, entryId, input, userId });
+        return result as WorldBookEntryDTO;
+      },
+      async delete(entryId: string, userId?: string): Promise<boolean> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "world_book_entries_delete", requestId, entryId, userId });
+        return result as boolean;
+      },
     },
   },
 

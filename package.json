@@ -1,6 +1,6 @@
 {
   "name": "lumiverse-backend",
-  "version": "0.5.1",
+  "version": "0.5.5",
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
@@ -10,7 +10,8 @@
     "runner:dev": "bun run scripts/runner.ts -- --dev",
     "start:all": "bun run build:frontend && FRONTEND_DIR=$(cd ../LumiverseFrontend/dist && pwd) bun run start",
     "build:frontend": "cd frontend && bun install && bun run build",
-    "migrate:st": "bun run scripts/migrate-sillytavern.ts"
+    "migrate:st": "bun run scripts/migrate-sillytavern.ts",
+    "release": "bash scripts/release.sh"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.26.2",
@@ -21,7 +22,7 @@
     "gpt-tokenizer": "^2.8.1",
     "hono": "^4.7.0",
     "js-tiktoken": "^1.0.16",
-    "lumiverse-spindle-types": "0.1.5",
+    "lumiverse-spindle-types": "0.1.6",
     "sharp": "^0.34.5"
   },
   "devDependencies": {
