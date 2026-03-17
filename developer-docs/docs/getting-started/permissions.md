@@ -30,6 +30,7 @@ These are always available:
 | `"ephemeral_storage"` | Use temporary storage with TTL, memory pooling, and per-extension quotas |
 | `"characters"` | Full CRUD on character cards (list, get, create, update, delete) |
 | `"chats"` | CRUD on chat sessions (list, get, update, delete) + get active chat |
+| `"world_books"` | Full CRUD on world books and their entries (list, get, create, update, delete) |
 | `"chat_mutation"` | Read and modify chat messages (append, update, delete) |
 | `"event_tracking"` | Track, query, and replay extension-level telemetry events |
 | `"ui_panels"` | Create floating widgets and docked edge panels that overlay/consume screen space |

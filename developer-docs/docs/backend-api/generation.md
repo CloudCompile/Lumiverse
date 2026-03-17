@@ -57,6 +57,99 @@ const results = await spindle.generate.batch({
 
 ---
 
+## Structured Output
+
+Some providers support native structured output, ensuring the LLM response conforms to a JSON schema. Pass provider-specific parameters via the `parameters` field.
+
+### Google Gemini
+
+Use `responseMimeType` and `responseSchema` to request structured JSON output:
+
+```ts
+const result = await spindle.generate.raw({
+  messages: [
+    { role: 'user', content: 'Extract the character name and age from: "Alice is 25 years old."' },
+  ],
+  parameters: {
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        age: { type: 'integer' },
+      },
+      required: ['name', 'age'],
+    },
+  },
+  connection_id: 'my-gemini-connection',
+})
+// result.content: '{"name": "Alice", "age": 25}'
+```
+
+`responseJsonSchema` is accepted as an alias for `responseSchema`.
+
+### OpenAI-compatible
+
+Use the standard `response_format` parameter:
+
+```ts
+const result = await spindle.generate.raw({
+  messages: [
+    { role: 'user', content: 'Extract the character name and age.' },
+  ],
+  parameters: {
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'character_info',
+        schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            age: { type: 'integer' },
+          },
+          required: ['name', 'age'],
+        },
+      },
+    },
+  },
+  connection_id: 'my-openai-connection',
+})
+```
+
+### Anthropic
+
+Anthropic uses tool definitions for structured output. Define a tool with the desired output schema and set `tool_choice` to force it:
+
+```ts
+const result = await spindle.generate.raw({
+  messages: [
+    { role: 'user', content: 'Extract the character name and age.' },
+  ],
+  parameters: {
+    tools: [{
+      name: 'extract_info',
+      description: 'Extract structured character information',
+      input_schema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          age: { type: 'integer' },
+        },
+        required: ['name', 'age'],
+      },
+    }],
+    tool_choice: { type: 'tool', name: 'extract_info' },
+  },
+  connection_id: 'my-anthropic-connection',
+})
+```
+
+!!! tip
+    Provider-specific parameters are passed through to the underlying API. Any parameter not explicitly handled by Lumiverse is forwarded directly, so you can use provider-specific features even if they aren't documented here.
+
+---
+
 ## Connection Profiles
 
 Extensions with the `generation` permission can discover and inspect the user's connection profiles. This lets you present a UI for selecting which LLM provider/model to use, or programmatically pick the right connection for your use case.
