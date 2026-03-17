@@ -8,6 +8,8 @@ import type {
   ConnectionProfileDTO,
   CharacterDTO,
   ChatDTO,
+  WorldBookDTO,
+  WorldBookEntryDTO,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
@@ -23,6 +25,7 @@ import * as generateSvc from "../services/generate.service";
 import * as connectionsSvc from "../services/connections.service";
 import * as charactersSvc from "../services/characters.service";
 import * as chatsSvc from "../services/chats.service";
+import * as worldBooksSvc from "../services/world-books.service";
 import * as settingsSvc from "../services/settings.service";
 import { getEphemeralPoolConfig } from "./ephemeral-pool.service";
 import { getDb } from "../db/connection";
@@ -676,6 +679,38 @@ export class WorkerHost {
         break;
       case "chats_delete":
         this.handleChatsDelete(msg.requestId, msg.chatId, msg.userId);
+        break;
+      // ─── World Books (gated: "world_books") ──────────────────────────
+      case "world_books_list":
+        this.handleWorldBooksList(msg.requestId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "world_books_get":
+        this.handleWorldBooksGet(msg.requestId, msg.worldBookId, msg.userId);
+        break;
+      case "world_books_create":
+        this.handleWorldBooksCreate(msg.requestId, msg.input, msg.userId);
+        break;
+      case "world_books_update":
+        this.handleWorldBooksUpdate(msg.requestId, msg.worldBookId, msg.input, msg.userId);
+        break;
+      case "world_books_delete":
+        this.handleWorldBooksDelete(msg.requestId, msg.worldBookId, msg.userId);
+        break;
+      // ─── World Book Entries (gated: "world_books") ────────────────────
+      case "world_book_entries_list":
+        this.handleWorldBookEntriesList(msg.requestId, msg.worldBookId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "world_book_entries_get":
+        this.handleWorldBookEntriesGet(msg.requestId, msg.entryId, msg.userId);
+        break;
+      case "world_book_entries_create":
+        this.handleWorldBookEntriesCreate(msg.requestId, msg.worldBookId, msg.input, msg.userId);
+        break;
+      case "world_book_entries_update":
+        this.handleWorldBookEntriesUpdate(msg.requestId, msg.entryId, msg.input, msg.userId);
+        break;
+      case "world_book_entries_delete":
+        this.handleWorldBookEntriesDelete(msg.requestId, msg.entryId, msg.userId);
         break;
       case "log":
         this.handleLog(msg.level, msg.message);
@@ -3018,6 +3053,259 @@ export class WorkerHost {
       this.enforceScopedUser(resolvedUserId);
 
       const deleted = chatsSvc.deleteChat(resolvedUserId, chatId);
+      this.postToWorker({ type: "response", requestId, result: deleted });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── World Books CRUD (gated: "world_books") ─────────────────────────
+
+  private toWorldBookDTO(wb: any): WorldBookDTO {
+    return {
+      id: wb.id,
+      name: wb.name || "",
+      description: wb.description || "",
+      metadata: (typeof wb.metadata === "object" && wb.metadata) ? wb.metadata : {},
+      created_at: wb.created_at,
+      updated_at: wb.updated_at,
+    };
+  }
+
+  private toWorldBookEntryDTO(e: any): WorldBookEntryDTO {
+    return {
+      id: e.id,
+      world_book_id: e.world_book_id,
+      uid: e.uid || "",
+      key: Array.isArray(e.key) ? e.key : [],
+      keysecondary: Array.isArray(e.keysecondary) ? e.keysecondary : [],
+      content: e.content || "",
+      comment: e.comment || "",
+      position: e.position ?? 0,
+      depth: e.depth ?? 4,
+      role: e.role || null,
+      order_value: e.order_value ?? 100,
+      selective: !!e.selective,
+      constant: !!e.constant,
+      disabled: !!e.disabled,
+      group_name: e.group_name || "",
+      group_override: !!e.group_override,
+      group_weight: e.group_weight ?? 100,
+      probability: e.probability ?? 100,
+      scan_depth: e.scan_depth ?? null,
+      case_sensitive: !!e.case_sensitive,
+      match_whole_words: !!e.match_whole_words,
+      automation_id: e.automation_id || null,
+      use_regex: !!e.use_regex,
+      prevent_recursion: !!e.prevent_recursion,
+      exclude_recursion: !!e.exclude_recursion,
+      delay_until_recursion: !!e.delay_until_recursion,
+      priority: e.priority ?? 10,
+      sticky: e.sticky ?? 0,
+      cooldown: e.cooldown ?? 0,
+      delay: e.delay ?? 0,
+      selective_logic: e.selective_logic ?? 0,
+      use_probability: e.use_probability !== undefined ? !!e.use_probability : true,
+      vectorized: !!e.vectorized,
+      extensions: (typeof e.extensions === "object" && e.extensions) ? e.extensions : {},
+      created_at: e.created_at,
+      updated_at: e.updated_at,
+    };
+  }
+
+  private handleWorldBooksList(requestId: string, limit?: number, offset?: number, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const result = worldBooksSvc.listWorldBooks(resolvedUserId, {
+        limit: Math.min(limit || 50, 200),
+        offset: offset || 0,
+      });
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          data: result.data.map((wb) => this.toWorldBookDTO(wb)),
+          total: result.total,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksGet(requestId: string, worldBookId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const wb = worldBooksSvc.getWorldBook(resolvedUserId, worldBookId);
+      this.postToWorker({ type: "response", requestId, result: wb ? this.toWorldBookDTO(wb) : null });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksCreate(requestId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      if (!input?.name || typeof input.name !== "string" || !input.name.trim()) {
+        throw new Error("World book name is required");
+      }
+
+      const wb = worldBooksSvc.createWorldBook(resolvedUserId, {
+        name: input.name,
+        description: input.description,
+        metadata: input.metadata,
+      });
+      this.postToWorker({ type: "response", requestId, result: this.toWorldBookDTO(wb) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksUpdate(requestId: string, worldBookId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const wb = worldBooksSvc.updateWorldBook(resolvedUserId, worldBookId, input || {});
+      if (!wb) throw new Error("World book not found");
+      this.postToWorker({ type: "response", requestId, result: this.toWorldBookDTO(wb) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksDelete(requestId: string, worldBookId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const deleted = worldBooksSvc.deleteWorldBook(resolvedUserId, worldBookId);
+      this.postToWorker({ type: "response", requestId, result: deleted });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── World Book Entries CRUD (gated: "world_books") ───────────────────
+
+  private handleWorldBookEntriesList(
+    requestId: string,
+    worldBookId: string,
+    limit?: number,
+    offset?: number,
+    userId?: string,
+  ): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const result = worldBooksSvc.listEntriesPaginated(resolvedUserId, worldBookId, {
+        limit: Math.min(limit || 50, 200),
+        offset: offset || 0,
+      });
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          data: result.data.map((e) => this.toWorldBookEntryDTO(e)),
+          total: result.total,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBookEntriesGet(requestId: string, entryId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const entry = worldBooksSvc.getEntry(resolvedUserId, entryId);
+      this.postToWorker({ type: "response", requestId, result: entry ? this.toWorldBookEntryDTO(entry) : null });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBookEntriesCreate(requestId: string, worldBookId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const entry = worldBooksSvc.createEntry(resolvedUserId, worldBookId, input || {});
+      if (!entry) throw new Error("World book not found");
+      this.postToWorker({ type: "response", requestId, result: this.toWorldBookEntryDTO(entry) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBookEntriesUpdate(requestId: string, entryId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const entry = worldBooksSvc.updateEntry(resolvedUserId, entryId, input || {});
+      if (!entry) throw new Error("World book entry not found");
+      this.postToWorker({ type: "response", requestId, result: this.toWorldBookEntryDTO(entry) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBookEntriesDelete(requestId: string, entryId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const deleted = worldBooksSvc.deleteEntry(resolvedUserId, entryId);
       this.postToWorker({ type: "response", requestId, result: deleted });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });

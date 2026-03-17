@@ -202,6 +202,7 @@ export class GoogleProvider implements LlmProvider {
   /** Keys explicitly handled by Google's buildBody — excluded from passthrough. */
   private static readonly HANDLED_PARAMS = new Set([
     "temperature", "max_tokens", "top_p", "top_k", "stop", "thinkingConfig",
+    "responseMimeType", "responseSchema", "responseJsonSchema",
   ]);
 
   private buildBody(request: GenerationRequest): any {
@@ -234,6 +235,16 @@ export class GoogleProvider implements LlmProvider {
     // Thinking configuration for Gemini 2.5+ and 3.x models
     if (params.thinkingConfig) {
       generationConfig.thinkingConfig = params.thinkingConfig;
+    }
+
+    // Structured output: responseMimeType and responseSchema go inside generationConfig
+    if (params.responseMimeType !== undefined) {
+      generationConfig.responseMimeType = params.responseMimeType;
+    }
+    // Accept both "responseSchema" (Google's native name) and "responseJsonSchema" (alias)
+    const responseSchema = params.responseSchema ?? params.responseJsonSchema;
+    if (responseSchema !== undefined) {
+      generationConfig.responseSchema = responseSchema;
     }
 
     if (Object.keys(generationConfig).length > 0) {
