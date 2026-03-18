@@ -21,7 +21,14 @@ export function initDatabase(path?: string): Database {
   db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA cache_size = -64000");
   db.run("PRAGMA temp_store = MEMORY");
-  db.run("PRAGMA mmap_size = 268435456");
+  // Memory-mapped I/O: disabled on Windows where mandatory file locks from
+  // mmap regions conflict with WAL checkpointing, causing freezes over time.
+  const isWindows = process.platform === "win32";
+  db.run(`PRAGMA mmap_size = ${isWindows ? 0 : 268435456}`);
+  // Checkpoint the WAL more aggressively to prevent unbounded WAL growth.
+  // Default (1000 pages) can let the WAL grow large on busy instances;
+  // on Windows this compounds the file-locking pressure.
+  db.run("PRAGMA wal_autocheckpoint = 500");
 
   return db;
 }

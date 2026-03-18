@@ -94,6 +94,7 @@ export class AnthropicProvider implements LlmProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -106,6 +107,7 @@ export class AnthropicProvider implements LlmProvider {
     let buffer = "";
     let streamInputTokens = 0;
 
+    try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -151,6 +153,9 @@ export class AnthropicProvider implements LlmProvider {
           // Skip malformed SSE lines
         }
       }
+    }
+    } finally {
+      reader.cancel().catch(() => {});
     }
   }
 

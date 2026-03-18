@@ -85,6 +85,7 @@ export class PollinationsProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -97,6 +98,7 @@ export class PollinationsProvider extends OpenAICompatibleProvider {
     let buffer = "";
     let reasoningKey: "reasoning" | "reasoning_content" | null = null;
 
+    try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -137,6 +139,9 @@ export class PollinationsProvider extends OpenAICompatibleProvider {
           // Skip malformed SSE lines
         }
       }
+    }
+    } finally {
+      reader.cancel().catch(() => {});
     }
   }
 }

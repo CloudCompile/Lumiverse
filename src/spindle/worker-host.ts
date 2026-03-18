@@ -60,6 +60,8 @@ import { join, resolve, relative, sep } from "path";
 
 const EPHEMERAL_MAX_FILES = 250;
 
+const CORS_PROXY_TIMEOUT_MS = 30_000;
+
 function requestWithAddressFamily(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string },
@@ -78,6 +80,7 @@ function requestWithAddressFamily(
         method: options.method || "GET",
         headers: options.headers,
         family,
+        timeout: CORS_PROXY_TIMEOUT_MS,
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -100,6 +103,9 @@ function requestWithAddressFamily(
       }
     );
 
+    request.on("timeout", () => {
+      request.destroy(new Error(`CORS proxy request timed out after ${CORS_PROXY_TIMEOUT_MS}ms`));
+    });
     request.on("error", reject);
     if (options.body) request.write(options.body);
     request.end();

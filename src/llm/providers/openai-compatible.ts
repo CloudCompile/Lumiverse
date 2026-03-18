@@ -83,6 +83,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -98,6 +99,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     // check both on every chunk.
     let reasoningKey: "reasoning" | "reasoning_content" | null = null;
 
+    try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -153,6 +155,9 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
           // Skip malformed SSE lines
         }
       }
+    }
+    } finally {
+      reader.cancel().catch(() => {});
     }
   }
 

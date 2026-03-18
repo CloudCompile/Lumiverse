@@ -238,6 +238,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -249,6 +250,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -335,6 +337,9 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
           // Skip malformed SSE lines
         }
       }
+    }
+    } finally {
+      reader.cancel().catch(() => {});
     }
   }
 }
