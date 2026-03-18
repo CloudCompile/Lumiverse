@@ -44,6 +44,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const activeProfileId = useStore((s) => s.activeProfileId)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
+  const regenFeedback = useStore((s) => s.regenFeedback)
   const guidedGenerations = useStore((s) => s.guidedGenerations)
   const quickReplySets = useStore((s) => s.quickReplySets)
   const personas = useStore((s) => s.personas)
@@ -258,7 +259,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
   }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides])
 
-  const handleRegenerate = useCallback(async () => {
+  const doRegenerate = useCallback(async (feedback?: string | null) => {
     if (isStreaming) return
     const nonce = ++generationNonceRef.current
 
@@ -302,13 +303,18 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     // 4. Fire generation
     try {
-      const res = await generateApi.start({
+      const genOpts: import('@/api/generate').GenerateRequest = {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         preset_id: getActivePresetForGeneration() || undefined,
         generation_type: 'normal',
-      })
+      }
+      if (feedback) {
+        genOpts.regen_feedback = feedback
+        genOpts.regen_feedback_position = regenFeedback.position
+      }
+      const res = await generateApi.start(genOpts)
       if (generationNonceRef.current !== nonce) return
       startStreaming(res.generationId)
       consumeOneshotGuides()
@@ -321,7 +327,19 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setStreamingError(msg)
       toast.error(msg, { title: 'Regeneration Failed' })
     }
-  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, getActivePresetForGeneration, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, getActivePresetForGeneration, regenFeedback.position, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+
+  const handleRegenerate = useCallback(() => {
+    if (isStreaming) return
+    if (regenFeedback.enabled) {
+      openModal('regenFeedback', {
+        onSubmit: (feedback: string) => doRegenerate(feedback),
+        onSkip: () => doRegenerate(),
+      })
+    } else {
+      doRegenerate()
+    }
+  }, [isStreaming, regenFeedback.enabled, openModal, doRegenerate])
 
   const handleContinue = useCallback(async () => {
     if (isStreaming) return

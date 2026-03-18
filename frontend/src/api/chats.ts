@@ -22,8 +22,8 @@ export const chatsApi = {
     return get<ChatSummary[]>('/chats/character-chats/' + characterId)
   },
 
-  get(id: string) {
-    return get<Chat>(`/chats/${id}`)
+  get(id: string, params?: { messages?: boolean }) {
+    return get<Chat>(`/chats/${id}`, params)
   },
 
   create(input: CreateChatInput) {
@@ -67,7 +67,7 @@ export const chatsApi = {
 }
 
 export const messagesApi = {
-  list(chatId: string, params?: { limit?: number; offset?: number }) {
+  list(chatId: string, params?: { limit?: number; offset?: number; tail?: boolean }) {
     return get<PaginatedResult<Message>>(`/chats/${chatId}/messages`, params)
   },
 

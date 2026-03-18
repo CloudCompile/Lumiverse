@@ -50,9 +50,17 @@ export default function ChatView() {
 
     const loadChat = async () => {
       try {
-        const chat = await chatsApi.get(chatId)
+        const pageSize = useStore.getState().messagesPerPage || 50
+
+        // Fetch chat metadata and last messages in parallel
+        const [chat, msgPage] = await Promise.all([
+          chatsApi.get(chatId, { messages: false }),
+          messagesApi.list(chatId, { limit: pageSize, tail: true }),
+        ])
         if (cancelled) return
+
         setActiveChat(chatId, chat.character_id)
+        setMessages(msgPage.data, msgPage.total)
 
         // Load per-chat wallpaper from metadata
         const wp = chat.metadata?.wallpaper as import('@/types/store').WallpaperRef | undefined
@@ -88,22 +96,6 @@ export default function ChatView() {
               }).catch(() => {})
             }
           }
-        }
-
-        // Load the last batch of messages (tail-first)
-        const PAGE_SIZE = 100
-        // First request: try loading PAGE_SIZE messages from the start
-        const first = await messagesApi.list(chatId, { limit: PAGE_SIZE, offset: 0 })
-        if (cancelled) return
-        if (first.total <= PAGE_SIZE) {
-          // Small chat — we have all messages already
-          setMessages(first.data, first.total)
-        } else {
-          // Large chat — load from the tail
-          const tailOffset = Math.max(0, first.total - PAGE_SIZE)
-          const tail = await messagesApi.list(chatId, { limit: PAGE_SIZE, offset: tailOffset })
-          if (cancelled) return
-          setMessages(tail.data, tail.total)
         }
       } catch (err) {
         console.error('[ChatView] Failed to load chat:', err)

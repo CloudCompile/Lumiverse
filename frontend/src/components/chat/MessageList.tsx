@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useMemo } from 'react'
+import { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
 import { useChunkedMessages } from '@/hooks/useChunkedMessages'
 import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
@@ -25,7 +25,8 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const bottomRef = useRef<HTMLDivElement>(null)
   const isNearBottomRef = useRef(true)
   const rafRef = useRef<number>(0)
-  const { visibleMessages, hasMore, loadMore, loadingOlder } = useChunkedMessages(messages, chatId)
+  const { visibleMessages, hasMore, loadMore, loadingOlder, justPrependedRef } = useChunkedMessages(messages, chatId)
+  const lastScrollHeightRef = useRef(0)
   const streamingContent = useStore((s) => s.streamingContent)
   const streamingReasoning = useStore((s) => s.streamingReasoning)
   const streamingError = useStore((s) => s.streamingError)
@@ -96,6 +97,23 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     isNearBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < threshold
   }, [])
+
+  // Scroll anchoring: when older messages are prepended, adjust scrollTop so
+  // the user's viewport stays on the same content instead of jumping to the top.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+
+    if (justPrependedRef.current) {
+      justPrependedRef.current = false
+      const heightDiff = el.scrollHeight - lastScrollHeightRef.current
+      if (heightDiff > 0 && lastScrollHeightRef.current > 0) {
+        el.scrollTop += heightDiff
+      }
+    }
+
+    lastScrollHeightRef.current = el.scrollHeight
+  })
 
   // RAF-batched auto-scroll during streaming
   useEffect(() => {

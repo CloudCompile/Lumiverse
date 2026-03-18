@@ -112,6 +112,10 @@ export interface AssemblyContext {
   precomputedVectorEntries?: { entry: import("../types/world-book").WorldBookEntry; score: number }[];
   /** Pipeline results from Lumi sidecar execution. */
   lumiPipelineResults?: import("../types/lumi-engine").LumiPipelineResult;
+  /** User-provided feedback text for regeneration guidance. */
+  regenFeedback?: string;
+  /** Where to inject regen feedback: 'system' (last system msg) or 'user' (last user msg). */
+  regenFeedbackPosition?: "system" | "user";
 }
 
 /** Lightweight summary of a council tool result for macro access (avoids importing spindle-types). */

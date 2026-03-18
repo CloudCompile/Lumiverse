@@ -3,16 +3,16 @@ import { messagesApi } from '@/api/chats'
 import { useStore } from '@/store'
 import type { Message } from '@/types/api'
 
-const CHUNK_SIZE = 50
 const MAX_DOM_MESSAGES = 500
-const SERVER_PAGE_SIZE = 100
 
 export function useChunkedMessages(messages: Message[], chatId?: string | null) {
-  const [displayCount, setDisplayCount] = useState(CHUNK_SIZE)
+  const messagesPerPage = useStore((s) => s.messagesPerPage) || 50
+  const [displayCount, setDisplayCount] = useState(messagesPerPage)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const loadingRef = useRef(false)
   const prevLengthRef = useRef(0)
   const prevChatIdRef = useRef(chatId)
+  const justPrependedRef = useRef(false)
 
   const totalChatLength = useStore((s) => s.totalChatLength)
   const prependMessages = useStore((s) => s.prependMessages)
@@ -20,18 +20,18 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
   useLayoutEffect(() => {
     if (chatId !== prevChatIdRef.current) {
       prevChatIdRef.current = chatId
-      setDisplayCount(CHUNK_SIZE)
+      setDisplayCount(messagesPerPage)
       prevLengthRef.current = messages.length
     }
-  }, [chatId, messages.length])
+  }, [chatId, messages.length, messagesPerPage])
 
   useEffect(() => {
     const currentLength = messages.length
     if (currentLength < prevLengthRef.current - 10) {
-      setDisplayCount(CHUNK_SIZE)
+      setDisplayCount(messagesPerPage)
     }
     prevLengthRef.current = currentLength
-  }, [messages.length])
+  }, [messages.length, messagesPerPage])
 
   const visibleMessages = useMemo(() => {
     const start = Math.max(0, messages.length - displayCount)
@@ -50,7 +50,7 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
 
     // If we have more in-memory messages to reveal, just expand the display window
     if (messages.length > displayCount) {
-      setDisplayCount((prev) => Math.min(prev + CHUNK_SIZE, MAX_DOM_MESSAGES))
+      setDisplayCount((prev) => Math.min(prev + messagesPerPage, MAX_DOM_MESSAGES))
       setTimeout(() => { loadingRef.current = false }, 100)
       return
     }
@@ -63,7 +63,7 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
 
     // Calculate the offset for the next batch of older messages
     const oldestLoaded = messages.length > 0 ? messages[0].index_in_chat : 0
-    const offset = Math.max(0, oldestLoaded - SERVER_PAGE_SIZE)
+    const offset = Math.max(0, oldestLoaded - messagesPerPage)
     const limit = oldestLoaded - offset
 
     if (limit <= 0) {
@@ -75,6 +75,7 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
     messagesApi
       .list(chatId, { limit, offset })
       .then((result) => {
+        justPrependedRef.current = true
         prependMessages(result.data)
         // Expand display count to show the newly loaded messages
         setDisplayCount((prev) => Math.min(prev + result.data.length, MAX_DOM_MESSAGES))
@@ -86,11 +87,11 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
         setLoadingOlder(false)
         setTimeout(() => { loadingRef.current = false }, 100)
       })
-  }, [chatId, messages, displayCount, totalChatLength, prependMessages])
+  }, [chatId, messages, displayCount, totalChatLength, prependMessages, messagesPerPage])
 
   const resetToBottom = useCallback(() => {
-    setDisplayCount(CHUNK_SIZE)
-  }, [])
+    setDisplayCount(messagesPerPage)
+  }, [messagesPerPage])
 
   return {
     visibleMessages,
@@ -98,6 +99,7 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
     loadMore,
     loadingOlder,
     resetToBottom,
+    justPrependedRef,
     totalCount: totalChatLength,
     displayCount: Math.min(displayCount, messages.length),
   }

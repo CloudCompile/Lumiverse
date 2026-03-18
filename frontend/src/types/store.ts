@@ -179,6 +179,14 @@ export interface ContextFilters {
   loomItems: ContextFilterEntry
 }
 
+// ---- Regen Feedback Settings ----
+export type RegenFeedbackPosition = 'system' | 'user'
+
+export interface RegenFeedbackSettings {
+  enabled: boolean
+  position: RegenFeedbackPosition
+}
+
 // ---- Reasoning Settings ----
 export interface ReasoningSettings {
   prefix: string
@@ -233,6 +241,7 @@ export interface SettingsSlice {
   landingPageChatsDisplayed: number
   charactersPerPage: number
   personasPerPage: number
+  messagesPerPage: number
   chatSheldDisplayMode: 'minimal' | 'immersive' | 'bubble'
   bubbleUserAlign: 'left' | 'right'
   chatSheldEnterToSend: boolean
@@ -256,6 +265,7 @@ export interface SettingsSlice {
   reasoningSettings: ReasoningSettings
   promptBias: string
   globalWorldBooks: string[]
+  regenFeedback: RegenFeedbackSettings
   guidedGenerations: GuidedGeneration[]
   quickReplySets: QuickReplySet[]
   wallpaper: WallpaperSettings

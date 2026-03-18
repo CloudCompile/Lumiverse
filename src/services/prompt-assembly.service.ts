@@ -556,6 +556,34 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     await applyGuidedGenerations(result, guided, macroEnv, breakdown);
   }
 
+  // Regen feedback injection (user-provided OOC guidance for regeneration)
+  if (ctx.regenFeedback) {
+    const oocContent = `[OOC: ${ctx.regenFeedback}]`;
+    if (ctx.regenFeedbackPosition === "system") {
+      // Append as a system message at the end
+      result.push({ role: "system", content: oocContent });
+      breakdown.push({ type: "utility", name: "Regen Feedback", role: "system", content: oocContent });
+    } else {
+      // Append to the last user message
+      let injected = false;
+      for (let i = result.length - 1; i >= 0; i--) {
+        if (result[i].role === "user") {
+          if (typeof result[i].content === "string") {
+            result[i] = { ...result[i], content: result[i].content + "\n" + oocContent };
+          }
+          injected = true;
+          breakdown.push({ type: "utility", name: "Regen Feedback", role: "user", content: oocContent });
+          break;
+        }
+      }
+      // Fallback: if no user message found, add as a user message
+      if (!injected) {
+        result.push({ role: "user", content: oocContent });
+        breakdown.push({ type: "utility", name: "Regen Feedback", role: "user", content: oocContent });
+      }
+    }
+  }
+
   // Continue type: append continueNudge (unless continuePrefill is on)
   if (ctx.generationType === "continue" && !completionSettings.continuePrefill) {
     const nudge = promptBehavior.continueNudge;

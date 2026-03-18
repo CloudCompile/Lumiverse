@@ -23,6 +23,15 @@ import type {
 import type { CouncilToolResult } from 'lumiverse-spindle-types'
 import type { ActivatedWorldInfoEntry } from '@/types/api'
 
+/**
+ * Fetch the latest messages using the tail endpoint (single request).
+ * Returns the last N messages from the chat, where N is the user's messagesPerPage setting.
+ */
+function fetchLatestMessages(chatId: string) {
+  const pageSize = useStore.getState().messagesPerPage || 50
+  return messagesApi.list(chatId, { limit: pageSize, tail: true })
+}
+
 export function useWebSocket() {
   const store = useStore
   const isAuthenticated = useStore((s) => s.isAuthenticated)
@@ -154,7 +163,7 @@ export function useWebSocket() {
             // Reconcile message list on error so any backend-staged empty messages
             // are reflected (or removed if the backend cleaned them up).
             if (payload.chatId) {
-              messagesApi.list(payload.chatId, { limit: 200 }).then((res) => {
+              fetchLatestMessages(payload.chatId).then((res) => {
                 const s = store.getState()
                 if (s.activeChatId === payload.chatId) {
                   s.setMessages(res.data, res.total)
@@ -185,7 +194,7 @@ export function useWebSocket() {
             // End streaming immediately, then reconcile the full message list
             // from backend source-of-truth to avoid id/index race conditions.
             state.endStreaming()
-            messagesApi.list(payload.chatId, { limit: 200 }).then((res) => {
+            fetchLatestMessages(payload.chatId).then((res) => {
               const s = store.getState()
               if (s.activeChatId === payload.chatId) {
                 s.setMessages(res.data, res.total)
@@ -237,7 +246,7 @@ export function useWebSocket() {
         // React render — no flash of empty content.
         const chatId = payload?.chatId || state.activeChatId
         if (chatId) {
-          messagesApi.list(chatId, { limit: 200 }).then((res) => {
+          fetchLatestMessages(chatId).then((res) => {
             const s = store.getState()
             if (s.activeChatId === chatId) {
               s.stopStreaming()

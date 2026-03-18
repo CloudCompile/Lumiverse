@@ -35,6 +35,8 @@ interface GenerateInput {
   generation_type?: GenerationType;
   impersonate_mode?: ImpersonateMode;
   target_character_id?: string;
+  regen_feedback?: string;
+  regen_feedback_position?: "system" | "user";
 }
 
 /** Lifecycle context passed from startGeneration → runGeneration */
@@ -230,6 +232,8 @@ async function runPromptPipeline(opts: {
   councilNamedResults?: Record<string, string>;
   precomputedVectorEntries?: VectorActivatedEntry[];
   lumiPipelineResults?: LumiPipelineResult;
+  regenFeedback?: string;
+  regenFeedbackPosition?: "system" | "user";
 }): Promise<PromptPipelineResult> {
   // Build spindle context
   let spindleContext: SpindleContext = {
@@ -269,6 +273,8 @@ async function runPromptPipeline(opts: {
       councilNamedResults: opts.councilNamedResults,
       precomputedVectorEntries: opts.precomputedVectorEntries,
       lumiPipelineResults: opts.lumiPipelineResults,
+      regenFeedback: opts.regenFeedback,
+      regenFeedbackPosition: opts.regenFeedbackPosition,
     });
 
     messages = assemblyResult.messages;
@@ -697,6 +703,8 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     councilNamedResults,
     precomputedVectorEntries,
     lumiPipelineResults,
+    regenFeedback: input.regen_feedback,
+    regenFeedbackPosition: input.regen_feedback_position,
   });
 
   let { messages } = pipeline;

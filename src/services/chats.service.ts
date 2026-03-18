@@ -302,6 +302,28 @@ export function listMessages(userId: string, chatId: string, pagination: Paginat
   );
 }
 
+export function listMessagesTail(userId: string, chatId: string, limit: number): PaginatedResult<Message> {
+  const db = getDb();
+  const countRow = db
+    .query("SELECT COUNT(*) as count FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ?")
+    .get(chatId, userId) as { count: number } | null;
+  const total = countRow?.count ?? 0;
+
+  // Fetch the last N messages by scanning the index in reverse, then reverse in memory
+  const rows = db
+    .query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? ORDER BY m.index_in_chat DESC LIMIT ?")
+    .all(chatId, userId, limit) as any[];
+  rows.reverse();
+
+  const offset = Math.max(0, total - rows.length);
+  return {
+    data: rows.map(rowToMessage),
+    total,
+    limit,
+    offset,
+  };
+}
+
 export function getMessage(userId: string, id: string): Message | null {
   const row = getDb().query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.id = ? AND c.user_id = ?").get(id, userId) as any;
   if (!row) return null;

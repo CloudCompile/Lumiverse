@@ -23,23 +23,30 @@ export default function SwipeControls({ message, chatId, variant = 'default' }: 
   const activeProfileId = useStore((s) => s.activeProfileId)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
+  const regenFeedback = useStore((s) => s.regenFeedback)
+  const openModal = useStore((s) => s.openModal)
 
   const isLastAssistantMessage = !message.is_user && messages.length > 0 && messages[messages.length - 1].id === message.id
   const regenerateNonceRef = useRef(0)
 
-  const handleRegenerate = useCallback(async () => {
+  const doRegenerate = useCallback(async (feedback?: string | null) => {
     if (isStreaming) return
     const nonce = ++regenerateNonceRef.current
     // Show streaming state immediately so the message shows the indicator
     beginStreaming(message.id)
     try {
-      const res = await generateApi.regenerate({
+      const genOpts: import('@/api/generate').GenerateRequest = {
         chat_id: chatId,
         message_id: message.id,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         preset_id: getActivePresetForGeneration() || undefined,
-      })
+      }
+      if (feedback) {
+        genOpts.regen_feedback = feedback
+        genOpts.regen_feedback_position = regenFeedback.position
+      }
+      const res = await generateApi.regenerate(genOpts)
       if (regenerateNonceRef.current !== nonce) return // stale response — a newer action took over
       startStreaming(res.generationId, message.id)
     } catch (err: any) {
@@ -54,10 +61,23 @@ export default function SwipeControls({ message, chatId, variant = 'default' }: 
     activeProfileId,
     activePersonaId,
     getActivePresetForGeneration,
+    regenFeedback.position,
     beginStreaming,
     startStreaming,
     setStreamingError,
   ])
+
+  const handleRegenerate = useCallback(() => {
+    if (isStreaming) return
+    if (regenFeedback.enabled) {
+      openModal('regenFeedback', {
+        onSubmit: (feedback: string) => doRegenerate(feedback),
+        onSkip: () => doRegenerate(),
+      })
+    } else {
+      doRegenerate()
+    }
+  }, [isStreaming, regenFeedback.enabled, openModal, doRegenerate])
 
   const handleSwipe = useCallback(
     async (direction: 'left' | 'right') => {

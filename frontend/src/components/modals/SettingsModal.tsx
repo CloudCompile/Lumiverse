@@ -384,6 +384,8 @@ function ChatSettings() {
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
+  const messagesPerPage = useStore((s) => s.messagesPerPage)
+  const regenFeedback = useStore((s) => s.regenFeedback)
   const setSetting = useStore((s) => s.setSetting)
   const isMac = navigator.platform.toUpperCase().includes('MAC')
 
@@ -528,6 +530,52 @@ function ChatSettings() {
         </div>
       )}
 
+      <h3 className={styles.sectionTitle} style={{ marginTop: 12 }}>Messages Per Page</h3>
+      <p className={styles.helperText}>
+        How many messages to load at a time. Lower values improve loading speed on slow connections.
+      </p>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>MESSAGES PER PAGE</label>
+        <div className={styles.segmented}>
+          {[25, 50, 100, 200].map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={clsx(styles.segmentedBtn, !![25, 50, 100, 200].includes(messagesPerPage ?? 50) && (messagesPerPage ?? 50) === value && styles.segmentedBtnActive)}
+              onClick={() => setSetting('messagesPerPage', value)}
+            >
+              {value}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={clsx(styles.segmentedBtn, ![25, 50, 100, 200].includes(messagesPerPage ?? 50) && styles.segmentedBtnActive)}
+            onClick={() => { if ([25, 50, 100, 200].includes(messagesPerPage ?? 50)) setSetting('messagesPerPage', 75) }}
+          >
+            Custom
+          </button>
+        </div>
+      </div>
+
+      {![25, 50, 100, 200].includes(messagesPerPage ?? 50) && (
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>CUSTOM VALUE</label>
+          <div className={styles.rangeRow}>
+            <input
+              type="range"
+              className={styles.rangeSlider}
+              min={10}
+              max={500}
+              step={5}
+              value={messagesPerPage ?? 50}
+              onChange={(e) => setSetting('messagesPerPage', parseInt(e.target.value, 10))}
+            />
+            <span className={styles.rangeValue}>{messagesPerPage ?? 50}</span>
+          </div>
+        </div>
+      )}
+
       <h3 className={styles.sectionTitle} style={{ marginTop: 12 }}>Input</h3>
 
       <div>
@@ -558,6 +606,48 @@ function ChatSettings() {
           <option value="right">Right</option>
         </select>
       </div>
+
+      <h3 className={styles.sectionTitle} style={{ marginTop: 12 }}>Regeneration Feedback</h3>
+      <p className={styles.helperText}>
+        When enabled, a feedback prompt appears before each regeneration or swipe, letting you guide the next response.
+      </p>
+
+      <div>
+        <label className={styles.toggle}>
+          <input
+            type="checkbox"
+            checked={regenFeedback.enabled}
+            onChange={(e) => setSetting('regenFeedback', { ...regenFeedback, enabled: e.target.checked })}
+          />
+          <span>Prompt for feedback on regenerate</span>
+        </label>
+      </div>
+
+      {regenFeedback.enabled && (
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Injection position</label>
+          <div className={styles.segmented}>
+            {([
+              { value: 'user', label: 'User Message' },
+              { value: 'system', label: 'System Prompt' },
+            ] as const).map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={clsx(styles.segmentedBtn, regenFeedback.position === opt.value && styles.segmentedBtnActive)}
+                onClick={() => setSetting('regenFeedback', { ...regenFeedback, position: opt.value })}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <p className={styles.toggleHint}>
+            {regenFeedback.position === 'user'
+              ? 'Feedback is appended to the last user message as [OOC: ...]'
+              : 'Feedback is appended to the end of the system prompt as [OOC: ...]'}
+          </p>
+        </div>
+      )}
     </div>
   )
 }

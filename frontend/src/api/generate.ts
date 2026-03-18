@@ -15,6 +15,8 @@ export interface GenerateRequest {
   generation_type?: GenerationType
   impersonate_mode?: ImpersonateMode
   target_character_id?: string
+  regen_feedback?: string
+  regen_feedback_position?: 'system' | 'user'
 }
 
 export interface GenerateResponse {

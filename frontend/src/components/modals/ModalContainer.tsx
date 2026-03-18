@@ -16,6 +16,7 @@ import PermissionRequestModal from './PermissionRequestModal'
 import CommandPalette from './CommandPalette'
 import RegexEditorModal from './RegexEditorModal'
 import RegexImportModal from './RegexImportModal'
+import RegenFeedbackModal from './RegenFeedbackModal'
 
 export default function ModalContainer() {
   const settingsModalOpen = useStore((s) => s.settingsModalOpen)
@@ -91,6 +92,20 @@ export default function ModalContainer() {
       {activeModal === 'toolEditor' && <ToolEditorModal />}
       {activeModal === 'regexEditor' && <RegexEditorModal />}
       {activeModal === 'regexImport' && <RegexImportModal />}
+
+      {activeModal === 'regenFeedback' && (
+        <RegenFeedbackModal
+          onSubmit={(feedback) => {
+            modalProps.onSubmit?.(feedback)
+            closeModal()
+          }}
+          onSkip={() => {
+            modalProps.onSkip?.()
+            closeModal()
+          }}
+          onCancel={closeModal}
+        />
+      )}
 
       <PermissionRequestModal />
       <CommandPalette />

@@ -55,6 +55,7 @@ app.get("/:id", (c) => {
   const userId = c.get("userId");
   const chat = svc.getChat(userId, c.req.param("id"));
   if (!chat) return c.json({ error: "Not found" }, 404);
+  if (c.req.query("messages") === "false") return c.json(chat);
   const messages = svc.getMessages(userId, chat.id);
   return c.json({ ...chat, messages });
 });
@@ -154,6 +155,12 @@ app.get("/:chatId/messages", (c) => {
   const chatId = c.req.param("chatId");
   const chat = svc.getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
+
+  // tail=true fetches the last N messages efficiently (single index scan from end)
+  if (c.req.query("tail") === "true") {
+    const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 1000);
+    return c.json(svc.listMessagesTail(userId, chatId, limit));
+  }
 
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
   return c.json(svc.listMessages(userId, chatId, pagination));
