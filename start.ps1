@@ -216,7 +216,7 @@ function Start-Backend {
     # Decide: visual runner or plain process
     $isTTY = [Environment]::UserInteractive -and -not $NoRunner
     if ($isTTY) {
-        $runnerArgs = @("run", "scripts/runner.ts")
+        $runnerArgs = @("run", "scripts/runner.tsx")
         if ($Mode -eq "dev") { $runnerArgs += @("--", "--dev") }
         Push-Location $BackendDir
         try { & bun @runnerArgs } finally { Pop-Location }

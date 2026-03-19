@@ -195,7 +195,7 @@ start_backend() {
     if [[ "$MODE" == "dev" ]]; then
       runner_args="-- --dev"
     fi
-    (cd "$BACKEND_DIR" && bun run scripts/runner.ts $runner_args)
+    (cd "$BACKEND_DIR" && bun run scripts/runner.tsx $runner_args)
   else
     # Non-interactive (piped, CI, --no-runner) — plain process
     echo ""
