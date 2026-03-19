@@ -15,6 +15,10 @@ export interface SummarizationSettings {
   autoMessageContext: number
   /** Messages to include when triggered manually. */
   manualMessageContext: number
+  /** Whether to limit the number of messages included in generation context. */
+  messageLimitEnabled: boolean
+  /** Maximum number of recent messages to include when messageLimit is enabled. */
+  messageLimitCount: number
 }
 
 export const DEFAULT_SUMMARIZATION_SETTINGS: SummarizationSettings = {
@@ -24,6 +28,8 @@ export const DEFAULT_SUMMARIZATION_SETTINGS: SummarizationSettings = {
   autoInterval: 10,
   autoMessageContext: 10,
   manualMessageContext: 10,
+  messageLimitEnabled: false,
+  messageLimitCount: 50,
 }
 
 /** Metadata keys stored on chat.metadata */

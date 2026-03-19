@@ -62,6 +62,15 @@ export default function ChatView() {
         setActiveChat(chatId, chat.character_id)
         setMessages(msgPage.data, msgPage.total)
 
+        // Auto-switch persona if this character has a binding
+        if (chat.character_id) {
+          const { characterPersonaBindings, personas: allPersonas, setActivePersona } = useStore.getState()
+          const boundPersonaId = characterPersonaBindings[chat.character_id]
+          if (boundPersonaId && allPersonas.some((p) => p.id === boundPersonaId)) {
+            setActivePersona(boundPersonaId)
+          }
+        }
+
         // Load per-chat wallpaper from metadata
         const wp = chat.metadata?.wallpaper as import('@/types/store').WallpaperRef | undefined
         if (wp?.image_id) {

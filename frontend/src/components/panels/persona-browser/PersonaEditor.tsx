@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare } from 'lucide-react'
+import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { personasApi } from '@/api/personas'
 import { worldBooksApi } from '@/api/world-books'
@@ -60,6 +60,10 @@ export default function PersonaEditor({
   const [descRole, setDescRole] = useState<string>(persona.metadata?.description_role ?? 'system')
   const openModal = useStore((s) => s.openModal)
   const activeChatId = useStore((s) => s.activeChatId)
+  const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const characters = useStore((s) => s.characters)
+  const characterPersonaBindings = useStore((s) => s.characterPersonaBindings)
+  const setCharacterPersonaBinding = useStore((s) => s.setCharacterPersonaBinding)
   const messages = useStore((s) => s.messages)
   const setMessages = useStore((s) => s.setMessages)
   const allPersonas = useStore((s) => s.personas)
@@ -242,6 +246,15 @@ export default function PersonaEditor({
     }
   }, [activeChatId, reattributing, persona.id, persona.name, messages, setMessages])
 
+  // Character-persona binding
+  const activeCharName = activeCharacterId ? characters.find((c) => c.id === activeCharacterId)?.name : null
+  const isBoundToActiveChar = activeCharacterId ? characterPersonaBindings[activeCharacterId] === persona.id : false
+
+  const handleToggleCharacterBinding = useCallback(() => {
+    if (!activeCharacterId) return
+    setCharacterPersonaBinding(activeCharacterId, isBoundToActiveChar ? null : persona.id)
+  }, [activeCharacterId, isBoundToActiveChar, persona.id, setCharacterPersonaBinding])
+
   return (
     <div className={styles.editor}>
       {/* Avatar zone */}
@@ -395,6 +408,27 @@ export default function PersonaEditor({
           </button>
         </div>
       </div>
+
+      {/* Character binding indicator */}
+      {activeCharacterId && (
+        <div className={styles.bindingRow}>
+          <button
+            type="button"
+            className={clsx(styles.bindingToggle, isBoundToActiveChar && styles.bindingToggleActive)}
+            onClick={handleToggleCharacterBinding}
+            title={
+              isBoundToActiveChar
+                ? `Unbind from ${activeCharName || 'character'}`
+                : `Bind to ${activeCharName || 'character'} — auto-switch to this persona when chatting with them`
+            }
+          >
+            <Link size={11} />
+          </button>
+          <span className={clsx(styles.bindingLabel, isBoundToActiveChar && styles.bindingLabelActive)}>
+            {isBoundToActiveChar ? `Bound to ${activeCharName}` : `Bind to ${activeCharName}`}
+          </span>
+        </div>
+      )}
 
       {/* Action buttons */}
       <div className={styles.actions}>

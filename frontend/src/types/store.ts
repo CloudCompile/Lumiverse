@@ -89,6 +89,8 @@ export type PersonaViewMode = 'grid' | 'list'
 export interface PersonasSlice {
   personas: Persona[]
   activePersonaId: string | null
+  /** Map of characterId → personaId for character-persona bindings */
+  characterPersonaBindings: Record<string, string>
   personaSearchQuery: string
   personaFilterType: PersonaFilterType
   personaSortField: PersonaSortField
@@ -98,6 +100,8 @@ export interface PersonasSlice {
 
   setPersonas: (personas: Persona[]) => void
   setActivePersona: (id: string | null) => void
+  /** Bind a persona to a character (or unbind with null) */
+  setCharacterPersonaBinding: (characterId: string, personaId: string | null) => void
   addPersona: (persona: Persona) => void
   updatePersona: (id: string, persona: Persona) => void
   removePersona: (id: string) => void

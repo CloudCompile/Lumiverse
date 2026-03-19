@@ -44,6 +44,8 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'personaSortField',
   'personaSortDirection',
   'personaFilterType',
+  // Character-persona bindings
+  'characterPersonaBindings',
   // Pack browser preferences
   'packFilterTab',
   'packSortField',

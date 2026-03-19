@@ -278,6 +278,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     "guidedGenerations", "promptBias",
     "theme",
     "contextFilters",
+    "summarization",
   ];
   const settingsMap = settingsSvc.getSettingsByKeys(ctx.userId, settingsKeys);
 
@@ -328,6 +329,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   const breakdown: AssemblyBreakdownEntry[] = [];
   const pendingAppends: PendingAppend[] = [];
   let chatHistoryInserted = false;
+  let chatHistoryCount = 0;
   let hasWiBefore = false;
   let hasWiAfter = false;
   let firstChatIdx = -1;
@@ -367,12 +369,23 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
       firstChatIdx = result.length;
 
-      // Insert all chat messages — evaluate macros in each message's content
+      // Apply message limit — keep only the N most recent messages when enabled.
+      // This works independently of summarization; users can use {{loomSummary}}
+      // in their preset to retain context from older messages.
+      const summarizationSettings = settingsMap.get("summarization") as
+        | { messageLimitEnabled?: boolean; messageLimitCount?: number }
+        | undefined;
+      let effectiveMessages = messages;
+      if (summarizationSettings?.messageLimitEnabled && summarizationSettings.messageLimitCount != null && summarizationSettings.messageLimitCount > 0) {
+        effectiveMessages = messages.slice(-summarizationSettings.messageLimitCount);
+      }
+
+      // Insert chat messages — evaluate macros in each message's content
       // For regenerate: skip the target message (it has a blank swipe)
       // Also skip messages marked as hidden drafts (extra.hidden === true)
       let historyCount = 0;
       const historyParts: string[] = [];
-      for (const msg of messages) {
+      for (const msg of effectiveMessages) {
         if (ctx.excludeMessageId && msg.id === ctx.excludeMessageId) continue;
         if (msg.extra?.hidden === true) continue;
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
@@ -399,6 +412,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       }
       breakdown.push({ type: "chat_history", name: "Chat History", messageCount: historyCount, firstMessageIndex: firstChatIdx, content: historyParts.join("\n") });
       chatHistoryInserted = true;
+      chatHistoryCount = historyCount;
 
       // Strip reasoning from older chat history messages based on keepInHistory
       if (reasoningVal) {
@@ -490,11 +504,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // firstChatIdx = index of the first chat message in `result[]`.
   // We need to compute lastChatIdx = index AFTER the last chat message.
 
-  // Count how many chat messages were inserted (from chat_history block)
-  const chatMsgCount = messages.filter((m) =>
-    !(ctx.excludeMessageId && m.id === ctx.excludeMessageId) && !(m.extra?.hidden === true)
-  ).length;
-  const lastChatIdx = firstChatIdx >= 0 ? firstChatIdx + chatMsgCount : result.length;
+  // Use the count tracked during chat_history insertion (respects message limit + exclusions)
+  const lastChatIdx = firstChatIdx >= 0 ? firstChatIdx + chatHistoryCount : result.length;
 
   // Position 0: "before" — insert just before chat history
   if (!hasWiBefore && wiCache.before.length > 0) {

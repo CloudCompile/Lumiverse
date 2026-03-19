@@ -305,15 +305,37 @@ function SummarizationConfig() {
         </Section>
       )}
 
-      {/* Message Truncation — stub for future */}
-      {mode !== 'disabled' && (
-        <Section icon={<Scissors size={16} />} title="Message Limit">
-          <div className={styles.warning}>
-            <AlertCircle size={14} />
-            <span>Message truncation will be available in a future update. Currently all messages are included in context.</span>
-          </div>
-        </Section>
-      )}
+      {/* Message Limit — trim chat history to N most recent messages during generation */}
+      <Section icon={<Scissors size={16} />} title="Message Limit" status={summarization.messageLimitEnabled}>
+        <div className={styles.toggleRow}>
+          <div
+            className={clsx(styles.toggle, summarization.messageLimitEnabled && styles.toggleOn)}
+            onClick={() => setSummarization({ messageLimitEnabled: !summarization.messageLimitEnabled })}
+            role="switch"
+            aria-checked={summarization.messageLimitEnabled}
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSummarization({ messageLimitEnabled: !summarization.messageLimitEnabled }) } }}
+          />
+          <span className={styles.toggleLabel}>Limit messages in context</span>
+        </div>
+        {summarization.messageLimitEnabled && (
+          <>
+            <NumberField
+              label="Message count"
+              hint="Keep the N most recent messages during generation"
+              value={summarization.messageLimitCount}
+              onChange={(v) => setSummarization({ messageLimitCount: v })}
+              min={1}
+              max={500}
+            />
+            <p className={styles.desc}>
+              {summarization.mode !== 'disabled'
+                ? 'Older messages will be trimmed from context. Use {{loomSummary}} in your preset to retain context from the summary.'
+                : 'Older messages will be trimmed from context. Enable summarization to preserve context from older messages via the {{loomSummary}} macro.'}
+            </p>
+          </>
+        )}
+      </Section>
     </div>
   )
 }

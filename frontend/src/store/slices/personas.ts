@@ -2,9 +2,10 @@ import type { StateCreator } from 'zustand'
 import type { PersonasSlice } from '@/types/store'
 import { settingsApi } from '@/api/settings'
 
-export const createPersonasSlice: StateCreator<PersonasSlice> = (set) => ({
+export const createPersonasSlice: StateCreator<PersonasSlice> = (set, get) => ({
   personas: [],
   activePersonaId: null,
+  characterPersonaBindings: {},
   personaSearchQuery: '',
   personaFilterType: 'all',
   personaSortField: 'name',
@@ -27,6 +28,16 @@ export const createPersonasSlice: StateCreator<PersonasSlice> = (set) => ({
     set({ activePersonaId: id })
     settingsApi.put('activePersonaId', id).catch(() => {})
   },
+  setCharacterPersonaBinding: (characterId, personaId) => {
+    const bindings = { ...get().characterPersonaBindings }
+    if (personaId) {
+      bindings[characterId] = personaId
+    } else {
+      delete bindings[characterId]
+    }
+    set({ characterPersonaBindings: bindings })
+    settingsApi.put('characterPersonaBindings', bindings).catch(() => {})
+  },
   addPersona: (persona) => set((s) => ({ personas: [...s.personas, persona] })),
   updatePersona: (id, persona) =>
     set((s) => ({ personas: s.personas.map((p) => (p.id === id ? persona : p)) })),
@@ -40,7 +51,20 @@ export const createPersonasSlice: StateCreator<PersonasSlice> = (set) => ({
         settingsApi.put('activePersonaId', activePersonaId).catch(() => {})
       }
 
-      return { personas, selectedPersonaId, activePersonaId }
+      // Clean up character bindings that reference the deleted persona
+      const bindings = { ...s.characterPersonaBindings }
+      let bindingsChanged = false
+      for (const [charId, personaId] of Object.entries(bindings)) {
+        if (personaId === id) {
+          delete bindings[charId]
+          bindingsChanged = true
+        }
+      }
+      if (bindingsChanged) {
+        settingsApi.put('characterPersonaBindings', bindings).catch(() => {})
+      }
+
+      return { personas, selectedPersonaId, activePersonaId, ...(bindingsChanged ? { characterPersonaBindings: bindings } : {}) }
     }),
   setPersonaSearchQuery: (query) => set({ personaSearchQuery: query }),
   setPersonaFilterType: (type) => {

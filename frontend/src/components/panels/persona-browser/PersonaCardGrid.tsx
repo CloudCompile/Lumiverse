@@ -1,4 +1,4 @@
-import { memo, type ReactNode } from 'react'
+import { Fragment, memo, useRef, useState, useEffect, useCallback, type ReactNode } from 'react'
 import { User, UserCheck, Crown, Link2 } from 'lucide-react'
 import { personasApi } from '@/api/personas'
 import LazyImage from '@/components/shared/LazyImage'
@@ -89,27 +89,52 @@ export default function PersonaCardGrid({
   onDoubleClick,
   renderEditor,
 }: PersonaCardGridProps) {
+  const gridRef = useRef<HTMLDivElement>(null)
+  const [colCount, setColCount] = useState(4)
+
+  const measureCols = useCallback(() => {
+    const el = gridRef.current
+    if (!el) return
+    const cols = getComputedStyle(el).gridTemplateColumns.split(' ').length
+    setColCount(cols)
+  }, [])
+
+  useEffect(() => {
+    measureCols()
+    const ro = new ResizeObserver(measureCols)
+    if (gridRef.current) ro.observe(gridRef.current)
+    return () => ro.disconnect()
+  }, [measureCols])
+
   if (personas.length === 0) {
     return <div className={styles.empty}>No personas found.</div>
   }
 
+  // Figure out which index to insert the editor after: the last card in the
+  // same row as the selected card, so remaining cards on the row stay put.
+  const selectedIdx = selectedId ? personas.findIndex((p) => p.id === selectedId) : -1
+  const editorAfterIdx = selectedIdx >= 0
+    ? Math.min(selectedIdx - (selectedIdx % colCount) + colCount - 1, personas.length - 1)
+    : -1
+
   return (
-    <div className={styles.grid}>
-      {personas.map((persona) => (
-        <PersonaCard
-          key={persona.id}
-          persona={persona}
-          isSelected={selectedId === persona.id}
-          isActive={activeId === persona.id}
-          onSelect={onSelect}
-          onDoubleClick={onDoubleClick}
-        />
+    <div className={styles.grid} ref={gridRef}>
+      {personas.map((persona, i) => (
+        <Fragment key={persona.id}>
+          <PersonaCard
+            persona={persona}
+            isSelected={selectedId === persona.id}
+            isActive={activeId === persona.id}
+            onSelect={onSelect}
+            onDoubleClick={onDoubleClick}
+          />
+          {renderEditor && selectedId && i === editorAfterIdx && (
+            <div className={styles.inlineEditor}>
+              {renderEditor(selectedId)}
+            </div>
+          )}
+        </Fragment>
       ))}
-      {renderEditor && selectedId && personas.some((p) => p.id === selectedId) && (
-        <div className={styles.inlineEditor}>
-          {renderEditor(selectedId)}
-        </div>
-      )}
     </div>
   )
 }

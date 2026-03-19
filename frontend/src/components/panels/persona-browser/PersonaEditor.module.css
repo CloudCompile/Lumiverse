@@ -275,6 +275,51 @@
   cursor: not-allowed;
 }
 
+.bindingRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bindingToggle {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--lumiverse-bg);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast);
+  flex-shrink: 0;
+}
+
+.bindingToggle:hover {
+  border-color: var(--lumiverse-primary);
+  color: var(--lumiverse-primary);
+}
+
+.bindingToggleActive {
+  background: rgba(147, 112, 219, 0.12);
+  border-color: var(--lumiverse-primary);
+  color: var(--lumiverse-primary);
+}
+
+.bindingLabel {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.bindingLabelActive {
+  color: var(--lumiverse-primary);
+}
+
 .actionBtn {
   width: 30px;
   height: 30px;
