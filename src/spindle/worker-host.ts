@@ -11,6 +11,9 @@ import type {
   WorldBookDTO,
   WorldBookEntryDTO,
   PersonaDTO,
+  ActivatedWorldInfoEntryDTO,
+  DryRunResultDTO,
+  ChatMemoryResultDTO,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
@@ -29,6 +32,8 @@ import * as chatsSvc from "../services/chats.service";
 import * as worldBooksSvc from "../services/world-books.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
+import * as promptAssemblySvc from "../services/prompt-assembly.service";
+import * as embeddingsSvc from "../services/embeddings.service";
 import { getEphemeralPoolConfig } from "./ephemeral-pool.service";
 import { getDb } from "../db/connection";
 import {
@@ -434,6 +439,10 @@ export class WorkerHost {
       case "request_generation":
         this.handleGeneration(msg.requestId, msg.input);
         break;
+      // ─── Dry Run (gated: "generation") ───────────────────────────────
+      case "generate_dry_run":
+        this.handleGenerateDryRun(msg.requestId, msg.input, msg.userId);
+        break;
       case "storage_read":
         this.handleStorageRead(msg.requestId, msg.path);
         break;
@@ -692,6 +701,10 @@ export class WorkerHost {
       case "chats_delete":
         this.handleChatsDelete(msg.requestId, msg.chatId, msg.userId);
         break;
+      // ─── Chat Memories (gated: "chats") ──────────────────────────────
+      case "chats_get_memories":
+        this.handleChatsGetMemories(msg.requestId, msg.chatId, msg.topK, msg.userId);
+        break;
       // ─── World Books (gated: "world_books") ──────────────────────────
       case "world_books_list":
         this.handleWorldBooksList(msg.requestId, msg.limit, msg.offset, msg.userId);
@@ -723,6 +736,10 @@ export class WorkerHost {
         break;
       case "world_book_entries_delete":
         this.handleWorldBookEntriesDelete(msg.requestId, msg.entryId, msg.userId);
+        break;
+      // ─── Activated World Info (gated: "world_books") ─────────────────
+      case "world_books_get_activated":
+        this.handleWorldBooksGetActivated(msg.requestId, msg.chatId, msg.userId);
         break;
       // ─── Personas (gated: "personas") ──────────────────────────────────
       case "personas_list":
@@ -3571,6 +3588,161 @@ export class WorkerHost {
 
       const wb = worldBooksSvc.getWorldBook(resolvedUserId, persona.attached_world_book_id);
       this.postToWorker({ type: "response", requestId, result: wb ? this.toWorldBookDTO(wb) : null });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Activated World Info (gated: "world_books") ─────────────────────
+
+  private async handleWorldBooksGetActivated(
+    requestId: string,
+    chatId: string,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const activated = await promptAssemblySvc.getActivatedWorldInfoForChat(resolvedUserId, chatId);
+
+      const result: ActivatedWorldInfoEntryDTO[] = activated.map((e) => ({
+        id: e.id,
+        comment: e.comment,
+        keys: e.keys,
+        source: e.source,
+        score: e.score,
+      }));
+
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Dry Run (gated: "generation") ──────────────────────────────────
+
+  private async handleGenerateDryRun(
+    requestId: string,
+    input: any,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} generation — Generation permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      if (!input?.chatId) throw new Error("chatId is required");
+
+      const dryRunResult = await generateSvc.dryRunGeneration({
+        userId: resolvedUserId,
+        chat_id: input.chatId,
+        connection_id: input.connectionId,
+        persona_id: input.personaId,
+        preset_id: input.presetId,
+        generation_type: input.generationType,
+        parameters: input.parameters,
+      });
+
+      // Map LlmMessage[] to LlmMessageDTO[] (flatten multipart content to string)
+      const messagesDTO: LlmMessageDTO[] = dryRunResult.messages.map((m) => ({
+        role: m.role,
+        content: typeof m.content === "string"
+          ? m.content
+          : m.content.map((p: any) => p.text || "").join(""),
+        name: m.name,
+      }));
+
+      const result: DryRunResultDTO = {
+        messages: messagesDTO,
+        breakdown: (dryRunResult.breakdown || []).map((b) => ({
+          type: b.type,
+          name: b.name,
+          role: b.role,
+          content: b.content,
+          blockId: b.blockId,
+          marker: b.marker,
+          messageCount: b.messageCount,
+          firstMessageIndex: b.firstMessageIndex,
+          preCountedTokens: b.preCountedTokens,
+          excludeFromTotal: b.excludeFromTotal,
+        })),
+        parameters: dryRunResult.parameters,
+        model: dryRunResult.model,
+        provider: dryRunResult.provider,
+        tokenCount: dryRunResult.tokenCount,
+        worldInfoStats: dryRunResult.worldInfoStats,
+        memoryStats: dryRunResult.memoryStats,
+      };
+
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Chat Memories (gated: "chats") ─────────────────────────────────
+
+  private async handleChatsGetMemories(
+    requestId: string,
+    chatId: string,
+    topK?: number,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const chat = chatsSvc.getChat(resolvedUserId, chatId);
+      if (!chat) throw new Error("Chat not found");
+
+      const messages = chatsSvc.getMessages(resolvedUserId, chatId);
+
+      // Load chat memory settings the same way prompt-assembly does
+      const chatMemSettingsRaw = settingsSvc.getSetting(resolvedUserId, "chatMemorySettings")?.value;
+      const chatMemSettings = chatMemSettingsRaw
+        ? embeddingsSvc.normalizeChatMemorySettings(chatMemSettingsRaw)
+        : null;
+
+      // Per-chat overrides from chat metadata
+      let perChatOverrides = (chat.metadata?.memory_settings as any) ?? null;
+
+      // Apply topK override from request
+      if (topK != null && topK > 0) {
+        perChatOverrides = { ...(perChatOverrides || {}), retrievalTopK: topK };
+      }
+
+      const memoryResult = await promptAssemblySvc.collectChatVectorMemory(
+        resolvedUserId, chatId, messages, chatMemSettings, perChatOverrides,
+      );
+
+      const result: ChatMemoryResultDTO = {
+        chunks: memoryResult.chunks.map((c) => ({
+          content: c.content,
+          score: c.score,
+          metadata: (typeof c.metadata === "object" && c.metadata) ? c.metadata : {},
+        })),
+        formatted: memoryResult.formatted,
+        count: memoryResult.count,
+        enabled: memoryResult.enabled,
+        queryPreview: memoryResult.queryPreview,
+        settingsSource: memoryResult.settingsSource,
+        chunksAvailable: memoryResult.chunksAvailable,
+        chunksPending: memoryResult.chunksPending,
+      };
+
+      this.postToWorker({ type: "response", requestId, result });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }

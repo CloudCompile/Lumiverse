@@ -179,5 +179,63 @@ All fields are optional. Common fields you'll typically set:
 
 See `WorldBookEntryDTO` above for the full list of supported fields.
 
+---
+
+## World Info Activation
+
+Query which world info entries would activate for a given chat — without running a full generation. This runs the complete activation pipeline: keyword matching, selective logic, probability rolls, sticky/cooldown/delay state, group competition, budget enforcement, and vector-based activation (if embeddings are configured).
+
+### `spindle.world_books.getActivated(chatId, userId?)`
+
+```ts
+const activated = await spindle.world_books.getActivated('chat-id')
+
+spindle.log.info(`${activated.length} entries activated`)
+
+for (const entry of activated) {
+  const source = entry.source === 'vector'
+    ? `vector (score: ${entry.score?.toFixed(4)})`
+    : 'keyword'
+  spindle.log.info(`[${source}] ${entry.comment} — keys: ${entry.keys.join(', ')}`)
+}
+```
+
+This is useful for:
+
+- **Debugging** — see exactly which WI entries fire for the current conversation state
+- **Analytics** — track which lorebook entries are used most often
+- **Dynamic content** — react to activated entries in interceptors or context handlers
+- **Validation** — verify that entry keywords are triggering as expected
+
+### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `chatId` | `string` | **Required.** The chat to evaluate activation against. |
+| `userId` | `string` | For operator-scoped extensions only. |
+
+### Returns
+
+`Promise<ActivatedWorldInfoEntryDTO[]>` — an array of activated entries from all sources (character world book, persona world book, global world books).
+
+### ActivatedWorldInfoEntryDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `string` | The world book entry ID. Can be used with `spindle.world_books.entries.get()` to fetch the full entry. |
+| `comment` | `string` | The entry's human-readable label. |
+| `keys` | `string[]` | The entry's primary activation keywords. |
+| `source` | `"keyword" \| "vector"` | How the entry was activated — via keyword matching or vector similarity search. |
+| `score` | `number` | Optional. For vector-activated entries, the similarity score (lower = more similar in cosine distance). Not present for keyword-activated entries. |
+
+!!! note "What gets scanned"
+    The activation pipeline evaluates entries from all world books attached to the current context:
+
+    - The character's attached world book (from `character.extensions.world_book_id`)
+    - The active persona's attached world book (from `persona.attached_world_book_id`)
+    - All global world books (from the `globalWorldBooks` setting)
+
+    Entries are scanned against the chat's message history using the same logic as prompt assembly.
+
 !!! note
     For user-scoped extensions, the user context is inferred automatically. For operator-scoped extensions, the user ID is resolved from the extension context. World books are always scoped to a single user.

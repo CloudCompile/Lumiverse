@@ -1109,6 +1109,65 @@ export async function collectVectorActivatedWorldInfo(
 }
 
 /**
+ * Get all activated world info entries for a chat (keyword + vector).
+ * Standalone helper for the Spindle RPC bridge — runs WI activation
+ * without the full prompt assembly pipeline.
+ */
+export async function getActivatedWorldInfoForChat(
+  userId: string,
+  chatId: string,
+): Promise<ActivatedWorldInfoEntry[]> {
+  const chat = chatsSvc.getChat(userId, chatId);
+  if (!chat) throw new Error("Chat not found");
+
+  const messages = chatsSvc.getMessages(userId, chatId);
+  const character = charactersSvc.getCharacter(userId, chat.character_id);
+  if (!character) throw new Error("Character not found");
+
+  const persona = personasSvc.resolvePersonaOrDefault(userId);
+
+  const globalWorldBookIds = (settingsSvc.getSetting(userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
+  const wiSources = collectWorldInfoSources(userId, character, persona, globalWorldBookIds);
+  const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
+  const worldInfoSettings = (settingsSvc.getSetting(userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
+
+  const wiResult = activateWorldInfo({
+    entries: wiSources.entries,
+    messages,
+    chatTurn: messages.length,
+    wiState,
+    settings: worldInfoSettings,
+  });
+
+  const activated: ActivatedWorldInfoEntry[] = wiResult.activatedEntries.map((e) => ({
+    id: e.id,
+    comment: e.comment || "",
+    keys: e.key || [],
+    source: "keyword" as const,
+  }));
+
+  const vectorActivated = await collectVectorActivatedWorldInfo(
+    userId, wiSources.worldBookIds, wiSources.entries, messages,
+  );
+  if (vectorActivated.length > 0) {
+    const existing = new Set(wiResult.activatedEntries.map((e) => e.id));
+    for (const { entry, score } of vectorActivated) {
+      if (existing.has(entry.id)) continue;
+      existing.add(entry.id);
+      activated.push({
+        id: entry.id,
+        comment: entry.comment || "",
+        keys: entry.key || [],
+        source: "vector",
+        score,
+      });
+    }
+  }
+
+  return activated;
+}
+
+/**
  * Retrieve relevant memories from vectorized chat history for long-term context.
  *
  * What i went with:
@@ -1188,7 +1247,7 @@ function formatMemoryOutput(
   return settings.memoryHeaderTemplate.replace(/\{\{memories\}\}/g, joined);
 }
 
-async function collectChatVectorMemory(
+export async function collectChatVectorMemory(
   userId: string,
   chatId: string,
   messages: Message[],

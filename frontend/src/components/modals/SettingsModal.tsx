@@ -381,6 +381,7 @@ function ChatSettings() {
   const displayMode = useStore((s) => s.chatSheldDisplayMode)
   const bubbleUserAlign = useStore((s) => s.bubbleUserAlign)
   const enterToSend = useStore((s) => s.chatSheldEnterToSend)
+  const saveDraftInput = useStore((s) => s.saveDraftInput)
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
@@ -591,6 +592,20 @@ function ChatSettings() {
           {enterToSend
             ? 'Use Shift+Enter for new line'
             : `Use ${isMac ? 'Cmd' : 'Ctrl'}+Enter to send`}
+        </p>
+      </div>
+
+      <div>
+        <label className={styles.toggle}>
+          <input
+            type="checkbox"
+            checked={saveDraftInput}
+            onChange={(e) => setSetting('saveDraftInput', e.target.checked)}
+          />
+          <span>Save draft input</span>
+        </label>
+        <p className={styles.toggleHint}>
+          Automatically saves your unsent message so it persists across page refreshes and chat switches
         </p>
       </div>
 

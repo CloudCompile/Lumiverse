@@ -42,6 +42,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const activeGenerationId = useStore((s) => s.activeGenerationId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const enterToSend = useStore((s) => s.chatSheldEnterToSend)
+  const saveDraftInput = useStore((s) => s.saveDraftInput)
   const activeProfileId = useStore((s) => s.activeProfileId)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
@@ -64,6 +65,45 @@ export default function InputArea({ chatId }: InputAreaProps) {
   // iPhone-specific: match input bar bottom corners to device screen curvature
   const screenCornerRadius = useDeviceFrameRadius()
   const [inputFocused, setInputFocused] = useState(false)
+
+  // ── Draft input persistence ──────────────────────────────────────────
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const DRAFT_KEY_PREFIX = 'lumiverse:chatDraft:'
+
+  // Restore draft on mount or chat switch
+  useEffect(() => {
+    if (!saveDraftInput) return
+    try {
+      const saved = localStorage.getItem(DRAFT_KEY_PREFIX + chatId)
+      if (saved) {
+        setText(saved)
+        requestAnimationFrame(() => {
+          if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto'
+            textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 180) + 'px'
+          }
+        })
+      }
+    } catch {}
+  }, [chatId, saveDraftInput])
+
+  // Debounced save on text change
+  useEffect(() => {
+    if (!saveDraftInput) return
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
+    draftTimerRef.current = setTimeout(() => {
+      try {
+        if (text) {
+          localStorage.setItem(DRAFT_KEY_PREFIX + chatId, text)
+        } else {
+          localStorage.removeItem(DRAFT_KEY_PREFIX + chatId)
+        }
+      } catch {}
+    }, 500)
+    return () => {
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
+    }
+  }, [text, chatId, saveDraftInput])
 
   const activeGuides = guidedGenerations.filter((g) => g.enabled)
   const activeGuideCount = activeGuides.length
@@ -198,6 +238,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
     const nonce = ++generationNonceRef.current
     setText('')
     setPendingAttachments([])
+    if (saveDraftInput) {
+      try { localStorage.removeItem(DRAFT_KEY_PREFIX + chatId) } catch {}
+    }
     setStreamingError(null)
 
     // Reset textarea height
@@ -258,7 +301,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput])
 
   const doRegenerate = useCallback(async (feedback?: string | null) => {
     if (isStreaming) return

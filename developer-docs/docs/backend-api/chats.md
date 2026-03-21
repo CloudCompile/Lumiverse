@@ -83,6 +83,76 @@ if (active) {
 }
 ```
 
+---
+
+## Chat Memories
+
+Retrieve long-term memory chunks for a chat via vector search. This is the same memory system that powers the `{{memories}}` macro during prompt assembly — semantic search over vectorized chat history using embeddings.
+
+### `spindle.chats.getMemories(chatId, options?)`
+
+```ts
+const memories = await spindle.chats.getMemories('chat-id')
+
+if (memories.enabled && memories.count > 0) {
+  spindle.log.info(`Retrieved ${memories.count} memory chunks`)
+  spindle.log.info(`Available: ${memories.chunksAvailable}, Pending: ${memories.chunksPending}`)
+
+  for (const chunk of memories.chunks) {
+    spindle.log.info(`Score: ${chunk.score} — ${chunk.content.slice(0, 80)}...`)
+  }
+
+  // The formatted string is ready to inject (uses the user's template settings)
+  spindle.log.info(`Formatted output:\n${memories.formatted}`)
+} else {
+  spindle.log.info('Chat memory is not enabled or no chunks available')
+}
+```
+
+Override the number of chunks retrieved with `topK`:
+
+```ts
+// Get the top 8 most relevant memories instead of the default (usually 4)
+const memories = await spindle.chats.getMemories('chat-id', { topK: 8 })
+```
+
+### Options
+
+| Field | Type | Description |
+|---|---|---|
+| `topK` | `number` | Override the number of chunks to retrieve (default comes from user's chat memory settings, usually 4). Range: 1-24. |
+| `userId` | `string` | For operator-scoped extensions only. |
+
+### ChatMemoryResultDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `chunks` | `ChatMemoryChunkDTO[]` | The retrieved memory chunks, sorted by relevance. |
+| `formatted` | `string` | Pre-formatted output using the user's `memoryHeaderTemplate` and `chunkTemplate` settings. Ready to inject. |
+| `count` | `number` | Number of chunks retrieved. |
+| `enabled` | `boolean` | Whether chat memory is enabled (requires embedding config + vectorized chat messages). |
+| `queryPreview` | `string` | Truncated query text built from recent messages (for debugging). |
+| `settingsSource` | `string` | `"global"` or `"per_chat"` — where the memory settings came from. |
+| `chunksAvailable` | `number` | Total vectorized chunks in the store for this chat. |
+| `chunksPending` | `number` | Chunks awaiting vectorization. If > 0, results may be incomplete. |
+
+### ChatMemoryChunkDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `content` | `string` | The chunk text (concatenated messages from a conversation segment). |
+| `score` | `number` | Similarity score (lower = more similar in cosine distance). |
+| `metadata` | `Record<string, unknown>` | Chunk metadata (may include `startIndex`, `endIndex`, etc.). |
+
+!!! note "Prerequisites"
+    Chat memories require the user to have embedding/vectorization configured (an embedding provider with an API key) and `vectorize_chat_messages` enabled. When not configured, the method returns `{ enabled: false, chunks: [], count: 0, ... }` without error.
+
+!!! tip "Memories vs Chat Mutation"
+    - **`getMemories()`** — retrieves semantically relevant *past* conversation segments via vector search. Read-only, no side effects.
+    - **`spindle.chat.getMessages()`** ([Chat Mutation](chat-mutation.md)) — returns the full raw message list for a chat.
+
+---
+
 !!! tip "Chats vs Chat Mutation"
     - **`spindle.chats`** (this page) — CRUD on chat *sessions* (list, get, rename, delete). Permission: `chats`.
     - **`spindle.chat`** ([Chat Mutation](chat-mutation.md)) — read and modify *messages* within a chat. Permission: `chat_mutation`.

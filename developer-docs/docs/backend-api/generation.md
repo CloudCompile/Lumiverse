@@ -57,6 +57,112 @@ const results = await spindle.generate.batch({
 
 ---
 
+## Dry Run (Prompt Assembly)
+
+Run the full prompt assembly pipeline — macros, world info, context filters, memory retrieval, token counting — without actually calling the LLM. Useful for prompt debugging, token budget analysis, and previewing what the model will see.
+
+### `spindle.generate.dryRun(input)`
+
+```ts
+const result = await spindle.generate.dryRun({
+  chatId: 'chat-id',
+})
+
+spindle.log.info(`Provider: ${result.provider}, Model: ${result.model}`)
+spindle.log.info(`Assembled ${result.messages.length} messages`)
+spindle.log.info(`Breakdown: ${result.breakdown.length} blocks`)
+
+if (result.tokenCount) {
+  spindle.log.info(`Total tokens: ${result.tokenCount.total_tokens}`)
+}
+
+if (result.worldInfoStats) {
+  spindle.log.info(`WI entries activated: ${result.worldInfoStats.activatedAfterBudget}`)
+}
+
+if (result.memoryStats?.enabled) {
+  spindle.log.info(`Memory chunks retrieved: ${result.memoryStats.chunksRetrieved}`)
+}
+```
+
+You can optionally override the connection, persona, preset, or generation type:
+
+```ts
+const result = await spindle.generate.dryRun({
+  chatId: 'chat-id',
+  connectionId: 'specific-connection',   // default: user's default connection
+  personaId: 'specific-persona',         // default: user's active/default persona
+  presetId: 'specific-preset',           // default: connection's linked preset
+  generationType: 'continue',            // default: 'normal'
+  parameters: { temperature: 0.8 },      // override sampler params
+})
+```
+
+### DryRunRequestDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `chatId` | `string` | **Required.** The chat to assemble the prompt for. |
+| `connectionId` | `string` | Optional. Use a specific connection profile. |
+| `personaId` | `string` | Optional. Use a specific persona. |
+| `presetId` | `string` | Optional. Use a specific preset. |
+| `generationType` | `string` | Optional. One of `"normal"`, `"continue"`, `"regenerate"`, `"swipe"`, `"impersonate"`. |
+| `parameters` | `Record<string, unknown>` | Optional. Override sampler parameters. |
+
+### DryRunResultDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `messages` | `LlmMessageDTO[]` | The fully assembled message array that would be sent to the LLM. |
+| `breakdown` | `AssemblyBreakdownEntryDTO[]` | Ordered list of prompt blocks showing how the prompt was built. |
+| `parameters` | `Record<string, unknown>` | Final merged sampler parameters. |
+| `model` | `string` | The model that would be used. |
+| `provider` | `string` | The provider that would be used. |
+| `tokenCount` | `DryRunTokenCountDTO` | Optional. Per-block token counts (if a tokenizer is available). |
+| `worldInfoStats` | `ActivationStatsDTO` | Optional. World info activation statistics. |
+| `memoryStats` | `MemoryStatsDTO` | Optional. Long-term memory retrieval statistics. |
+
+### AssemblyBreakdownEntryDTO
+
+Each entry represents one block in the assembled prompt:
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | Block type: `"block"`, `"chat_history"`, `"world_info"`, `"authors_note"`, `"utility"`, `"long_term_memory"`, `"separator"`, `"append"`, `"sidecar"`. |
+| `name` | `string` | Human-readable block name. |
+| `role` | `string` | Message role (`"system"`, `"user"`, `"assistant"`). |
+| `content` | `string` | The resolved text content. |
+| `blockId` | `string` | Preset block ID (if from a preset block). |
+
+### ActivationStatsDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `totalCandidates` | `number` | Total WI entries considered. |
+| `activatedBeforeBudget` | `number` | Entries that matched before budget enforcement. |
+| `activatedAfterBudget` | `number` | Entries included after budget enforcement. |
+| `evictedByBudget` | `number` | Entries dropped due to budget limits. |
+| `evictedByMinPriority` | `number` | Entries dropped due to minimum priority threshold. |
+| `estimatedTokens` | `number` | Approximate total WI tokens (chars/4). |
+| `recursionPassesUsed` | `number` | Number of keyword-chaining recursion passes. |
+
+### MemoryStatsDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | `boolean` | Whether long-term memory is active. |
+| `chunksRetrieved` | `number` | Number of memory chunks included. |
+| `chunksAvailable` | `number` | Total chunks in the vector store. |
+| `chunksPending` | `number` | Chunks awaiting vectorization. |
+| `injectionMethod` | `string` | How memories were injected: `"macro"`, `"fallback"`, or `"disabled"`. |
+| `queryPreview` | `string` | Truncated query text used for vector search. |
+| `settingsSource` | `string` | Whether settings came from `"global"` or `"per_chat"` overrides. |
+
+!!! tip
+    Dry run mirrors the exact assembly pipeline used during real generation (macros, world info, context filters, memory) but skips the council execution and LLM call. It's the fastest way to debug prompt construction.
+
+---
+
 ## Structured Output
 
 Some providers support native structured output, ensuring the LLM response conforms to a JSON schema. Pass provider-specific parameters via the `parameters` field.

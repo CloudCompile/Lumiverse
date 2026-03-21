@@ -161,6 +161,15 @@ const spindleApi: SpindleAPI = {
         input: { ...input, type: "batch" },
       });
     },
+    async dryRun(input) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "generate_dry_run",
+        requestId,
+        input,
+      });
+      return result as import("lumiverse-spindle-types").DryRunResultDTO;
+    },
   },
 
   storage: {
@@ -702,6 +711,17 @@ const spindleApi: SpindleAPI = {
       const result = await request({ type: "chats_delete", requestId, chatId, userId });
       return result as boolean;
     },
+    async getMemories(chatId: string, options?: { topK?: number; userId?: string }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "chats_get_memories",
+        requestId,
+        chatId,
+        topK: options?.topK,
+        userId: options?.userId,
+      });
+      return result as import("lumiverse-spindle-types").ChatMemoryResultDTO;
+    },
   },
 
   world_books: {
@@ -769,6 +789,16 @@ const spindleApi: SpindleAPI = {
         const result = await request({ type: "world_book_entries_delete", requestId, entryId, userId });
         return result as boolean;
       },
+    },
+    async getActivated(chatId: string, userId?: string) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "world_books_get_activated",
+        requestId,
+        chatId,
+        userId,
+      });
+      return result as import("lumiverse-spindle-types").ActivatedWorldInfoEntryDTO[];
     },
   },
 

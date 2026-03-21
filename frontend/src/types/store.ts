@@ -249,6 +249,7 @@ export interface SettingsSlice {
   chatSheldDisplayMode: 'minimal' | 'immersive' | 'bubble'
   bubbleUserAlign: 'left' | 'right'
   chatSheldEnterToSend: boolean
+  saveDraftInput: boolean
   chatWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
   chatContentMaxWidth: number
   modalWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
