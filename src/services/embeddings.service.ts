@@ -1201,20 +1201,33 @@ export async function searchChatChunks(
     const chunkId = String(row.source_id);
     let meta: any = {};
     try {
-      meta = JSON.parse(row.metadata_json || "{}");
+      const raw = row.metadata_json;
+      if (typeof raw === "string") {
+        meta = JSON.parse(raw);
+      } else if (raw && typeof raw === "object") {
+        meta = raw; // Already parsed (Arrow deserialization)
+      }
     } catch {
       // Treat as empty metadata
     }
 
-    // Exclusion check
-    let shouldExclude = false;
+    // Exclusion check: resolve message IDs from metadata or fall back to SQLite
+    let chunkMessageIds: string[] = [];
     if (meta.messageIds && Array.isArray(meta.messageIds)) {
-      if (meta.messageIds.some((id: string) => excludeIds.has(id))) {
-        shouldExclude = true;
+      chunkMessageIds = meta.messageIds;
+    } else {
+      // Fallback: look up message_ids from the chat_chunks table
+      try {
+        const chunkRow = getDb().query("SELECT message_ids FROM chat_chunks WHERE id = ?").get(chunkId) as any;
+        if (chunkRow?.message_ids) {
+          chunkMessageIds = JSON.parse(chunkRow.message_ids);
+        }
+      } catch {
+        // non-fatal
       }
-    } else if (excludeIds.has(chunkId)) {
-      shouldExclude = true;
     }
+
+    const shouldExclude = chunkMessageIds.length > 0 && chunkMessageIds.some((id: string) => excludeIds.has(id));
     if (shouldExclude) continue;
 
     // Extract vector for MMR (may be Float32Array from Lance)
