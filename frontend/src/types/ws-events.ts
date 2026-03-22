@@ -48,6 +48,12 @@ export enum EventType {
   // Regex Scripts
   REGEX_SCRIPT_CHANGED = 'REGEX_SCRIPT_CHANGED',
   REGEX_SCRIPT_DELETED = 'REGEX_SCRIPT_DELETED',
+
+  // Expressions
+  EXPRESSION_CHANGED = 'EXPRESSION_CHANGED',
+
+  // Import progress
+  IMPORT_GALLERY_PROGRESS = 'IMPORT_GALLERY_PROGRESS',
 }
 
 export interface WSEvent<T = any> {

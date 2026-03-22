@@ -21,6 +21,9 @@ import { getCouncilSettings, getAvailableTools } from "./council-settings.servic
 import { BUILTIN_TOOLS_MAP } from "./builtin-tools";
 import { toolRegistry } from "../../spindle/tool-registry";
 import { getWorkerHost } from "../../spindle/lifecycle";
+import { getExpressionLabels, hasExpressions } from "../expressions.service";
+import { getSidecarSettings } from "../sidecar-settings.service";
+import type { SidecarConfig } from "lumiverse-spindle-types";
 
 const MAX_RETRIES = 3;
 
@@ -60,8 +63,8 @@ export async function executeCouncil(
 ): Promise<CouncilExecutionResult | null> {
   const settings = input.settings ?? getCouncilSettings(input.userId);
 
-  if (!settings.councilMode || !settings.toolsSettings.enabled) {
-    console.debug("[council] Skipped: councilMode=%s, toolsEnabled=%s", settings.councilMode, settings.toolsSettings.enabled);
+  if (!settings.councilMode) {
+    console.debug("[council] Skipped: councilMode is disabled");
     return null;
   }
   if (settings.members.length === 0) {
@@ -69,17 +72,22 @@ export async function executeCouncil(
     return null;
   }
 
-  const sidecar = settings.toolsSettings.sidecar;
-  if (!sidecar.connectionProfileId || !sidecar.model) {
-    console.warn("[council] Skipped: sidecar connection not configured (profileId=%s, model=%s)", sidecar.connectionProfileId, sidecar.model);
-    return null;
+  // Tools are active if any member has tools assigned — no separate switch needed
+  const hasTools = settings.members.some((m) => m.tools.length > 0);
+
+  // Resolve sidecar connection from shared settings (falls back to legacy council config)
+  const sidecar = getSidecarSettings(input.userId);
+  if (hasTools && (!sidecar.connectionProfileId || !sidecar.model)) {
+    console.warn("[council] Tools skipped: sidecar connection not configured (profileId=%s, model=%s)", sidecar.connectionProfileId, sidecar.model);
   }
 
-  // Verify the sidecar connection exists
-  const sidecarConn = connectionsSvc.getConnection(input.userId, sidecar.connectionProfileId);
-  if (!sidecarConn) {
-    console.warn("[council] Skipped: sidecar connection profile '%s' not found", sidecar.connectionProfileId);
-    return null;
+  // Verify the sidecar connection exists (if tools need it)
+  let sidecarConn = null;
+  if (hasTools && sidecar.connectionProfileId) {
+    sidecarConn = connectionsSvc.getConnection(input.userId, sidecar.connectionProfileId);
+    if (!sidecarConn) {
+      console.warn("[council] Tools skipped: sidecar connection profile '%s' not found", sidecar.connectionProfileId);
+    }
   }
 
   const startTime = Date.now();
@@ -123,6 +131,7 @@ export async function executeCouncil(
     const memberResults = await executeMemberTools(
       input,
       settings,
+      sidecar,
       member,
       availableTools,
       contextMessages,
@@ -170,13 +179,13 @@ export async function executeCouncil(
 async function executeMemberTools(
   input: ExecuteInput,
   settings: CouncilSettings,
+  sidecar: SidecarConfig,
   member: CouncilMember,
   tools: Map<string, CouncilToolDefinition>,
   contextMessages: LlmMessage[],
   namedResults: Map<string, string>
 ): Promise<CouncilToolResult[]> {
   const results: CouncilToolResult[] = [];
-  const sidecar = settings.toolsSettings.sidecar;
 
   // Build member identity context
   const identityMsg = buildMemberIdentity(input.userId, member);
@@ -189,6 +198,12 @@ async function executeMemberTools(
 
     const toolDef = tools.get(toolName);
     if (!toolDef) continue;
+
+    // Skip expression detector when the character has no expressions configured
+    if (toolDef.name === "detect_expression") {
+      const charId = input.enrichment?.character?.id;
+      if (!charId || !hasExpressions(input.userId, charId)) continue;
+    }
 
     const toolStart = Date.now();
     let success = false;
@@ -235,7 +250,8 @@ async function executeMemberTools(
             identityMsg,
             contextMessages,
             settings.toolsSettings,
-            input.signal
+            input.signal,
+            input.enrichment
           );
         }
         success = true;
@@ -294,13 +310,14 @@ async function invokeExtensionToolViaWorker(
 /** Call the sidecar LLM for a single tool. */
 async function invokeSidecarTool(
   userId: string,
-  sidecar: { connectionProfileId: string; model: string; temperature: number; topP: number; maxTokens: number },
+  sidecar: SidecarConfig,
   tool: CouncilToolDefinition,
   member: CouncilMember,
   identityMsg: string,
   contextMessages: LlmMessage[],
   toolsSettings: { maxWordsPerTool: number; timeoutMs: number },
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  enrichment?: CouncilEnrichment
 ): Promise<string> {
   const brevityNote =
     toolsSettings.maxWordsPerTool > 0
@@ -311,6 +328,15 @@ async function invokeSidecarTool(
     ? `\nYour role on the council is: ${member.role}`
     : "";
 
+  // Dynamic enrichment for expression detector — inject available labels
+  let dynamicSuffix = "";
+  if (tool.name === "detect_expression" && enrichment?.character) {
+    const labels = getExpressionLabels(userId, enrichment.character.id);
+    if (labels.length > 0) {
+      dynamicSuffix = `\n\n## Available Expression Labels\n${labels.join(", ")}`;
+    }
+  }
+
   const systemPrompt = `${identityMsg}${roleNote}
 
 You are being asked to use the following analysis tool. Respond with your analysis directly — do not use JSON formatting.
@@ -318,7 +344,7 @@ You are being asked to use the following analysis tool. Respond with your analys
 ## Tool: ${tool.displayName}
 ${tool.description}
 
-${tool.prompt}${brevityNote}`;
+${tool.prompt}${dynamicSuffix}${brevityNote}`;
 
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },

@@ -16,7 +16,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [Macros](macros.md) | Free | Register custom `{{macros}}` for prompts |
 | [Interceptors](interceptors.md) | `interceptor` | Modify the prompt before it reaches the LLM |
 | [Context Handlers](context-handlers.md) | `context_handler` | Enrich the generation context before assembly |
-| [LLM Tools](llm-tools.md) | `tools` | Register function-calling tools |
+| [LLM Tools](llm-tools.md) | `tools` | Register function-calling tools + Council-eligible tools |
 | [Generation](generation.md) | `generation` | Fire LLM generations + inspect connections |
 | [Storage](storage.md) | Free | Scoped file storage (extension + per-user) |
 | [Ephemeral Storage](ephemeral-storage.md) | `ephemeral_storage` | Temporary storage with TTL and quotas |

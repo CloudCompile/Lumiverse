@@ -1,4 +1,4 @@
-import { get, post, put, del, upload, BASE_URL } from './client'
+import { get, post, put, del, upload, uploadWithProgress, BASE_URL } from './client'
 import type {
   Character,
   CharacterSummary,
@@ -71,9 +71,12 @@ export const charactersApi = {
     return `${BASE_URL}/images/${imageId}`
   },
 
-  importFile(file: File) {
+  importFile(file: File, onProgress?: (percent: number) => void) {
     const form = new FormData()
     form.append('file', file)
+    if (onProgress) {
+      return uploadWithProgress<ImportResult>('/characters/import', form, onProgress)
+    }
     return upload<ImportResult>('/characters/import', form)
   },
 

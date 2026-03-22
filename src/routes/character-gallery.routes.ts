@@ -12,6 +12,21 @@ app.get("/", (c) => {
   return c.json(items);
 });
 
+// POST /bulk — upload multiple images to gallery in one request
+app.post("/bulk", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("characterId");
+  if (!characterId) return c.json({ error: "characterId is required" }, 400);
+  const formData = await c.req.formData();
+
+  const files = formData.getAll("images") as File[];
+  if (!files.length) return c.json({ error: "images are required" }, 400);
+  if (files.length > 100) return c.json({ error: "Maximum 100 images per request" }, 400);
+
+  const items = await svc.uploadBulkToGallery(userId, characterId, files);
+  return c.json(items, 201);
+});
+
 // POST / — upload image file + add to gallery
 app.post("/", async (c) => {
   const userId = c.get("userId");

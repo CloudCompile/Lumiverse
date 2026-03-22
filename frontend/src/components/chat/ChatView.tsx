@@ -7,6 +7,7 @@ import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import { imagesApi } from '@/api/images'
+import { expressionsApi } from '@/api/expressions'
 import type { WallpaperRef } from '@/types/store'
 import MessageList from './MessageList'
 import InputArea from './InputArea'
@@ -14,6 +15,7 @@ import ScrollToBottom from './ScrollToBottom'
 import CouncilPill from './CouncilPill'
 import LumiPill from './LumiPill'
 import PortraitPanel from './PortraitPanel'
+import ExpressionDisplay from './expressions/ExpressionDisplay'
 import styles from './ChatView.module.css'
 import clsx from 'clsx'
 
@@ -80,6 +82,17 @@ export default function ChatView() {
         const wp = chat.metadata?.wallpaper as import('@/types/store').WallpaperRef | undefined
         if (wp?.image_id) {
           useStore.getState().setActiveChatWallpaper(wp)
+        }
+
+        // Restore active expression from chat metadata
+        const savedExpr = chat.metadata?.active_expression as string | undefined
+        if (savedExpr && chat.character_id) {
+          expressionsApi.get(chat.character_id).then((config) => {
+            if (cancelled) return
+            if (config?.enabled && config.mappings?.[savedExpr]) {
+              useStore.getState().setActiveExpression(savedExpr, config.mappings[savedExpr], chat.character_id!)
+            }
+          }).catch(() => {})
         }
 
         // Detect group chat and initialize group state
@@ -238,6 +251,7 @@ export default function ChatView() {
           </>
         )}
       </div>
+      <ExpressionDisplay />
     </div>
   )
 }

@@ -22,6 +22,8 @@ import { getCouncilSettings, getAvailableTools } from "./council/council-setting
 import * as tokenizerSvc from "./tokenizer.service";
 import * as breakdownSvc from "./breakdown.service";
 import * as regexScriptsSvc from "./regex-scripts.service";
+import { detectExpression, getExpressionDetectionSettings } from "./expression-detection.service";
+import { hasExpressions, getExpressionConfig } from "./expressions.service";
 
 interface GenerateInput {
   userId: string;
@@ -71,6 +73,8 @@ interface GenerationLifecycle {
   presetName?: string;
   /** Max context from connection parameters (for breakdown display) */
   maxContext?: number;
+  /** Council named results (for expression detection and other post-generation hooks) */
+  councilNamedResults?: Record<string, string>;
 }
 
 export interface RawGenerateInput {
@@ -95,6 +99,7 @@ export interface DryRunResult {
   messages: LlmMessage[];
   breakdown: AssemblyBreakdownEntry[];
   parameters: Record<string, any>;
+  assistantPrefill?: string;
   model: string;
   provider: string;
   tokenCount?: {
@@ -147,6 +152,9 @@ interface PromptPipelineResult {
   /** Snapshot of chat history messages taken before interceptors/post-processing,
    *  used as the shared tokenization source for both dry-run and generation breakdowns. */
   chatHistoryMessages?: LlmMessage[];
+  /** The resolved assistant prefill text. When set, the generate service prepends
+   *  this to the LLM response since the model continues after the prefill. */
+  assistantPrefill?: string;
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
   worldInfoStats?: DryRunResult["worldInfoStats"];
   memoryStats?: import("../llm/types").MemoryStats;
@@ -262,6 +270,7 @@ async function runPromptPipeline(opts: {
   let messages: LlmMessage[];
   let assembledParams: GenerationParameters = {};
   let breakdown: AssemblyBreakdownEntry[] | undefined;
+  let assistantPrefill: string | undefined;
   let activatedWorldInfo: ActivatedWorldInfoEntry[] | undefined;
   let worldInfoStats: DryRunResult["worldInfoStats"] | undefined;
   let memoryStats: import("../llm/types").MemoryStats | undefined;
@@ -294,6 +303,7 @@ async function runPromptPipeline(opts: {
     messages = assemblyResult.messages;
     assembledParams = assemblyResult.parameters;
     breakdown = assemblyResult.breakdown;
+    assistantPrefill = assemblyResult.assistantPrefill;
     activatedWorldInfo = assemblyResult.activatedWorldInfo;
     worldInfoStats = assemblyResult.worldInfoStats;
     memoryStats = assemblyResult.memoryStats;
@@ -377,7 +387,7 @@ async function runPromptPipeline(opts: {
   // Merge parameters: assembled (from preset) < request overrides
   const parameters: GenerationParameters = { ...assembledParams, ...opts.inputParameters };
 
-  return { messages, parameters, breakdown, chatHistoryMessages, activatedWorldInfo, worldInfoStats, memoryStats, deferredWiState, spindleContext, deliberationHandledByMacro };
+  return { messages, parameters, breakdown, chatHistoryMessages, assistantPrefill, activatedWorldInfo, worldInfoStats, memoryStats, deferredWiState, spindleContext, deliberationHandledByMacro };
 }
 
 /** Resolve provider and key for raw generate: supports connection_id, direct api_key, or provider-name lookup. */
@@ -511,12 +521,13 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   let inlineTools: ToolDefinition[] | undefined;
   let precomputedVectorEntries: VectorActivatedEntry[] | undefined;
 
+  // Council is active when enabled with members. Tools run if any member has tools assigned.
   const councilActive = councilSettings.councilMode
-    && councilSettings.toolsSettings.enabled
-    && councilSettings.members.length > 0
+    && councilSettings.members.length > 0;
+  const councilHasTools = councilActive
     && councilSettings.members.some((m) => m.tools.length > 0);
 
-  if (councilActive) {
+  if (councilHasTools) {
     if (councilSettings.toolsSettings.mode === "inline") {
       // Inline mode requires enableFunctionCalling in the preset's completion
       // settings — the tools are registered as native function calls with the
@@ -771,6 +782,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   lifecycle.model = connection.model;
   lifecycle.providerName = provider.name;
   lifecycle.maxContext = mergedParams.max_context_length as number | undefined;
+  lifecycle.councilNamedResults = councilNamedResults;
 
   // Strip internal-only keys before they reach the provider
   delete mergedParams.max_context_length;
@@ -788,7 +800,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   }
 
   // Run generation in the background
-  runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools);
+  runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools, pipeline.assistantPrefill);
 
   return { generationId, status: "streaming" };
 
@@ -867,6 +879,7 @@ export async function dryRunGeneration(input: GenerateInput): Promise<DryRunResu
     messages: pipeline.messages,
     breakdown: pipeline.breakdown || [],
     parameters: outboundParams,
+    assistantPrefill: pipeline.assistantPrefill,
     model: connection.model,
     provider: provider.name,
     tokenCount,
@@ -887,7 +900,8 @@ async function runGeneration(
   chatId: string,
   lifecycle: GenerationLifecycle,
   signal: AbortSignal,
-  tools?: ToolDefinition[]
+  tools?: ToolDefinition[],
+  assistantPrefill?: string,
 ): Promise<void> {
   eventBus.emit(EventType.GENERATION_STARTED, {
     generationId, chatId, model,
@@ -899,6 +913,17 @@ async function runGeneration(
 
   let fullContent = "";
   let fullReasoning = "";
+
+  // Prepend assistant prefill to content: the model continues *after* the prefill,
+  // so the prefill text is not included in the model's output. Emit it as the first
+  // content token so the frontend sees it, and include it in the saved content.
+  if (assistantPrefill) {
+    fullContent = assistantPrefill;
+    eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
+      generationId, chatId, token: assistantPrefill,
+    }, userId);
+  }
+
   let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
 
   // ── Guided CoT detection ───────────────────────────────────────────
@@ -1169,6 +1194,9 @@ async function runGeneration(
         breakdown: breakdownPayload,
         usage: streamUsage,
       }, userId);
+
+      // Fire-and-forget expression detection after successful generation
+      fireExpressionDetection(userId, chatId, lifecycle).catch(() => {});
     }
   } catch (err: any) {
     eventBus.emit(EventType.GENERATION_ENDED, {
@@ -1187,6 +1215,80 @@ async function runGeneration(
       }
     }
   }
+}
+
+/**
+ * Fire-and-forget expression detection after a successful generation.
+ * Handles both standalone auto-detect mode and council tool result extraction.
+ */
+async function fireExpressionDetection(
+  userId: string,
+  chatId: string,
+  lifecycle: GenerationLifecycle
+): Promise<void> {
+  const chat = chatsSvc.getChat(userId, chatId);
+  if (!chat) return;
+
+  const characterId = lifecycle.targetCharacterId || chat.character_id;
+  if (!characterId || !hasExpressions(userId, characterId)) return;
+
+  const expressionConfig = getExpressionConfig(userId, characterId);
+  if (!expressionConfig?.enabled) return;
+
+  const labels = Object.keys(expressionConfig.mappings);
+  if (labels.length === 0) return;
+
+  // Check if council already produced an expression result
+  if (lifecycle.councilNamedResults?.["expression_data"]) {
+    const councilLabel = lifecycle.councilNamedResults["expression_data"].trim().toLowerCase();
+    const matched = labels.find((l) => l.toLowerCase() === councilLabel);
+    if (matched) {
+      emitExpressionChanged(userId, chatId, chat, characterId, matched, expressionConfig.mappings[matched]);
+      return;
+    }
+  }
+
+  // Standalone auto-detect mode
+  const detectionSettings = getExpressionDetectionSettings(userId);
+  if (detectionSettings.mode === "off" || detectionSettings.mode === "council") return;
+
+  const allMessages = chatsSvc.getMessages(userId, chatId);
+  const recentMessages: LlmMessage[] = allMessages
+    .slice(-detectionSettings.contextWindow)
+    .map((m) => ({ role: m.is_user ? "user" as const : "assistant" as const, content: m.content }));
+
+  const detectedLabel = await detectExpression({
+    userId,
+    chatId,
+    characterId,
+    labels,
+    recentMessages,
+  });
+
+  if (detectedLabel && expressionConfig.mappings[detectedLabel]) {
+    emitExpressionChanged(userId, chatId, chat, characterId, detectedLabel, expressionConfig.mappings[detectedLabel]);
+  }
+}
+
+function emitExpressionChanged(
+  userId: string,
+  chatId: string,
+  chat: { metadata: any },
+  characterId: string,
+  label: string,
+  imageId: string
+): void {
+  // Persist to chat metadata
+  chatsSvc.updateChat(userId, chatId, {
+    metadata: { ...chat.metadata, active_expression: label },
+  });
+  // Emit to frontend
+  eventBus.emit(EventType.EXPRESSION_CHANGED, {
+    chatId,
+    characterId,
+    label,
+    imageId,
+  }, userId);
 }
 
 export function stopGeneration(generationId: string): boolean {

@@ -12,6 +12,11 @@ export const settingsApi = {
     return get<SettingRow[]>('/settings')
   },
 
+  /** GET /settings/:key — get a single setting */
+  get(key: string) {
+    return get<SettingRow>(`/settings/${encodeURIComponent(key)}`)
+  },
+
   /** PUT /settings/:key — upsert a single setting */
   put(key: string, value: any) {
     return put<SettingRow>(`/settings/${encodeURIComponent(key)}`, { value })

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle } from 'lucide-react'
+import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu } from 'lucide-react'
 import { useStore } from '@/store'
+import { settingsApi } from '@/api/settings'
 import { EditorSection, FormField, TextInput, Select } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import CouncilMemberItem from './council/CouncilMemberItem'
@@ -10,6 +11,22 @@ import type { CouncilMember } from 'lumiverse-spindle-types'
 import styles from './CouncilManager.module.css'
 
 const MIN_TOOL_TIMEOUT_MS = 15000
+
+interface SidecarConfig {
+  connectionProfileId: string
+  model: string
+  temperature: number
+  topP: number
+  maxTokens: number
+}
+
+const SIDECAR_DEFAULTS: SidecarConfig = {
+  connectionProfileId: '',
+  model: '',
+  temperature: 0.7,
+  topP: 0.9,
+  maxTokens: 1024,
+}
 
 export default function CouncilManager() {
   const councilSettings = useStore((s) => s.councilSettings)
@@ -25,6 +42,49 @@ export default function CouncilManager() {
   const loadAvailableTools = useStore((s) => s.loadAvailableTools)
   const activeLoomPresetId = useStore((s) => s.activeLoomPresetId)
   const presets = useStore((s) => s.presets)
+
+  // Shared sidecar settings (independent of council)
+  const [sidecarConfig, setSidecarConfig] = useState<SidecarConfig>(SIDECAR_DEFAULTS)
+
+  useEffect(() => {
+    const applyLegacy = (cs: any) => {
+      const legacy = cs?.toolsSettings?.sidecar
+      if (legacy?.connectionProfileId) {
+        setSidecarConfig({
+          connectionProfileId: legacy.connectionProfileId,
+          model: legacy.model || '',
+          temperature: legacy.temperature ?? 0.7,
+          topP: legacy.topP ?? 0.9,
+          maxTokens: legacy.maxTokens ?? 1024,
+        })
+      }
+    }
+    settingsApi.get('sidecarSettings')
+      .then((row) => {
+        if (row?.value?.connectionProfileId) {
+          setSidecarConfig({ ...SIDECAR_DEFAULTS, ...(row.value as Partial<SidecarConfig>) })
+        } else {
+          // No dedicated setting — try legacy council sidecar
+          settingsApi.get('council_settings')
+            .then((cs) => applyLegacy(cs?.value))
+            .catch(() => {})
+        }
+      })
+      .catch(() => {
+        // sidecarSettings key doesn't exist — try legacy
+        settingsApi.get('council_settings')
+          .then((cs) => applyLegacy(cs?.value))
+          .catch(() => {})
+      })
+  }, [])
+
+  const saveSidecar = useCallback((partial: Partial<SidecarConfig>) => {
+    setSidecarConfig((prev) => {
+      const updated = { ...prev, ...partial }
+      settingsApi.put('sidecarSettings', updated).catch(() => {})
+      return updated
+    })
+  }, [])
 
   const functionCallingEnabled = useMemo(() => {
     if (!activeLoomPresetId) return true
@@ -42,16 +102,14 @@ export default function CouncilManager() {
   }, [loadAvailableTools])
 
   const ts = councilSettings.toolsSettings
-  const sidecar = ts.sidecar
 
   const profileOptions = profiles.map((p) => ({ value: p.id, label: `${p.name} (${p.provider})` }))
 
   const handleToggleEnabled = useCallback(() => {
     saveCouncilSettings({
       councilMode: !councilSettings.councilMode,
-      toolsSettings: { ...ts, enabled: !councilSettings.councilMode },
     })
-  }, [councilSettings.councilMode, ts, saveCouncilSettings])
+  }, [councilSettings.councilMode, saveCouncilSettings])
 
   const handleAddMember = useCallback(
     (member: CouncilMember) => {
@@ -85,9 +143,61 @@ export default function CouncilManager() {
         </button>
       </div>
 
-      {/* Tools Config */}
+      {/* Sidecar LLM — shared connection used by council tools, expression detection, and other sidecar features */}
+      <EditorSection Icon={Cpu} title="Sidecar LLM">
+        <div className={styles.inlineHint} style={{ marginBottom: 10 }}>
+          The sidecar connection is used by council tools, expression detection, and other background LLM features.
+        </div>
+
+        <FormField label="Connection Profile">
+          <Select
+            value={sidecarConfig.connectionProfileId}
+            onChange={(val) => saveSidecar({ connectionProfileId: val })}
+            options={[{ value: '', label: 'Select a connection...' }, ...profileOptions]}
+          />
+        </FormField>
+
+        <FormField label="Model">
+          <TextInput
+            value={sidecarConfig.model}
+            onChange={(val) => saveSidecar({ model: val })}
+            placeholder="e.g. claude-3-haiku-20240307"
+          />
+        </FormField>
+
+        <div className={styles.fieldRow}>
+          <FormField label="Temperature">
+            <NumberStepper
+              value={sidecarConfig.temperature}
+              onChange={(val) => saveSidecar({ temperature: val })}
+              min={0}
+              max={2}
+              step={0.05}
+            />
+          </FormField>
+          <FormField label="Top P">
+            <NumberStepper
+              value={sidecarConfig.topP}
+              onChange={(val) => saveSidecar({ topP: val })}
+              min={0}
+              max={1}
+              step={0.05}
+            />
+          </FormField>
+          <FormField label="Max Tokens">
+            <NumberStepper
+              value={sidecarConfig.maxTokens}
+              onChange={(val) => saveSidecar({ maxTokens: val })}
+              min={256}
+              max={4096}
+              step={50}
+            />
+          </FormField>
+        </div>
+      </EditorSection>
+
+      {/* Tools Config — how tools are invoked (sidecar vs inline) */}
       <EditorSection Icon={Link2} title="Tools Configuration">
-        {/* Mode Toggle */}
         <FormField label="Mode">
           <div className={styles.modeToggle}>
             <button
@@ -107,6 +217,12 @@ export default function CouncilManager() {
           </div>
         </FormField>
 
+        {(ts.mode ?? 'sidecar') === 'sidecar' && (
+          <div className={styles.inlineHint}>
+            Tools run on the sidecar LLM configured above. Each tool gets its own call.
+          </div>
+        )}
+
         {(ts.mode ?? 'sidecar') === 'inline' && (
           <>
             <div className={styles.inlineHint}>
@@ -120,58 +236,6 @@ export default function CouncilManager() {
                 Function Calling is disabled in the active Loom preset. Inline tools will not be sent.
               </div>
             )}
-          </>
-        )}
-
-        {(ts.mode ?? 'sidecar') === 'sidecar' && (
-          <>
-        <FormField label="Connection Profile">
-          <Select
-            value={sidecar.connectionProfileId}
-            onChange={(val) =>
-              setCouncilToolsSettings({ sidecar: { ...sidecar, connectionProfileId: val } })
-            }
-            options={[{ value: '', label: 'Select a connection...' }, ...profileOptions]}
-          />
-        </FormField>
-
-        <FormField label="Model">
-          <TextInput
-            value={sidecar.model}
-            onChange={(val) => setCouncilToolsSettings({ sidecar: { ...sidecar, model: val } })}
-            placeholder="e.g. claude-3-haiku-20240307"
-          />
-        </FormField>
-
-        <div className={styles.fieldRow}>
-          <FormField label="Temperature">
-            <NumberStepper
-              value={sidecar.temperature}
-              onChange={(val) => setCouncilToolsSettings({ sidecar: { ...sidecar, temperature: val } })}
-              min={0}
-              max={2}
-              step={0.05}
-            />
-          </FormField>
-          <FormField label="Top P">
-            <NumberStepper
-              value={sidecar.topP}
-              onChange={(val) => setCouncilToolsSettings({ sidecar: { ...sidecar, topP: val } })}
-              min={0}
-              max={1}
-              step={0.05}
-            />
-          </FormField>
-          <FormField label="Max Tokens">
-            <NumberStepper
-              value={sidecar.maxTokens}
-              onChange={(val) => setCouncilToolsSettings({ sidecar: { ...sidecar, maxTokens: val } })}
-              min={256}
-              max={4096}
-              step={50}
-            />
-          </FormField>
-        </div>
           </>
         )}
       </EditorSection>

@@ -15,10 +15,11 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { Character, CharacterGalleryItem } from '@/types/api'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
+import ExpressionEditorTab from './ExpressionEditorTab'
 
 const DEBOUNCE_MS = 2000
 
-type TabId = 'core' | 'system' | 'greetings' | 'identity' | 'gallery' | 'advanced'
+type TabId = 'core' | 'system' | 'greetings' | 'identity' | 'gallery' | 'expressions' | 'advanced'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'core', label: 'Core Prompts' },
@@ -26,6 +27,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'greetings', label: 'Greetings' },
   { id: 'identity', label: 'Identity' },
   { id: 'gallery', label: 'Gallery' },
+  { id: 'expressions', label: 'Expressions' },
   { id: 'advanced', label: 'Advanced' },
 ]
 
@@ -719,6 +721,10 @@ export default function CharacterEditorPage() {
                         </div>
                       )}
                     </div>
+                  )}
+
+                  {activeTab === 'expressions' && character && (
+                    <ExpressionEditorTab characterId={character.id} />
                   )}
 
                   {activeTab === 'advanced' && (

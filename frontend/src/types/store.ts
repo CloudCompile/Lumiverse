@@ -623,6 +623,20 @@ export interface RegexSlice {
   setRegexEditingId: (id: string | null) => void
 }
 
+// ---- Expression Slice ----
+import type { ExpressionDisplaySettings } from '@/types/expressions'
+
+export interface ExpressionSlice {
+  currentExpression: string | null
+  currentExpressionImageId: string | null
+  previousExpressionImageId: string | null
+  expressionCharacterId: string | null
+  expressionDisplay: ExpressionDisplaySettings
+  setActiveExpression: (label: string | null, imageId: string | null, characterId: string | null) => void
+  setExpressionDisplay: (partial: Partial<ExpressionDisplaySettings>) => void
+  toggleExpressionMinimized: () => void
+}
+
 // ---- Combined Store ----
 export type AppStore = ChatSlice &
   CharactersSlice &
@@ -642,4 +656,5 @@ export type AppStore = ChatSlice &
   GroupChatSlice &
   SpindlePlacementSlice &
   PromptBreakdownSlice &
-  RegexSlice
+  RegexSlice &
+  ExpressionSlice

@@ -157,6 +157,11 @@ export interface AssemblyResult {
   messages: LlmMessage[];
   breakdown: AssemblyBreakdownEntry[];
   parameters: Record<string, any>;
+  /** The resolved assistant prefill text (from promptBias / assistantPrefill / assistantImpersonation).
+   *  When set, the last message in `messages` is an assistant message containing this text.
+   *  The generate service must prepend this to the LLM response content since the model
+   *  continues *after* the prefill (it's not included in the model's output). */
+  assistantPrefill?: string;
   /** Summary of all world info entries activated during this assembly. */
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
   /** Statistics from the World Info activation pipeline (budget enforcement, etc.). */

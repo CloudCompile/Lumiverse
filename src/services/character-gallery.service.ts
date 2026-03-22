@@ -3,6 +3,8 @@ import { uploadImage } from "./images.service";
 import { getCharacter } from "./characters.service";
 import type { CharacterGalleryItem } from "../types/character-gallery";
 import { safeFetch } from "../utils/safe-fetch";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
 
 function rowToGalleryItem(row: any): CharacterGalleryItem {
   return {
@@ -62,6 +64,35 @@ export async function uploadToGallery(
 ): Promise<CharacterGalleryItem> {
   const image = await uploadImage(userId, file);
   return addToGallery(userId, characterId, image.id, caption);
+}
+
+/**
+ * Upload multiple images to a character's gallery in one call.
+ * Emits IMPORT_GALLERY_PROGRESS WS events so the frontend can track progress.
+ */
+export async function uploadBulkToGallery(
+  userId: string,
+  characterId: string,
+  files: File[],
+): Promise<CharacterGalleryItem[]> {
+  const total = files.length;
+  const items: CharacterGalleryItem[] = [];
+
+  for (let i = 0; i < total; i++) {
+    eventBus.emit(
+      EventType.IMPORT_GALLERY_PROGRESS,
+      { characterId, current: i + 1, total, filename: files[i].name },
+      userId,
+    );
+    try {
+      const item = await uploadToGallery(userId, characterId, files[i]);
+      items.push(item);
+    } catch {
+      // skip individual failures
+    }
+  }
+
+  return items;
 }
 
 export function removeFromGallery(userId: string, itemId: string): boolean {

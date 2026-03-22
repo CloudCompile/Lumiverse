@@ -34,6 +34,7 @@ import { systemRoutes } from "./routes/system.routes";
 import { migrateRoutes } from "./routes/migrate.routes";
 import { presetProfilesRoutes } from "./routes/preset-profiles.routes";
 import { regexScriptsRoutes } from "./routes/regex-scripts.routes";
+import { expressionsRoutes } from "./routes/expressions.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -42,11 +43,12 @@ const app = new Hono();
 app.use("*", compress());
 
 // Body size limit — 10 MB default for API routes.
-// Bulk import routes (migrate/*, characters/import-bulk) are excluded here;
-// the Bun server-level maxRequestBodySize (512 MB in index.ts) covers them.
+// Import routes (migrate/*, characters/import, characters/import-bulk) are excluded
+// here to support charx uploads up to 50 MB; the Bun server-level maxRequestBodySize
+// (512 MB in index.ts) covers them.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/images") {
+  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip")) {
     return next();
   }
   return bodyLimit({
@@ -133,6 +135,7 @@ app.route("/api/v1/system", systemRoutes);
 app.route("/api/v1/migrate", migrateRoutes);
 app.route("/api/v1/preset-profiles", presetProfilesRoutes);
 app.route("/api/v1/regex-scripts", regexScriptsRoutes);
+app.route("/api/v1/characters/:characterId/expressions", expressionsRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

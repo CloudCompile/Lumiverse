@@ -129,6 +129,36 @@ export default function CharacterBrowser() {
         />
       )}
 
+      {browser.importProgress && (
+        <div className={styles.importProgress}>
+          <div className={styles.importProgressSpinner} />
+          <div className={styles.importProgressInfo}>
+            <div className={styles.importProgressLabel}>
+              <span className={styles.importProgressFilename}>{browser.importProgress.filename}</span>
+              <span className={styles.importProgressStep}>
+                {browser.importProgress.step === 'uploading'
+                  ? `Uploading\u2026 ${browser.importProgress.percent}%`
+                  : browser.importProgress.step === 'gallery'
+                    ? `Adding to gallery\u2026 ${browser.importProgress.galleryCurrent}/${browser.importProgress.galleryTotal}`
+                    : 'Processing\u2026'}
+              </span>
+            </div>
+            <div className={styles.importProgressBar}>
+              <div
+                className={styles.importProgressFill}
+                style={{
+                  width: browser.importProgress.step === 'uploading'
+                    ? `${browser.importProgress.percent}%`
+                    : browser.importProgress.step === 'gallery' && browser.importProgress.galleryTotal
+                      ? `${Math.round((browser.importProgress.galleryCurrent! / browser.importProgress.galleryTotal) * 100)}%`
+                      : '100%',
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {browser.importError && (
         <div className={styles.importError}>
           <span>{browser.importError}</span>

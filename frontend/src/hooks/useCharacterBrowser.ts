@@ -5,6 +5,8 @@ import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
 import { get } from '@/api/client'
 import { useStore } from '@/store'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/ws/events'
 import type { Character, CharacterSummary, TagCount } from '@/types/api'
 import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
 
@@ -51,7 +53,14 @@ export function useCharacterBrowser() {
 
   // Local state
   const [loading, setLoading] = useState(false)
-  const [importLoading, setImportLoading] = useState(false)
+  const [importProgress, setImportProgress] = useState<{
+    step: 'uploading' | 'processing' | 'gallery'
+    percent: number
+    filename: string
+    galleryCurrent?: number
+    galleryTotal?: number
+  } | null>(null)
+  const importLoading = !!importProgress
   const [importError, setImportError] = useState<string | null>(null)
   const [batchDeleteProgress, setBatchDeleteProgress] = useState<{ done: number; total: number } | null>(null)
   const [pendingLorebookImport, setPendingLorebookImport] = useState<Character | null>(null)
@@ -60,6 +69,26 @@ export function useCharacterBrowser() {
   const [pendingLorebooks, setPendingLorebooks] = useState<LorebookInfo[]>([])
   const [lorebookModalOpen, setLorebookModalOpen] = useState(false)
   const [debouncedQuery, setDebouncedQuery] = useState(searchQuery)
+
+  // Listen for gallery progress WS events during import
+  useEffect(() => {
+    if (!importProgress) return
+    return wsClient.on(
+      EventType.IMPORT_GALLERY_PROGRESS,
+      (payload: { current: number; total: number; filename: string }) => {
+        setImportProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                step: 'gallery',
+                galleryCurrent: payload.current,
+                galleryTotal: payload.total,
+              }
+            : null,
+        )
+      },
+    )
+  }, [!!importProgress])
 
   // ─── Server-side paginated summaries (the fast path) ────────────────────
   const [browserItems, setBrowserItems] = useState<CharacterSummary[]>([])
@@ -187,10 +216,18 @@ export function useCharacterBrowser() {
   // Import file
   const importFile = useCallback(
     async (file: File) => {
-      setImportLoading(true)
+      setImportProgress({ step: 'uploading', percent: 0, filename: file.name })
       setImportError(null)
       try {
-        const result = await charactersApi.importFile(file)
+        const result = await charactersApi.importFile(file, (percent) => {
+          setImportProgress((prev) =>
+            prev
+              ? percent >= 100
+                ? { ...prev, step: 'processing', percent: 100 }
+                : { ...prev, percent }
+              : null
+          )
+        })
         addCharacter(result.character)
         // Refresh browser page to show new character
         setBrowserTotal((t) => t + 1)
@@ -202,7 +239,7 @@ export function useCharacterBrowser() {
         setImportError(msg)
         throw err
       } finally {
-        setImportLoading(false)
+        setImportProgress(null)
       }
     },
     [addCharacter]
@@ -249,7 +286,7 @@ export function useCharacterBrowser() {
   // Import URL
   const importUrl = useCallback(
     async (url: string) => {
-      setImportLoading(true)
+      setImportProgress({ step: 'processing', percent: 100, filename: url })
       setImportError(null)
       try {
         const result = await charactersApi.importUrl(url)
@@ -264,7 +301,7 @@ export function useCharacterBrowser() {
         setImportError(msg)
         throw err
       } finally {
-        setImportLoading(false)
+        setImportProgress(null)
       }
     },
     [addCharacter]
@@ -461,6 +498,7 @@ export function useCharacterBrowser() {
     favoriteCharacters,
     loading,
     importLoading,
+    importProgress,
     importError,
     batchDeleteProgress,
     pendingLorebookImport,

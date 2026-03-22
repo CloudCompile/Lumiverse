@@ -19,6 +19,7 @@ import { createGroupChatSlice } from './slices/group-chat'
 import { createSpindlePlacementSlice } from './slices/spindle-placement'
 import { createPromptBreakdownSlice } from './slices/prompt-breakdown'
 import { createRegexSlice } from './slices/regex'
+import { createExpressionSlice } from './slices/expressions'
 
 export const useStore = create<AppStore>()((...a) => ({
   ...createChatSlice(...a),
@@ -40,4 +41,5 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createSpindlePlacementSlice(...a),
   ...createPromptBreakdownSlice(...a),
   ...createRegexSlice(...a),
+  ...createExpressionSlice(...a),
 }))

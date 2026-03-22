@@ -2,6 +2,7 @@ import { decodeMulti } from "@msgpack/msgpack";
 import sharp from "sharp";
 import { BUILTIN_TOOLS_MAP } from "./council/builtin-tools";
 import * as councilSettingsSvc from "./council/council-settings.service";
+import { getSidecarSettings } from "./sidecar-settings.service";
 import * as settingsSvc from "./settings.service";
 import * as chatsSvc from "./chats.service";
 import * as charactersSvc from "./characters.service";
@@ -284,13 +285,12 @@ function getImageGenSettings(userId: string): ImageGenSettings {
 }
 
 async function analyzeScene(userId: string, chatId: string): Promise<SceneData> {
-  const council = councilSettingsSvc.getCouncilSettings(userId);
-  const sidecar = council.toolsSettings?.sidecar;
-  if (!sidecar?.connectionProfileId || !sidecar.model) {
-    throw new Error("Council sidecar connection is required for scene analysis");
+  const sidecar = getSidecarSettings(userId);
+  if (!sidecar.connectionProfileId || !sidecar.model) {
+    throw new Error("Sidecar LLM connection is required for scene analysis — configure it in the Council panel");
   }
   const conn = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
-  if (!conn) throw new Error("Council sidecar connection not found");
+  if (!conn) throw new Error("Sidecar connection not found");
 
   const tool = BUILTIN_TOOLS_MAP.get("generate_scene");
   if (!tool) throw new Error("generate_scene council tool is unavailable");

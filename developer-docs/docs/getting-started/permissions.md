@@ -25,7 +25,7 @@ These are always available:
 |---|---|
 | `"generation"` | Fire LLM generations (raw, quiet, batch) on behalf of the user. Also grants access to list/inspect connection profiles. |
 | `"interceptor"` | Register a pre-generation interceptor that can modify the prompt before it reaches the LLM |
-| `"tools"` | Register LLM tools (function calling) |
+| `"tools"` | Register LLM tools (function calling). Council-eligible tools appear in the Council tools list and can be assigned to members for pre-generation analysis |
 | `"cors_proxy"` | Make HTTP requests through the Lumiverse server (bypass CORS) |
 | `"context_handler"` | Register middleware that enriches the generation context before prompt assembly |
 | `"ephemeral_storage"` | Use temporary storage with TTL, memory pooling, and per-extension quotas |

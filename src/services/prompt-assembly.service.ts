@@ -163,7 +163,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   const chat = chatsSvc.getChat(ctx.userId, ctx.chatId);
   if (!chat) throw new Error("Chat not found");
 
-  const messages = chatsSvc.getMessages(ctx.userId, ctx.chatId);
+  const allMessages = chatsSvc.getMessages(ctx.userId, ctx.chatId);
+  // Filter out the excluded message (e.g. regenerate/swipe target with a blank swipe)
+  // so it doesn't appear in macros, WI scanning, or any assembly path.
+  const messages = ctx.excludeMessageId
+    ? allMessages.filter(m => m.id !== ctx.excludeMessageId)
+    : allMessages;
   // For group chats, resolve the target character; fall back to the chat's primary character
   const characterId = ctx.targetCharacterId || chat.character_id;
   const character = charactersSvc.getCharacter(ctx.userId, characterId);
@@ -417,12 +422,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       }
 
       // Insert chat messages — evaluate macros in each message's content
-      // For regenerate: skip the target message (it has a blank swipe)
-      // Also skip messages marked as hidden drafts (extra.hidden === true)
+      // Skip messages marked as hidden drafts (extra.hidden === true)
+      // (excludeMessageId is already filtered out at the top of assemblePrompt)
       let historyCount = 0;
       const historyParts: string[] = [];
       for (const msg of effectiveMessages) {
-        if (ctx.excludeMessageId && msg.id === ctx.excludeMessageId) continue;
         if (msg.extra?.hidden === true) continue;
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
         const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
@@ -691,49 +695,50 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     }
   }
 
-  // ---- Build user nudge (replaces assistant prefill for universal compatibility) ----
-  // Instead of appending an assistant prefill (which some models reject),
-  // we always inject a silent user nudge so the conversation ends with a user message.
-  const nudgeParts: string[] = [];
+  // ---- Build group nudge (user message) + assistant prefill ----
+  let assistantPrefill: string | undefined;
 
   // Group chat nudge from preset (e.g. "[Write next reply only as {{char}}]")
   if (ctx.targetCharacterId) {
     const groupNudge = promptBehavior.groupNudge;
     if (groupNudge) {
       const resolved = (await evaluate(groupNudge, macroEnv, registry)).text;
-      if (resolved) nudgeParts.push(resolved);
+      if (resolved) {
+        result.push({ role: "user", content: resolved });
+        breakdown.push({ type: "utility", name: "Group Nudge", role: "user", content: resolved });
+      }
     }
   }
 
-  // promptBias (Start Reply With) — folded into the nudge as guidance
+  // Collect assistant prefill: promptBias (Start Reply With) + assistantPrefill/assistantImpersonation
+  const prefillParts: string[] = [];
+
   const promptBiasVal = settingsMap.get("promptBias");
   if (promptBiasVal && typeof promptBiasVal === "string" && promptBiasVal.trim()) {
     const resolvedBias = (await evaluate(promptBiasVal, macroEnv, registry)).text;
-    if (resolvedBias) nudgeParts.push(`Begin your reply with: ${resolvedBias}`);
+    if (resolvedBias) prefillParts.push(resolvedBias);
   }
 
-  // assistantPrefill / assistantImpersonation — folded into the nudge as guidance
   const csPrefill = (ctx.generationType === "impersonate" && completionSettings.assistantImpersonation)
     ? completionSettings.assistantImpersonation
     : completionSettings.assistantPrefill;
   if (csPrefill) {
     const resolvedPrefill = (await evaluate(csPrefill, macroEnv, registry)).text;
-    if (resolvedPrefill) nudgeParts.push(`Begin your reply with: ${resolvedPrefill}`);
+    if (resolvedPrefill) prefillParts.push(resolvedPrefill);
   }
 
-  // Ensure the conversation always ends with a user message
-  if (nudgeParts.length > 0) {
-    const nudgeContent = nudgeParts.join("\n");
-    result.push({ role: "user", content: nudgeContent });
-    breakdown.push({ type: "utility", name: "User Nudge", role: "user", content: nudgeContent });
+  if (prefillParts.length > 0) {
+    assistantPrefill = prefillParts.join("");
+    result.push({ role: "assistant", content: assistantPrefill });
+    breakdown.push({ type: "utility", name: "Assistant Prefill", role: "assistant", content: assistantPrefill });
   } else if (ctx.generationType === "continue" && result.length > 0 && result[result.length - 1].role === "assistant") {
-    // Continue generation with no explicit nudge — add a minimal nudge so the
+    // Continue generation with no explicit prefill — add a minimal nudge so the
     // conversation ends on a user message (required by most providers).
     result.push({ role: "user", content: "[Continue]" });
     breakdown.push({ type: "utility", name: "User Nudge", role: "user", content: "[Continue]" });
   }
 
-  // ---- Apply CompletionSettings post-processing (excluding prefill, handled above) ----
+  // ---- Apply CompletionSettings post-processing ----
   applyCompletionSettings(result, completionSettings, character, persona, ctx.generationType);
 
   // ---- Apply pending append blocks ----
@@ -777,6 +782,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     messages: result,
     breakdown,
     parameters,
+    assistantPrefill,
     activatedWorldInfo: activatedWorldInfo.length > 0 ? activatedWorldInfo : undefined,
     worldInfoStats: wiResult.stats,
     memoryStats,
@@ -1715,7 +1721,7 @@ function applyContextFilters(
 
 /**
  * Apply CompletionSettings as a post-processing pass on the assembled messages.
- * Handles squashSystemMessages, useSystemPrompt, namesBehavior, and assistantPrefill
+ * Handles squashSystemMessages, useSystemPrompt, and namesBehavior
  * in a single O(n) pass (where possible).
  */
 function applyCompletionSettings(
@@ -1769,7 +1775,6 @@ function applyCompletionSettings(
     i++;
   }
 
-  // NOTE: assistantPrefill is now folded into the user nudge by assemblePrompt().
 }
 
 /**
@@ -1928,7 +1933,7 @@ export function injectReasoningParams(params: Record<string, any>, providerName:
 /**
  * One-liner impersonation: skip all preset blocks, include only chat history
  * and the impersonation prompt from preset behaviors. Optionally includes the
- * assistantImpersonation prefill nudge.
+ * assistantImpersonation prefill as a trailing assistant message.
  */
 async function onelinerImpersonation(
   messages: Message[],
@@ -1970,21 +1975,22 @@ async function onelinerImpersonation(
     }
   }
 
-  // assistantImpersonation prefill nudge
+  // assistantImpersonation prefill — sent as actual assistant message
+  let assistantPrefill: string | undefined;
   const csPrefill = completionSettings.assistantImpersonation || completionSettings.assistantPrefill;
   if (csPrefill) {
     const resolvedPrefill = (await evaluate(csPrefill, macroEnv, registry)).text;
     if (resolvedPrefill) {
-      const nudgeContent = `Begin your reply with: ${resolvedPrefill}`;
-      result.push({ role: "user", content: nudgeContent });
-      breakdown.push({ type: "utility", name: "User Nudge", role: "user", content: nudgeContent });
+      assistantPrefill = resolvedPrefill;
+      result.push({ role: "assistant", content: assistantPrefill });
+      breakdown.push({ type: "utility", name: "Assistant Prefill", role: "assistant", content: assistantPrefill });
     }
   }
 
   // Build parameters from sampler overrides + reasoning settings
   const parameters = buildParameters(samplerOverrides, preset, reasoningSettings, connection?.provider, connection?.model);
 
-  return { messages: result, breakdown, parameters };
+  return { messages: result, breakdown, parameters, assistantPrefill };
 }
 
 /**

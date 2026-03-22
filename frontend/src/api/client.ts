@@ -95,3 +95,40 @@ export async function upload<T>(path: string, formData: FormData): Promise<T> {
   })
   return handleResponse<T>(res)
 }
+
+export function uploadWithProgress<T>(
+  path: string,
+  formData: FormData,
+  onProgress?: (percent: number) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${BASE_URL}${path}`)
+    xhr.withCredentials = true
+
+    if (onProgress) {
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100))
+        }
+      })
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText))
+        } catch {
+          reject(new Error('Invalid JSON response'))
+        }
+      } else {
+        let body: any
+        try { body = JSON.parse(xhr.responseText) } catch { body = xhr.responseText }
+        reject(new ApiError(xhr.status, xhr.statusText, body))
+      }
+    }
+
+    xhr.onerror = () => reject(new Error('Network error'))
+    xhr.send(formData)
+  })
+}

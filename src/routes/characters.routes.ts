@@ -3,6 +3,7 @@ import * as svc from "../services/characters.service";
 import * as files from "../services/files.service";
 import * as images from "../services/images.service";
 import * as cardSvc from "../services/character-card.service";
+import * as gallerySvc from "../services/character-gallery.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
 
@@ -190,13 +191,21 @@ async function fetchGenericCharacter(url: string, userId: string) {
 
   if (contentType.includes("application/zip") || url.toLowerCase().endsWith(".charx")) {
     const file = new File([buf], "import.charx", { type: "application/zip" });
-    const { card: cardInput, avatarFile } = await cardSvc.extractCardFromCharx(file);
+    const { card: cardInput, avatarFile, galleryFiles } = await cardSvc.extractCardFromCharx(file);
     const character = svc.createCharacter(userId, cardInput);
 
     if (avatarFile) {
       const image = await images.uploadImage(userId, avatarFile);
       svc.setCharacterImage(userId, character.id, image.id);
       svc.setCharacterAvatar(userId, character.id, image.filename);
+    }
+
+    if (galleryFiles.length > 3) {
+      await gallerySvc.uploadBulkToGallery(userId, character.id, galleryFiles);
+    } else {
+      for (const gf of galleryFiles) {
+        try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
+      }
     }
 
     return svc.getCharacter(userId, character.id)!;
@@ -405,17 +414,20 @@ app.post("/import-bulk", async (c) => {
 
     for (const file of files) {
       const filename = file.name || "unknown";
+      const filenameLower = filename.toLowerCase();
       try {
         let cardInput;
         let avatarFile: File | null = null;
+        let charxGalleryFiles: File[] = [];
 
-        if (file.type === "image/png" || filename.endsWith(".png")) {
+        if (file.type === "image/png" || filenameLower.endsWith(".png")) {
           cardInput = await cardSvc.extractCardFromPng(file);
           avatarFile = file;
-        } else if (filename.endsWith(".charx")) {
+        } else if (filenameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed") {
           const charxResult = await cardSvc.extractCardFromCharx(file);
           cardInput = charxResult.card;
           avatarFile = charxResult.avatarFile;
+          charxGalleryFiles = charxResult.galleryFiles;
         } else {
           const text = await file.text();
           const json = JSON.parse(text);
@@ -453,6 +465,14 @@ app.post("/import-bulk", async (c) => {
           const image = await images.uploadImage(userId, avatarFile);
           svc.setCharacterImage(userId, character.id, image.id);
           svc.setCharacterAvatar(userId, character.id, image.filename);
+        }
+
+        if (charxGalleryFiles.length > 3) {
+          await gallerySvc.uploadBulkToGallery(userId, character.id, charxGalleryFiles);
+        } else {
+          for (const gf of charxGalleryFiles) {
+            try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
+          }
         }
 
         const imported = svc.getCharacter(userId, character.id)!;
@@ -500,7 +520,8 @@ app.post("/import", async (c) => {
       const file = formData.get("file") as File | null;
       if (!file) return c.json({ error: "file is required" }, 400);
 
-      if (file.type === "image/png" || file.name?.endsWith(".png")) {
+      const nameLower = file.name?.toLowerCase() ?? "";
+      if (file.type === "image/png" || nameLower.endsWith(".png")) {
         // PNG card — extract embedded JSON + use as avatar
         const cardInput = await cardSvc.extractCardFromPng(file);
         const character = svc.createCharacter(userId, cardInput);
@@ -509,14 +530,21 @@ app.post("/import", async (c) => {
         svc.setCharacterAvatar(userId, character.id, image.filename);
         const imported = svc.getCharacter(userId, character.id)!;
         return c.json({ character: imported }, 201);
-      } else if (file.name?.endsWith(".charx")) {
-        // CHARX archive — ZIP with card.json + optional avatar
-        const { card: cardInput, avatarFile } = await cardSvc.extractCardFromCharx(file);
+      } else if (nameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed") {
+        // CHARX archive — ZIP with card.json + optional avatar + gallery images
+        const { card: cardInput, avatarFile, galleryFiles } = await cardSvc.extractCardFromCharx(file);
         const character = svc.createCharacter(userId, cardInput);
         if (avatarFile) {
           const image = await images.uploadImage(userId, avatarFile);
           svc.setCharacterImage(userId, character.id, image.id);
           svc.setCharacterAvatar(userId, character.id, image.filename);
+        }
+        if (galleryFiles.length > 3) {
+          await gallerySvc.uploadBulkToGallery(userId, character.id, galleryFiles);
+        } else {
+          for (const gf of galleryFiles) {
+            try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
+          }
         }
         const imported = svc.getCharacter(userId, character.id)!;
         return c.json({ character: imported }, 201);

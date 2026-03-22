@@ -75,6 +75,11 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'guidedGenerations',
   'quickReplySets',
   'toastPosition',
+  // Expression display settings
+  'expressionDisplay',
+  'expressionDetection',
+  // Shared sidecar LLM settings
+  'sidecarSettings',
 ])
 
 // ── Debounced batch persistence ──────────────────────────────────────────

@@ -1,5 +1,5 @@
 import type { CouncilSettings, CouncilToolDefinition } from "lumiverse-spindle-types";
-import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS, COUNCIL_SIDECAR_DEFAULTS } from "lumiverse-spindle-types";
+import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS, SIDECAR_DEFAULTS } from "lumiverse-spindle-types";
 import * as settingsSvc from "../settings.service";
 import { BUILTIN_COUNCIL_TOOLS, BUILTIN_TOOLS_MAP } from "./builtin-tools";
 import { getDLCTools } from "./dlc-tools";
@@ -25,13 +25,15 @@ export function getCouncilSettings(userId: string): CouncilSettings {
   if (!row) {
     return normalizeCouncilSettings({
       ...COUNCIL_SETTINGS_DEFAULTS,
-      toolsSettings: { ...COUNCIL_TOOLS_DEFAULTS, sidecar: { ...COUNCIL_SIDECAR_DEFAULTS } },
+      toolsSettings: { ...COUNCIL_TOOLS_DEFAULTS },
     });
   }
 
   const stored = row.value as Partial<CouncilSettings>;
   const storedTools = stored.toolsSettings ?? {};
-  const storedSidecar = (storedTools as any).sidecar ?? {};
+
+  // Preserve legacy sidecar field if present (for backwards compat fallback)
+  const legacySidecar = (storedTools as any).sidecar;
 
   return normalizeCouncilSettings({
     ...COUNCIL_SETTINGS_DEFAULTS,
@@ -39,10 +41,7 @@ export function getCouncilSettings(userId: string): CouncilSettings {
     toolsSettings: {
       ...COUNCIL_TOOLS_DEFAULTS,
       ...storedTools,
-      sidecar: {
-        ...COUNCIL_SIDECAR_DEFAULTS,
-        ...storedSidecar,
-      },
+      ...(legacySidecar ? { sidecar: { ...SIDECAR_DEFAULTS, ...legacySidecar } } : {}),
     },
   });
 }
@@ -57,9 +56,6 @@ export function putCouncilSettings(userId: string, partial: Partial<CouncilSetti
       ? {
           ...current.toolsSettings,
           ...partial.toolsSettings,
-          sidecar: partial.toolsSettings.sidecar
-            ? { ...current.toolsSettings.sidecar, ...partial.toolsSettings.sidecar }
-            : current.toolsSettings.sidecar,
         }
       : current.toolsSettings,
   });

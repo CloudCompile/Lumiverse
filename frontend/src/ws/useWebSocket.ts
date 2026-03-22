@@ -412,6 +412,14 @@ export function useWebSocket() {
       wsClient.on(EventType.REGEX_SCRIPT_DELETED, () => {
         store.getState().loadRegexScripts()
       }),
+
+      // Expression change events
+      wsClient.on(EventType.EXPRESSION_CHANGED, (payload: { chatId: string; characterId: string; label: string; imageId: string }) => {
+        const state = store.getState()
+        if (payload.chatId === state.activeChatId) {
+          state.setActiveExpression(payload.label, payload.imageId, payload.characterId)
+        }
+      }),
     ]
 
     return () => {

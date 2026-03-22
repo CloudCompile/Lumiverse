@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand'
 import type { CouncilSlice } from '@/types/store'
 import type { CouncilMember, CouncilSettings, CouncilToolsSettings, CouncilToolDefinition } from 'lumiverse-spindle-types'
-import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS, COUNCIL_SIDECAR_DEFAULTS } from 'lumiverse-spindle-types'
+import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS } from 'lumiverse-spindle-types'
 import { councilApi } from '@/api/council'
 import { spindleApi } from '@/api/spindle'
 import { generateUUID } from '@/lib/uuid'
@@ -37,7 +37,6 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
     try {
       const settings = await councilApi.getSettings()
       const storedTools = settings.toolsSettings ?? {}
-      const storedSidecar = (storedTools as any).sidecar ?? {}
       set({
         councilSettings: {
           ...COUNCIL_SETTINGS_DEFAULTS,
@@ -45,10 +44,6 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
           toolsSettings: {
             ...COUNCIL_TOOLS_DEFAULTS,
             ...storedTools,
-            sidecar: {
-              ...COUNCIL_SIDECAR_DEFAULTS,
-              ...storedSidecar,
-            },
           },
         },
       })
@@ -68,9 +63,6 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
         ? {
             ...current.toolsSettings,
             ...partial.toolsSettings,
-            sidecar: partial.toolsSettings.sidecar
-              ? { ...current.toolsSettings.sidecar, ...partial.toolsSettings.sidecar }
-              : current.toolsSettings.sidecar,
           }
         : current.toolsSettings,
     }
@@ -181,9 +173,6 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
     settings.toolsSettings = {
       ...settings.toolsSettings,
       ...partial,
-      sidecar: partial.sidecar
-        ? { ...settings.toolsSettings.sidecar, ...partial.sidecar }
-        : settings.toolsSettings.sidecar,
     }
     set({ councilSettings: settings })
     debouncedSave(settings)

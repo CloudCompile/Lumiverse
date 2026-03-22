@@ -165,10 +165,72 @@ function addLazyLoadingToImages(html: string): string {
   return html.replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy"')
 }
 
+/**
+ * Escape ordered-list patterns that don't form intentional multi-item lists.
+ * Prevents lines like "25. She felt old" from rendering as <ol start="25">.
+ * Only preserves list formatting when 2+ consecutive numbered lines exist
+ * (bridging blank lines between them).
+ */
+function escapeIsolatedOrderedListItems(text: string): string {
+  const lines = text.split('\n')
+  const n = lines.length
+  const LIST_RE = /^\s*\d+\.\s/
+
+  // Track fenced code blocks to skip them
+  let fenced = false
+  const inFence: boolean[] = []
+  for (let i = 0; i < n; i++) {
+    if (/^\s*(`{3,}|~{3,})/.test(lines[i])) fenced = !fenced
+    inFence[i] = fenced
+  }
+
+  const isCand = lines.map((l, i) => !inFence[i] && LIST_RE.test(l))
+
+  // Group consecutive candidates, bridging only blank lines
+  const isReal = new Array(n).fill(false)
+  let i = 0
+  while (i < n) {
+    if (!isCand[i]) { i++; continue }
+
+    const members = [i]
+    let j = i + 1
+    while (j < n) {
+      if (isCand[j]) {
+        members.push(j)
+        j++
+      } else if (lines[j].trim() === '') {
+        let k = j
+        while (k < n && lines[k].trim() === '') k++
+        if (k < n && isCand[k]) {
+          j = k
+        } else {
+          break
+        }
+      } else {
+        break
+      }
+    }
+
+    if (members.length >= 2) {
+      for (const m of members) isReal[m] = true
+    }
+
+    i = j
+  }
+
+  return lines.map((line, idx) => {
+    if (isCand[idx] && !isReal[idx]) {
+      return line.replace(/^(\s*\d+)\.\s/, '$1\\. ')
+    }
+    return line
+  }).join('\n')
+}
+
 function formatContent(raw: string): string {
   if (!raw) return ''
   const normalized = normalizeQuotes(raw)
-  let html = marked.parse(normalized, { async: false }) as string
+  const listSafe = escapeIsolatedOrderedListItems(normalized)
+  let html = marked.parse(listSafe, { async: false }) as string
   html = normalizeQuotesInHTML(html)
   html = colorizeDialogue(html)
   html = addLazyLoadingToImages(html)
