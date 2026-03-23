@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
+import { chatsApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
 import styles from './GroupChatMemberBar.module.css'
 import clsx from 'clsx'
@@ -11,6 +12,7 @@ interface GroupChatMemberBarProps {
 
 export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) {
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
+  const mutedCharacterIds = useStore((s) => s.mutedCharacterIds)
   const characters = useStore((s) => s.characters)
   const activeGroupCharacterId = useStore((s) => s.activeGroupCharacterId)
   const isStreaming = useStore((s) => s.isStreaming)
@@ -19,10 +21,11 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
   const startStreaming = useStore((s) => s.startStreaming)
   const setStreamingError = useStore((s) => s.setStreamingError)
+  const toggleMuteCharacter = useStore((s) => s.toggleMuteCharacter)
 
   const handleForceGenerate = useCallback(
     async (characterId: string) => {
-      if (isStreaming) return
+      if (isStreaming || mutedCharacterIds.includes(characterId)) return
       try {
         const res = await generateApi.start({
           chat_id: chatId,
@@ -39,7 +42,28 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
         setStreamingError(msg)
       }
     },
-    [chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, startStreaming, setStreamingError]
+    [chatId, isStreaming, mutedCharacterIds, activeProfileId, activePersonaId, getActivePresetForGeneration, startStreaming, setStreamingError]
+  )
+
+  const handleToggleMute = useCallback(
+    async (e: React.MouseEvent, characterId: string) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const newMuted = toggleMuteCharacter(characterId)
+      const isMuted = newMuted.includes(characterId)
+      try {
+        if (isMuted) {
+          await chatsApi.muteCharacter(chatId, characterId)
+        } else {
+          await chatsApi.unmuteCharacter(chatId, characterId)
+        }
+      } catch (err) {
+        console.error('[GroupMemberBar] Mute toggle failed:', err)
+        // Revert on failure
+        toggleMuteCharacter(characterId)
+      }
+    },
+    [chatId, toggleMuteCharacter]
   )
 
   if (groupCharacterIds.length === 0) return null
@@ -49,6 +73,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
       {groupCharacterIds.map((id) => {
         const char = characters.find((c) => c.id === id)
         const isActive = id === activeGroupCharacterId
+        const isMuted = mutedCharacterIds.includes(id)
         const talk = char?.talkativeness ?? 0.5
         return (
           <button
@@ -57,11 +82,17 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
             className={clsx(
               styles.member,
               isActive && styles.memberActive,
+              isMuted && styles.memberMuted,
               talk >= 0.7 && styles.talkHigh,
               talk <= 0.3 && styles.talkLow
             )}
             onClick={() => handleForceGenerate(id)}
-            title={`${char?.name || 'Character'} — Click to force generate (talkativeness: ${talk.toFixed(1)})`}
+            onContextMenu={(e) => handleToggleMute(e, id)}
+            title={
+              isMuted
+                ? `${char?.name || 'Character'} — Muted (right-click to unmute)`
+                : `${char?.name || 'Character'} — Click to generate, right-click to mute`
+            }
             disabled={isStreaming}
           >
             {char?.avatar_path || char?.image_id ? (
@@ -77,6 +108,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
               </span>
             )}
             <span className={styles.name}>{char?.name || 'Unknown'}</span>
+            {isMuted && <span className={styles.mutedBadge} />}
           </button>
         )
       })}

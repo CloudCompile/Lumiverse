@@ -51,6 +51,21 @@ app.post("/group", async (c) => {
   return c.json(chat, 201);
 });
 
+// Group chat muting
+app.post("/:id/mute/:characterId", (c) => {
+  const userId = c.get("userId");
+  const updated = svc.setGroupMute(userId, c.req.param("id"), c.req.param("characterId"), true);
+  if (!updated) return c.json({ error: "Not found or not a group chat member" }, 404);
+  return c.json(updated);
+});
+
+app.post("/:id/unmute/:characterId", (c) => {
+  const userId = c.get("userId");
+  const updated = svc.setGroupMute(userId, c.req.param("id"), c.req.param("characterId"), false);
+  if (!updated) return c.json({ error: "Not found or not a group chat member" }, 404);
+  return c.json(updated);
+});
+
 app.get("/:id", (c) => {
   const userId = c.get("userId");
   const chat = svc.getChat(userId, c.req.param("id"));

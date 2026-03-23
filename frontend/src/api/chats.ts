@@ -42,6 +42,14 @@ export const chatsApi = {
     return post<Chat>('/chats/group', input)
   },
 
+  muteCharacter(chatId: string, characterId: string) {
+    return post<Chat>(`/chats/${chatId}/mute/${characterId}`, {})
+  },
+
+  unmuteCharacter(chatId: string, characterId: string) {
+    return post<Chat>(`/chats/${chatId}/unmute/${characterId}`, {})
+  },
+
   reattributeUserMessages(chatId: string, personaId: string) {
     return post<{ success: true; updated: number; persona_id: string; persona_name: string }>(
       `/chats/${chatId}/reattribute-user-messages`,

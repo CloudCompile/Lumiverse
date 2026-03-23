@@ -532,18 +532,21 @@ export interface LumiSlice {
 export interface GroupChatSlice {
   isGroupChat: boolean
   groupCharacterIds: string[]
+  mutedCharacterIds: string[]
   roundCharactersSpoken: string[]
   roundTotal: number
   currentRound: number
   isNudgeLoopActive: boolean
   activeGroupCharacterId: string | null
 
-  setGroupChat: (isGroup: boolean, characterIds: string[]) => void
+  setGroupChat: (isGroup: boolean, characterIds: string[], mutedIds?: string[]) => void
   clearGroupChat: () => void
   markCharacterSpoken: (characterId: string) => void
   startNewRound: (total: number) => void
   setNudgeLoopActive: (active: boolean) => void
   setActiveGroupCharacter: (characterId: string | null) => void
+  setMutedCharacterIds: (ids: string[]) => void
+  toggleMuteCharacter: (characterId: string) => string[]
 }
 
 // ---- Spindle Placement Slice ----

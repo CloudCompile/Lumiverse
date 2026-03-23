@@ -98,8 +98,9 @@ export default function ChatView() {
         // Detect group chat and initialize group state
         const isGroup = chat.metadata?.group === true
         const groupCharIds: string[] = isGroup ? (chat.metadata.character_ids || []) : []
+        const mutedIds: string[] = isGroup ? (chat.metadata.muted_character_ids || []) : []
         if (isGroup && groupCharIds.length > 0) {
-          useStore.getState().setGroupChat(true, groupCharIds)
+          useStore.getState().setGroupChat(true, groupCharIds, mutedIds)
           // Load all group characters into the store
           const store = useStore.getState()
           const missingIds = groupCharIds.filter((id) => !store.characters.some((c) => c.id === id))

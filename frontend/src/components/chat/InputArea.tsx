@@ -62,6 +62,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
   const isGroupChat = useStore((s) => s.isGroupChat)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
+  const mutedCharacterIds = useStore((s) => s.mutedCharacterIds)
   const expressionDisplay = useStore((s) => s.expressionDisplay)
   const setExpressionDisplay = useStore((s) => s.setExpressionDisplay)
 
@@ -273,9 +274,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
         preset_id: getActivePresetForGeneration() || undefined,
         generation_type: 'normal' as const,
       }
-      // For group chats, let the backend pick the first speaker (or pass a specific one if forced)
+      // For group chats, pick the first non-muted character as the initial speaker
       if (isGroupChat && groupCharacterIds.length > 0) {
-        genOpts.target_character_id = groupCharacterIds[0]
+        const firstUnmuted = groupCharacterIds.find((id) => !mutedCharacterIds.includes(id))
+        if (firstUnmuted) genOpts.target_character_id = firstUnmuted
       }
       if (content || attachments) {
         const extra: Record<string, any> = {}

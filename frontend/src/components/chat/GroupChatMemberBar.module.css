@@ -106,6 +106,32 @@
   text-align: center;
 }
 
+/* Muted state */
+.memberMuted {
+  opacity: 0.4;
+  pointer-events: auto;
+}
+
+.memberMuted .avatar,
+.memberMuted .avatarFallback {
+  filter: grayscale(0.8);
+}
+
+.memberMuted .name {
+  text-decoration: line-through;
+}
+
+.mutedBadge {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lumiverse-error, #e54545);
+  border: 1.5px solid var(--lumiverse-bg, rgba(18, 18, 24, 0.95));
+}
+
 /* Talkativeness indicator as border opacity */
 .talkHigh .avatar,
 .talkHigh .avatarFallback {

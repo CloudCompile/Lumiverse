@@ -241,6 +241,34 @@ export function updateChat(userId: string, id: string, input: UpdateChatInput): 
   return updated;
 }
 
+// ---- Group chat muting ----
+
+export function getGroupMutedIds(chat: Chat): string[] {
+  if (!chat.metadata?.group) return [];
+  return Array.isArray(chat.metadata.muted_character_ids)
+    ? chat.metadata.muted_character_ids
+    : [];
+}
+
+export function setGroupMute(userId: string, chatId: string, characterId: string, muted: boolean): Chat | null {
+  const chat = getChat(userId, chatId);
+  if (!chat || !chat.metadata?.group) return null;
+
+  const characterIds: string[] = chat.metadata.character_ids || [];
+  if (!characterIds.includes(characterId)) return null;
+
+  const currentMuted: string[] = getGroupMutedIds(chat);
+  let newMuted: string[];
+  if (muted) {
+    newMuted = currentMuted.includes(characterId) ? currentMuted : [...currentMuted, characterId];
+  } else {
+    newMuted = currentMuted.filter((id) => id !== characterId);
+  }
+
+  const newMetadata = { ...chat.metadata, muted_character_ids: newMuted };
+  return updateChat(userId, chatId, { metadata: newMetadata });
+}
+
 export function reattributeUserMessages(userId: string, chatId: string, personaId: string, personaName: string): number | null {
   const chat = getChat(userId, chatId);
   if (!chat) return null;

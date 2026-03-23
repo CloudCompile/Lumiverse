@@ -1,19 +1,21 @@
 import type { StateCreator } from 'zustand'
 import type { GroupChatSlice } from '@/types/store'
 
-export const createGroupChatSlice: StateCreator<GroupChatSlice> = (set) => ({
+export const createGroupChatSlice: StateCreator<GroupChatSlice> = (set, get) => ({
   isGroupChat: false,
   groupCharacterIds: [],
+  mutedCharacterIds: [],
   roundCharactersSpoken: [],
   roundTotal: 0,
   currentRound: 0,
   isNudgeLoopActive: false,
   activeGroupCharacterId: null,
 
-  setGroupChat: (isGroup, characterIds) =>
+  setGroupChat: (isGroup, characterIds, mutedIds) =>
     set({
       isGroupChat: isGroup,
       groupCharacterIds: characterIds,
+      mutedCharacterIds: mutedIds ?? [],
       roundCharactersSpoken: [],
       roundTotal: 0,
       currentRound: 0,
@@ -25,6 +27,7 @@ export const createGroupChatSlice: StateCreator<GroupChatSlice> = (set) => ({
     set({
       isGroupChat: false,
       groupCharacterIds: [],
+      mutedCharacterIds: [],
       roundCharactersSpoken: [],
       roundTotal: 0,
       currentRound: 0,
@@ -49,4 +52,15 @@ export const createGroupChatSlice: StateCreator<GroupChatSlice> = (set) => ({
   setNudgeLoopActive: (active) => set({ isNudgeLoopActive: active }),
 
   setActiveGroupCharacter: (characterId) => set({ activeGroupCharacterId: characterId }),
+
+  setMutedCharacterIds: (ids) => set({ mutedCharacterIds: ids }),
+
+  toggleMuteCharacter: (characterId) => {
+    const current = get().mutedCharacterIds
+    const newMuted = current.includes(characterId)
+      ? current.filter((id) => id !== characterId)
+      : [...current, characterId]
+    set({ mutedCharacterIds: newMuted })
+    return newMuted
+  },
 })

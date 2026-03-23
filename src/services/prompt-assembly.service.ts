@@ -277,6 +277,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   initMacros();
   const groupCharacterNames = resolveGroupCharacterNames(chat, (cid) =>
     charactersSvc.getCharacter(ctx.userId, cid)?.name);
+  const mutedIds = chatsSvc.getGroupMutedIds(chat);
+  const groupNotMutedNames = groupCharacterNames && mutedIds.length > 0
+    ? resolveGroupCharacterNames(chat, (cid) =>
+        mutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(ctx.userId, cid)?.name)
+    : undefined;
   const macroEnv: MacroEnv = buildEnv({
     character,
     persona,
@@ -285,6 +290,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     generationType: ctx.generationType,
     connection,
     groupCharacterNames,
+    groupNotMutedNames,
     targetCharacterId: ctx.targetCharacterId,
     targetCharacterName: ctx.targetCharacterId ? character.name : undefined,
   });
@@ -3062,19 +3068,26 @@ async function legacyAssembly(
   initMacros();
   let macroEnv: MacroEnv | null = null;
   if (character && chat) {
+    const chatObj = chat as Chat;
     const groupNames = userId
-      ? resolveGroupCharacterNames(chat as Chat, (cid) =>
+      ? resolveGroupCharacterNames(chatObj, (cid) =>
           charactersSvc.getCharacter(userId, cid)?.name)
       : undefined;
-    const isGroup = !!(chat as Chat).metadata?.group;
+    const isGroup = !!chatObj.metadata?.group;
+    const legacyMutedIds = userId ? chatsSvc.getGroupMutedIds(chatObj) : [];
+    const legacyNotMuted = groupNames && legacyMutedIds.length > 0 && userId
+      ? resolveGroupCharacterNames(chatObj, (cid) =>
+          legacyMutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(userId, cid)?.name)
+      : undefined;
     macroEnv = buildEnv({
       character: character as Character,
       persona: persona ?? null,
-      chat: chat as Chat,
+      chat: chatObj,
       messages,
       generationType,
       connection: connection ?? null,
       groupCharacterNames: groupNames,
+      groupNotMutedNames: legacyNotMuted,
       targetCharacterName: isGroup ? (character as Character).name : undefined,
     });
     // Populate reasoning macros
