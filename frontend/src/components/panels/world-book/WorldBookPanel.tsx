@@ -33,6 +33,7 @@ export default function WorldBookPanel() {
   const [entryTotal, setEntryTotal] = useState(0)
   const [entryOffset, setEntryOffset] = useState(0)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [entrySearchFilter, setEntrySearchFilter] = useState('')
 
   // Book editing state
   const [bookFieldsOpen, setBookFieldsOpen] = useState(false)
@@ -59,11 +60,27 @@ export default function WorldBookPanel() {
   const enabledNonEmptyCount = vectorSummary?.enabled_non_empty ?? 0
   const allNonEmptySemanticEnabled = nonEmptyEntryCount > 0 && enabledNonEmptyCount === nonEmptyEntryCount
   const someNonEmptySemanticEnabled = enabledNonEmptyCount > 0 && enabledNonEmptyCount < nonEmptyEntryCount
+  const normalizedEntrySearch = entrySearchFilter.trim().toLowerCase()
+  const filteredEntries = normalizedEntrySearch
+    ? entries.filter((entry) =>
+        [entry.comment, entry.content, ...entry.key, ...entry.keysecondary]
+          .join('\n')
+          .toLowerCase()
+          .includes(normalizedEntrySearch)
+      )
+    : entries
 
   useEffect(() => {
     if (!bulkSemanticToggleRef.current) return
     bulkSemanticToggleRef.current.indeterminate = someNonEmptySemanticEnabled
   }, [someNonEmptySemanticEnabled])
+
+  useEffect(() => {
+    if (!selectedEntryId) return
+    if (!filteredEntries.some((entry) => entry.id === selectedEntryId)) {
+      setSelectedEntryId(null)
+    }
+  }, [filteredEntries, selectedEntryId])
 
   // Load books
   const loadBooks = useCallback(async () => {
@@ -119,12 +136,14 @@ export default function WorldBookPanel() {
         setBookName(book.name)
         setBookDescription(book.description)
       }
+      setEntrySearchFilter('')
       setSelectedEntryId(null)
       setShowDiagnosticsModal(false)
     } else {
       setEntries([])
       setEntryTotal(0)
       setEntryOffset(0)
+      setEntrySearchFilter('')
       setSelectedEntryId(null)
       setVectorSummary(null)
       setShowDiagnosticsModal(false)
@@ -609,9 +628,20 @@ export default function WorldBookPanel() {
             </button>
           </div>
 
+          <label className={styles.entrySearch}>
+            <Search size={14} className={styles.entrySearchIcon} />
+            <input
+              type="text"
+              className={styles.entrySearchInput}
+              placeholder="Search entries..."
+              value={entrySearchFilter}
+              onChange={(e) => setEntrySearchFilter(e.target.value)}
+            />
+          </label>
+
           {/* Entry list */}
           <div className={styles.entryList}>
-            {entries.map((entry) => (
+            {filteredEntries.map((entry) => (
               <div key={entry.id}>
                 <div
                   className={clsx(styles.entryRow, selectedEntryId === entry.id && styles.entryRowActive)}
@@ -661,6 +691,9 @@ export default function WorldBookPanel() {
             ))}
             {entries.length === 0 && (
               <div className={styles.emptyState}>No entries yet</div>
+            )}
+            {entries.length > 0 && filteredEntries.length === 0 && (
+              <div className={styles.emptyState}>No entries match your search</div>
             )}
             {entries.length < entryTotal && (
               <button
