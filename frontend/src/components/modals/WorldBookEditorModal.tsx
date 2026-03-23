@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
-import { X, Plus, Trash2, BookOpen, Upload, User, FileUp } from 'lucide-react'
+import { X, Plus, Trash2, BookOpen, Upload, User, FileUp, Search } from 'lucide-react'
 import { useStore } from '@/store'
 import { worldBooksApi } from '@/api/world-books'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -30,6 +30,7 @@ export default function WorldBookEditorModal() {
   const [entryTotal, setEntryTotal] = useState(0)
   const [entryOffset, setEntryOffset] = useState(0)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [entrySearchFilter, setEntrySearchFilter] = useState('')
 
   // Book editing state
   const [bookName, setBookName] = useState('')
@@ -53,11 +54,27 @@ export default function WorldBookEditorModal() {
   const enabledNonEmptyCount = vectorSummary?.enabled_non_empty ?? 0
   const allNonEmptySemanticEnabled = nonEmptyEntryCount > 0 && enabledNonEmptyCount === nonEmptyEntryCount
   const someNonEmptySemanticEnabled = enabledNonEmptyCount > 0 && enabledNonEmptyCount < nonEmptyEntryCount
+  const normalizedEntrySearch = entrySearchFilter.trim().toLowerCase()
+  const filteredEntries = normalizedEntrySearch
+    ? entries.filter((entry) =>
+        [entry.comment, entry.content, ...entry.key, ...entry.keysecondary]
+          .join('\n')
+          .toLowerCase()
+          .includes(normalizedEntrySearch)
+      )
+    : entries
 
   useEffect(() => {
     if (!bulkSemanticToggleRef.current) return
     bulkSemanticToggleRef.current.indeterminate = someNonEmptySemanticEnabled
   }, [someNonEmptySemanticEnabled])
+
+  useEffect(() => {
+    if (!selectedEntryId) return
+    if (!filteredEntries.some((entry) => entry.id === selectedEntryId)) {
+      setSelectedEntryId(null)
+    }
+  }, [filteredEntries, selectedEntryId])
 
   // Load books
   const loadBooks = useCallback(async () => {
@@ -113,11 +130,13 @@ export default function WorldBookEditorModal() {
         setBookName(book.name)
         setBookDescription(book.description)
       }
+      setEntrySearchFilter('')
       setSelectedEntryId(null)
     } else {
       setEntries([])
       setEntryTotal(0)
       setEntryOffset(0)
+      setEntrySearchFilter('')
       setSelectedEntryId(null)
       setVectorSummary(null)
     }
@@ -287,7 +306,7 @@ export default function WorldBookEditorModal() {
     setPostImportBook(result.world_book)
   }, [])
 
-  const selectedEntry = entries.find((e) => e.id === selectedEntryId) || null
+  const selectedEntry = filteredEntries.find((e) => e.id === selectedEntryId) || null
 
   return createPortal(
     <div className={styles.overlay} onClick={closeModal}>
@@ -465,9 +484,20 @@ export default function WorldBookEditorModal() {
                 </button>
               </div>
 
+              <label className={styles.entrySearch}>
+                <Search size={14} className={styles.entrySearchIcon} />
+                <input
+                  type="text"
+                  className={styles.entrySearchInput}
+                  placeholder="Search entries..."
+                  value={entrySearchFilter}
+                  onChange={(e) => setEntrySearchFilter(e.target.value)}
+                />
+              </label>
+
               {/* Entry list */}
               <div className={styles.entryList}>
-                {entries.map((entry) => (
+                {filteredEntries.map((entry) => (
                   <div
                     key={entry.id}
                     className={clsx(styles.entryRow, selectedEntryId === entry.id && styles.entryRowActive)}
@@ -506,6 +536,12 @@ export default function WorldBookEditorModal() {
                     </span>
                   </div>
                 ))}
+                {entries.length === 0 && (
+                  <div className={styles.entryEmptyState}>No entries yet</div>
+                )}
+                {entries.length > 0 && filteredEntries.length === 0 && (
+                  <div className={styles.entryEmptyState}>No entries match your search</div>
+                )}
                 {entries.length < entryTotal && (
                   <button
                     type="button"
