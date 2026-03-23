@@ -50,4 +50,57 @@ export function registerNamesMacros(): void {
     aliases: ["not_char"],
     handler: (ctx) => ctx.env.names.notChar,
   });
+
+  // ---- Group chat macros ----
+
+  registry.registerMacro({
+    builtIn: true,
+    name: "charGroupFocused",
+    category: "Names",
+    description: "Name of the focused/target character in a group chat. Empty in non-group chats.",
+    returnType: "string",
+    aliases: ["charFocused", "char_group_focused"],
+    handler: (ctx) => ctx.env.names.charGroupFocused,
+  });
+
+  registry.registerMacro({
+    builtIn: true,
+    name: "isGroupChat",
+    category: "Names",
+    description: "Whether the current chat is a group chat",
+    returns: "\"yes\" or \"no\"",
+    returnType: "string",
+    aliases: ["is_group_chat"],
+    handler: (ctx) => ctx.env.names.isGroupChat,
+  });
+
+  registry.registerMacro({
+    builtIn: true,
+    name: "groupOthers",
+    category: "Names",
+    description: "Comma-separated group member names excluding the focused character. Empty in non-group chats.",
+    returnType: "string",
+    aliases: ["group_others"],
+    handler: (ctx) => ctx.env.names.groupOthers,
+  });
+
+  registry.registerMacro({
+    builtIn: true,
+    name: "groupMemberCount",
+    category: "Names",
+    description: "Number of characters in the group chat. \"0\" in non-group chats.",
+    returnType: "string",
+    aliases: ["group_member_count"],
+    handler: (ctx) => ctx.env.names.groupMemberCount,
+  });
+
+  registry.registerMacro({
+    builtIn: true,
+    name: "groupLastSpeaker",
+    category: "Names",
+    description: "Name of the last non-user character who spoke. Empty if none or non-group chat.",
+    returnType: "string",
+    aliases: ["group_last_speaker"],
+    handler: (ctx) => ctx.env.names.groupLastSpeaker,
+  });
 }

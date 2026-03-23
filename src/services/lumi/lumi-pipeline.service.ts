@@ -2,7 +2,8 @@ import type { LumiPipelineInput, LumiPipelineResult, LumiModuleResult } from "..
 import type { LlmMessage } from "../../llm/types";
 import { rawGenerate } from "../generate.service";
 import * as connectionsSvc from "../connections.service";
-import { evaluate, buildEnv, registry, initMacros } from "../../macros";
+import { evaluate, buildEnv, resolveGroupCharacterNames, registry, initMacros } from "../../macros";
+import * as charactersSvc from "../characters.service";
 import { eventBus } from "../../ws/bus";
 import { EventType } from "../../ws/events";
 
@@ -71,12 +72,17 @@ export async function executeLumiPipeline(
 
   // Build macro env for resolving prompts
   initMacros();
+  const groupCharacterNames = resolveGroupCharacterNames(input.chat, (cid) =>
+    charactersSvc.getCharacter(input.userId, cid)?.name);
+  const isGroup = !!input.chat.metadata?.group;
   const macroEnv = buildEnv({
     character: input.character,
     persona: input.persona,
     chat: input.chat,
     messages: input.messages,
     generationType: "normal",
+    groupCharacterNames,
+    targetCharacterName: isGroup ? input.character.name : undefined,
   });
 
   // Trim chat history to fit sidecar context window

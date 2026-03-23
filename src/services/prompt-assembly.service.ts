@@ -7,7 +7,7 @@ import type { Chat } from "../types/chat";
 import type { Message } from "../types/message";
 import type { Preset } from "../types/preset";
 import type { ConnectionProfile } from "../types/connection-profile";
-import { evaluate, buildEnv, registry, initMacros } from "../macros";
+import { evaluate, buildEnv, resolveGroupCharacterNames, registry, initMacros } from "../macros";
 import type { MacroEnv } from "../macros";
 import {
   activateWorldInfo,
@@ -275,6 +275,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // ---- Macro engine ----
   initMacros();
+  const groupCharacterNames = resolveGroupCharacterNames(chat, (cid) =>
+    charactersSvc.getCharacter(ctx.userId, cid)?.name);
   const macroEnv: MacroEnv = buildEnv({
     character,
     persona,
@@ -282,6 +284,9 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     messages,
     generationType: ctx.generationType,
     connection,
+    groupCharacterNames,
+    targetCharacterId: ctx.targetCharacterId,
+    targetCharacterName: ctx.targetCharacterId ? character.name : undefined,
   });
 
   // Batch-load all settings needed for assembly in a single query
@@ -3057,6 +3062,11 @@ async function legacyAssembly(
   initMacros();
   let macroEnv: MacroEnv | null = null;
   if (character && chat) {
+    const groupNames = userId
+      ? resolveGroupCharacterNames(chat as Chat, (cid) =>
+          charactersSvc.getCharacter(userId, cid)?.name)
+      : undefined;
+    const isGroup = !!(chat as Chat).metadata?.group;
     macroEnv = buildEnv({
       character: character as Character,
       persona: persona ?? null,
@@ -3064,6 +3074,8 @@ async function legacyAssembly(
       messages,
       generationType,
       connection: connection ?? null,
+      groupCharacterNames: groupNames,
+      targetCharacterName: isGroup ? (character as Character).name : undefined,
     });
     // Populate reasoning macros
     if (userId) {

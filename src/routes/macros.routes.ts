@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { evaluate, buildEnv, registry, initMacros } from "../macros";
+import { evaluate, buildEnv, resolveGroupCharacterNames, registry, initMacros } from "../macros";
 import type { MacroEnv, MacroHandler, MacroDefinition } from "../macros";
 import * as chatsSvc from "../services/chats.service";
 import * as charactersSvc from "../services/characters.service";
@@ -88,6 +88,9 @@ function buildEnvFromIds(userId: string, body: {
           ? connectionsSvc.getConnection(userId, body.connection_id)
           : connectionsSvc.getDefaultConnection(userId);
 
+        const groupCharacterNames = resolveGroupCharacterNames(chat, (cid) =>
+          charactersSvc.getCharacter(userId, cid)?.name);
+        const isGroup = !!chat.metadata?.group;
         return buildEnv({
           character,
           persona,
@@ -96,6 +99,8 @@ function buildEnvFromIds(userId: string, body: {
           generationType: "normal",
           connection,
           dynamicMacros: body.dynamic_macros,
+          groupCharacterNames,
+          targetCharacterName: isGroup ? character.name : undefined,
         });
       }
     }
@@ -128,7 +133,10 @@ function buildEnvFromIds(userId: string, body: {
   const connection = connectionsSvc.getDefaultConnection(userId);
 
   return {
-    names: { user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User" },
+    names: {
+      user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
+      charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", groupLastSpeaker: "",
+    },
     character: {
       name: "", description: "", personality: "", scenario: "", persona: persona?.description || "",
       mesExamples: "", mesExamplesRaw: "", systemPrompt: "", postHistoryInstructions: "",

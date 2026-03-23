@@ -123,6 +123,16 @@ export interface MacroEnv {
     group: string;
     groupNotMuted: string;
     notChar: string;
+    /** Name of the focused/target character in a group chat. Empty in non-group chats. */
+    charGroupFocused: string;
+    /** Comma-separated group members excluding the focused character. Empty in non-group chats. */
+    groupOthers: string;
+    /** Number of group members as a string (e.g. "4"). "0" in non-group chats. */
+    groupMemberCount: string;
+    /** "yes" or "no" */
+    isGroupChat: string;
+    /** Name of the last non-user character who spoke. Empty if none or non-group chat. */
+    groupLastSpeaker: string;
   };
   character: {
     name: string;

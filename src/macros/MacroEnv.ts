@@ -14,6 +14,14 @@ export interface BuildEnvContext {
   generationType: GenerationType;
   connection?: ConnectionProfile | null;
   dynamicMacros?: Record<string, string | MacroHandler | MacroDefinition>;
+  /** Pre-resolved group character names (all members). Used for {{group}} macro. */
+  groupCharacterNames?: string[];
+  /** Pre-resolved non-muted group character names. Used for {{groupNotMuted}} macro. Falls back to groupCharacterNames if not provided. */
+  groupNotMutedNames?: string[];
+  /** The target character ID for group chats (the character whose turn it is). */
+  targetCharacterId?: string;
+  /** Pre-resolved name of the target/focused character. Falls back to character.name if targetCharacterId is set. */
+  targetCharacterName?: string;
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
@@ -23,13 +31,27 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
   const lastUserMsg = findLast(messages, (m) => m.is_user);
   const lastCharMsg = findLast(messages, (m) => !m.is_user);
 
+  const isGroup = !!chat.metadata?.group && Array.isArray(chat.metadata?.character_ids);
+  const allGroupNames = ctx.groupCharacterNames;
+  const focusedName = isGroup ? (ctx.targetCharacterName || character.name) : "";
+  const groupLastSpeaker = isGroup
+    ? (findLast(messages, (m) => !m.is_user)?.name || "")
+    : "";
+
   return {
     names: {
       user: persona?.name || "User",
       char: character.name,
-      group: "", // groups not yet supported
-      groupNotMuted: "",
+      group: allGroupNames?.join(", ") ?? "",
+      groupNotMuted: (ctx.groupNotMutedNames ?? allGroupNames)?.join(", ") ?? "",
       notChar: persona?.name || "User",
+      charGroupFocused: focusedName,
+      groupOthers: isGroup && allGroupNames
+        ? allGroupNames.filter((n) => n !== focusedName).join(", ")
+        : "",
+      groupMemberCount: isGroup && allGroupNames ? String(allGroupNames.length) : "0",
+      isGroupChat: isGroup ? "yes" : "no",
+      groupLastSpeaker,
     },
     character: {
       name: character.name,
@@ -89,6 +111,26 @@ function buildDynamicLookup(
     map.set(k.toLowerCase(), macros[k]);
   }
   return map;
+}
+
+/**
+ * Resolve group character names from chat metadata for group chats.
+ * Returns the names array, or undefined if not a group chat.
+ * @param chat The chat object
+ * @param getCharacterName Lookup function: (characterId) => name | undefined
+ */
+export function resolveGroupCharacterNames(
+  chat: Chat,
+  getCharacterName: (id: string) => string | undefined,
+): string[] | undefined {
+  const meta = chat.metadata;
+  if (!meta?.group || !Array.isArray(meta.character_ids)) return undefined;
+  const names: string[] = [];
+  for (const cid of meta.character_ids as string[]) {
+    const name = getCharacterName(cid);
+    if (name) names.push(name);
+  }
+  return names.length > 0 ? names : undefined;
 }
 
 function findLast(messages: Message[], predicate: (m: Message) => boolean): Message | null {
