@@ -36,7 +36,7 @@ export default function WorldBookEditorModal() {
   const [bookName, setBookName] = useState('')
   const [bookDescription, setBookDescription] = useState('')
   const [vectorSummary, setVectorSummary] = useState<WorldBookVectorSummary | null>(null)
-  const [semanticUpdating, setSemanticUpdating] = useState(false)
+
   const [postImportBook, setPostImportBook] = useState<WorldBook | null>(null)
 
   // Confirmation modals
@@ -48,12 +48,6 @@ export default function WorldBookEditorModal() {
   const bookNameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const bookDescTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const entryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
-  const bulkSemanticToggleRef = useRef<HTMLInputElement>(null)
-
-  const nonEmptyEntryCount = vectorSummary?.non_empty ?? 0
-  const enabledNonEmptyCount = vectorSummary?.enabled_non_empty ?? 0
-  const allNonEmptySemanticEnabled = nonEmptyEntryCount > 0 && enabledNonEmptyCount === nonEmptyEntryCount
-  const someNonEmptySemanticEnabled = enabledNonEmptyCount > 0 && enabledNonEmptyCount < nonEmptyEntryCount
   const normalizedEntrySearch = entrySearchFilter.trim().toLowerCase()
   const filteredEntries = normalizedEntrySearch
     ? entries.filter((entry) =>
@@ -63,11 +57,6 @@ export default function WorldBookEditorModal() {
           .includes(normalizedEntrySearch)
       )
     : entries
-
-  useEffect(() => {
-    if (!bulkSemanticToggleRef.current) return
-    bulkSemanticToggleRef.current.indeterminate = someNonEmptySemanticEnabled
-  }, [someNonEmptySemanticEnabled])
 
   useEffect(() => {
     if (!selectedEntryId) return
@@ -278,27 +267,6 @@ export default function WorldBookEditorModal() {
     }
   }, [selectedBookId, reindexing, loadEntries, loadVectorSummary])
 
-  const handleBulkSemanticActivation = useCallback(async (enabled: boolean) => {
-    if (!selectedBookId) return
-    try {
-      setSemanticUpdating(true)
-      const result = await worldBooksApi.setSemanticActivation(selectedBookId, enabled)
-      setVectorSummary(result.summary)
-      await loadEntries(selectedBookId)
-      setVectorStatus(
-        enabled
-          ? result.summary.non_empty > 0
-            ? `Semantic activation is on for ${result.summary.enabled_non_empty}/${result.summary.non_empty} non-empty entries. Reindex semantic search to refresh vectors.`
-            : 'This book does not have any non-empty entries to enable for semantic activation.'
-          : 'Semantic activation is off for all entries in this book.'
-      )
-    } catch {
-      setVectorStatus(enabled ? 'Failed to enable semantic activation' : 'Failed to disable semantic activation')
-    } finally {
-      setSemanticUpdating(false)
-    }
-  }, [selectedBookId, loadEntries])
-
   const handleImport = useCallback((result: WorldBookImportResult) => {
     setBooks((prev) => [result.world_book, ...prev])
     setSelectedBookId(result.world_book.id)
@@ -431,27 +399,6 @@ export default function WorldBookEditorModal() {
                       <span>{vectorSummary.pending} pending</span>
                       <span>{vectorSummary.error} errors</span>
                     </div>
-                    <label className={styles.bulkSemanticToggle}>
-                      <input
-                        ref={bulkSemanticToggleRef}
-                        type="checkbox"
-                        className={styles.bulkSemanticCheckbox}
-                        checked={allNonEmptySemanticEnabled}
-                        disabled={semanticUpdating || nonEmptyEntryCount === 0}
-                        onChange={(event) => handleBulkSemanticActivation(event.target.checked)}
-                      />
-                      <span className={styles.bulkSemanticBody}>
-                        <span className={styles.bulkSemanticTitle}>Use semantic activation for all non-empty entries</span>
-                        <span className={styles.bulkSemanticMeta}>
-                          {nonEmptyEntryCount > 0
-                            ? `${enabledNonEmptyCount} of ${nonEmptyEntryCount} non-empty entries are opted in.`
-                            : 'Add content to at least one entry before enabling semantic activation.'}
-                        </span>
-                      </span>
-                    </label>
-                    <span className={styles.bulkSemanticHint}>
-                      This only changes entry opt-in. Reindex semantic search after changing it.
-                    </span>
                   </div>
                 )}
                 <div className={styles.bookActionRow}>

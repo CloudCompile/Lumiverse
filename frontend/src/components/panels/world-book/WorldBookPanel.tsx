@@ -42,7 +42,7 @@ export default function WorldBookPanel() {
   const [vectorStatus, setVectorStatus] = useState<string | null>(null)
   const [vectorSummary, setVectorSummary] = useState<WorldBookVectorSummary | null>(null)
   const [showDiagnosticsModal, setShowDiagnosticsModal] = useState(false)
-  const [semanticUpdating, setSemanticUpdating] = useState(false)
+
   const [postImportBook, setPostImportBook] = useState<WorldBook | null>(null)
 
   // Confirmation modals
@@ -58,12 +58,6 @@ export default function WorldBookPanel() {
   const bookNameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const bookDescTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const entryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
-  const bulkSemanticToggleRef = useRef<HTMLInputElement>(null)
-
-  const nonEmptyEntryCount = vectorSummary?.non_empty ?? 0
-  const enabledNonEmptyCount = vectorSummary?.enabled_non_empty ?? 0
-  const allNonEmptySemanticEnabled = nonEmptyEntryCount > 0 && enabledNonEmptyCount === nonEmptyEntryCount
-  const someNonEmptySemanticEnabled = enabledNonEmptyCount > 0 && enabledNonEmptyCount < nonEmptyEntryCount
   const normalizedEntrySearch = entrySearchFilter.trim().toLowerCase()
   const filteredEntries = normalizedEntrySearch
     ? entries.filter((entry) =>
@@ -73,11 +67,6 @@ export default function WorldBookPanel() {
           .includes(normalizedEntrySearch)
       )
     : entries
-
-  useEffect(() => {
-    if (!bulkSemanticToggleRef.current) return
-    bulkSemanticToggleRef.current.indeterminate = someNonEmptySemanticEnabled
-  }, [someNonEmptySemanticEnabled])
 
   useEffect(() => {
     if (!selectedEntryId) return
@@ -243,27 +232,6 @@ export default function WorldBookPanel() {
       setReindexing(false)
     }
   }, [selectedBookId, reindexing, loadEntries, loadVectorSummary])
-
-  const handleBulkSemanticActivation = useCallback(async (enabled: boolean) => {
-    if (!selectedBookId) return
-    try {
-      setSemanticUpdating(true)
-      const result = await worldBooksApi.setSemanticActivation(selectedBookId, enabled)
-      setVectorSummary(result.summary)
-      await loadEntries(selectedBookId)
-      setVectorStatus(
-        enabled
-          ? result.summary.non_empty > 0
-            ? `Semantic activation is on for ${result.summary.enabled_non_empty}/${result.summary.non_empty} non-empty entries. Reindex semantic search to refresh vectors.`
-            : 'This book does not have any non-empty entries to enable for semantic activation.'
-          : 'Semantic activation is off for all entries in this book.'
-      )
-    } catch {
-      setVectorStatus(enabled ? 'Failed to enable semantic activation' : 'Failed to disable semantic activation')
-    } finally {
-      setSemanticUpdating(false)
-    }
-  }, [selectedBookId, loadEntries])
 
   const handleConvertToVectorizedPreview = useCallback(async () => {
     if (!selectedBookId) return
@@ -701,7 +669,7 @@ export default function WorldBookPanel() {
                   type="button"
                   className={styles.subtleActionBtn}
                   onClick={handleConvertToVectorizedPreview}
-                  disabled={reindexing || semanticUpdating}
+                  disabled={reindexing}
                 >
                   Convert to Vectorized
                 </button>
