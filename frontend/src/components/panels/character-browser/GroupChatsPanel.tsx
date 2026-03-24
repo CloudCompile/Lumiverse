@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { Users, Trash2, MessageSquarePlus, Loader2 } from 'lucide-react'
 import { chatsApi } from '@/api/chats'
-import { charactersApi } from '@/api/characters'
+import { getCharacterAvatarUrlById } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -25,6 +25,7 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 function MosaicThumb({ charIds, size = 'small' }: { charIds: string[]; size?: 'small' | 'large' }) {
+  const characters = useStore((s) => s.characters)
   const displayIds = charIds.slice(0, 4)
   const count = charIds.length
   const mosaicClass =
@@ -42,7 +43,10 @@ function MosaicThumb({ charIds, size = 'small' }: { charIds: string[]; size?: 's
       {displayIds.map((id) => (
         <div key={id} className={styles.mosaicCell}>
           <LazyImage
-            src={charactersApi.avatarUrl(id)}
+            src={getCharacterAvatarUrlById(
+              id,
+              characters.find((entry) => entry.id === id)?.image_id ?? null
+            ) || ''}
             alt=""
             spinnerSize={iconSize}
             fallback={

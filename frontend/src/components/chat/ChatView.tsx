@@ -101,28 +101,27 @@ export default function ChatView() {
         const mutedIds: string[] = isGroup ? (chat.metadata.muted_character_ids || []) : []
         if (isGroup && groupCharIds.length > 0) {
           useStore.getState().setGroupChat(true, groupCharIds, mutedIds)
-          // Load all group characters into the store
-          const store = useStore.getState()
-          const missingIds = groupCharIds.filter((id) => !store.characters.some((c) => c.id === id))
-          if (missingIds.length > 0) {
-            Promise.all(missingIds.map((id) => charactersApi.get(id).catch(() => null)))
-              .then((chars) => {
-                if (!cancelled) {
-                  const valid = chars.filter(Boolean) as import('@/types/api').Character[]
-                  if (valid.length > 0) useStore.getState().addCharacters(valid)
-                }
-              })
-          }
+          // Refresh group members on every chat open so avatars/profile data
+          // don't get stuck on an older in-memory character snapshot.
+          Promise.all(groupCharIds.map((id) => charactersApi.get(id).catch(() => null)))
+            .then((chars) => {
+              if (cancelled) return
+              const valid = chars.filter(Boolean) as import('@/types/api').Character[]
+              if (valid.length === 0) return
+
+              const store = useStore.getState()
+              for (const char of valid) {
+                store.updateCharacter(char.id, char)
+              }
+            })
         } else {
           useStore.getState().clearGroupChat()
-          // Ensure the active character is in the store for name resolution
+          // Refresh the active character on every chat open so profile/chat
+          // surfaces don't rely on a stale cached avatar/image_id.
           if (chat.character_id) {
-            const store = useStore.getState()
-            if (!store.characters.some((c) => c.id === chat.character_id)) {
-              charactersApi.get(chat.character_id).then((char) => {
-                if (!cancelled) useStore.getState().addCharacter(char)
-              }).catch(() => {})
-            }
+            charactersApi.get(chat.character_id).then((char) => {
+              if (!cancelled) useStore.getState().updateCharacter(char.id, char)
+            }).catch(() => {})
           }
         }
       } catch (err) {

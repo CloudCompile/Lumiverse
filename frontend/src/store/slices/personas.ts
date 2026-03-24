@@ -40,7 +40,16 @@ export const createPersonasSlice: StateCreator<PersonasSlice> = (set, get) => ({
   },
   addPersona: (persona) => set((s) => ({ personas: [...s.personas, persona] })),
   updatePersona: (id, persona) =>
-    set((s) => ({ personas: s.personas.map((p) => (p.id === id ? persona : p)) })),
+    set((s) => {
+      const existingIndex = s.personas.findIndex((p) => p.id === id)
+      if (existingIndex === -1) {
+        return { personas: [persona, ...s.personas] }
+      }
+
+      const personas = [...s.personas]
+      personas[existingIndex] = persona
+      return { personas }
+    }),
   removePersona: (id) =>
     set((s) => {
       const personas = s.personas.filter((p) => p.id !== id)

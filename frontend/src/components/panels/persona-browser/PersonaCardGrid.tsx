@@ -1,6 +1,6 @@
 import { Fragment, memo, useRef, useState, useEffect, useCallback, type ReactNode } from 'react'
 import { User, UserCheck, Crown, Link2 } from 'lucide-react'
-import { personasApi } from '@/api/personas'
+import { getPersonaAvatarUrl } from '@/lib/avatarUrls'
 import LazyImage from '@/components/shared/LazyImage'
 import type { Persona } from '@/types/api'
 import styles from './PersonaCardGrid.module.css'
@@ -45,7 +45,7 @@ const PersonaCard = memo(function PersonaCard({
     >
       <div className={styles.avatarWrap}>
         <LazyImage
-          src={personasApi.avatarUrl(persona.id)}
+          src={getPersonaAvatarUrl(persona) || ''}
           alt={persona.name}
           className={styles.avatarImg}
           fallback={

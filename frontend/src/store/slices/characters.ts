@@ -29,7 +29,16 @@ export const createCharactersSlice: StateCreator<CharactersSlice> = (set) => ({
   setEditingCharacterId: (id) => set({ editingCharacterId: id }),
 
   updateCharacter: (id, character) =>
-    set((state) => ({ characters: state.characters.map((c) => (c.id === id ? character : c)) })),
+    set((state) => {
+      const existingIndex = state.characters.findIndex((c) => c.id === id)
+      if (existingIndex === -1) {
+        return { characters: [character, ...state.characters] }
+      }
+
+      const characters = [...state.characters]
+      characters[existingIndex] = character
+      return { characters }
+    }),
 
   toggleFavorite: (id) =>
     set((state) => {

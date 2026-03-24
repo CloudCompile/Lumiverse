@@ -11,12 +11,12 @@
 
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/store'
-import { charactersApi } from '@/api/characters'
+import { getCharacterAvatarUrlById } from '@/lib/avatarUrls'
 import { extractPalette, type ImagePalette } from '@/lib/colorExtraction'
 import { deriveCharacterOverlay, deriveCharacterNameVars } from '@/lib/characterTheme'
 import type { ThemeConfig } from '@/types/theme'
 
-/** In-memory palette cache keyed by character ID to avoid re-extraction. */
+/** In-memory palette cache keyed by avatar identity to avoid re-extraction. */
 const paletteCache = new Map<string, ImagePalette>()
 
 /** Keys we set on the root so we can clean them up. */
@@ -25,31 +25,37 @@ const NAME_VAR_KEYS = ['--char-name-dark', '--char-name-light']
 export function useCharacterTheme() {
   const characterAware = useStore((s) => (s.theme as ThemeConfig | null)?.characterAware === true)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
-  const appliedCharIdRef = useRef<string | null>(null)
-  const nameAppliedCharIdRef = useRef<string | null>(null)
+  const characters = useStore((s) => s.characters)
+  const activeCharacter = activeCharacterId
+    ? characters.find((entry) => entry.id === activeCharacterId) ?? null
+    : null
+  const avatarUrl = getCharacterAvatarUrlById(activeCharacterId, activeCharacter?.image_id ?? null)
+  const avatarCacheKey = activeCharacterId
+    ? `${activeCharacterId}:${activeCharacter?.image_id ?? 'legacy'}:${activeCharacter?.avatar_path ?? 'none'}`
+    : null
+  const appliedAvatarKeyRef = useRef<string | null>(null)
+  const nameAppliedAvatarKeyRef = useRef<string | null>(null)
 
   // ── 1. Character name colors (always active) ──
   useEffect(() => {
     const root = document.documentElement
 
-    if (!activeCharacterId) {
+    if (!activeCharacterId || !avatarUrl || !avatarCacheKey) {
       NAME_VAR_KEYS.forEach((k) => root.style.removeProperty(k))
-      nameAppliedCharIdRef.current = null
+      nameAppliedAvatarKeyRef.current = null
       return
     }
 
-    if (nameAppliedCharIdRef.current === activeCharacterId) return
+    if (nameAppliedAvatarKeyRef.current === avatarCacheKey) return
 
     let cancelled = false
 
     const apply = async () => {
       try {
-        const avatarUrl = charactersApi.avatarUrl(activeCharacterId)
-
-        let palette = paletteCache.get(activeCharacterId)
+        let palette = paletteCache.get(avatarCacheKey)
         if (!palette) {
           palette = await extractPalette(avatarUrl)
-          paletteCache.set(activeCharacterId, palette)
+          paletteCache.set(avatarCacheKey, palette)
         }
 
         if (cancelled) return
@@ -58,7 +64,7 @@ export function useCharacterTheme() {
         for (const [key, value] of Object.entries(vars)) {
           root.style.setProperty(key, value)
         }
-        nameAppliedCharIdRef.current = activeCharacterId
+        nameAppliedAvatarKeyRef.current = avatarCacheKey
       } catch (err) {
         console.warn('[useCharacterTheme] Name color extraction failed:', err)
       }
@@ -66,28 +72,26 @@ export function useCharacterTheme() {
 
     apply()
     return () => { cancelled = true }
-  }, [activeCharacterId])
+  }, [activeCharacterId, avatarUrl, avatarCacheKey])
 
   // ── 2. Character-aware theme overlay (opt-in) ──
   useEffect(() => {
     if (!characterAware) {
-      appliedCharIdRef.current = null
+      appliedAvatarKeyRef.current = null
       return
     }
 
-    if (!activeCharacterId) return
-    if (appliedCharIdRef.current === activeCharacterId) return
+    if (!activeCharacterId || !avatarUrl || !avatarCacheKey) return
+    if (appliedAvatarKeyRef.current === avatarCacheKey) return
 
     let cancelled = false
 
     const apply = async () => {
       try {
-        const avatarUrl = charactersApi.avatarUrl(activeCharacterId)
-
-        let palette = paletteCache.get(activeCharacterId)
+        let palette = paletteCache.get(avatarCacheKey)
         if (!palette) {
           palette = await extractPalette(avatarUrl)
-          paletteCache.set(activeCharacterId, palette)
+          paletteCache.set(avatarCacheKey, palette)
         }
 
         if (cancelled) return
@@ -97,7 +101,7 @@ export function useCharacterTheme() {
         const current = useStore.getState().theme as ThemeConfig | null
         if (!current?.characterAware) return
 
-        appliedCharIdRef.current = activeCharacterId
+        appliedAvatarKeyRef.current = avatarCacheKey
 
         useStore.getState().setTheme({
           ...current,
@@ -114,5 +118,5 @@ export function useCharacterTheme() {
 
     apply()
     return () => { cancelled = true }
-  }, [characterAware, activeCharacterId])
+  }, [characterAware, activeCharacterId, avatarUrl, avatarCacheKey])
 }

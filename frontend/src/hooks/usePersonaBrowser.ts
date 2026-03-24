@@ -188,9 +188,7 @@ export function usePersonaBrowser() {
 
   const uploadAvatar = useCallback(
     async (id: string, file: File) => {
-      await personasApi.uploadAvatar(id, file)
-      // Re-fetch persona to get updated image_id
-      const updated = await personasApi.get(id)
+      const updated = await personasApi.uploadAvatar(id, file)
       updatePersonaInStore(id, updated)
       return updated
     },

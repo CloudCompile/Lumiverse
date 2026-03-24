@@ -9,6 +9,7 @@ import { embeddingsApi } from '@/api/embeddings'
 import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
 import { imagesApi } from '@/api/images'
+import { getPersonaAvatarUrlById } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import type { MessageAttachment } from '@/types/api'
@@ -704,7 +705,12 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   <span className={styles.personaMain}>
                     <span className={styles.personaAvatar}>
                       {p.avatar_path || p.image_id ? (
-                        <img className={styles.personaAvatarImg} src={personasApi.avatarUrl(p.id)} alt={p.name} loading="lazy" />
+                        <img
+                          className={styles.personaAvatarImg}
+                          src={getPersonaAvatarUrlById(p.id, p.image_id) || undefined}
+                          alt={p.name}
+                          loading="lazy"
+                        />
                       ) : (
                         <span className={styles.personaFallback}>{p.name.slice(0, 1).toUpperCase()}</span>
                       )}
