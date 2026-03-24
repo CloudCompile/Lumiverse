@@ -423,19 +423,25 @@ export function importWorldBook(
       : [];
 
     const comment = raw.comment || raw.name || "";
-    const enabled = raw.enabled !== undefined ? raw.enabled : (raw.disabled !== undefined ? !raw.disabled : true);
+    const enabled = raw.enabled !== undefined ? raw.enabled
+      : raw.disabled !== undefined ? !raw.disabled
+      : raw.disable !== undefined ? !raw.disable
+      : true;
 
-    // Collect unknown fields into extensions
+    // Fields that map to DB columns — everything else is preserved in extensions
     const knownFields = new Set([
-      "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name", "enabled", "disabled",
-      "insertion_order", "order_value", "position", "depth", "role", "selective",
-      "constant", "case_sensitive", "match_whole_words", "group", "group_name",
-      "group_override", "group_weight", "probability", "scan_depth",
-      "automation_id", "extensions", "selectiveLogic", "selective_logic",
-      "useProbability", "use_probability", "use_regex",
-      "prevent_recursion", "exclude_recursion", "delay_until_recursion",
+      "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
+      "enabled", "disabled", "disable",
+      "insertion_order", "order_value", "order", "position", "depth", "role", "selective",
+      "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
+      "group", "group_name", "group_override", "groupOverride",
+      "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
+      "automation_id", "automationId", "selectiveLogic", "selective_logic",
+      "useProbability", "use_probability", "use_regex", "useRegex",
+      "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
+      "delay_until_recursion", "delayUntilRecursion",
       "priority", "sticky", "cooldown", "delay",
-      "id", "entry", "uid", "vectorized",
+      "id", "entry", "uid", "vectorized", "extensions",
     ]);
     const extras: Record<string, any> = {};
     for (const [k, v] of Object.entries(raw)) {
@@ -448,26 +454,26 @@ export function importWorldBook(
       content: raw.content || "",
       comment,
       disabled: !enabled,
-      order_value: raw.insertion_order ?? raw.order_value ?? 100,
+      order_value: raw.insertion_order ?? raw.order_value ?? raw.order ?? 100,
       position: raw.position ?? 0,
       depth: raw.depth ?? 4,
       role: raw.role || undefined,
       selective: raw.selective ?? false,
       constant: raw.constant ?? false,
-      case_sensitive: raw.case_sensitive ?? false,
-      match_whole_words: raw.match_whole_words ?? false,
+      case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,
+      match_whole_words: raw.match_whole_words ?? raw.matchWholeWords ?? false,
       group_name: raw.group || raw.group_name || "",
-      group_override: raw.group_override ?? false,
-      group_weight: raw.group_weight ?? 100,
+      group_override: raw.group_override ?? raw.groupOverride ?? false,
+      group_weight: raw.group_weight ?? raw.groupWeight ?? 100,
       probability: raw.probability ?? 100,
-      scan_depth: raw.scan_depth ?? undefined,
-      automation_id: raw.automation_id || undefined,
+      scan_depth: raw.scan_depth ?? raw.scanDepth ?? undefined,
+      automation_id: raw.automation_id || raw.automationId || undefined,
       selective_logic: raw.selectiveLogic ?? raw.selective_logic ?? 0,
       use_probability: raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true),
-      use_regex: raw.use_regex ?? false,
-      prevent_recursion: raw.prevent_recursion ?? false,
-      exclude_recursion: raw.exclude_recursion ?? false,
-      delay_until_recursion: raw.delay_until_recursion ?? false,
+      use_regex: raw.use_regex ?? raw.useRegex ?? false,
+      prevent_recursion: raw.prevent_recursion ?? raw.preventRecursion ?? false,
+      exclude_recursion: raw.exclude_recursion ?? raw.excludeRecursion ?? false,
+      delay_until_recursion: raw.delay_until_recursion ?? raw.delayUntilRecursion ?? false,
       priority: raw.priority ?? 10,
       sticky: raw.sticky ?? 0,
       cooldown: raw.cooldown ?? 0,
@@ -537,7 +543,30 @@ export function importWorldBookBulk(
         : [];
 
       const comment = raw.comment || raw.name || "";
-      const enabled = raw.enabled !== undefined ? raw.enabled : (raw.disabled !== undefined ? !raw.disabled : true);
+      const enabled = raw.enabled !== undefined ? raw.enabled
+        : raw.disabled !== undefined ? !raw.disabled
+        : raw.disable !== undefined ? !raw.disable
+        : true;
+
+      // Preserve ST-specific fields (ignoreBudget, characterFilter, triggers, etc.) in extensions
+      const bulkKnownFields = new Set([
+        "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
+        "enabled", "disabled", "disable",
+        "insertion_order", "order_value", "order", "position", "depth", "role", "selective",
+        "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
+        "group", "group_name", "group_override", "groupOverride",
+        "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
+        "automation_id", "automationId", "selectiveLogic", "selective_logic",
+        "useProbability", "use_probability", "use_regex", "useRegex",
+        "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
+        "delay_until_recursion", "delayUntilRecursion",
+        "priority", "sticky", "cooldown", "delay",
+        "id", "entry", "uid", "vectorized", "extensions",
+      ]);
+      const extras: Record<string, any> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (!bulkKnownFields.has(k)) extras[k] = v;
+      }
 
       insert.run(
         crypto.randomUUID(), worldBook.id, crypto.randomUUID(),
@@ -548,22 +577,22 @@ export function importWorldBookBulk(
         raw.position ?? 0,
         raw.depth ?? 4,
         raw.role || null,
-        raw.insertion_order ?? raw.order_value ?? 100,
+        raw.insertion_order ?? raw.order_value ?? raw.order ?? 100,
         raw.selective ? 1 : 0,
         raw.constant ? 1 : 0,
         !enabled ? 1 : 0,
         raw.group || raw.group_name || "",
-        raw.group_override ? 1 : 0,
-        raw.group_weight ?? 100,
+        (raw.group_override ?? raw.groupOverride) ? 1 : 0,
+        raw.group_weight ?? raw.groupWeight ?? 100,
         raw.probability ?? 100,
-        raw.scan_depth ?? null,
-        raw.case_sensitive ? 1 : 0,
-        raw.match_whole_words ? 1 : 0,
-        raw.automation_id || null,
-        raw.use_regex ? 1 : 0,
-        raw.prevent_recursion ? 1 : 0,
-        raw.exclude_recursion ? 1 : 0,
-        raw.delay_until_recursion ? 1 : 0,
+        raw.scan_depth ?? raw.scanDepth ?? null,
+        (raw.case_sensitive ?? raw.caseSensitive) ? 1 : 0,
+        (raw.match_whole_words ?? raw.matchWholeWords) ? 1 : 0,
+        raw.automation_id || raw.automationId || null,
+        (raw.use_regex ?? raw.useRegex) ? 1 : 0,
+        (raw.prevent_recursion ?? raw.preventRecursion) ? 1 : 0,
+        (raw.exclude_recursion ?? raw.excludeRecursion) ? 1 : 0,
+        (raw.delay_until_recursion ?? raw.delayUntilRecursion) ? 1 : 0,
         raw.priority ?? 10,
         raw.sticky ?? 0,
         raw.cooldown ?? 0,
@@ -574,7 +603,7 @@ export function importWorldBookBulk(
         "not_enabled",
         null,
         null,
-        JSON.stringify(raw.extensions || {}),
+        JSON.stringify({ ...raw.extensions, ...extras }),
         now, now
       );
       entryCount++;
@@ -611,23 +640,37 @@ export function importCharacterBook(
   let entryCount = 0;
 
   for (const raw of entries) {
-    const keys: string[] = Array.isArray(raw.keys) ? raw.keys : [];
-    const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys : [];
+    const keys: string[] = Array.isArray(raw.keys) ? raw.keys
+      : Array.isArray(raw.key) ? raw.key
+      : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
+      : typeof raw.keys === "string" ? raw.keys.split(",").map((k: string) => k.trim()).filter(Boolean)
+      : [];
+    const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys
+      : Array.isArray(raw.keysecondary) ? raw.keysecondary
+      : typeof raw.secondary_keys === "string" ? raw.secondary_keys.split(",").map((k: string) => k.trim()).filter(Boolean)
+      : [];
 
-    // Map known CCV2/V3 field names to our schema
+    // Map known CCV2/V3 + ST field names to our schema
     const comment = raw.comment || raw.name || "";
-    const enabled = raw.enabled !== undefined ? raw.enabled : true;
+    const enabled = raw.enabled !== undefined ? raw.enabled
+      : raw.disabled !== undefined ? !raw.disabled
+      : raw.disable !== undefined ? !raw.disable
+      : true;
 
-    // Collect unknown fields into extensions
+    // Fields that map to DB columns — everything else is preserved in extensions
     const knownFields = new Set([
-      "keys", "secondary_keys", "content", "comment", "name", "enabled",
-      "insertion_order", "position", "depth", "role", "selective",
-      "constant", "case_sensitive", "match_whole_words", "group",
-      "group_override", "group_weight", "probability", "scan_depth",
-      "automation_id", "extensions", "selectiveLogic", "useProbability",
-      "use_regex", "prevent_recursion", "exclude_recursion",
-      "delay_until_recursion", "priority", "sticky", "cooldown", "delay",
-      "id", "entry", "uid",
+      "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
+      "enabled", "disabled", "disable",
+      "insertion_order", "order_value", "order", "position", "depth", "role", "selective",
+      "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
+      "group", "group_name", "group_override", "groupOverride",
+      "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
+      "automation_id", "automationId", "selectiveLogic", "selective_logic",
+      "useProbability", "use_probability", "use_regex", "useRegex",
+      "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
+      "delay_until_recursion", "delayUntilRecursion",
+      "priority", "sticky", "cooldown", "delay",
+      "id", "entry", "uid", "vectorized", "extensions",
     ]);
     const extras: Record<string, any> = {};
     for (const [k, v] of Object.entries(raw)) {
@@ -640,30 +683,31 @@ export function importCharacterBook(
       content: raw.content || "",
       comment,
       disabled: !enabled,
-      order_value: raw.insertion_order ?? 100,
+      order_value: raw.insertion_order ?? raw.order_value ?? raw.order ?? 100,
       position: raw.position ?? 0,
       depth: raw.depth ?? 4,
       role: raw.role || undefined,
       selective: raw.selective ?? false,
       constant: raw.constant ?? false,
-      case_sensitive: raw.case_sensitive ?? false,
-      match_whole_words: raw.match_whole_words ?? false,
-      group_name: raw.group || "",
-      group_override: raw.group_override ?? false,
-      group_weight: raw.group_weight ?? 100,
+      case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,
+      match_whole_words: raw.match_whole_words ?? raw.matchWholeWords ?? false,
+      group_name: raw.group || raw.group_name || "",
+      group_override: raw.group_override ?? raw.groupOverride ?? false,
+      group_weight: raw.group_weight ?? raw.groupWeight ?? 100,
       probability: raw.probability ?? 100,
-      scan_depth: raw.scan_depth ?? undefined,
-      automation_id: raw.automation_id || undefined,
+      scan_depth: raw.scan_depth ?? raw.scanDepth ?? undefined,
+      automation_id: raw.automation_id || raw.automationId || undefined,
       selective_logic: raw.selectiveLogic ?? raw.selective_logic ?? 0,
       use_probability: raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true),
-      use_regex: raw.use_regex ?? false,
-      prevent_recursion: raw.prevent_recursion ?? false,
-      exclude_recursion: raw.exclude_recursion ?? false,
-      delay_until_recursion: raw.delay_until_recursion ?? false,
+      use_regex: raw.use_regex ?? raw.useRegex ?? false,
+      prevent_recursion: raw.prevent_recursion ?? raw.preventRecursion ?? false,
+      exclude_recursion: raw.exclude_recursion ?? raw.excludeRecursion ?? false,
+      delay_until_recursion: raw.delay_until_recursion ?? raw.delayUntilRecursion ?? false,
       priority: raw.priority ?? 10,
       sticky: raw.sticky ?? 0,
       cooldown: raw.cooldown ?? 0,
       delay: raw.delay ?? 0,
+      vectorized: raw.vectorized ?? false,
       extensions: { ...raw.extensions, ...extras },
     });
     entryCount++;
