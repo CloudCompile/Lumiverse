@@ -34,7 +34,7 @@ export default function ExpressionSlotCard({ label, imageId, onDelete, onRename,
     <div className={styles.card}>
       <div className={styles.imageWrap} onClick={() => onPreview(expressionsApi.imageUrl(imageId))}>
         <LazyImage
-          src={expressionsApi.thumbnailUrl(imageId)}
+          src={expressionsApi.smallUrl(imageId)}
           alt={label}
           className={styles.image}
         />

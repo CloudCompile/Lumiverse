@@ -118,6 +118,43 @@
   white-space: nowrap;
 }
 
+.exportWrapper {
+  position: relative;
+}
+
+.exportPopover {
+  position: fixed;
+  transform: translateX(-100%);
+  min-width: 180px;
+  background: var(--lumiverse-bg);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  box-shadow: var(--lumiverse-shadow-lg);
+  z-index: 9995;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.exportPopoverItem {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 5px;
+  background: transparent;
+  border: none;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.exportPopoverItem:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-primary);
+}
+
 .globalPills {
   display: flex;
   flex-wrap: wrap;

@@ -21,6 +21,7 @@ export interface EnvConfig {
   dataDir: string;
   frontendDir: string;
   ownerUsername: string;
+  /** @deprecated Only used for legacy migration to owner.credentials. */
   ownerPassword: string;
   authSecret: string;
   trustedOrigins: string[];
@@ -66,15 +67,9 @@ export function loadEnv(): EnvConfig {
 
   const ownerUsername = process.env.OWNER_USERNAME || "admin";
 
+  // OWNER_PASSWORD is optional — only used for legacy migration to owner.credentials.
+  // New installs use the setup wizard which writes credentials directly.
   const ownerPassword = process.env.OWNER_PASSWORD || "";
-  if (!ownerPassword) {
-    console.error("OWNER_PASSWORD is required. Set it in your .env file.");
-    process.exit(1);
-  }
-  if (ownerPassword.length < 8) {
-    console.error("OWNER_PASSWORD must be at least 8 characters.");
-    process.exit(1);
-  }
 
   // AUTH_SECRET is optional — if not set, it will be derived from the identity
   // key during initIdentity(). An explicit value takes precedence.

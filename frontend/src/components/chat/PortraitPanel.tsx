@@ -4,9 +4,11 @@ import { X } from 'lucide-react'
 import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
+import { imagesApi } from '@/api/images'
 import LazyImage from '@/components/shared/LazyImage'
 import ImageLightbox from './ImageLightbox'
+import AvatarSwitcherPopover from './AvatarSwitcherPopover'
 import type { Character, CharacterGalleryItem } from '@/types/api'
 import styles from './PortraitPanel.module.css'
 import clsx from 'clsx'
@@ -17,6 +19,8 @@ interface PortraitPanelProps {
 
 export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const activeChatId = useStore((s) => s.activeChatId)
+  const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const characters = useStore((s) => s.characters)
   const togglePortraitPanel = useStore((s) => s.togglePortraitPanel)
   const storedCharacter = activeCharacterId
@@ -44,9 +48,25 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), [])
 
+  // Resolve lightbox URL — use original quality (no size tier) for full aspect ratio
+  const getLightboxUrl = useCallback(() => {
+    if (activeChatAvatarId) {
+      // Active alternate override — check if it has an original (uncropped) image
+      const alts = character?.extensions?.alternate_avatars as Array<{ image_id: string; original_image_id?: string }> | undefined
+      const altEntry = alts?.find((a) => a.image_id === activeChatAvatarId)
+      if (altEntry?.original_image_id) return imagesApi.url(altEntry.original_image_id)
+      return imagesApi.url(activeChatAvatarId)
+    }
+    // Primary avatar — the character card image is already stored at full size
+    if (character?.image_id) return imagesApi.url(character.image_id)
+    return null
+  }, [character, activeChatAvatarId])
+
   if (!activeCharacterId) return null
 
-  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
+  const avatarUrl = activeChatAvatarId
+    ? imagesApi.largeUrl(activeChatAvatarId)
+    : (getCharacterAvatarLargeUrl(character) ?? '')
   const charName = character?.name || ''
 
   return (
@@ -73,19 +93,21 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
           <X size={14} />
         </button>
 
-        <div className={styles.frame}>
-          <LazyImage
-            src={avatarUrl}
-            alt={charName}
-            containerClassName={styles.portrait}
-            style={{ objectFit: 'contain', width: '100%', height: 'auto' }}
-            fallback={
-              <div className={styles.placeholder}>
-                {(charName || '?')[0].toUpperCase()}
-              </div>
-            }
-          />
-        </div>
+        <AvatarSwitcherPopover chatId={activeChatId || ''}>
+          <div className={styles.frame} onClick={() => setLightboxSrc(getLightboxUrl())}>
+            <LazyImage
+              src={avatarUrl}
+              alt={charName}
+              containerClassName={styles.portrait}
+              style={{ objectFit: 'contain', width: '100%', height: 'auto' }}
+              fallback={
+                <div className={styles.placeholder}>
+                  {(charName || '?')[0].toUpperCase()}
+                </div>
+              }
+            />
+          </div>
+        </AvatarSwitcherPopover>
 
         <span className={styles.name}>{charName}</span>
 
@@ -110,7 +132,7 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
                   onClick={() => setLightboxSrc(characterGalleryApi.imageUrl(item.image_id))}
                 >
                   <LazyImage
-                    src={characterGalleryApi.thumbnailUrl(item.image_id)}
+                    src={characterGalleryApi.smallUrl(item.image_id)}
                     alt={item.caption || ''}
                     className={styles.mosaicImg}
                     fallback={<div className={styles.mosaicPlaceholder} />}

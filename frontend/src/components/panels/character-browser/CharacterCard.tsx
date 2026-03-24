@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Star, Pencil } from 'lucide-react'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl, getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
 import { getTagColor } from '@/lib/tagColors'
 import LazyImage from '@/components/shared/LazyImage'
 import type { Character, CharacterSummary } from '@/types/api'
@@ -13,6 +13,8 @@ interface CharacterCardProps {
   isSelected?: boolean
   batchMode?: boolean
   compact?: boolean
+  /** Use the large image tier (~700px) instead of the small tier (~300px) */
+  useLargeTier?: boolean
   onOpen: (character: Character | CharacterSummary) => void
   onEdit?: (id: string) => void
   onToggleFavorite: (id: string) => void
@@ -25,13 +27,13 @@ export default memo(function CharacterCard({
   isSelected,
   batchMode,
   compact,
+  useLargeTier,
   onOpen,
   onEdit,
   onToggleFavorite,
   onToggleBatch,
 }: CharacterCardProps) {
-  // Use direct image URL when image_id is available (bypasses character DB lookup)
-  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
+  const avatarUrl = (useLargeTier ? getCharacterAvatarLargeUrl(character) : getCharacterAvatarThumbUrl(character)) ?? ''
   const tags = character.tags?.slice(0, 3) || []
   const extraTagCount = (character.tags?.length || 0) - 3
 

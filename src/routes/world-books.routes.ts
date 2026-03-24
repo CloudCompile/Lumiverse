@@ -40,6 +40,18 @@ app.get("/:id", (c) => {
   return c.json({ ...book, entries });
 });
 
+app.get("/:id/export", (c) => {
+  const userId = c.get("userId");
+  const format = (c.req.query("format") || "lumiverse") as svc.WorldBookExportFormat;
+  const validFormats: svc.WorldBookExportFormat[] = ["lumiverse", "character_book", "sillytavern"];
+  if (!validFormats.includes(format)) {
+    return c.json({ error: `Invalid format. Must be one of: ${validFormats.join(", ")}` }, 400);
+  }
+  const result = svc.exportWorldBook(userId, c.req.param("id"), format);
+  if (!result) return c.json({ error: "Not found" }, 404);
+  return c.json(result);
+});
+
 app.put("/:id", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
@@ -68,6 +80,20 @@ app.post("/:id/semantic-activation", async (c) => {
     return c.json({ error: "enabled must be a boolean" }, 400);
   }
   const result = svc.setWorldBookSemanticActivation(userId, c.req.param("id"), body.enabled);
+  if (!result) return c.json({ error: "World book not found" }, 404);
+  return c.json(result);
+});
+
+app.get("/:id/convert-to-vectorized/preview", (c) => {
+  const userId = c.get("userId");
+  const preview = svc.getConvertToVectorizedPreview(userId, c.req.param("id"));
+  if (!preview) return c.json({ error: "World book not found" }, 404);
+  return c.json(preview);
+});
+
+app.post("/:id/convert-to-vectorized", (c) => {
+  const userId = c.get("userId");
+  const result = svc.convertToVectorized(userId, c.req.param("id"));
   if (!result) return c.json({ error: "World book not found" }, 404);
   return c.json(result);
 });

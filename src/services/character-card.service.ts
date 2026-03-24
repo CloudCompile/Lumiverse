@@ -1,6 +1,7 @@
 import { inflateSync } from "zlib";
 import { unzipSync } from "fflate";
 import type { CreateCharacterInput } from "../types/character";
+import type { CreateRegexScriptInput, RegexTarget } from "../types/regex-script";
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const MAX_DECOMPRESSED_SIZE = 10 * 1024 * 1024; // 10 MB (PNG text chunks)
@@ -87,6 +88,138 @@ function extractPngTextChunk(buffer: Buffer, keyword: string): string | null {
 // ── Image type detection ────────────────────────────────────────────────────
 
 const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|webp|avif|bmp|svg)$/i;
+
+// ── RPack decode (RisuAI byte-substitution obfuscation) ──────────────────────
+
+// prettier-ignore
+const RPACK_DECODE_MAP = new Uint8Array([
+  0x2c,0xf7,0x84,0x8b,0xc9,0x65,0xfb,0xb6,0x9f,0xae,0xb3,0x03,0x2d,0x01,0x69,0x74,
+  0x1f,0xe4,0xa3,0xec,0xee,0x5c,0x34,0x21,0x93,0x4a,0x0f,0x6a,0xe2,0x62,0x02,0x9e,
+  0x22,0x9c,0xfd,0x3c,0xfc,0x71,0xc7,0xc6,0xad,0x59,0x67,0x05,0x70,0x6d,0x8a,0x44,
+  0x12,0xfa,0x24,0x86,0x5f,0xaf,0xd1,0x7a,0x47,0xce,0xfe,0x50,0x63,0xdd,0x51,0x06,
+  0x6f,0x18,0xe0,0x52,0xa8,0x09,0x9d,0x56,0x73,0x4c,0xb8,0x53,0x6c,0xc3,0xa0,0x0e,
+  0x19,0xcf,0x3e,0x0d,0x7e,0x07,0x32,0x68,0x46,0xea,0x48,0xf9,0x99,0x2e,0xab,0xa4,
+  0x49,0x20,0x5e,0x55,0x35,0x38,0x0c,0xbc,0xd3,0xb1,0x58,0x16,0x79,0x28,0x0a,0x1a,
+  0xe1,0xf2,0xcd,0xc4,0x39,0xdb,0xa2,0xba,0x60,0x72,0x76,0x7d,0x95,0xef,0x7f,0xc8,
+  0xc0,0xde,0x37,0x94,0xbf,0xb5,0x14,0x81,0x92,0x25,0x45,0xac,0xe7,0xf5,0x66,0xa7,
+  0x2b,0x36,0x5a,0xc1,0x13,0xe3,0x4b,0x3a,0xe8,0x8d,0x83,0x1b,0x7c,0x27,0xb0,0x9a,
+  0x42,0xeb,0x87,0xaa,0xdc,0x54,0x8e,0x78,0x26,0xd2,0x57,0x29,0xd4,0xb7,0xf8,0x2f,
+  0x8f,0x89,0x75,0xf0,0x41,0x77,0xc2,0x1e,0xff,0xd8,0x15,0x11,0xe5,0x04,0x97,0x17,
+  0xf3,0x31,0xd0,0x9b,0x00,0xd7,0xca,0xb4,0x4f,0x2a,0x3b,0xd9,0xb2,0x6b,0xda,0x5d,
+  0xa1,0x3f,0x30,0x61,0xbd,0x91,0x3d,0x4e,0xe6,0xdf,0xbe,0x4d,0x82,0x8c,0x1d,0x23,
+  0x10,0x98,0x64,0xf4,0x85,0x33,0x7b,0x90,0x43,0xbb,0xa9,0x88,0xf1,0xd6,0xa5,0x1c,
+  0xf6,0xcc,0x6e,0xb9,0x5b,0x0b,0x96,0xed,0xd5,0xe9,0xc5,0xcb,0x08,0xa6,0x80,0x40,
+]);
+
+const RPACK_MAGIC = 111;
+const RPACK_VERSION = 0;
+
+export interface RisuModule {
+  name: string;
+  description: string;
+  lorebook?: RisuLorebook[];
+  regex?: RisuRegex[];
+  trigger?: unknown[];
+  assets?: [string, string, string][];
+}
+
+interface RisuLorebook {
+  key: string;
+  secondkey?: string;
+  comment?: string;
+  content: string;
+  mode?: string;
+  insertorder?: number;
+  alwaysActive?: boolean;
+  selective?: boolean;
+  [key: string]: unknown;
+}
+
+interface RisuRegex {
+  comment: string;
+  in: string;
+  out: string;
+  type: string;
+  ableFlag?: boolean;
+}
+
+/**
+ * Decodes an RPack-encoded buffer using the static byte substitution table.
+ */
+function decodeRPack(data: Uint8Array): Uint8Array {
+  const result = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    result[i] = RPACK_DECODE_MAP[data[i]];
+  }
+  return result;
+}
+
+/**
+ * Parses a .risum (RisuAI module) binary blob.
+ * Format: magic(1) + version(1) + payloadLen(u32 LE) + RPack-encoded JSON + [assets...] + 0x00
+ */
+export function decodeRisuModule(data: Uint8Array): RisuModule | null {
+  if (data.length < 7) return null;
+
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (data[0] !== RPACK_MAGIC || data[1] !== RPACK_VERSION) return null;
+
+  const payloadLen = view.getUint32(2, true);
+  if (6 + payloadLen > data.length) return null;
+
+  const encoded = data.subarray(6, 6 + payloadLen);
+  const decoded = decodeRPack(encoded);
+  const jsonStr = new TextDecoder().decode(decoded);
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    if (parsed?.type === "risuModule" && parsed.module) {
+      return parsed.module as RisuModule;
+    }
+  } catch { /* malformed JSON — skip */ }
+
+  return null;
+}
+
+const RISU_TYPE_TO_TARGET: Record<string, RegexTarget> = {
+  editdisplay: "display",
+  editprocess: "prompt",
+  editoutput: "response",
+  editinput: "prompt",
+};
+
+/**
+ * Converts RisuAI module regex scripts to Lumiverse CreateRegexScriptInput[].
+ */
+export function convertRisuRegexScripts(
+  regexes: RisuRegex[],
+  characterId: string
+): CreateRegexScriptInput[] {
+  const results: CreateRegexScriptInput[] = [];
+
+  for (let i = 0; i < regexes.length; i++) {
+    const r = regexes[i];
+    if (!r.in) continue;
+
+    const target = RISU_TYPE_TO_TARGET[r.type] ?? "display";
+
+    results.push({
+      name: r.comment || `Imported RisuAI Script ${i + 1}`,
+      find_regex: r.in,
+      replace_string: r.out ?? "",
+      flags: "gs",
+      placement: ["ai_output"],
+      scope: "character",
+      scope_id: characterId,
+      target,
+      sort_order: i,
+      description: `Imported from RisuAI module`,
+      metadata: { source: "risuai_module", original_type: r.type },
+    });
+  }
+
+  return results;
+}
 
 /**
  * Maps raw character card data (V1/V2/V3 spec) to our CreateCharacterInput.
@@ -183,12 +316,71 @@ function imageFileFromBytes(bytes: Uint8Array, path: string): File {
   return new File([new Uint8Array(bytes).buffer as ArrayBuffer], basename, { type: MIME_MAP[ext] || "image/png" });
 }
 
+// ── RisuAI expression heuristic ───────────────────────────────────────────────
+
+/** Keywords whose presence in an expression label indicates NSFW content. */
+const NSFW_CONTENT_KEYWORDS = [
+  "cumshot", "creampie", "position", "missionary", "cowgirl", "doggystyle",
+  "fellatio", "blowjob", "footjob", "paizuri", "handjob", "titjob", "boobjob",
+  "masturbation", "fingering", "congress", "straddle", "nelson", "spooning",
+  "mating press", "riding", "penetrat", "thrust",
+  "nude", "naked", "topless", "bottomless", "undress",
+  "showing armpit", "showing nude", "breast caress",
+  "nsfw", "lewd", "sex", "orgasm",
+  "anal", "vaginal", "oral",
+];
+
+/** Pattern for generic non-expression asset names (backgrounds, UI, etc.). */
+const NON_EXPRESSION_NAME_RE = /^(bg\d*|background\d*|overlay|ui|icon|banner|logo|header|footer|frame|border)$/i;
+
+/** Returns true if the label looks like an expression asset (not a background/UI element). */
+function isExpressionAsset(label: string): boolean {
+  const suffix = label.includes("_") ? label.slice(label.lastIndexOf("_") + 1) : label;
+  if (NON_EXPRESSION_NAME_RE.test(suffix.trim())) return false;
+  if (NON_EXPRESSION_NAME_RE.test(label.trim())) return false;
+  return true;
+}
+
+/** Returns true if an expression label contains NSFW content keywords. */
+export function isNsfwExpressionLabel(label: string): boolean {
+  const lower = label.toLowerCase();
+  return NSFW_CONTENT_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+export interface CharxExpressionAsset {
+  /** Expression label derived from the asset name. */
+  label: string;
+  /** The image File ready for upload. */
+  file: File;
+}
+
+export interface LumiverseModules {
+  version: number;
+  /** True when any expression label matches NSFW content keywords. */
+  has_nsfw_expressions?: boolean;
+  expressions?: {
+    enabled: boolean;
+    defaultExpression: string;
+    mappings: Record<string, string>; // label → archive path
+  };
+  alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
+  alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+}
+
 export interface CharxResult {
   card: CreateCharacterInput;
   /** The avatar image file extracted from the archive, if found. */
   avatarFile: File | null;
   /** Additional images from assets/icon/ and assets/other/ for the gallery. */
   galleryFiles: File[];
+  /** Decoded RisuAI module from module.risum, if present in the archive. */
+  risuModule: RisuModule | null;
+  /** Expression-like images detected from x-risu-asset entries via heuristic. */
+  expressionAssets: CharxExpressionAsset[];
+  /** Decoded Lumiverse modules from lumiverse_modules.json, if present. */
+  lumiverseModules: LumiverseModules | null;
+  /** All image files keyed by their archive path (for Lumiverse module asset lookup). */
+  assetFiles: Map<string, File>;
 }
 
 /**
@@ -209,10 +401,13 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
 
   const data = new Uint8Array(arrayBuf);
 
-  // Only decompress card.json and image files — skip everything else
+  // Only decompress card.json, module files, and image files — skip everything else
   const unzipped = unzipSync(data, {
     filter: (entry) =>
-      entry.name === "card.json" || IMAGE_EXTENSIONS.test(entry.name),
+      entry.name === "card.json" ||
+      entry.name === "module.risum" ||
+      entry.name === "lumiverse_modules.json" ||
+      IMAGE_EXTENSIONS.test(entry.name),
   });
 
   const cardBytes = unzipped["card.json"];
@@ -238,7 +433,7 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
   );
 
   const avatarPath =
-    imagePaths.find((p) => p.startsWith("assets/icon/images/")) ??
+    imagePaths.find((p) => p.startsWith("assets/icon/image/")) ??
     imagePaths.find((p) => !p.includes("/")) ??
     imagePaths.find((p) => p.startsWith("assets/"));
 
@@ -255,5 +450,54 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
     }
   }
 
-  return { card, avatarFile, galleryFiles };
+  // Decode RisuAI module if present
+  let risuModule: RisuModule | null = null;
+  const moduleBytes = unzipped["module.risum"];
+  if (moduleBytes) {
+    try {
+      risuModule = decodeRisuModule(moduleBytes);
+    } catch { /* malformed module — skip */ }
+  }
+
+  // Detect expression-like images from x-risu-asset entries
+  const expressionAssets: CharxExpressionAsset[] = [];
+  const rawData = (json as Record<string, any>).data ?? json;
+  const cardAssets: any[] = Array.isArray(rawData.assets) ? rawData.assets : [];
+  const risuExprAssets = cardAssets.filter(
+    (a: any) => a.type === "x-risu-asset" && a.name && a.uri
+  );
+
+  if (risuExprAssets.length > 0) {
+    for (const asset of risuExprAssets) {
+      if (!isExpressionAsset(asset.name)) continue;
+
+      // Resolve embeded:// URI → ZIP path (e.g. "embeded://assets/other/image/X.webp" → "assets/other/image/X.webp")
+      const zipPath = (asset.uri as string).replace(/^embeded:\/\//, "");
+      const bytes = unzipped[zipPath];
+      if (!bytes || bytes.length === 0) continue;
+
+      const label = asset.name as string;
+      expressionAssets.push({ label, file: imageFileFromBytes(bytes, zipPath) });
+    }
+  }
+
+  // Decode Lumiverse modules if present
+  let lumiverseModules: LumiverseModules | null = null;
+  const lumiverseBytes = unzipped["lumiverse_modules.json"];
+  if (lumiverseBytes) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(lumiverseBytes));
+      if (parsed && typeof parsed === "object" && typeof parsed.version === "number") {
+        lumiverseModules = parsed as LumiverseModules;
+      }
+    } catch { /* malformed modules JSON — skip */ }
+  }
+
+  // Build assetFiles map (archive-path → File) for Lumiverse module asset lookup
+  const assetFiles = new Map<string, File>();
+  for (const p of imagePaths) {
+    assetFiles.set(p, imageFileFromBytes(unzipped[p], p));
+  }
+
+  return { card, avatarFile, galleryFiles, risuModule, expressionAssets, lumiverseModules, assetFiles };
 }

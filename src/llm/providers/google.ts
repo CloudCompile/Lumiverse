@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type LlmMessage, type LlmMessagePart } from "../types";
+import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
 
 export class GoogleProvider implements LlmProvider {
   readonly name = "google";
@@ -50,21 +50,27 @@ export class GoogleProvider implements LlmProvider {
     const candidate = data.candidates?.[0];
     const parts = candidate?.content?.parts || [];
 
-    // Separate thinking parts from regular text
+    // Separate thinking parts from regular text, and collect function calls
     let content = "";
     let reasoning = "";
+    const fnCalls: ToolCallResult[] = [];
     for (const p of parts) {
       if (p.thought) {
         reasoning += p.text || "";
+      } else if (p.functionCall) {
+        fnCalls.push({ name: p.functionCall.name, args: p.functionCall.args ?? {}, call_id: crypto.randomUUID() });
       } else {
         content += p.text || "";
       }
     }
 
+    const toolCalls = fnCalls.length > 0 ? fnCalls : undefined;
+
     return {
       content,
       reasoning: reasoning || undefined,
-      finish_reason: candidate?.finishReason || "STOP",
+      finish_reason: toolCalls ? "tool_calls" : (candidate?.finishReason || "STOP"),
+      tool_calls: toolCalls,
       usage: data.usageMetadata
         ? {
             prompt_tokens: data.usageMetadata.promptTokenCount || 0,
@@ -118,12 +124,15 @@ export class GoogleProvider implements LlmProvider {
           const parts = candidate?.content?.parts || [];
           const finishReason = candidate?.finishReason;
 
-          // Separate thinking parts (thought: true) from regular text parts
+          // Separate thinking parts (thought: true) from regular text parts, and collect function calls
           let text = "";
           let reasoning = "";
+          const fnCalls: ToolCallResult[] = [];
           for (const p of parts) {
             if (p.thought) {
               reasoning += p.text || "";
+            } else if (p.functionCall) {
+              fnCalls.push({ name: p.functionCall.name, args: p.functionCall.args ?? {}, call_id: crypto.randomUUID() });
             } else {
               text += p.text || "";
             }
@@ -138,11 +147,14 @@ export class GoogleProvider implements LlmProvider {
               }
             : undefined;
 
-          if (text || reasoning) {
+          const toolCalls = fnCalls.length > 0 ? fnCalls : undefined;
+
+          if (text || reasoning || toolCalls) {
             yield {
               token: text,
               reasoning: reasoning || undefined,
-              finish_reason: finishReason === "STOP" ? "stop" : undefined,
+              finish_reason: toolCalls ? "tool_calls" : (finishReason === "STOP" ? "stop" : undefined),
+              tool_calls: toolCalls,
               usage,
             };
           } else if (finishReason || usage) {

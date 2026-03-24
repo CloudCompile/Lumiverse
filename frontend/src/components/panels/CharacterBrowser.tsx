@@ -15,6 +15,8 @@ import GroupChatsPanel from './character-browser/GroupChatsPanel'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import BulkImportProgressModal from '@/components/modals/BulkImportProgressModal'
 import LorebookImportModal from '@/components/modals/LorebookImportModal'
+import ExpressionsImportModal from '@/components/modals/ExpressionsImportModal'
+import AlternateFieldsSummaryModal from '@/components/modals/AlternateFieldsSummaryModal'
 import Pagination from '@/components/shared/Pagination'
 import styles from './CharacterBrowser.module.css'
 
@@ -273,6 +275,18 @@ export default function CharacterBrowser() {
         isOpen={browser.lorebookModalOpen}
         lorebooks={browser.pendingLorebooks}
         onClose={browser.closeLorebookModal}
+      />
+
+      <ExpressionsImportModal
+        isOpen={browser.expressionsModalOpen}
+        items={browser.pendingExpressions}
+        onClose={browser.closeExpressionsModal}
+      />
+
+      <AlternateFieldsSummaryModal
+        isOpen={browser.altFieldsSummaryOpen}
+        items={browser.pendingAltFieldsSummary}
+        onClose={browser.closeAltFieldsSummary}
       />
 
       <CharacterEditorPage />

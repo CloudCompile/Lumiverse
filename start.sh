@@ -9,6 +9,7 @@ set -euo pipefail
 #   ./start.sh --backend-only   Start backend only, skip frontend serving
 #   ./start.sh --dev            Start backend in watch mode (no frontend build)
 #   ./start.sh --setup          Run setup wizard only
+#   ./start.sh --reset-password  Reset owner account password
 #   ./start.sh -m|--migrate-st  Run SillyTavern migration helper
 #   ./start.sh --no-runner      Start without the visual runner
 #
@@ -28,9 +29,22 @@ ok()    { echo -e "${GREEN}[ok]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[warn]${NC}  $*"; }
 err()   { echo -e "${RED}[error]${NC} $*" >&2; }
 
+# ─── Platform detection ─────────────────────────────────────────────────────
+
+IS_TERMUX=false
+IS_PROOT=false
+
+# Detect native Termux: $PREFIX is always set in Termux shell sessions
+if [[ -n "${PREFIX:-}" && -d "/data/data/com.termux" ]]; then
+  IS_TERMUX=true
+# Detect proot-distro inside Termux (running a full Linux distro)
+elif [[ -f "/etc/os-release" && -d "/data/data/com.termux" ]] 2>/dev/null; then
+  IS_PROOT=true
+fi
+
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 
-MODE="all"  # all | build-only | backend-only | dev | setup | migrate-st
+MODE="all"  # all | build-only | backend-only | dev | setup | reset-password | migrate-st
 USE_RUNNER=true
 FORCE_BUILD=false
 for arg in "$@"; do
@@ -40,6 +54,7 @@ for arg in "$@"; do
     --backend-only) MODE="backend-only" ;;
     --dev)          MODE="dev" ;;
     --setup)        MODE="setup" ;;
+    --reset-password) MODE="reset-password" ;;
     --migrate-st|-m) MODE="migrate-st" ;;
     --no-runner)    USE_RUNNER=false ;;
     --help|-h)
@@ -58,12 +73,85 @@ FRONTEND_DIR="${FRONTEND_PATH:-$SCRIPT_DIR/frontend}"
 
 # ─── Ensure Bun is installed ────────────────────────────────────────────────
 
-ensure_bun() {
+# Try to find bun in PATH or common install locations.
+# Called at the start and after install attempts.
+_resolve_bun() {
+  # Load Bun env early — catches cases where Bun was previously installed
+  # but the current shell session hasn't sourced the profile yet.
+  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+  export PATH="$BUN_INSTALL/bin:$PATH"
+  [[ -f "$BUN_INSTALL/env" ]] && source "$BUN_INSTALL/env"
+
   if command -v bun &>/dev/null; then
+    return 0
+  fi
+
+  # Fallback: check common locations directly (covers proot /root/.bun, etc.)
+  local try_paths=(
+    "$BUN_INSTALL/bin/bun"
+    "$HOME/.bun/bin/bun"
+    "/root/.bun/bin/bun"
+  )
+  for try in "${try_paths[@]}"; do
+    if [[ -x "$try" ]]; then
+      export PATH="$(dirname "$try"):$PATH"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# Install Termux prerequisites for running glibc-linked Bun binaries.
+# Bun is compiled against glibc, but Termux uses Android's bionic libc.
+# We need glibc-runner to bridge the gap, plus bun-termux for a proper
+# wrapper that handles /proc/self/exe, hardlink stubs, and path remapping.
+_install_bun_termux() {
+  info "Termux detected — installing Bun with glibc compatibility layer..."
+
+  # Ensure pkg is up to date and install glibc prerequisites
+  if ! command -v pkg &>/dev/null; then
+    err "Termux 'pkg' package manager not found."
+    exit 1
+  fi
+
+  info "Installing Termux prerequisites (glibc-repo, glibc-runner, build-essential)..."
+  pkg update -y
+  pkg install -y git curl build-essential glibc-repo glibc-runner
+
+  # The official Bun installer downloads the linux-aarch64 glibc binary,
+  # which is exactly what we need — glibc-runner will execute it.
+  touch "$HOME/.bashrc" 2>/dev/null || true
+  curl -fsSL https://bun.sh/install | bash
+  source "$HOME/.bashrc" 2>/dev/null || true
+
+  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+  export PATH="$BUN_INSTALL/bin:$PATH"
+  [[ -f "$BUN_INSTALL/env" ]] && source "$BUN_INSTALL/env"
+
+  # Install bun-termux wrapper (userland-exec + LD_PRELOAD shim)
+  # This replaces the raw bun binary with a wrapper that:
+  #   - Loads glibc's ld-linux via userland exec (fixes /proc/self/exe)
+  #   - Intercepts syscalls for Android filesystem compatibility
+  #   - Remaps shebang paths to Termux prefix
+  if [[ ! -d "$HOME/.bun-termux" ]]; then
+    info "Installing bun-termux wrapper..."
+    git clone https://github.com/Happ1ness-dev/bun-termux.git "$HOME/.bun-termux"
+    (cd "$HOME/.bun-termux" && make && make install)
+    ok "bun-termux wrapper installed"
+  else
+    info "bun-termux wrapper already present, skipping..."
+  fi
+}
+
+ensure_bun() {
+  # ── Try to resolve an existing Bun installation ──────────────────────────
+  if _resolve_bun; then
     ok "Bun $(bun --version) found"
     return
   fi
 
+  # ── No Bun found — install it ───────────────────────────────────────────
   warn "Bun not found. Installing..."
 
   if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
@@ -72,40 +160,28 @@ ensure_bun() {
     exit 1
   fi
 
-  curl -fsSL https://bun.sh/install | bash
+  if [[ "$IS_TERMUX" == true ]]; then
+    _install_bun_termux
+  else
+    curl -fsSL https://bun.sh/install | bash
+  fi
 
   # ── Make bun available in this session ──────────────────────────────────
-  # The installer modifies shell profiles but we can't rely on re-sourcing
-  # them (non-interactive shells hit the early-exit guard in .bashrc).
-  # Instead we manually wire up the PATH the same way the installer does.
-
-  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-  export PATH="$BUN_INSTALL/bin:$PATH"
-
-  # Newer Bun installers create a dedicated env file — source it if present
-  [[ -f "$BUN_INSTALL/env" ]] && source "$BUN_INSTALL/env"
-
-  if command -v bun &>/dev/null; then
+  if _resolve_bun; then
     ok "Bun $(bun --version) installed successfully"
     return
   fi
 
-  # Last resort: the binary exists but isn't resolving through PATH.
-  # Try common install locations directly.
-  local try_paths=(
-    "$BUN_INSTALL/bin/bun"
-    "$HOME/.bun/bin/bun"
-  )
-  for try in "${try_paths[@]}"; do
-    if [[ -x "$try" ]]; then
-      ok "Bun $("$try" --version) installed (using direct path: $try)"
-      # Make it available for every subsequent call in this script
-      export PATH="$(dirname "$try"):$PATH"
-      return
-    fi
-  done
-
-  err "Bun installation failed. Please install manually: https://bun.sh"
+  # ── Installation failed ─────────────────────────────────────────────────
+  if [[ "$IS_TERMUX" == true ]]; then
+    err "Bun installation failed on Termux."
+    err "You can also try running inside proot-distro:"
+    err "  pkg install proot-distro && proot-distro install ubuntu"
+    err "  proot-distro login ubuntu"
+    err "  # Then re-run this script inside the Ubuntu environment"
+  else
+    err "Bun installation failed. Please install manually: https://bun.sh"
+  fi
   exit 1
 }
 
@@ -129,6 +205,12 @@ run_setup() {
   (cd "$BACKEND_DIR" && bun run scripts/setup-wizard.ts)
 }
 
+run_reset_password() {
+  install_deps "$BACKEND_DIR" "backend"
+  info "Launching password reset..."
+  (cd "$BACKEND_DIR" && bun run reset-password)
+}
+
 run_migrate_st() {
   install_deps "$BACKEND_DIR" "backend"
   info "Launching SillyTavern migration helper..."
@@ -142,7 +224,15 @@ install_deps() {
   local name="$2"
 
   info "Installing $name dependencies..."
-  (cd "$dir" && bun install)
+
+  if [[ "$IS_TERMUX" == true ]]; then
+    # Android doesn't support hardlinks — use file copy backend instead.
+    # Without this, bun install fails with EPERM on node_modules linking.
+    (cd "$dir" && bun install --backend=copyfile)
+  else
+    (cd "$dir" && bun install)
+  fi
+
   ok "$name dependencies installed"
 }
 
@@ -216,6 +306,12 @@ echo ""
 echo -e "${BOLD}Lumiverse${NC} — Launcher"
 echo ""
 
+if [[ "$IS_TERMUX" == true ]]; then
+  info "Running on Termux (Android)"
+elif [[ "$IS_PROOT" == true ]]; then
+  info "Running inside proot-distro (Android)"
+fi
+
 ensure_bun
 
 case "$MODE" in
@@ -239,6 +335,9 @@ case "$MODE" in
     ;;
   setup)
     run_setup
+    ;;
+  reset-password)
+    run_reset_password
     ;;
   migrate-st)
     run_migrate_st

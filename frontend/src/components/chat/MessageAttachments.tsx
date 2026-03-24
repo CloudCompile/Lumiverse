@@ -33,7 +33,7 @@ export default function MessageAttachments({ attachments, isUser }: MessageAttac
               title={att.original_filename}
             >
               <img
-                src={imagesApi.url(att.image_id)}
+                src={imagesApi.smallUrl(att.image_id)}
                 alt={att.original_filename}
                 loading="lazy"
               />
@@ -41,7 +41,7 @@ export default function MessageAttachments({ attachments, isUser }: MessageAttac
           ) : (
             <span key={att.image_id} className={styles.inlineImageWrap}>
               <img
-                src={imagesApi.url(att.image_id)}
+                src={imagesApi.largeUrl(att.image_id)}
                 alt={att.original_filename}
                 className={styles.inlineImage}
                 loading="lazy"

@@ -93,12 +93,16 @@ export interface RawGenerateInput {
   connection_id?: string;
   /** Optional: use this key directly (for extension endpoints) */
   api_key?: string;
+  /** Optional tool/function definitions for inline function calling. */
+  tools?: ToolDefinition[];
 }
 
 export interface QuietGenerateInput {
   messages: LlmMessage[];
   connection_id?: string;
   parameters?: GenerationParameters;
+  /** Optional tool/function definitions for inline function calling. */
+  tools?: ToolDefinition[];
 }
 
 export interface DryRunResult {
@@ -1284,10 +1288,20 @@ function emitExpressionChanged(
   label: string,
   imageId: string
 ): void {
-  // Persist to chat metadata
-  chatsSvc.updateChat(userId, chatId, {
-    metadata: { ...chat.metadata, active_expression: label },
-  });
+  const isGroup = chat.metadata?.group === true;
+  const metaUpdate: Record<string, any> = { ...chat.metadata };
+
+  if (isGroup) {
+    // Persist per-character expression map for group chats
+    const groupExpressions: Record<string, { label: string; imageId: string }> =
+      metaUpdate.group_expressions ? { ...metaUpdate.group_expressions } : {};
+    groupExpressions[characterId] = { label, imageId };
+    metaUpdate.group_expressions = groupExpressions;
+  }
+  // Always persist the latest expression as active_expression (for single chats / backward compat)
+  metaUpdate.active_expression = label;
+
+  chatsSvc.updateChat(userId, chatId, { metadata: metaUpdate });
   // Emit to frontend
   eventBus.emit(EventType.EXPRESSION_CHANGED, {
     chatId,
@@ -1337,6 +1351,7 @@ export async function rawGenerate(userId: string, input: RawGenerateInput & { si
     messages: input.messages,
     model: input.model,
     parameters: input.parameters,
+    tools: input.tools,
     stream: false,
     signal: input.signal,
   });
@@ -1373,6 +1388,7 @@ export async function quietGenerate(userId: string, input: QuietGenerateInput): 
     messages: input.messages,
     model: connection.model,
     parameters: mergedParams,
+    tools: input.tools,
     stream: false,
   });
 }

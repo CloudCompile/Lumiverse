@@ -45,17 +45,20 @@ app.delete("/:id", (c) => {
   return c.json({ success: true });
 });
 
-app.get("/:id/avatar", (c) => {
+app.get("/:id/avatar", async (c) => {
   const userId = c.get("userId");
   const info = svc.getPersonaAvatarInfo(userId, c.req.param("id"));
   if (!info) return c.json({ error: "Not found" }, 404);
 
+  const sizeParam = c.req.query("size") as images.ThumbTier | undefined;
+  const tier = sizeParam === "sm" || sizeParam === "lg" ? sizeParam : undefined;
+
   if (info.image_id) {
-    const filepath = images.getImageFilePath(userId, info.image_id);
+    const filepath = await images.getImageFilePath(userId, info.image_id, tier);
     if (filepath) {
       return createAvatarResolverResponse(
         filepath,
-        info.image_id,
+        info.image_id + (tier ? `_${tier}` : ""),
         c.req.header("If-None-Match")
       );
     }

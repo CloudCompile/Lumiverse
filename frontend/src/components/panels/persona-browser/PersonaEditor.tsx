@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
-import { getPersonaAvatarUrl } from '@/lib/avatarUrls'
+import { getPersonaAvatarLargeUrl } from '@/lib/avatarUrls'
 import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
 import { useStore } from '@/store'
@@ -195,8 +195,8 @@ export default function PersonaEditor({
 
   // Avatar crop flow
   const handleCropComplete = useCallback(
-    async (file: File) => {
-      await onUploadAvatar(persona.id, file)
+    async (croppedFile: File, _originalFile: File) => {
+      await onUploadAvatar(persona.id, croppedFile)
       setAvatarKey((k) => k + 1)
     },
     [persona.id, onUploadAvatar]
@@ -268,7 +268,7 @@ export default function PersonaEditor({
         >
           <LazyImage
             key={avatarKey}
-            src={getPersonaAvatarUrl(persona) || ''}
+            src={getPersonaAvatarLargeUrl(persona) || ''}
             alt={persona.name}
             className={styles.avatarImg}
             fallback={

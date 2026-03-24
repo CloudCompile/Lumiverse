@@ -1,0 +1,133 @@
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { Layers } from 'lucide-react'
+import { useStore } from '@/store'
+import { chatsApi } from '@/api/chats'
+import styles from './AlternateFieldSwitcher.module.css'
+import clsx from 'clsx'
+
+interface AlternateFieldVariant {
+  id: string
+  label: string
+  content: string
+}
+
+const FIELD_LABELS: Record<string, string> = {
+  description: 'Description',
+  personality: 'Personality',
+  scenario: 'Scenario',
+}
+
+const FIELDS = ['description', 'personality', 'scenario'] as const
+
+export default function AlternateFieldSwitcher({ chatId }: { chatId: string }) {
+  const [open, setOpen] = useState(false)
+  const [selections, setSelections] = useState<Record<string, string>>({})
+  const [chatMetadata, setChatMetadata] = useState<Record<string, any> | null>(null)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const characters = useStore((s) => s.characters)
+
+  const character = characters.find((c) => c.id === activeCharacterId)
+
+  const altFields = character?.extensions?.alternate_fields as
+    | Record<string, AlternateFieldVariant[]>
+    | undefined
+
+  const hasAlternates =
+    altFields && Object.values(altFields).some((arr) => Array.isArray(arr) && arr.length > 0)
+
+  // Load chat metadata on mount / chatId change
+  useEffect(() => {
+    if (!chatId || !hasAlternates) return
+    let cancelled = false
+    chatsApi.get(chatId, { messages: false }).then((chat) => {
+      if (cancelled) return
+      setChatMetadata(chat.metadata || {})
+      setSelections((chat.metadata?.alternate_field_selections as Record<string, string>) || {})
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [chatId, hasAlternates])
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const handleSelect = useCallback(
+    async (field: string, variantId: string | null) => {
+      const newSelections = { ...selections }
+      if (variantId) {
+        newSelections[field] = variantId
+      } else {
+        delete newSelections[field]
+      }
+      setSelections(newSelections)
+
+      const newMetadata = { ...(chatMetadata || {}), alternate_field_selections: newSelections }
+      if (Object.keys(newSelections).length === 0) {
+        delete newMetadata.alternate_field_selections
+      }
+
+      try {
+        await chatsApi.update(chatId, { metadata: newMetadata })
+        setChatMetadata(newMetadata)
+      } catch (err) {
+        console.error('[AlternateFieldSwitcher] Failed to save:', err)
+      }
+    },
+    [chatId, chatMetadata, selections]
+  )
+
+  if (!hasAlternates) return null
+
+  const hasActiveSelection = Object.keys(selections).length > 0
+
+  return (
+    <div className={styles.wrapper} ref={ref}>
+      <button
+        type="button"
+        className={clsx(styles.triggerBtn, open && styles.triggerBtnActive)}
+        onClick={() => setOpen((v) => !v)}
+        title="Alternate fields"
+      >
+        <Layers size={14} />
+        {hasActiveSelection && <span className={styles.badge} />}
+      </button>
+
+      {open && (
+        <div className={styles.popover}>
+          <div className={styles.popoverTitle}>Alternate Fields</div>
+          {FIELDS.map((field) => {
+            const variants = altFields?.[field]
+            if (!Array.isArray(variants) || variants.length === 0) return null
+            const selectedId = selections[field] || null
+
+            return (
+              <div key={field} className={styles.fieldRow}>
+                <span className={styles.fieldLabel}>{FIELD_LABELS[field]}</span>
+                <select
+                  className={styles.fieldSelect}
+                  value={selectedId || ''}
+                  onChange={(e) => handleSelect(field, e.target.value || null)}
+                >
+                  <option value="">Default</option>
+                  {variants.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}

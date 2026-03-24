@@ -1083,6 +1083,7 @@ export class WorkerHost {
             messages: input.messages || [],
             parameters: input.parameters,
             connection_id: input.connection_id,
+            tools: input.tools,
           });
           break;
         case "quiet":
@@ -1090,6 +1091,7 @@ export class WorkerHost {
             messages: input.messages || [],
             connection_id: input.connection_id,
             parameters: input.parameters,
+            tools: input.tools,
           });
           break;
         case "batch":

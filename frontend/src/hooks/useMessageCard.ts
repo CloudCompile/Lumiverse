@@ -2,7 +2,8 @@ import { useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
-import { getCharacterAvatarUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById } from '@/lib/avatarUrls'
+import { imagesApi } from '@/api/images'
 import type { Message } from '@/types/api'
 
 /**
@@ -51,6 +52,8 @@ export function useMessageCard(message: Message, chatId: string) {
   const activePersonaId = useStore((s) => s.activePersonaId)
   const personas = useStore((s) => s.personas)
   const autoParse = useStore((s) => s.reasoningSettings.autoParse)
+  const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
+  const isBubbleMode = useStore((s) => s.chatSheldDisplayMode) === 'bubble'
 
   const streamingContent = useStore((s) => s.streamingContent)
   const streamingReasoning = useStore((s) => s.streamingReasoning)
@@ -106,12 +109,18 @@ export function useMessageCard(message: Message, chatId: string) {
     : ((isGenericAssistantName ? effectiveCharacter?.name : normalizedMessageName) || effectiveCharacter?.name || 'Assistant')
 
   const effectiveCharId = messageCharacterId || activeCharacterId
+  const getCharAvatarUrl = isBubbleMode ? getCharacterAvatarLargeUrlById : getCharacterAvatarThumbUrlById
+  const getPersonaAvatarUrl = isBubbleMode ? getPersonaAvatarLargeUrlById : getPersonaAvatarThumbUrlById
+  const getImageUrl = isBubbleMode ? imagesApi.largeUrl : imagesApi.smallUrl
+
   const avatarUrl = isUser
-    ? getPersonaAvatarUrlById(
+    ? getPersonaAvatarUrl(
         userPersonaId ?? activePersona?.id ?? null,
         messagePersona?.image_id ?? activePersona?.image_id ?? null
       )
-    : getCharacterAvatarUrlById(effectiveCharId, effectiveCharacter?.image_id ?? null)
+    : (activeChatAvatarId && effectiveCharId === activeCharacterId)
+      ? getImageUrl(activeChatAvatarId)
+      : getCharAvatarUrl(effectiveCharId, effectiveCharacter?.image_id ?? null)
 
   const macroUserName = useMemo(() => {
     const fallback = activePersona?.name ?? 'User'

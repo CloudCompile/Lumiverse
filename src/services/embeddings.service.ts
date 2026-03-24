@@ -679,6 +679,38 @@ export async function updateEmbeddingConfig(
   return { ...merged, has_api_key };
 }
 
+/**
+ * Parse embedding responses from OpenAI-compatible, Ollama /api/embed, and Ollama /api/embeddings formats.
+ */
+function parseEmbeddingResponse(payload: any, expectedCount: number): number[][] {
+  // OpenAI format: { data: [{ embedding: number[] }, ...] }
+  if (Array.isArray(payload.data) && payload.data.length > 0 && payload.data[0].embedding) {
+    const vectors = payload.data.map((d: any) => d.embedding || []);
+    if (vectors.length !== expectedCount) {
+      throw new Error(`Embedding provider returned ${vectors.length} vectors, expected ${expectedCount}`);
+    }
+    return vectors;
+  }
+
+  // Ollama /api/embed format: { embeddings: number[][] }
+  if (Array.isArray(payload.embeddings) && Array.isArray(payload.embeddings[0])) {
+    if (payload.embeddings.length !== expectedCount) {
+      throw new Error(`Embedding provider returned ${payload.embeddings.length} vectors, expected ${expectedCount}`);
+    }
+    return payload.embeddings;
+  }
+
+  // Ollama /api/embeddings (legacy single): { embedding: number[] }
+  if (Array.isArray(payload.embedding)) {
+    if (expectedCount !== 1) {
+      throw new Error(`Ollama /api/embeddings only supports single inputs, but ${expectedCount} texts were sent`);
+    }
+    return [payload.embedding];
+  }
+
+  throw new Error("Unrecognized embedding response format");
+}
+
 async function requestEmbeddings(
   userId: string,
   texts: string[],
@@ -690,11 +722,15 @@ async function requestEmbeddings(
   if (!apiKey) throw new Error("Embedding API key is not configured");
   if (!texts.length) return [];
 
+  const isOllamaNative = /\/api\/(embed|embeddings)\b/.test(cfg.api_url);
+
   const body: Record<string, any> = {
     model: cfg.model,
     input: texts,
-    encoding_format: "float",
   };
+  if (!isOllamaNative) {
+    body.encoding_format = "float";
+  }
   if (!options?.omitDimensions && cfg.send_dimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
 
   const url = resolveEmbeddingUrl(cfg.api_url);
@@ -712,11 +748,8 @@ async function requestEmbeddings(
     throw new Error(`Embedding request failed (${res.status}): ${msg}`);
   }
 
-  const payload = await res.json() as { data?: Array<{ embedding?: number[] }> };
-  const vectors = (payload.data || []).map((d) => d.embedding || []);
-  if (vectors.length !== texts.length) {
-    throw new Error("Embedding provider returned an unexpected number of vectors");
-  }
+  const payload = await res.json() as any;
+  const vectors = parseEmbeddingResponse(payload, texts.length);
   return vectors;
 }
 

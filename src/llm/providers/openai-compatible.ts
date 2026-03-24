@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import type { ProviderCapabilities } from "../param-schema";
-import type { GenerationRequest, GenerationResponse, StreamChunk, LlmMessage, LlmMessagePart } from "../types";
+import type { GenerationRequest, GenerationResponse, StreamChunk, ToolCallResult, LlmMessage, LlmMessagePart } from "../types";
 
 /**
  * Abstract base class for providers that use the OpenAI-compatible
@@ -57,10 +57,20 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     const data = (await res.json()) as any;
     const choice = data.choices?.[0];
 
+    const rawToolCalls = choice?.message?.tool_calls;
+    const toolCalls: ToolCallResult[] | undefined = Array.isArray(rawToolCalls) && rawToolCalls.length > 0
+      ? rawToolCalls.map((tc: any) => ({
+          name: tc.function?.name || tc.name || "",
+          args: typeof tc.function?.arguments === "string" ? JSON.parse(tc.function.arguments) : (tc.function?.arguments ?? {}),
+          call_id: tc.id || crypto.randomUUID(),
+        }))
+      : undefined;
+
     return {
       content: choice?.message?.content || "",
       reasoning: choice?.message?.reasoning || choice?.message?.reasoning_content || undefined,
-      finish_reason: choice?.finish_reason || "stop",
+      finish_reason: toolCalls ? "tool_calls" : (choice?.finish_reason || "stop"),
+      tool_calls: toolCalls,
       usage: data.usage
         ? {
             prompt_tokens: data.usage.prompt_tokens,
@@ -99,6 +109,9 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     // check both on every chunk.
     let reasoningKey: "reasoning" | "reasoning_content" | null = null;
 
+    // Tool call accumulation — OpenAI streams tool_calls as delta chunks
+    const toolCallBuffer: { id: string; name: string; argsJson: string }[] = [];
+
     try {
     while (true) {
       const { done, value } = await reader.read();
@@ -118,6 +131,15 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
           const parsed = JSON.parse(data);
           const delta = parsed.choices?.[0]?.delta;
           const finishReason = parsed.choices?.[0]?.finish_reason;
+
+          // Accumulate tool call deltas
+          for (const tc of (delta?.tool_calls ?? [])) {
+            const idx = tc.index ?? toolCallBuffer.length;
+            if (!toolCallBuffer[idx]) toolCallBuffer[idx] = { id: tc.id ?? "", name: "", argsJson: "" };
+            if (tc.id && !toolCallBuffer[idx].id) toolCallBuffer[idx].id = tc.id;
+            if (tc.function?.name) toolCallBuffer[idx].name += tc.function.name;
+            if (tc.function?.arguments) toolCallBuffer[idx].argsJson += tc.function.arguments;
+          }
 
           // Resolve reasoning from the detected key, or auto-detect on first occurrence
           let reasoning: string | undefined;
@@ -141,15 +163,26 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
               }
             : undefined;
 
-          if (reasoning || content) {
+          if (finishReason) {
+            // Emit accumulated tool calls on the finish chunk
+            const toolCalls: ToolCallResult[] | undefined = toolCallBuffer.length > 0
+              ? toolCallBuffer.map(tc => ({ name: tc.name, args: JSON.parse(tc.argsJson || "{}"), call_id: tc.id || crypto.randomUUID() }))
+              : undefined;
             yield {
               token: content || "",
               reasoning: reasoning || undefined,
-              finish_reason: finishReason || undefined,
+              finish_reason: toolCalls ? "tool_calls" : finishReason,
+              tool_calls: toolCalls,
               usage,
             };
-          } else if (finishReason || usage) {
-            yield { token: "", finish_reason: finishReason || undefined, usage };
+          } else if (reasoning || content) {
+            yield {
+              token: content || "",
+              reasoning: reasoning || undefined,
+              usage,
+            };
+          } else if (usage) {
+            yield { token: "", usage };
           }
         } catch {
           // Skip malformed SSE lines

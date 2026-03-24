@@ -102,6 +102,18 @@
   opacity: 1;
 }
 
+.avatarOverlayUploading {
+  opacity: 1 !important;
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.avatarProgressText {
+  font-size: 12px;
+  font-weight: 700;
+  color: white;
+  font-variant-numeric: tabular-nums;
+}
+
 .hiddenInput {
   display: none;
 }
@@ -165,6 +177,57 @@
 .deleteBtn:hover {
   color: var(--lumiverse-error);
   border-color: var(--lumiverse-error);
+}
+
+.exportWrapper {
+  position: relative;
+}
+
+.exportDropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  z-index: 100;
+  min-width: 220px;
+  background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle));
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.exportDropdown button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.exportDropdown button:hover {
+  background: var(--lumiverse-fill-hover);
+}
+
+.exportSpinner {
+  animation: spin 0.8s linear infinite;
+  color: var(--lumiverse-primary);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .savingIndicator {

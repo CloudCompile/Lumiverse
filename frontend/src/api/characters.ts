@@ -1,4 +1,5 @@
-import { get, post, put, del, upload, uploadWithProgress, BASE_URL } from './client'
+import { get, post, put, del, upload, uploadWithProgress, getBlob, BASE_URL } from './client'
+import { triggerBlobDownload } from '@/lib/downloads'
 import type {
   Character,
   CharacterSummary,
@@ -56,9 +57,12 @@ export const charactersApi = {
     return post<Character>(`/characters/${id}/duplicate`)
   },
 
-  uploadAvatar(id: string, file: File) {
+  uploadAvatar(id: string, file: File, onProgress?: (percent: number) => void) {
     const form = new FormData()
     form.append('avatar', file)
+    if (onProgress) {
+      return uploadWithProgress<Character>(`/characters/${id}/avatar`, form, onProgress)
+    }
     return upload<Character>(`/characters/${id}/avatar`, form)
   },
 
@@ -97,5 +101,20 @@ export const charactersApi = {
 
   batchDelete(ids: string[], keepChats = false) {
     return post<BatchDeleteResult>('/characters/batch-delete', { ids, keep_chats: keepChats })
+  },
+
+  async exportCharacter(id: string, format: 'json' | 'png' | 'charx', characterName?: string) {
+    const blob = await getBlob(`/characters/${id}/export`, { format })
+    const ext = format === 'charx' ? 'charx' : format
+    const safeName = (characterName || 'character').replace(/[^a-zA-Z0-9_\-. ]/g, '_')
+    triggerBlobDownload(blob, `${safeName}.${ext}`)
+  },
+
+  getResolvedFields(id: string, chatId?: string) {
+    const params: Record<string, any> = {}
+    if (chatId) params.chat_id = chatId
+    return get<Record<string, { content: string; variant_id: string | null; label: string }>>(
+      `/characters/${id}/resolved-fields`, params
+    )
   },
 }

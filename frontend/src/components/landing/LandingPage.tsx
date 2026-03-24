@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router'
 import { motion, AnimatePresence } from 'motion/react'
 import { RefreshCw, MessageSquarePlus, Loader2, MessageSquare, Trash2 } from 'lucide-react'
 import { chatsApi } from '@/api/chats'
-import { getCharacterAvatarUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarLargeUrlById } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
 import { useScrollGate } from '@/hooks/useScrollGate'
 import LazyImage from '@/components/shared/LazyImage'
@@ -84,7 +84,7 @@ function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
     ? characters.find((entry) => entry.id === item.character_id) ?? null
     : null
   const avatarUrl = item.character_id
-    ? getCharacterAvatarUrlById(
+    ? getCharacterAvatarLargeUrlById(
         item.character_id,
         liveCharacter?.image_id ?? item.character_image_id
       )

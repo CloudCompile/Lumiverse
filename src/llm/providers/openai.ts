@@ -4,6 +4,7 @@ import type {
   GenerationRequest,
   GenerationResponse,
   StreamChunk,
+  ToolCallResult,
   LlmMessage,
   LlmMessagePart,
 } from "../types";
@@ -185,6 +186,8 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       content = data.output_text;
     }
 
+    const fnCalls: ToolCallResult[] = [];
+
     if (data.output) {
       for (const item of data.output) {
         // Reasoning items (o-series models)
@@ -202,16 +205,27 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
             }
           }
         }
+        // Function call items
+        if (item.type === "function_call") {
+          fnCalls.push({
+            name: item.name || "",
+            args: typeof item.arguments === "string" ? JSON.parse(item.arguments) : (item.arguments ?? {}),
+            call_id: item.call_id || item.id || crypto.randomUUID(),
+          });
+        }
       }
     }
+
+    const toolCalls = fnCalls.length > 0 ? fnCalls : undefined;
 
     return {
       content,
       reasoning,
-      finish_reason:
-        data.status === "completed"
+      finish_reason: toolCalls ? "tool_calls"
+        : data.status === "completed"
           ? "stop"
           : data.incomplete_details?.reason || data.status || "stop",
+      tool_calls: toolCalls,
       usage: data.usage
         ? {
             prompt_tokens: data.usage.input_tokens || 0,
@@ -250,6 +264,9 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    // Tool call accumulation for Responses API function_call streaming
+    const fnCallBuffer: Map<string, { name: string; argsJson: string; callId: string }> = new Map();
+
     try {
     while (true) {
       const { done, value } = await reader.read();
@@ -280,30 +297,39 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
               yield { token: "", reasoning: parsed.delta || "" };
               break;
 
-            // Response complete — extract usage
-            case "response.completed": {
-              const resp = parsed.response || parsed;
-              const usage = resp.usage
-                ? {
-                    prompt_tokens: resp.usage.input_tokens || 0,
-                    completion_tokens: resp.usage.output_tokens || 0,
-                    total_tokens:
-                      (resp.usage.input_tokens || 0) +
-                      (resp.usage.output_tokens || 0),
-                  }
-                : undefined;
-              yield {
-                token: "",
-                finish_reason:
-                  resp.status === "completed"
-                    ? "stop"
-                    : resp.incomplete_details?.reason || resp.status || "stop",
-                usage,
-              };
+            // Function call argument streaming
+            case "response.function_call_arguments.delta": {
+              const itemId = parsed.item_id || parsed.output_index?.toString() || "0";
+              const existing = fnCallBuffer.get(itemId);
+              if (existing) {
+                existing.argsJson += parsed.delta || "";
+              }
+              break;
+            }
+            case "response.function_call_arguments.done": {
+              const itemId = parsed.item_id || parsed.output_index?.toString() || "0";
+              const existing = fnCallBuffer.get(itemId);
+              if (existing && parsed.arguments) {
+                existing.argsJson = parsed.arguments;
+              }
               break;
             }
 
-            // Also handle response.done (Realtime API naming variant)
+            // Function call output item added — capture name and call_id
+            case "response.output_item.added": {
+              const item = parsed.item;
+              if (item?.type === "function_call") {
+                fnCallBuffer.set(item.id || parsed.output_index?.toString() || String(fnCallBuffer.size), {
+                  name: item.name || "",
+                  argsJson: "",
+                  callId: item.call_id || item.id || crypto.randomUUID(),
+                });
+              }
+              break;
+            }
+
+            // Response complete — extract usage and emit tool calls
+            case "response.completed":
             case "response.done": {
               const resp = parsed.response || parsed;
               const usage = resp.usage
@@ -315,21 +341,30 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
                       (resp.usage.output_tokens || 0),
                   }
                 : undefined;
+
+              const toolCalls: ToolCallResult[] | undefined = fnCallBuffer.size > 0
+                ? [...fnCallBuffer.values()].map(tc => ({
+                    name: tc.name,
+                    args: JSON.parse(tc.argsJson || "{}"),
+                    call_id: tc.callId,
+                  }))
+                : undefined;
+
               yield {
                 token: "",
-                finish_reason:
-                  resp.status === "completed"
+                finish_reason: toolCalls ? "tool_calls"
+                  : resp.status === "completed"
                     ? "stop"
                     : resp.incomplete_details?.reason || resp.status || "stop",
+                tool_calls: toolCalls,
                 usage,
               };
               break;
             }
 
             // All other events (response.created, response.in_progress,
-            // response.output_item.added, response.content_part.added,
-            // response.output_text.done, response.output_item.done, etc.)
-            // are lifecycle events — silently skip.
+            // response.content_part.added, response.output_text.done,
+            // response.output_item.done, etc.) are lifecycle events — silently skip.
             default:
               break;
           }

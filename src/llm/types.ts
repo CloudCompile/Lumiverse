@@ -62,10 +62,19 @@ export interface GenerationParameters {
   [key: string]: any;
 }
 
+export interface ToolCallResult {
+  name: string;
+  args: Record<string, unknown>;
+  /** Provider call ID (e.g. Anthropic `id`, OpenAI `id`). Synthetic UUID for providers that don't supply one. */
+  call_id: string;
+}
+
 export interface GenerationResponse {
   content: string;
   reasoning?: string;
   finish_reason: string;
+  /** Present when the LLM requested function calls instead of (or in addition to) generating text. */
+  tool_calls?: ToolCallResult[];
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -77,6 +86,8 @@ export interface StreamChunk {
   token: string;
   reasoning?: string;
   finish_reason?: string;
+  /** Accumulated function calls (set on the final chunk when finish_reason indicates tool use). */
+  tool_calls?: ToolCallResult[];
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;

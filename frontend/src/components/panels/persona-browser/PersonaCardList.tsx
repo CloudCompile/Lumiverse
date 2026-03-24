@@ -1,6 +1,6 @@
 import { memo, type ReactNode } from 'react'
 import { User, UserCheck, Crown, Link2 } from 'lucide-react'
-import { getPersonaAvatarUrl } from '@/lib/avatarUrls'
+import { getPersonaAvatarThumbUrl } from '@/lib/avatarUrls'
 import LazyImage from '@/components/shared/LazyImage'
 import type { Persona } from '@/types/api'
 import styles from './PersonaCardList.module.css'
@@ -45,7 +45,7 @@ const PersonaRow = memo(function PersonaRow({
     >
       <div className={styles.avatar}>
         <LazyImage
-          src={getPersonaAvatarUrl(persona) || ''}
+          src={getPersonaAvatarThumbUrl(persona) || ''}
           alt={persona.name}
           className={styles.avatarImg}
           fallback={

@@ -30,7 +30,7 @@ export const expressionsApi = {
     return `${BASE_URL}/images/${imageId}`
   },
 
-  thumbnailUrl(imageId: string): string {
-    return `${BASE_URL}/images/${imageId}?thumb=true`
+  smallUrl(imageId: string): string {
+    return `${BASE_URL}/images/${imageId}?size=sm`
   },
 }

@@ -5,6 +5,7 @@ import { X, Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import { embeddingsApi } from '@/api/embeddings'
+import { imagesApi } from '@/api/images'
 import { PRESETS, DEFAULT_THEME } from '@/theme/presets'
 import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
@@ -12,6 +13,7 @@ import ModeSelector from '@/components/panels/theme-panel/ModeSelector'
 import UserManagement from '@/components/settings/UserManagement'
 import TokenizerManager from '@/components/settings/TokenizerManager'
 import Diagnostics from '@/components/settings/Diagnostics'
+import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import styles from './SettingsModal.module.css'
 import clsx from 'clsx'
 
@@ -1765,6 +1767,116 @@ function EmbeddingsSettings() {
   )
 }
 
+function ImageOptimizationSettings() {
+  const thumbnailSettings = useStore((s) => (s as any).thumbnailSettings as { smallSize?: number, largeSize?: number } | undefined)
+  const setSetting = useStore((s) => s.setSetting)
+
+  const smallSize = thumbnailSettings?.smallSize ?? 300
+  const largeSize = thumbnailSettings?.largeSize ?? 700
+
+  const [rebuilding, setRebuilding] = useState(false)
+  const [rebuildProgress, setRebuildProgress] = useState<{ current: number, total: number } | null>(null)
+  const [rebuildStatus, setRebuildStatus] = useState<string | null>(null)
+
+  const update = (patch: { smallSize?: number, largeSize?: number }) => {
+    setSetting('thumbnailSettings', { smallSize, largeSize, ...patch })
+  }
+
+  const handleRebuild = async () => {
+    if (rebuilding) return
+    setRebuilding(true)
+    setRebuildStatus('Starting...')
+    setRebuildProgress(null)
+    try {
+      const result = await imagesApi.rebuildThumbnails({
+        onProgress: (p) => {
+          setRebuildProgress({ current: p.current, total: p.total })
+          const parts = [`${p.current}/${p.total}`]
+          if (p.generated > 0) parts.push(`${p.generated} generated`)
+          if (p.skipped > 0) parts.push(`${p.skipped} skipped`)
+          if (p.failed > 0) parts.push(`${p.failed} failed`)
+          setRebuildStatus(parts.join(' \u2022 '))
+        },
+      })
+      const parts = [`${result.generated} generated`]
+      if (result.skipped > 0) parts.push(`${result.skipped} skipped`)
+      if (result.failed > 0) parts.push(`${result.failed} failed`)
+      setRebuildStatus(`Done — ${parts.join(', ')}`)
+    } catch (err: any) {
+      setRebuildStatus(`Failed: ${err.message || 'Unknown error'}`)
+    } finally {
+      setRebuilding(false)
+    }
+  }
+
+  const pct = rebuildProgress && rebuildProgress.total > 0
+    ? Math.round((rebuildProgress.current / rebuildProgress.total) * 100)
+    : 0
+
+  return (
+    <>
+      <p className={styles.placeholder}>
+        Control the resolution of generated thumbnail tiers. Smaller values reduce bandwidth; larger values improve visual quality.
+      </p>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Small Tier — {smallSize}px</label>
+          <input
+            type="range"
+            min={100} max={500} step={50}
+            value={smallSize}
+            onChange={(e) => update({ smallSize: Number(e.target.value) })}
+            style={{ width: '100%' }}
+          />
+          <span className={styles.placeholder} style={{ marginTop: 2, fontSize: 11 }}>
+            Used for cards, message avatars, and small UI elements. Default: 300px
+          </span>
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Large Tier — {largeSize}px</label>
+          <input
+            type="range"
+            min={400} max={1200} step={50}
+            value={largeSize}
+            onChange={(e) => update({ largeSize: Number(e.target.value) })}
+            style={{ width: '100%' }}
+          />
+          <span className={styles.placeholder} style={{ marginTop: 2, fontSize: 11 }}>
+            Used for portrait panel, character editor, and profile views. Default: 700px
+          </span>
+        </div>
+      </div>
+
+      <div className={styles.field} style={{ marginTop: 8 }}>
+        <label className={styles.fieldLabel}>Rebuild Thumbnail Cache</label>
+        <span className={styles.placeholder} style={{ fontSize: 11 }}>
+          Deletes all existing thumbnails and regenerates them at the current tier sizes. This is fast — typically a few seconds for hundreds of images.
+        </span>
+        <button
+          type="button"
+          className={clsx(styles.segmentedBtn, styles.segmentedBtnActive)}
+          style={{ alignSelf: 'flex-start', marginTop: 4, padding: '6px 16px' }}
+          disabled={rebuilding}
+          onClick={handleRebuild}
+        >
+          {rebuilding ? 'Rebuilding...' : 'Rebuild Thumbnails'}
+        </button>
+        {rebuilding && rebuildProgress && rebuildProgress.total > 0 && (
+          <div style={{ marginTop: 6, width: '100%', height: 4, borderRadius: 2, background: 'var(--lumiverse-fill-subtle)', overflow: 'hidden' }}>
+            <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: 'var(--lumiverse-primary)', transition: 'width 0.2s ease' }} />
+          </div>
+        )}
+        {rebuildStatus && (
+          <span className={styles.placeholder} style={{ marginTop: 4, fontSize: 11 }}>
+            {rebuildStatus}
+          </span>
+        )}
+      </div>
+    </>
+  )
+}
+
 function AdvancedSettings() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -1831,47 +1943,46 @@ function AdvancedSettings() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [cfg])
 
-  if (loading || !cfg) {
-    return (
-      <div className={styles.settingsSection}>
-        <h3 className={styles.sectionTitle}>Advanced</h3>
-        <p className={styles.placeholder}>Loading...</p>
-      </div>
-    )
-  }
-
-  const isManualMode = cfg.quickMode === null
-
   return (
     <div className={styles.settingsSection}>
       <h3 className={styles.sectionTitle}>Advanced</h3>
-      <p className={styles.placeholder}>Fine-grained control over long-term memory chunking, retrieval, and formatting.</p>
 
-      {error && <p className={styles.errorText}>{error}</p>}
-      {success && <p className={styles.successText}>{success}</p>}
+      {/* Image Optimization accordion */}
+      <CollapsibleSection title="Image Optimization" defaultExpanded={false}>
+        <ImageOptimizationSettings />
+      </CollapsibleSection>
 
-      {/* Quick Mode / Manual toggle */}
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Memory Mode</label>
-        <div className={styles.segmented}>
-          {(['conservative', 'balanced', 'aggressive', null] as const).map((mode) => (
-            <button
-              key={mode ?? 'manual'}
-              type="button"
-              className={clsx(styles.segmentedBtn, cfg.quickMode === mode && styles.segmentedBtnActive)}
-              onClick={() => update({ quickMode: mode })}
-            >
-              {mode === null ? 'Manual' : mode.charAt(0).toUpperCase() + mode.slice(1)}
-            </button>
-          ))}
-        </div>
-        <span className={styles.placeholder} style={{ marginTop: 2, fontSize: 11 }}>
-          Quick presets auto-configure chunking & exclusion. "Manual" unlocks all fields below.
-        </span>
-      </div>
+      {/* Long-Term Memory accordion */}
+      <CollapsibleSection title="Long-Term Chat Memory" defaultExpanded>
+        {loading || !cfg ? (
+          <p className={styles.placeholder}>Loading memory settings...</p>
+        ) : (
+          <>
+            {error && <p className={styles.errorText}>{error}</p>}
+            {success && <p className={styles.successText}>{success}</p>}
 
-      {/* Section: Chunking */}
-      <h4 className={styles.subsectionTitle} style={{ marginTop: 8 }}>Chunking</h4>
+            {/* Quick Mode / Manual toggle */}
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Memory Mode</label>
+              <div className={styles.segmented}>
+                {(['conservative', 'balanced', 'aggressive', null] as const).map((mode) => (
+                  <button
+                    key={mode ?? 'manual'}
+                    type="button"
+                    className={clsx(styles.segmentedBtn, cfg.quickMode === mode && styles.segmentedBtnActive)}
+                    onClick={() => update({ quickMode: mode })}
+                  >
+                    {mode === null ? 'Manual' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <span className={styles.placeholder} style={{ marginTop: 2, fontSize: 11 }}>
+                Quick presets auto-configure chunking & exclusion. "Manual" unlocks all fields below.
+              </span>
+            </div>
+
+            {/* Section: Chunking */}
+            <h4 className={styles.subsectionTitle} style={{ marginTop: 8 }}>Chunking</h4>
 
       <div className={styles.drawerRow}>
         <div className={styles.field}>
@@ -1881,7 +1992,7 @@ function AdvancedSettings() {
             type="number"
             min={200} max={2000}
             value={cfg.chunkTargetTokens}
-            disabled={!isManualMode}
+            disabled={cfg.quickMode !== null}
             onChange={(e) => update({ chunkTargetTokens: Number(e.target.value) || 800 })}
           />
         </div>
@@ -1892,7 +2003,7 @@ function AdvancedSettings() {
             type="number"
             min={400} max={4000}
             value={cfg.chunkMaxTokens}
-            disabled={!isManualMode}
+            disabled={cfg.quickMode !== null}
             onChange={(e) => update({ chunkMaxTokens: Number(e.target.value) || 1600 })}
           />
         </div>
@@ -1903,7 +2014,7 @@ function AdvancedSettings() {
             type="number"
             min={0} max={500}
             value={cfg.chunkOverlapTokens}
-            disabled={!isManualMode}
+            disabled={cfg.quickMode !== null}
             onChange={(e) => update({ chunkOverlapTokens: Number(e.target.value) || 0 })}
           />
         </div>
@@ -1964,7 +2075,7 @@ function AdvancedSettings() {
             type="number"
             min={5} max={100}
             value={cfg.exclusionWindow}
-            disabled={!isManualMode}
+            disabled={cfg.quickMode !== null}
             onChange={(e) => update({ exclusionWindow: Number(e.target.value) || 20 })}
           />
         </div>
@@ -2056,7 +2167,10 @@ function AdvancedSettings() {
         </div>
       </div>
 
-      {saving && <p className={styles.placeholder} style={{ marginTop: 8, fontSize: 11 }}>Saving...</p>}
+            {saving && <p className={styles.placeholder} style={{ marginTop: 8, fontSize: 11 }}>Saving...</p>}
+          </>
+        )}
+      </CollapsibleSection>
     </div>
   )
 }

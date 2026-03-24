@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { env } from "../env";
+import { verifyPassword } from "better-auth/crypto";
+import { getDb } from "../db/connection";
 import * as managerSvc from "../spindle/manager.service";
 import { PRIVILEGED_PERMISSIONS } from "../spindle/manager.service";
 import type { ExtensionInfo } from "lumiverse-spindle-types";
@@ -101,7 +102,22 @@ app.put("/ephemeral/config", requireOwner, async (c) => {
     }
 
     const password = typeof body.password === "string" ? body.password : "";
-    if (!password || password !== env.ownerPassword) {
+    if (!password) {
+      return c.json({ error: "Invalid credentials" }, 403);
+    }
+
+    // Verify against the owner's hashed password in the account table
+    const session = c.get("session");
+    const account = getDb()
+      .query('SELECT password FROM account WHERE userId = ? AND providerId = ?')
+      .get(session.user.id, "credential") as { password: string } | null;
+
+    if (!account) {
+      return c.json({ error: "Invalid credentials" }, 403);
+    }
+
+    const valid = await verifyPassword({ hash: account.password, password });
+    if (!valid) {
       return c.json({ error: "Invalid credentials" }, 403);
     }
 

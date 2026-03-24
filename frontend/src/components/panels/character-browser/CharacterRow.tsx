@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Star, Pencil } from 'lucide-react'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import { getTagColor } from '@/lib/tagColors'
 import LazyImage from '@/components/shared/LazyImage'
 import type { Character, CharacterSummary } from '@/types/api'
@@ -28,7 +28,7 @@ export default memo(function CharacterRow({
   onToggleFavorite,
   onToggleBatch,
 }: CharacterRowProps) {
-  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
+  const avatarUrl = getCharacterAvatarThumbUrl(character) ?? ''
   const tags = character.tags?.slice(0, 3) || []
 
   const handleClick = () => {

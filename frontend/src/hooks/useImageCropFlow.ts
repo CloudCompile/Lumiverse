@@ -1,15 +1,17 @@
 import { useState, useCallback, useRef } from 'react'
 
-export default function useImageCropFlow(onComplete: (file: File) => void) {
+export default function useImageCropFlow(onComplete: (croppedFile: File, originalFile: File) => void) {
   const [isOpen, setIsOpen] = useState(false)
   const [imageSrc, setImageSrc] = useState<string | null>(null)
   const objectUrlRef = useRef<string | null>(null)
+  const originalFileRef = useRef<File | null>(null)
 
   const cleanup = useCallback(() => {
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current)
       objectUrlRef.current = null
     }
+    originalFileRef.current = null
     setImageSrc(null)
     setIsOpen(false)
   }, [])
@@ -18,6 +20,7 @@ export default function useImageCropFlow(onComplete: (file: File) => void) {
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current)
     }
+    originalFileRef.current = file
     const url = URL.createObjectURL(file)
     objectUrlRef.current = url
     setImageSrc(url)
@@ -27,8 +30,9 @@ export default function useImageCropFlow(onComplete: (file: File) => void) {
   const handleCropDone = useCallback(
     (blob: Blob) => {
       const croppedFile = new File([blob], 'avatar.png', { type: 'image/png' })
+      const original = originalFileRef.current
       cleanup()
-      onComplete(croppedFile)
+      onComplete(croppedFile, original || croppedFile)
     },
     [onComplete, cleanup]
   )

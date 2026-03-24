@@ -1,7 +1,8 @@
 import { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
 import { useChunkedMessages } from '@/hooks/useChunkedMessages'
 import { useStore } from '@/store'
-import { getCharacterAvatarUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById } from '@/lib/avatarUrls'
+import { imagesApi } from '@/api/images'
 import MessageCard from './MessageCard'
 import MessageContent from './MessageContent'
 import ReasoningBlock from './ReasoningBlock'
@@ -45,6 +46,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const characters = useStore((s) => s.characters)
   const isGroupChat = useStore((s) => s.isGroupChat)
   const activeGroupCharacterId = useStore((s) => s.activeGroupCharacterId)
+  const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const isNudgeLoopActive = useStore((s) => s.isNudgeLoopActive)
 
   // For streaming, use the group's active character if in a group chat
@@ -66,9 +68,16 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   }, [streamCharacter?.name, activeCharacter?.name, messages])
   const activePersona = personas.find((p) => p.id === activePersonaId)
   const userName = activePersona?.name ?? 'User'
+  const isBubble = displayMode === 'bubble'
+  const getCharAvatar = isBubble ? getCharacterAvatarLargeUrlById : getCharacterAvatarThumbUrlById
+  const getPersonaAvatar = isBubble ? getPersonaAvatarLargeUrlById : getPersonaAvatarThumbUrlById
+  const getImgUrl = isBubble ? imagesApi.largeUrl : imagesApi.smallUrl
+
   const avatarUrl = isImpersonateStream
-    ? getPersonaAvatarUrlById(activePersonaId, activePersona?.image_id ?? null)
-    : getCharacterAvatarUrlById(streamCharacterId, streamCharacter?.image_id ?? null)
+    ? getPersonaAvatar(activePersonaId, activePersona?.image_id ?? null)
+    : (activeChatAvatarId && streamCharacterId === activeCharacterId)
+      ? getImgUrl(activeChatAvatarId)
+      : getCharAvatar(streamCharacterId, streamCharacter?.image_id ?? null)
 
   // Intersection observer for loading more
   const sentinelRef = useRef<HTMLDivElement>(null)

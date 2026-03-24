@@ -84,21 +84,47 @@ export default function ChatView() {
           useStore.getState().setActiveChatWallpaper(wp)
         }
 
-        // Restore active expression from chat metadata
-        const savedExpr = chat.metadata?.active_expression as string | undefined
-        if (savedExpr && chat.character_id) {
-          expressionsApi.get(chat.character_id).then((config) => {
-            if (cancelled) return
-            if (config?.enabled && config.mappings?.[savedExpr]) {
-              useStore.getState().setActiveExpression(savedExpr, config.mappings[savedExpr], chat.character_id!)
-            }
-          }).catch(() => {})
-        }
+        // Restore active avatar override from metadata
+        const avatarOverride = chat.metadata?.active_avatar_id as string | undefined
+        useStore.getState().setActiveChatAvatarId(avatarOverride || null)
 
         // Detect group chat and initialize group state
         const isGroup = chat.metadata?.group === true
         const groupCharIds: string[] = isGroup ? (chat.metadata.character_ids || []) : []
         const mutedIds: string[] = isGroup ? (chat.metadata.muted_character_ids || []) : []
+
+        // Restore active expression from chat metadata
+        if (isGroup && groupCharIds.length > 0) {
+          // Restore per-character group expressions
+          const savedGroupExprs = chat.metadata?.group_expressions as Record<string, { label: string; imageId: string }> | undefined
+          if (savedGroupExprs && Object.keys(savedGroupExprs).length > 0) {
+            useStore.getState().setGroupExpressions(savedGroupExprs)
+          } else {
+            useStore.getState().clearGroupExpressions()
+          }
+          // Also restore the last single active_expression for the primary character
+          const savedExpr = chat.metadata?.active_expression as string | undefined
+          if (savedExpr && chat.character_id) {
+            expressionsApi.get(chat.character_id).then((config) => {
+              if (cancelled) return
+              if (config?.enabled && config.mappings?.[savedExpr]) {
+                useStore.getState().setActiveExpression(savedExpr, config.mappings[savedExpr], chat.character_id!)
+              }
+            }).catch(() => {})
+          }
+        } else {
+          useStore.getState().clearGroupExpressions()
+          const savedExpr = chat.metadata?.active_expression as string | undefined
+          if (savedExpr && chat.character_id) {
+            expressionsApi.get(chat.character_id).then((config) => {
+              if (cancelled) return
+              if (config?.enabled && config.mappings?.[savedExpr]) {
+                useStore.getState().setActiveExpression(savedExpr, config.mappings[savedExpr], chat.character_id!)
+              }
+            }).catch(() => {})
+          }
+        }
+
         if (isGroup && groupCharIds.length > 0) {
           useStore.getState().setGroupChat(true, groupCharIds, mutedIds)
           // Refresh group members on every chat open so avatars/profile data
@@ -116,6 +142,7 @@ export default function ChatView() {
             })
         } else {
           useStore.getState().clearGroupChat()
+          useStore.getState().clearGroupExpressions()
           // Refresh the active character on every chat open so profile/chat
           // surfaces don't rely on a stale cached avatar/image_id.
           if (chat.character_id) {

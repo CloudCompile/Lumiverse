@@ -90,16 +90,17 @@ When launched in an interactive terminal, the backend runs inside a visual TUI d
 
 ## Configuration
 
-Configuration is managed through `.env` (see `.env.example` for all options):
+Configuration is managed through `.env` (see `.env.example` for all options). Sensitive credentials are stored securely in the `data/` directory — no plaintext passwords in `.env`:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OWNER_PASSWORD` | Yes | — | Admin account password |
 | `PORT` | No | `7860` | Server port |
-| `OWNER_USERNAME` | No | `admin` | Admin account username |
+| `OWNER_USERNAME` | No | `admin` | Admin account display name |
 | `AUTH_SECRET` | No | *derived* | Session signing secret (auto-derived from identity file) |
 | `FRONTEND_DIR` | No | — | Path to built frontend dist for static serving |
 | `TRUSTED_ORIGINS` | No | `localhost` | Comma-separated CORS origins |
+
+Owner password is stored hashed in `data/owner.credentials` (created by the setup wizard). To reset: `bun run reset-password`.
 
 ## Architecture
 

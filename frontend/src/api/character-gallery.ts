@@ -38,7 +38,7 @@ export const characterGalleryApi = {
     return `${BASE_URL}/images/${imageId}`
   },
 
-  thumbnailUrl(imageId: string) {
-    return `${BASE_URL}/images/${imageId}?thumb=true`
+  smallUrl(imageId: string) {
+    return `${BASE_URL}/images/${imageId}?size=sm`
   },
 }

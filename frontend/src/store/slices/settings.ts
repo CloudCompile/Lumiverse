@@ -80,6 +80,8 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'expressionDetection',
   // Shared sidecar LLM settings
   'sidecarSettings',
+  // Image optimization (thumbnail tier sizes)
+  'thumbnailSettings',
 ])
 
 // ── Debounced batch persistence ──────────────────────────────────────────
@@ -220,6 +222,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     opacity: 0.3,
     fit: 'cover',
   },
+
+  thumbnailSettings: { smallSize: 300, largeSize: 700 },
 
   setWallpaper: (partial) =>
     set((state) => {

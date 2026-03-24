@@ -5,7 +5,7 @@ import { X, Search, Check } from 'lucide-react'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import Pagination from '@/components/shared/Pagination'
 import type { Character } from '@/types/api'
 import styles from './GroupChatCreatorModal.module.css'
@@ -242,7 +242,7 @@ export default function GroupChatCreatorModal() {
                       >
                         {char.avatar_path || char.image_id ? (
                           <img
-                            src={getCharacterAvatarUrl(char) || undefined}
+                            src={getCharacterAvatarThumbUrl(char) || undefined}
                             alt={char.name}
                             className={styles.pillAvatar}
                           />
@@ -281,7 +281,7 @@ export default function GroupChatCreatorModal() {
                       >
                         {char.avatar_path || char.image_id ? (
                           <img
-                            src={getCharacterAvatarUrl(char) || undefined}
+                            src={getCharacterAvatarThumbUrl(char) || undefined}
                             alt={char.name}
                             className={styles.charAvatar}
                             loading="lazy"
@@ -367,7 +367,7 @@ export default function GroupChatCreatorModal() {
                     <div key={char.id} className={styles.talkSlider}>
                       {char.avatar_path || char.image_id ? (
                         <img
-                          src={getCharacterAvatarUrl(char) || undefined}
+                          src={getCharacterAvatarThumbUrl(char) || undefined}
                           alt={char.name}
                           className={styles.talkAvatar}
                         />

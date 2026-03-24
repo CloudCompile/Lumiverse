@@ -2,7 +2,7 @@ import { useCallback } from 'react'
 import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import styles from './GroupChatMemberBar.module.css'
 import clsx from 'clsx'
 
@@ -75,7 +75,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
         const isActive = id === activeGroupCharacterId
         const isMuted = mutedCharacterIds.includes(id)
         const talk = char?.talkativeness ?? 0.5
-        const avatarUrl = getCharacterAvatarUrl(char)
+        const avatarUrl = getCharacterAvatarThumbUrl(char)
         return (
           <button
             key={id}

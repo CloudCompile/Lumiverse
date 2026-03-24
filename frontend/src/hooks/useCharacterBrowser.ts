@@ -9,6 +9,8 @@ import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
 import type { Character, CharacterSummary, TagCount } from '@/types/api'
 import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
+import type { ExpressionsImportInfo } from '@/components/modals/ExpressionsImportModal'
+import type { AlternateFieldsSummaryInfo } from '@/components/modals/AlternateFieldsSummaryModal'
 
 const SEARCH_DEBOUNCE_MS = 150
 
@@ -68,6 +70,10 @@ export function useCharacterBrowser() {
   const [bulkImportOpen, setBulkImportOpen] = useState(false)
   const [pendingLorebooks, setPendingLorebooks] = useState<LorebookInfo[]>([])
   const [lorebookModalOpen, setLorebookModalOpen] = useState(false)
+  const [pendingExpressions, setPendingExpressions] = useState<ExpressionsImportInfo[]>([])
+  const [expressionsModalOpen, setExpressionsModalOpen] = useState(false)
+  const [pendingAltFieldsSummary, setPendingAltFieldsSummary] = useState<AlternateFieldsSummaryInfo[]>([])
+  const [altFieldsSummaryOpen, setAltFieldsSummaryOpen] = useState(false)
   const [debouncedQuery, setDebouncedQuery] = useState(searchQuery)
 
   // Listen for gallery progress WS events during import
@@ -281,6 +287,26 @@ export function useCharacterBrowser() {
   const closeLorebookModal = useCallback(() => {
     setLorebookModalOpen(false)
     setPendingLorebooks([])
+    // Chain to expressions modal if pending
+    if (pendingExpressions.length > 0) {
+      setExpressionsModalOpen(true)
+    } else if (pendingAltFieldsSummary.length > 0) {
+      setAltFieldsSummaryOpen(true)
+    }
+  }, [pendingExpressions, pendingAltFieldsSummary])
+
+  const closeExpressionsModal = useCallback(() => {
+    setExpressionsModalOpen(false)
+    setPendingExpressions([])
+    // Chain to alternate fields summary if pending
+    if (pendingAltFieldsSummary.length > 0) {
+      setAltFieldsSummaryOpen(true)
+    }
+  }, [pendingAltFieldsSummary])
+
+  const closeAltFieldsSummary = useCallback(() => {
+    setAltFieldsSummaryOpen(false)
+    setPendingAltFieldsSummary([])
   }, [])
 
   // Import URL
@@ -505,6 +531,10 @@ export function useCharacterBrowser() {
     bulkImportOpen,
     pendingLorebooks,
     lorebookModalOpen,
+    pendingExpressions,
+    expressionsModalOpen,
+    pendingAltFieldsSummary,
+    altFieldsSummaryOpen,
     searchQuery,
     filterTab,
     sortField,
@@ -545,6 +575,8 @@ export function useCharacterBrowser() {
     handleBulkImportComplete,
     closeBulkImport,
     closeLorebookModal,
+    closeExpressionsModal,
+    closeAltFieldsSummary,
     batchDelete,
     openChat,
     startNewChat,

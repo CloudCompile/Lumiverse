@@ -22,6 +22,13 @@ export default function ExpressionDisplay() {
   const toggleMinimized = useStore((s) => s.toggleExpressionMinimized)
   const setActiveExpression = useStore((s) => s.setActiveExpression)
 
+  // Group chat state
+  const isGroupChat = useStore((s) => s.isGroupChat)
+  const groupCharacterIds = useStore((s) => s.groupCharacterIds)
+  const groupExpressions = useStore((s) => s.groupExpressions)
+  const respondingCharacterId = useStore((s) => s.respondingCharacterId)
+  const isStreaming = useStore((s) => s.isStreaming)
+
   const character = useMemo(
     () => characters.find((c) => c.id === (expressionCharacterId || activeCharacterId)),
     [characters, expressionCharacterId, activeCharacterId]
@@ -96,6 +103,58 @@ export default function ExpressionDisplay() {
     }
   }, [activeChatId, hasExpressions, exprConfig, resolvedCharId, setActiveExpression])
 
+  // ── Group expression config fetching ──
+  const [groupConfigs, setGroupConfigs] = useState<Map<string, ExpressionConfig>>(new Map())
+  const [hoveredCharId, setHoveredCharId] = useState<string | null>(null)
+
+  // Refetch group configs when any group character is edited
+  const [groupConfigVersion, setGroupConfigVersion] = useState(0)
+  useEffect(() => {
+    if (!isGroupChat || groupCharacterIds.length === 0) return
+    const unsub = wsClient.on(EventType.CHARACTER_EDITED, (payload: { id: string }) => {
+      if (groupCharacterIds.includes(payload.id)) {
+        setGroupConfigVersion((v) => v + 1)
+      }
+    })
+    return unsub
+  }, [isGroupChat, groupCharacterIds])
+
+  useEffect(() => {
+    if (!isGroupChat || groupCharacterIds.length === 0) {
+      setGroupConfigs(new Map())
+      return
+    }
+    let cancelled = false
+    Promise.all(
+      groupCharacterIds.map(async (id) => {
+        try {
+          const config = await expressionsApi.get(id)
+          if (config?.enabled && Object.keys(config.mappings || {}).length > 0) {
+            return [id, config] as const
+          }
+        } catch { /* character may not have expressions */ }
+        return null
+      })
+    ).then((results) => {
+      if (cancelled) return
+      const map = new Map<string, ExpressionConfig>()
+      for (const r of results) {
+        if (r) map.set(r[0], r[1])
+      }
+      setGroupConfigs(map)
+    })
+    return () => { cancelled = true }
+  }, [isGroupChat, groupCharacterIds, groupConfigVersion])
+
+  // Derived group values
+  const groupExpressionCharIds = useMemo(() => {
+    if (!isGroupChat) return []
+    return groupCharacterIds.filter((id) => groupConfigs.has(id))
+  }, [isGroupChat, groupCharacterIds, groupConfigs])
+
+  const isGroupExpressionMode = isGroupChat && groupExpressionCharIds.length > 0
+
+  // ── Sizing ──
   const [pos, setPos] = useState({ x: display.x, y: display.y })
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const dragging = useRef(false)
@@ -110,47 +169,57 @@ export default function ExpressionDisplay() {
     setCustomSize({ width: display.customWidth, height: display.customHeight })
   }, [display.customWidth, display.customHeight])
 
-  // Resolve display dimensions
+  // Base per-character slot size
   const size = useMemo(() => {
     if (display.sizePreset === 'custom') return { width: customSize.width, height: customSize.height }
     return EXPRESSION_SIZE_PRESETS[display.sizePreset as Exclude<ExpressionDisplaySize, 'custom'>] || EXPRESSION_SIZE_PRESETS.medium
   }, [display.sizePreset, customSize])
+
+  // Effective container size (wider for group expression mode)
+  const containerSize = useMemo(() => {
+    if (!isGroupExpressionMode || groupExpressionCharIds.length <= 1) return size
+    const n = groupExpressionCharIds.length
+    // Overlap increases with more characters to keep total width reasonable
+    const slotAdvance = size.width * Math.max(0.45, 0.75 - 0.1 * Math.max(0, n - 2))
+    const totalWidth = Math.round(size.width + (n - 1) * slotAdvance)
+    return { width: totalWidth, height: size.height }
+  }, [isGroupExpressionMode, groupExpressionCharIds.length, size])
 
   // Clamp position to screen bounds whenever display settings or size change
   useEffect(() => {
     const pad = 12
     let x: number, y: number
     if (display.x < 0 || display.y < 0) {
-      x = window.innerWidth - size.width - 24
-      y = window.innerHeight - size.height - 100
+      x = window.innerWidth - containerSize.width - 24
+      y = window.innerHeight - containerSize.height - 100
     } else {
       x = display.x
       y = display.y
     }
     // Ensure the widget stays within viewport
-    x = Math.max(pad, Math.min(x, window.innerWidth - size.width - pad))
-    y = Math.max(pad, Math.min(y, window.innerHeight - size.height - pad))
+    x = Math.max(pad, Math.min(x, window.innerWidth - containerSize.width - pad))
+    y = Math.max(pad, Math.min(y, window.innerHeight - containerSize.height - pad))
     setPos({ x, y })
-  }, [display.x, display.y, size.width, size.height])
+  }, [display.x, display.y, containerSize.width, containerSize.height])
 
   // Re-clamp on window resize
   useEffect(() => {
     const onResize = () => {
       const pad = 12
       setPos((prev) => ({
-        x: Math.max(pad, Math.min(prev.x, window.innerWidth - size.width - pad)),
-        y: Math.max(pad, Math.min(prev.y, window.innerHeight - size.height - pad)),
+        x: Math.max(pad, Math.min(prev.x, window.innerWidth - containerSize.width - pad)),
+        y: Math.max(pad, Math.min(prev.y, window.innerHeight - containerSize.height - pad)),
       }))
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [size.width, size.height])
+  }, [containerSize.width, containerSize.height])
 
   const currentImageUrl = currentExpressionImageId
     ? expressionsApi.imageUrl(currentExpressionImageId)
     : null
 
-  // Preload images
+  // Preload images (single mode + group mode)
   useEffect(() => {
     if (currentImageUrl) {
       const img = new Image()
@@ -158,17 +227,28 @@ export default function ExpressionDisplay() {
     }
   }, [currentImageUrl])
 
+  useEffect(() => {
+    if (!isGroupExpressionMode) return
+    for (const charId of groupExpressionCharIds) {
+      const url = getGroupCharImageUrl(charId)
+      if (url) {
+        const img = new Image()
+        img.src = url
+      }
+    }
+  }, [isGroupExpressionMode, groupExpressionCharIds, groupExpressions, groupConfigs])
+
   const clampPos = useCallback(
     (x: number, y: number) => {
       const pad = 12
-      const w = display.minimized ? 40 : size.width
-      const h = display.minimized ? 40 : size.height + (display.frameless ? 0 : 28)
+      const w = display.minimized ? 40 : containerSize.width
+      const h = display.minimized ? 40 : containerSize.height + (display.frameless ? 0 : 28)
       return {
         x: Math.max(pad, Math.min(x, window.innerWidth - w - pad)),
         y: Math.max(pad, Math.min(y, window.innerHeight - h - pad)),
       }
     },
-    [size.width, size.height, display.minimized, display.frameless]
+    [containerSize.width, containerSize.height, display.minimized, display.frameless]
   )
 
   const dragStartPos = useRef({ x: 0, y: 0 })
@@ -258,9 +338,40 @@ export default function ExpressionDisplay() {
     [setExpressionDisplay]
   )
 
-  if (!display.enabled || !hasExpressions || !currentImageUrl) return null
+  // ── Group expression layout calculations (must be before early returns) ──
+  const groupSlotOverlap = useMemo(() => {
+    if (!isGroupExpressionMode || groupExpressionCharIds.length <= 1) return 0
+    const n = groupExpressionCharIds.length
+    return size.width * (1 - Math.max(0.45, 0.75 - 0.1 * Math.max(0, n - 2)))
+  }, [isGroupExpressionMode, groupExpressionCharIds.length, size.width])
 
-  // Minimized state
+  // ── Group helpers ──
+  function getGroupCharImageUrl(charId: string): string | null {
+    const expr = groupExpressions[charId]
+    if (expr?.imageId) return expressionsApi.imageUrl(expr.imageId)
+    // Fall back to default expression from config
+    const config = groupConfigs.get(charId)
+    if (!config) return null
+    const defaultLabel = config.defaultExpression
+    if (defaultLabel && config.mappings[defaultLabel]) {
+      return expressionsApi.imageUrl(config.mappings[defaultLabel])
+    }
+    const firstLabel = Object.keys(config.mappings)[0]
+    if (firstLabel) return expressionsApi.imageUrl(config.mappings[firstLabel])
+    return null
+  }
+
+  function getGroupCharLabel(charId: string): string | null {
+    return groupExpressions[charId]?.label
+      || groupConfigs.get(charId)?.defaultExpression
+      || null
+  }
+
+  // ── Visibility gate ──
+  if (!display.enabled) return null
+  if (!isGroupExpressionMode && (!hasExpressions || !currentImageUrl)) return null
+
+  // ── Minimized state ──
   if (display.minimized) {
     const handleMinimizedPointerUp = () => {
       if (!dragging.current) return
@@ -280,6 +391,10 @@ export default function ExpressionDisplay() {
       isDragging.current = false
     }
 
+    const minimizedTitle = isGroupExpressionMode
+      ? groupExpressionCharIds.map((id) => characters.find((c) => c.id === id)?.name || '?').join(', ')
+      : `${character?.name || ''} — ${currentExpression || ''}`
+
     return createPortal(
       <>
         <div
@@ -289,10 +404,13 @@ export default function ExpressionDisplay() {
           onPointerMove={handlePointerMove}
           onPointerUp={handleMinimizedPointerUp}
           onContextMenu={handleContextMenu}
-          title={`${character?.name || ''} — ${currentExpression || ''}`}
+          title={minimizedTitle}
         >
           <span className={styles.minimizedIcon}>
-            {(character?.name || '?')[0].toUpperCase()}
+            {isGroupExpressionMode
+              ? groupExpressionCharIds.length.toString()
+              : (character?.name || '?')[0].toUpperCase()
+            }
           </span>
         </div>
         {renderContextMenu()}
@@ -368,8 +486,8 @@ export default function ExpressionDisplay() {
         <button
           className={styles.contextMenuItem}
           onClick={() => {
-            const x = window.innerWidth - size.width - 24
-            const y = window.innerHeight - size.height - 100
+            const x = window.innerWidth - containerSize.width - 24
+            const y = window.innerHeight - containerSize.height - 100
             setPos({ x, y })
             setExpressionDisplay({ x, y })
             setContextMenu(null)
@@ -381,6 +499,11 @@ export default function ExpressionDisplay() {
     )
   }
 
+  // ── Drag handle name ──
+  const handleDisplayName = isGroupExpressionMode
+    ? groupExpressionCharIds.map((id) => characters.find((c) => c.id === id)?.name || '?').join(' / ')
+    : character?.name
+
   const containerClass = [
     styles.container,
     display.frameless ? styles.frameless : styles.framed,
@@ -388,6 +511,7 @@ export default function ExpressionDisplay() {
     display.clickThrough ? styles.clickThrough : '',
   ].filter(Boolean).join(' ')
 
+  // ── Render ──
   return createPortal(
     <>
       <div
@@ -395,8 +519,8 @@ export default function ExpressionDisplay() {
         style={{
           left: pos.x,
           top: pos.y,
-          width: size.width,
-          height: size.height + (display.frameless ? 0 : 28),
+          width: containerSize.width,
+          height: containerSize.height + (display.frameless ? 0 : 28),
           opacity: display.opacity,
         }}
         onContextMenu={!display.clickThrough ? handleContextMenu : undefined}
@@ -410,7 +534,7 @@ export default function ExpressionDisplay() {
             onPointerUp={handlePointerUp}
             onContextMenu={display.clickThrough ? handleContextMenu : undefined}
           >
-            <span className={styles.handleName}>{character?.name}</span>
+            <span className={styles.handleName}>{handleDisplayName}</span>
             <button type="button" className={styles.handleBtn} onClick={(e) => { e.stopPropagation(); toggleMinimized() }}>
               <Minus size={12} />
             </button>
@@ -426,7 +550,7 @@ export default function ExpressionDisplay() {
             onPointerUp={handlePointerUp}
             onContextMenu={display.clickThrough ? handleContextMenu : undefined}
           >
-            <span className={styles.handleName}>{character?.name}</span>
+            <span className={styles.handleName}>{handleDisplayName}</span>
             <button type="button" className={styles.handleBtn} onClick={(e) => { e.stopPropagation(); toggleMinimized() }}>
               <Minus size={12} />
             </button>
@@ -436,32 +560,89 @@ export default function ExpressionDisplay() {
           </div>
         )}
 
-        {/* Expression image with crossfade */}
-        <div
-          className={styles.imageContainer}
-          onPointerDown={!display.clickThrough ? handlePointerDown : undefined}
-          onPointerMove={!display.clickThrough ? handlePointerMove : undefined}
-          onPointerUp={!display.clickThrough ? handlePointerUp : undefined}
-        >
-          <AnimatePresence mode="sync">
-            {currentImageUrl && (
-              <motion.img
-                key={currentImageUrl}
-                src={currentImageUrl}
-                alt={currentExpression || ''}
-                className={styles.expressionImg}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3, ease: 'easeInOut' }}
-                draggable={false}
-              />
+        {/* Expression image area */}
+        {isGroupExpressionMode ? (
+          /* ── Group expression row ── */
+          <div
+            className={styles.groupRow}
+            onPointerDown={!display.clickThrough ? handlePointerDown : undefined}
+            onPointerMove={!display.clickThrough ? handlePointerMove : undefined}
+            onPointerUp={!display.clickThrough ? handlePointerUp : undefined}
+          >
+            {groupExpressionCharIds.map((charId, idx) => {
+              const imageUrl = getGroupCharImageUrl(charId)
+              const label = getGroupCharLabel(charId)
+              const isResponding = isStreaming && respondingCharacterId === charId
+              const isHovered = hoveredCharId === charId
+              const isActive = isResponding || isHovered
+              const char = characters.find((c) => c.id === charId)
+              const marginLeft = idx === 0 ? 0 : -groupSlotOverlap
+
+              return (
+                <div
+                  key={charId}
+                  className={[
+                    styles.groupSlot,
+                    isActive ? styles.groupSlotActive : styles.groupSlotIdle,
+                  ].join(' ')}
+                  style={{
+                    width: size.width,
+                    marginLeft,
+                    zIndex: isHovered ? 3 : isResponding ? 2 : 1,
+                  }}
+                  onMouseEnter={() => setHoveredCharId(charId)}
+                  onMouseLeave={() => setHoveredCharId(null)}
+                >
+                  <AnimatePresence mode="sync">
+                    {imageUrl && (
+                      <motion.img
+                        key={imageUrl}
+                        src={imageUrl}
+                        alt={label || char?.name || ''}
+                        className={styles.expressionImg}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.3, ease: 'easeInOut' }}
+                        draggable={false}
+                      />
+                    )}
+                  </AnimatePresence>
+                  <span className={styles.groupNameTag}>
+                    {char?.name}{label ? ` — ${label}` : ''}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          /* ── Single character expression ── */
+          <div
+            className={styles.imageContainer}
+            onPointerDown={!display.clickThrough ? handlePointerDown : undefined}
+            onPointerMove={!display.clickThrough ? handlePointerMove : undefined}
+            onPointerUp={!display.clickThrough ? handlePointerUp : undefined}
+          >
+            <AnimatePresence mode="sync">
+              {currentImageUrl && (
+                <motion.img
+                  key={currentImageUrl}
+                  src={currentImageUrl}
+                  alt={currentExpression || ''}
+                  className={styles.expressionImg}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.3, ease: 'easeInOut' }}
+                  draggable={false}
+                />
+              )}
+            </AnimatePresence>
+            {currentExpression && (
+              <span className={styles.labelBadge}>{currentExpression}</span>
             )}
-          </AnimatePresence>
-          {currentExpression && (
-            <span className={styles.labelBadge}>{currentExpression}</span>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Resize handle */}
         <div

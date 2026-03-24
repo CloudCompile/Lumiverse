@@ -3,7 +3,10 @@ import * as svc from "../services/characters.service";
 import * as files from "../services/files.service";
 import * as images from "../services/images.service";
 import * as cardSvc from "../services/character-card.service";
+import * as exportSvc from "../services/character-export.service";
 import * as gallerySvc from "../services/character-gallery.service";
+import * as regexSvc from "../services/regex-scripts.service";
+import * as exprSvc from "../services/expressions.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
 import { createAvatarResolverResponse } from "../utils/avatar-cache";
@@ -11,6 +14,33 @@ import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 
 const app = new Hono();
+
+// ─── RisuAI module regex import helper ────────────────────────────────────
+
+function importRisuModuleRegexScripts(
+  userId: string,
+  characterId: string,
+  module: cardSvc.RisuModule | null
+): number {
+  if (!module?.regex?.length) return 0;
+  const scripts = cardSvc.convertRisuRegexScripts(module.regex, characterId);
+  let imported = 0;
+  for (const script of scripts) {
+    const result = regexSvc.createRegexScript(userId, script);
+    if (typeof result !== "string") imported++;
+  }
+  return imported;
+}
+
+async function importRisuExpressionAssets(
+  userId: string,
+  characterId: string,
+  assets: cardSvc.CharxExpressionAsset[]
+): Promise<number> {
+  if (!assets.length) return 0;
+  const config = await exprSvc.importFromAssets(userId, characterId, assets);
+  return Object.keys(config.mappings).length;
+}
 
 // ─── URL parsing helpers ──────────────────────────────────────────────────
 
@@ -194,7 +224,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
 
   if (contentType.includes("application/zip") || url.toLowerCase().endsWith(".charx")) {
     const file = new File([buf], "import.charx", { type: "application/zip" });
-    const { card: cardInput, avatarFile, galleryFiles } = await cardSvc.extractCardFromCharx(file);
+    const { card: cardInput, avatarFile, galleryFiles, risuModule, expressionAssets } = await cardSvc.extractCardFromCharx(file);
     const character = svc.createCharacter(userId, cardInput);
 
     if (avatarFile) {
@@ -210,6 +240,9 @@ async function fetchGenericCharacter(url: string, userId: string) {
         try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
       }
     }
+
+    importRisuModuleRegexScripts(userId, character.id, risuModule);
+    await importRisuExpressionAssets(userId, character.id, expressionAssets);
 
     return svc.getCharacter(userId, character.id)!;
   }
@@ -342,18 +375,21 @@ app.delete("/:id", (c) => {
   return c.json({ success: true });
 });
 
-app.get("/:id/avatar", (c) => {
+app.get("/:id/avatar", async (c) => {
   const userId = c.get("userId");
   const info = svc.getCharacterAvatarInfo(userId, c.req.param("id"));
   if (!info) return c.json({ error: "Not found" }, 404);
 
+  const sizeParam = c.req.query("size") as images.ThumbTier | undefined;
+  const tier = sizeParam === "sm" || sizeParam === "lg" ? sizeParam : undefined;
+
   // Prefer image_id, fall back to legacy avatar_path
   if (info.image_id) {
-    const filepath = images.getImageFilePath(userId, info.image_id);
+    const filepath = await images.getImageFilePath(userId, info.image_id, tier);
     if (filepath) {
       return createAvatarResolverResponse(
         filepath,
-        info.image_id,
+        info.image_id + (tier ? `_${tier}` : ""),
         c.req.header("If-None-Match")
       );
     }
@@ -378,6 +414,49 @@ app.post("/:id/duplicate", (c) => {
   const character = svc.duplicateCharacter(userId, c.req.param("id"));
   if (!character) return c.json({ error: "Not found" }, 404);
   return c.json(character, 201);
+});
+
+app.get("/:id/export", async (c) => {
+  const userId = c.get("userId");
+  const id = c.req.param("id");
+  const format = (c.req.query("format") || "json") as "json" | "png" | "charx";
+
+  if (format === "json") {
+    const result = exportSvc.exportAsJson(userId, id);
+    if (!result) return c.json({ error: "Not found" }, 404);
+    const name = exportSvc.sanitizeFilename(result.data?.name || "character");
+    return c.json(result, 200, {
+      "Content-Disposition": `attachment; filename="${name}.json"`,
+    });
+  }
+
+  if (format === "png") {
+    const buf = await exportSvc.exportAsPng(userId, id);
+    if (!buf) return c.json({ error: "Not found" }, 404);
+    const character = svc.getCharacter(userId, id);
+    const name = exportSvc.sanitizeFilename(character?.name || "character");
+    return new Response(new Uint8Array(buf), {
+      headers: {
+        "Content-Type": "image/png",
+        "Content-Disposition": `attachment; filename="${name}.png"`,
+      },
+    });
+  }
+
+  if (format === "charx") {
+    const buf = await exportSvc.exportAsCharx(userId, id);
+    if (!buf) return c.json({ error: "Not found" }, 404);
+    const character = svc.getCharacter(userId, id);
+    const name = exportSvc.sanitizeFilename(character?.name || "character");
+    return new Response(new Uint8Array(buf), {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${name}.charx"`,
+      },
+    });
+  }
+
+  return c.json({ error: "Invalid format. Must be one of: json, png, charx" }, 400);
 });
 
 app.post("/:id/avatar", async (c) => {
@@ -430,6 +509,8 @@ app.post("/import-bulk", async (c) => {
         let cardInput;
         let avatarFile: File | null = null;
         let charxGalleryFiles: File[] = [];
+        let risuModule: cardSvc.RisuModule | null = null;
+        let expressionAssets: cardSvc.CharxExpressionAsset[] = [];
 
         if (file.type === "image/png" || filenameLower.endsWith(".png")) {
           cardInput = await cardSvc.extractCardFromPng(file);
@@ -439,6 +520,8 @@ app.post("/import-bulk", async (c) => {
           cardInput = charxResult.card;
           avatarFile = charxResult.avatarFile;
           charxGalleryFiles = charxResult.galleryFiles;
+          risuModule = charxResult.risuModule;
+          expressionAssets = charxResult.expressionAssets;
         } else {
           const text = await file.text();
           const json = JSON.parse(text);
@@ -485,6 +568,9 @@ app.post("/import-bulk", async (c) => {
             try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
           }
         }
+
+        importRisuModuleRegexScripts(userId, character.id, risuModule);
+        await importRisuExpressionAssets(userId, character.id, expressionAssets);
 
         const imported = svc.getCharacter(userId, character.id)!;
 
@@ -542,23 +628,105 @@ app.post("/import", async (c) => {
         const imported = svc.getCharacter(userId, character.id)!;
         return c.json({ character: imported }, 201);
       } else if (nameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed") {
-        // CHARX archive — ZIP with card.json + optional avatar + gallery images
-        const { card: cardInput, avatarFile, galleryFiles } = await cardSvc.extractCardFromCharx(file);
+        // CHARX archive — ZIP with card.json + optional avatar + gallery images + modules
+        const charxResult = await cardSvc.extractCardFromCharx(file);
+        const { card: cardInput, avatarFile, risuModule, expressionAssets, lumiverseModules, assetFiles } = charxResult;
         const character = svc.createCharacter(userId, cardInput);
         if (avatarFile) {
           const image = await images.uploadImage(userId, avatarFile);
           svc.setCharacterImage(userId, character.id, image.id);
           svc.setCharacterAvatar(userId, character.id, image.filename);
         }
-        if (galleryFiles.length > 3) {
-          await gallerySvc.uploadBulkToGallery(userId, character.id, galleryFiles);
+
+        // Track consumed asset paths so remaining go to gallery
+        const consumedPaths = new Set<string>();
+        let lumiverseModulesSummary: Record<string, any> | undefined;
+
+        if (lumiverseModules) {
+          const extensions: Record<string, any> = { ...(character.extensions || {}) };
+
+          // Import expressions from Lumiverse modules
+          if (lumiverseModules.expressions?.mappings) {
+            const exprMappings: Record<string, string> = {};
+            for (const [label, archivePath] of Object.entries(lumiverseModules.expressions.mappings)) {
+              const assetFile = assetFiles.get(archivePath);
+              if (assetFile) {
+                const img = await images.uploadImage(userId, assetFile);
+                exprMappings[label] = img.id;
+                consumedPaths.add(archivePath);
+              }
+            }
+            if (Object.keys(exprMappings).length > 0) {
+              extensions.expressions = {
+                enabled: lumiverseModules.expressions.enabled,
+                defaultExpression: lumiverseModules.expressions.defaultExpression,
+                mappings: exprMappings,
+              };
+            }
+          }
+
+          // Import alternate fields
+          if (lumiverseModules.alternate_fields) {
+            extensions.alternate_fields = lumiverseModules.alternate_fields;
+          }
+
+          // Import alternate avatars
+          const altAvatars: Array<{ id: string; image_id: string; label: string }> = [];
+          if (Array.isArray(lumiverseModules.alternate_avatars)) {
+            for (const av of lumiverseModules.alternate_avatars) {
+              const assetFile = assetFiles.get(av.path);
+              if (assetFile) {
+                const img = await images.uploadImage(userId, assetFile);
+                altAvatars.push({ id: av.id || crypto.randomUUID(), image_id: img.id, label: av.label });
+                consumedPaths.add(av.path);
+              }
+            }
+            if (altAvatars.length > 0) {
+              extensions.alternate_avatars = altAvatars;
+            }
+          }
+
+          svc.updateCharacter(userId, character.id, { extensions });
+
+          lumiverseModulesSummary = {
+            has_expressions: !!extensions.expressions,
+            has_alternate_fields: !!lumiverseModules.alternate_fields,
+            has_alternate_avatars: altAvatars.length > 0,
+            expression_count: Object.keys(extensions.expressions?.mappings || {}).length,
+            alternate_field_counts: lumiverseModules.alternate_fields
+              ? Object.fromEntries(
+                  Object.entries(lumiverseModules.alternate_fields).map(
+                    ([k, v]) => [k, Array.isArray(v) ? v.length : 0]
+                  )
+                )
+              : undefined,
+          };
+        }
+
+        // Upload remaining unconsumed asset images to gallery
+        const remainingGalleryFiles: File[] = [];
+        for (const [path, assetFile] of assetFiles) {
+          if (consumedPaths.has(path)) continue;
+          if (avatarFile && assetFile.name === avatarFile.name) continue;
+          if (/^assets\/(icon|other)\//i.test(path)) {
+            remainingGalleryFiles.push(assetFile);
+          }
+        }
+        if (remainingGalleryFiles.length > 3) {
+          await gallerySvc.uploadBulkToGallery(userId, character.id, remainingGalleryFiles);
         } else {
-          for (const gf of galleryFiles) {
+          for (const gf of remainingGalleryFiles) {
             try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
           }
         }
+
+        importRisuModuleRegexScripts(userId, character.id, risuModule);
+        await importRisuExpressionAssets(userId, character.id, expressionAssets);
         const imported = svc.getCharacter(userId, character.id)!;
-        return c.json({ character: imported }, 201);
+        return c.json({
+          character: imported,
+          ...(lumiverseModulesSummary ? { lumiverse_modules: lumiverseModulesSummary } : {}),
+        }, 201);
       } else {
         // JSON file — read text content, parse card spec
         const text = await file.text();

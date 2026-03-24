@@ -143,6 +143,30 @@ export function removeExpression(userId: string, characterId: string, label: str
   return saveConfig(userId, characterId, config);
 }
 
+export async function importFromAssets(
+  userId: string,
+  characterId: string,
+  assets: Array<{ label: string; file: File }>
+): Promise<ExpressionConfig> {
+  const existing = getExpressionConfig(userId, characterId) ?? { ...EMPTY_CONFIG };
+  const newMappings: Record<string, string> = { ...existing.mappings };
+
+  for (const { label, file } of assets) {
+    const image = await uploadImage(userId, file);
+    newMappings[label] = image.id;
+  }
+
+  const config: ExpressionConfig = {
+    enabled: Object.keys(newMappings).length > 0,
+    defaultExpression: existing.defaultExpression || "default" in newMappings
+      ? "default"
+      : Object.keys(newMappings)[0] || "",
+    mappings: newMappings,
+  };
+
+  return saveConfig(userId, characterId, config);
+}
+
 export function getExpressionLabels(userId: string, characterId: string): string[] {
   const config = getExpressionConfig(userId, characterId);
   if (!config?.mappings) return [];

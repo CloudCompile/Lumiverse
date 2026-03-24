@@ -1,7 +1,14 @@
+import { join, resolve } from "path";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { hashPassword } from "better-auth/crypto";
 import { getDb } from "../db/connection";
 import { env } from "../env";
-import { auth, allowCreation } from "./index";
 import { provisionUserDirectories } from "./provision";
+import {
+  ownerCredentialsExist,
+  readOwnerCredentials,
+  writeOwnerCredentials,
+} from "../crypto/credentials";
 
 const CONTENT_TABLES = [
   "characters",
@@ -26,27 +33,157 @@ export function getFirstUserId(): string | null {
   return firstUserId;
 }
 
+/**
+ * Seed the owner account directly into BetterAuth's tables.
+ * Bypasses signUpEmail() so a plaintext password is never needed at runtime —
+ * only the pre-hashed value from the credentials file is used.
+ */
+function seedOwnerDirectly(db: ReturnType<typeof getDb>, username: string, passwordHash: string): string {
+  const userId = crypto.randomUUID();
+  const accountId = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  const email = `${username}@lumiverse.local`;
+
+  db.run(
+    `INSERT INTO "user" (id, name, email, emailVerified, username, displayUsername, role, createdAt, updatedAt)
+     VALUES (?, ?, ?, 1, ?, ?, 'owner', ?, ?)`,
+    [userId, username, email, username, username, now, now]
+  );
+
+  db.run(
+    `INSERT INTO "account" (id, accountId, providerId, userId, password, createdAt, updatedAt)
+     VALUES (?, ?, 'credential', ?, ?, ?, ?)`,
+    [accountId, userId, userId, passwordHash, now, now]
+  );
+
+  return userId;
+}
+
+/**
+ * Strip a key from the .env file. Removes the line entirely, plus any
+ * immediately preceding comment line that describes it.
+ */
+function stripEnvKey(envPath: string, key: string): boolean {
+  if (!existsSync(envPath)) return false;
+
+  const original = readFileSync(envPath, "utf-8");
+  const lines = original.split("\n");
+  const filtered: string[] = [];
+  let stripped = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Match "KEY=..." or "KEY =" (with optional whitespace)
+    if (line.match(new RegExp(`^\\s*${key}\\s*=`))) {
+      // Also remove a preceding comment if it references this key
+      if (filtered.length > 0 && filtered[filtered.length - 1].match(/^\s*#/)) {
+        filtered.pop();
+      }
+      stripped = true;
+      continue;
+    }
+    filtered.push(line);
+  }
+
+  if (stripped) {
+    // Clean up double blank lines left behind
+    const cleaned = filtered.join("\n").replace(/\n{3,}/g, "\n\n");
+    writeFileSync(envPath, cleaned);
+  }
+
+  return stripped;
+}
+
+/**
+ * If OWNER_PASSWORD is in the env (legacy install) but no credentials file
+ * exists, hash the password, write the credentials file, and strip it
+ * from .env.
+ */
+async function migrateOwnerPassword(credentialsPath: string): Promise<boolean> {
+  if (!env.ownerPassword) {
+    return false;
+  }
+
+  const envPath = resolve(process.cwd(), ".env");
+
+  // Already migrated — just clean up .env if the key is still lingering
+  if (ownerCredentialsExist(credentialsPath)) {
+    if (stripEnvKey(envPath, "OWNER_PASSWORD")) {
+      console.log("[Auth] Removed lingering OWNER_PASSWORD from .env (already migrated).");
+    }
+    return false;
+  }
+
+  console.log("[Auth] Migrating OWNER_PASSWORD to owner.credentials...");
+  const hash = await hashPassword(env.ownerPassword);
+  writeOwnerCredentials(credentialsPath, env.ownerUsername, hash);
+
+  if (stripEnvKey(envPath, "OWNER_PASSWORD")) {
+    console.log("[Auth] Removed OWNER_PASSWORD from .env file.");
+  }
+
+  console.log("[Auth] Migration complete. Credentials stored in data/owner.credentials.");
+  return true;
+}
+
+/**
+ * Strip secrets from .env that are now handled by data/ files:
+ *  - ENCRYPTION_KEY  → stored in data/lumiverse.identity
+ *  - AUTH_SECRET     → derived from identity key at startup
+ *  - OWNER_PASSWORD  → stored hashed in data/owner.credentials
+ */
+function cleanupLegacyEnvSecrets(): void {
+  const envPath = resolve(process.cwd(), ".env");
+  const identityPath = join(env.dataDir, "lumiverse.identity");
+
+  // Only strip encryption/auth keys if the identity file exists (proves migration is done)
+  if (!existsSync(identityPath)) return;
+
+  const stripped: string[] = [];
+
+  // Check the raw process.env values — env.authSecret may have been derived
+  // at runtime by initIdentity(), so we can't rely on it to detect a .env entry.
+  if (process.env.ENCRYPTION_KEY && stripEnvKey(envPath, "ENCRYPTION_KEY")) {
+    stripped.push("ENCRYPTION_KEY");
+  }
+  if (process.env.AUTH_SECRET && stripEnvKey(envPath, "AUTH_SECRET")) {
+    stripped.push("AUTH_SECRET");
+  }
+
+  if (stripped.length > 0) {
+    console.log(`[Auth] Removed legacy secrets from .env: ${stripped.join(", ")}`);
+    console.log("[Auth] These are now managed by data/lumiverse.identity.");
+  }
+}
+
 export async function seedOwner(): Promise<void> {
   const db = getDb();
+  const credentialsPath = join(env.dataDir, "owner.credentials");
+
+  // Migrate legacy secrets from .env → data/ files
+  await migrateOwnerPassword(credentialsPath);
+  cleanupLegacyEnvSecrets();
 
   const userCount = db.query('SELECT COUNT(*) as count FROM "user"').get() as { count: number } | null;
   if (userCount && userCount.count > 0) {
     // Users exist — skip initial seed but still enforce the owner role below.
   } else {
-    // First run: create the owner account.
-    console.log(`[Auth] Seeding owner account: ${env.ownerUsername}`);
+    // First run: create the owner account from the credentials file.
+    if (!ownerCredentialsExist(credentialsPath)) {
+      console.error("");
+      console.error("[Auth] No owner credentials found and no users exist.");
+      console.error("[Auth] Run the setup wizard first:  bun run setup");
+      console.error("[Auth] Or reset the password:       bun run reset-password");
+      console.error("");
+      process.exit(1);
+    }
 
-    allowCreation();
+    const creds = readOwnerCredentials(credentialsPath);
+    console.log(`[Auth] Seeding owner account: ${creds.username}`);
 
     try {
-      await auth.api.signUpEmail({
-        body: {
-          email: `${env.ownerUsername}@lumiverse.local`,
-          password: env.ownerPassword,
-          name: env.ownerUsername,
-          username: env.ownerUsername,
-        },
-      });
+      const userId = seedOwnerDirectly(db, creds.username, creds.passwordHash);
+      provisionUserDirectories(userId);
     } catch (err) {
       console.error("[Auth] Failed to seed owner:", err);
       throw err;
@@ -54,27 +191,30 @@ export async function seedOwner(): Promise<void> {
   }
 
   // Always ensure the designated owner has role = "owner".
-  // signUpEmail() creates users with role = "user" (admin plugin default).
   // The UPDATE is a separate step — if the process crashed between the
   // INSERT and this UPDATE on a previous run, the owner would be stuck
   // as "user" forever since the count-guard above would skip re-seeding.
   //
   // Lookup chain (most specific → broadest):
-  //   1. Exact username match
-  //   2. Case-insensitive username match (BetterAuth normalizes usernames)
+  //   1. Exact username match (from credentials file or env fallback)
+  //   2. Case-insensitive username match
   //   3. First-created user (user 0) — guaranteed owner for single-user installs
   type UserRow = { id: string; role: string; username: string };
 
+  const ownerUsername = ownerCredentialsExist(credentialsPath)
+    ? readOwnerCredentials(credentialsPath).username
+    : env.ownerUsername;
+
   let owner: UserRow | null = db
     .query('SELECT id, role, username FROM "user" WHERE username = ?')
-    .get(env.ownerUsername) as UserRow | null;
+    .get(ownerUsername) as UserRow | null;
 
   if (!owner) {
     owner = db
       .query('SELECT id, role, username FROM "user" WHERE LOWER(username) = LOWER(?)')
-      .get(env.ownerUsername) as UserRow | null;
+      .get(ownerUsername) as UserRow | null;
     if (owner) {
-      console.log(`[Auth] Owner matched via case-insensitive lookup: "${owner.username}" (env: "${env.ownerUsername}")`);
+      console.log(`[Auth] Owner matched via case-insensitive lookup: "${owner.username}" (expected: "${ownerUsername}")`);
     }
   }
 

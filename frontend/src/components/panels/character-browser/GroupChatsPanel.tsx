@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { Users, Trash2, MessageSquarePlus, Loader2 } from 'lucide-react'
 import { chatsApi } from '@/api/chats'
-import { getCharacterAvatarUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -43,7 +43,7 @@ function MosaicThumb({ charIds, size = 'small' }: { charIds: string[]; size?: 's
       {displayIds.map((id) => (
         <div key={id} className={styles.mosaicCell}>
           <LazyImage
-            src={getCharacterAvatarUrlById(
+            src={getCharacterAvatarThumbUrlById(
               id,
               characters.find((entry) => entry.id === id)?.image_id ?? null
             ) || ''}

@@ -550,7 +550,7 @@ async function gatherDirectorImages(userId: string, chatId: string, naiSettings:
     if (chat) {
       const character = charactersSvc.getCharacter(userId, chat.character_id);
       if (character?.image_id) {
-        const path = imagesSvc.getImageFilePath(userId, character.image_id, false);
+        const path = await imagesSvc.getImageFilePath(userId, character.image_id);
         if (path) {
           const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
           images.push({ data: uint8ToBase64(bytes), strength, infoExtracted, refType: avatarRefType });
@@ -563,7 +563,7 @@ async function gatherDirectorImages(userId: string, chatId: string, naiSettings:
     const personas = personasSvc.listPersonas(userId, { limit: 100, offset: 0 }).data;
     const persona = personas.find((p) => p.is_default) || personas[0];
     if (persona?.image_id) {
-      const path = imagesSvc.getImageFilePath(userId, persona.image_id, false);
+      const path = await imagesSvc.getImageFilePath(userId, persona.image_id);
       if (path) {
         const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
         images.push({ data: uint8ToBase64(bytes), strength, infoExtracted, refType: avatarRefType });

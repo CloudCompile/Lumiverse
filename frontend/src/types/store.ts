@@ -5,6 +5,8 @@ export interface ChatSlice {
   activeChatId: string | null
   activeCharacterId: string | null
   activeChatWallpaper: WallpaperRef | null
+  /** Active avatar image_id override from chat metadata (alternate avatar selection) */
+  activeChatAvatarId: string | null
   messages: Message[]
   isStreaming: boolean
   streamingContent: string
@@ -16,6 +18,7 @@ export interface ChatSlice {
   totalChatLength: number
   setActiveChat: (chatId: string | null, characterId?: string | null) => void
   setActiveChatWallpaper: (wallpaper: WallpaperRef | null) => void
+  setActiveChatAvatarId: (imageId: string | null) => void
   setMessages: (messages: Message[], total?: number) => void
   prependMessages: (messages: Message[]) => void
   addMessage: (message: Message) => void
@@ -275,6 +278,7 @@ export interface SettingsSlice {
   guidedGenerations: GuidedGeneration[]
   quickReplySets: QuickReplySet[]
   wallpaper: WallpaperSettings
+  thumbnailSettings: { smallSize: number, largeSize: number }
   setWallpaper: (settings: Partial<WallpaperSettings>) => void
   setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K]) => void
   setTheme: (theme: ThemeConfig | null) => void
@@ -629,13 +633,26 @@ export interface RegexSlice {
 // ---- Expression Slice ----
 import type { ExpressionDisplaySettings } from '@/types/expressions'
 
+export interface GroupExpressionEntry {
+  label: string
+  imageId: string
+}
+
 export interface ExpressionSlice {
   currentExpression: string | null
   currentExpressionImageId: string | null
   previousExpressionImageId: string | null
   expressionCharacterId: string | null
   expressionDisplay: ExpressionDisplaySettings
+  /** Per-character expression state for group chats (characterId → label+imageId) */
+  groupExpressions: Record<string, GroupExpressionEntry>
+  /** Character currently generating a response (set via GENERATION_STARTED, cleared on GENERATION_ENDED) */
+  respondingCharacterId: string | null
   setActiveExpression: (label: string | null, imageId: string | null, characterId: string | null) => void
+  setGroupExpression: (characterId: string, label: string, imageId: string) => void
+  setGroupExpressions: (map: Record<string, GroupExpressionEntry>) => void
+  clearGroupExpressions: () => void
+  setRespondingCharacterId: (characterId: string | null) => void
   setExpressionDisplay: (partial: Partial<ExpressionDisplaySettings>) => void
   toggleExpressionMinimized: () => void
 }

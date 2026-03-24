@@ -208,6 +208,66 @@ export function setWorldBookSemanticActivation(
   };
 }
 
+export function getConvertToVectorizedPreview(
+  userId: string,
+  worldBookId: string,
+): { total: number; eligible: number; constant_skipped: number; already_vectorized: number; empty_skipped: number; disabled_skipped: number } | null {
+  const book = getWorldBook(userId, worldBookId);
+  if (!book) return null;
+  const entries = listEntries(userId, worldBookId);
+
+  let eligible = 0;
+  let constantSkipped = 0;
+  let alreadyVectorized = 0;
+  let emptySkipped = 0;
+  let disabledSkipped = 0;
+
+  for (const entry of entries) {
+    const hasContent = (entry.content || "").trim().length > 0;
+    if (entry.constant) { constantSkipped++; continue; }
+    if (entry.vectorized) { alreadyVectorized++; continue; }
+    if (!hasContent) { emptySkipped++; continue; }
+    if (entry.disabled) { disabledSkipped++; continue; }
+    eligible++;
+  }
+
+  return { total: entries.length, eligible, constant_skipped: constantSkipped, already_vectorized: alreadyVectorized, empty_skipped: emptySkipped, disabled_skipped: disabledSkipped };
+}
+
+export function convertToVectorized(
+  userId: string,
+  worldBookId: string,
+): { summary: WorldBookVectorSummary; converted: number } | null {
+  const book = getWorldBook(userId, worldBookId);
+  if (!book) return null;
+
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+
+  const converted = db.query(
+    `UPDATE world_book_entries
+     SET vectorized = 1,
+         vector_index_status = 'pending',
+         vector_indexed_at = NULL,
+         vector_index_error = NULL,
+         updated_at = ?
+     WHERE world_book_id = ?
+       AND constant = 0
+       AND disabled = 0
+       AND length(trim(content)) > 0
+       AND vectorized = 0`
+  ).run(now, worldBookId).changes;
+
+  if (converted > 0) {
+    db.query("UPDATE world_books SET updated_at = ? WHERE id = ?").run(now, worldBookId);
+  }
+
+  return {
+    summary: getWorldBookVectorSummary(userId, worldBookId)!,
+    converted,
+  };
+}
+
 // --- World Book Entry CRUD ---
 
 export function listEntriesPaginated(userId: string, worldBookId: string, pagination: PaginationParams): PaginatedResult<WorldBookEntry> {
@@ -619,7 +679,7 @@ export function importWorldBookBulk(
   return { worldBook, entryCount };
 }
 
-// --- Character Book Import ---
+// --- Character Book Import / Export ---
 
 export function importCharacterBook(
   userId: string,
@@ -714,4 +774,138 @@ export function importCharacterBook(
   }
 
   return { worldBook, entryCount };
+}
+
+// --- World Book Export ---
+
+export type WorldBookExportFormat = "lumiverse" | "character_book" | "sillytavern";
+
+export function exportWorldBook(
+  userId: string,
+  worldBookId: string,
+  format: WorldBookExportFormat = "lumiverse"
+): Record<string, any> | null {
+  const book = getWorldBook(userId, worldBookId);
+  if (!book) return null;
+  const entries = listEntries(userId, worldBookId);
+
+  switch (format) {
+    case "lumiverse":
+      return exportLumiverse(book, entries);
+    case "character_book":
+      return exportCharacterBookFormat(book, entries);
+    case "sillytavern":
+      return exportSillyTavern(book, entries);
+  }
+}
+
+function exportLumiverse(book: WorldBook, entries: WorldBookEntry[]): Record<string, any> {
+  return {
+    version: 1,
+    type: "lumiverse_world_book",
+    name: book.name,
+    description: book.description,
+    metadata: book.metadata,
+    entries: entries.map((entry) => {
+      const { id, world_book_id, vector_index_status, vector_indexed_at, vector_index_error, created_at, updated_at, ...rest } = entry;
+      return rest;
+    }),
+    exported_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+function entryToCharacterBookSpec(entry: WorldBookEntry, index: number): Record<string, any> {
+  const extensions: Record<string, any> = {
+    ...entry.extensions,
+    priority: entry.priority,
+    sticky: entry.sticky,
+    cooldown: entry.cooldown,
+    delay: entry.delay,
+    selective_logic: entry.selective_logic,
+    use_probability: entry.use_probability,
+    use_regex: entry.use_regex,
+    prevent_recursion: entry.prevent_recursion,
+    exclude_recursion: entry.exclude_recursion,
+    delay_until_recursion: entry.delay_until_recursion,
+    group_override: entry.group_override,
+    group_weight: entry.group_weight,
+    probability: entry.probability,
+    scan_depth: entry.scan_depth,
+    automation_id: entry.automation_id,
+    vectorized: entry.vectorized,
+    uid: entry.uid,
+  };
+
+  return {
+    id: index,
+    keys: entry.key,
+    secondary_keys: entry.keysecondary,
+    content: entry.content,
+    comment: entry.comment,
+    enabled: !entry.disabled,
+    insertion_order: entry.order_value,
+    position: entry.position,
+    depth: entry.depth,
+    selective: entry.selective,
+    constant: entry.constant,
+    case_sensitive: entry.case_sensitive,
+    match_whole_words: entry.match_whole_words,
+    ...(entry.role ? { role: entry.role } : {}),
+    ...(entry.group_name ? { group: entry.group_name } : {}),
+    extensions,
+  };
+}
+
+function exportCharacterBookFormat(book: WorldBook, entries: WorldBookEntry[]): Record<string, any> {
+  return {
+    name: book.name,
+    description: book.description,
+    entries: entries.map((entry, i) => entryToCharacterBookSpec(entry, i)),
+  };
+}
+
+function exportSillyTavern(book: WorldBook, entries: WorldBookEntry[]): Record<string, any> {
+  return {
+    name: book.name,
+    description: book.description,
+    entries: Object.fromEntries(
+      entries.map((entry, i) => [
+        String(i),
+        {
+          uid: entry.uid,
+          keys: entry.key,
+          secondary_keys: entry.keysecondary,
+          content: entry.content,
+          comment: entry.comment,
+          enabled: !entry.disabled,
+          insertion_order: entry.order_value,
+          position: entry.position,
+          depth: entry.depth,
+          selective: entry.selective,
+          constant: entry.constant,
+          case_sensitive: entry.case_sensitive,
+          match_whole_words: entry.match_whole_words,
+          role: entry.role,
+          group: entry.group_name,
+          group_override: entry.group_override,
+          group_weight: entry.group_weight,
+          probability: entry.probability,
+          scan_depth: entry.scan_depth,
+          automation_id: entry.automation_id,
+          selectiveLogic: entry.selective_logic,
+          useProbability: entry.use_probability,
+          use_regex: entry.use_regex,
+          prevent_recursion: entry.prevent_recursion,
+          exclude_recursion: entry.exclude_recursion,
+          delay_until_recursion: entry.delay_until_recursion,
+          priority: entry.priority,
+          sticky: entry.sticky,
+          cooldown: entry.cooldown,
+          delay: entry.delay,
+          vectorized: entry.vectorized,
+          ...entry.extensions,
+        },
+      ])
+    ),
+  };
 }

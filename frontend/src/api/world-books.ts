@@ -48,6 +48,10 @@ export const worldBooksApi = {
     return del<void>(`/world-books/${bookId}/entries/${entryId}`)
   },
 
+  export(bookId: string, format: 'lumiverse' | 'character_book' | 'sillytavern' = 'lumiverse') {
+    return get<Record<string, any>>(`/world-books/${bookId}/export`, { format })
+  },
+
   importJson(payload: Record<string, any>) {
     return post<{ world_book: WorldBook; entry_count: number }>('/world-books/import', payload)
   },
@@ -68,6 +72,23 @@ export const worldBooksApi = {
     return post<{ summary: WorldBookVectorSummary; updated_entries: number }>(
       `/world-books/${bookId}/semantic-activation`,
       { enabled }
+    )
+  },
+
+  getConvertToVectorizedPreview(bookId: string) {
+    return get<{
+      total: number
+      eligible: number
+      constant_skipped: number
+      already_vectorized: number
+      empty_skipped: number
+      disabled_skipped: number
+    }>(`/world-books/${bookId}/convert-to-vectorized/preview`)
+  },
+
+  convertToVectorized(bookId: string) {
+    return post<{ summary: WorldBookVectorSummary; converted: number }>(
+      `/world-books/${bookId}/convert-to-vectorized`
     )
   },
 

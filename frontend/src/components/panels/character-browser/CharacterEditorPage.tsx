@@ -1,21 +1,28 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download } from 'lucide-react'
+import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download, Loader2 } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
+import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
+import { imagesApi } from '@/api/images'
 import { worldBooksApi } from '@/api/world-books'
+import { chatsApi } from '@/api/chats'
 import { useStore } from '@/store'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { Character, CharacterGalleryItem } from '@/types/api'
+import { toast } from '@/lib/toast'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
 import ExpressionEditorTab from './ExpressionEditorTab'
+import AlternateFieldEditor from './AlternateFieldEditor'
+import AlternateAvatarManager from './AlternateAvatarManager'
+import type { AlternateAvatarEntry } from './AlternateAvatarManager'
 
 const DEBOUNCE_MS = 2000
 
@@ -35,6 +42,10 @@ export default function CharacterEditorPage() {
   const editingCharacterId = useStore((s) => s.editingCharacterId)
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
   const allCharacters = useStore((s) => s.characters)
+  const activeChatId = useStore((s) => s.activeChatId)
+  const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
+  const setActiveChatAvatarId = useStore((s) => s.setActiveChatAvatarId)
+  const updateCharInStore = useStore((s) => s.updateCharacter)
   const browser = useCharacterBrowser()
 
   const character = allCharacters.find((c) => c.id === editingCharacterId) ?? null
@@ -57,6 +68,8 @@ export default function CharacterEditorPage() {
   const [worldBooks, setWorldBooks] = useState<Array<{ id: string; name: string }>>([])
   const [galleryUploading, setGalleryUploading] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [avatarUploadProgress, setAvatarUploadProgress] = useState<number | null>(null)
+  const [altAvatarUploadProgress, setAltAvatarUploadProgress] = useState<number | null>(null)
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const fileRef = useRef<HTMLInputElement>(null)
   const galleryFileRef = useRef<HTMLInputElement>(null)
@@ -243,6 +256,57 @@ export default function CharacterEditorPage() {
     [debouncedSave]
   )
 
+  const handleAlternatesChange = useCallback(
+    (field: string, variants: Array<{ id: string; label: string; content: string }>) => {
+      if (!editingCharacterId || !character) return
+      const currentExtensions = character.extensions || {}
+      const currentAltFields = currentExtensions.alternate_fields || {}
+      const updatedAltFields = { ...currentAltFields, [field]: variants }
+      // Clean up empty arrays
+      if (variants.length === 0) delete updatedAltFields[field]
+      const updatedExtensions = { ...currentExtensions, alternate_fields: updatedAltFields }
+      // Clean up if no alternate fields remain
+      if (Object.keys(updatedAltFields).length === 0) delete updatedExtensions.alternate_fields
+      debouncedSave('extensions', updatedExtensions)
+    },
+    [editingCharacterId, character, debouncedSave]
+  )
+
+  const handleAlternateAvatarsChange = useCallback(
+    (avatars: AlternateAvatarEntry[]) => {
+      if (!editingCharacterId || !character) return
+      const currentExtensions = character.extensions || {}
+      const updatedExtensions = { ...currentExtensions }
+      if (avatars.length > 0) {
+        updatedExtensions.alternate_avatars = avatars
+      } else {
+        delete updatedExtensions.alternate_avatars
+      }
+      debouncedSave('extensions', updatedExtensions)
+    },
+    [editingCharacterId, character, debouncedSave]
+  )
+
+  const handleAvatarSelect = useCallback(
+    async (imageId: string | null) => {
+      if (!activeChatId) return
+      setActiveChatAvatarId(imageId)
+      try {
+        const chat = await chatsApi.get(activeChatId, { messages: false })
+        const metadata = { ...(chat.metadata || {}) }
+        if (imageId) {
+          metadata.active_avatar_id = imageId
+        } else {
+          delete metadata.active_avatar_id
+        }
+        await chatsApi.update(activeChatId, { metadata })
+      } catch (err) {
+        console.error('[Editor] Avatar select failed:', err)
+      }
+    },
+    [activeChatId, setActiveChatAvatarId]
+  )
+
   const handleAddTag = useCallback(() => {
     if (!editingCharacterId) return
     const tag = newTag.trim()
@@ -336,15 +400,58 @@ export default function CharacterEditorPage() {
 
   // Avatar
   const handleCropComplete = useCallback(
-    async (file: File) => {
+    async (croppedFile: File, _originalFile: File) => {
       if (!editingCharacterId) return
-      await browser.uploadAvatar(editingCharacterId, file)
-      setAvatarKey((k) => k + 1)
+      setAvatarUploadProgress(0)
+      try {
+        const updated = await charactersApi.uploadAvatar(editingCharacterId, croppedFile, (p) => setAvatarUploadProgress(p))
+        updateCharInStore(editingCharacterId, updated)
+        setAvatarKey((k) => k + 1)
+      } catch (err) {
+        console.error('[Editor] Avatar upload failed:', err)
+      } finally {
+        setAvatarUploadProgress(null)
+      }
     },
-    [editingCharacterId, browser.uploadAvatar]
+    [editingCharacterId, updateCharInStore]
   )
 
   const { cropModalProps, openCropFlow } = useImageCropFlow(handleCropComplete)
+
+  // Separate crop flow for alternate avatar uploads
+  const handleAltAvatarCropComplete = useCallback(
+    async (croppedFile: File, originalFile: File) => {
+      if (!editingCharacterId || !character) return
+      setAltAvatarUploadProgress(0)
+      try {
+        // Upload original (full aspect ratio) for lightbox
+        const originalImage = await imagesApi.upload(originalFile, (p) => setAltAvatarUploadProgress(Math.round(p * 0.4)))
+        // Upload cropped for display
+        const image = await imagesApi.upload(croppedFile, (p) => setAltAvatarUploadProgress(40 + Math.round(p * 0.6)))
+        const newId = crypto.randomUUID()
+        const entry: AlternateAvatarEntry = {
+          id: newId,
+          image_id: image.id,
+          original_image_id: originalImage.id,
+          label: 'New Avatar',
+        }
+        const currentExtensions = character.extensions || {}
+        const currentAlts = (currentExtensions.alternate_avatars || []) as AlternateAvatarEntry[]
+        const updatedAlts = [...currentAlts, entry]
+        const updatedExtensions = { ...currentExtensions, alternate_avatars: updatedAlts }
+        showSaving()
+        browser.updateCharacter(editingCharacterId, { extensions: updatedExtensions })
+      } catch (err) {
+        console.error('[AltAvatar] Upload failed:', err)
+      } finally {
+        setAltAvatarUploadProgress(null)
+      }
+    },
+    [editingCharacterId, character, browser.updateCharacter, showSaving]
+  )
+
+  const { cropModalProps: altAvatarCropProps, openCropFlow: openAltAvatarCropFlow } =
+    useImageCropFlow(handleAltAvatarCropComplete)
 
   const handleFileSelected = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -383,6 +490,41 @@ export default function CharacterEditorPage() {
     close()
     browser.openChat(character)
   }, [character, browser.openChat, close])
+
+  const [showExportMenu, setShowExportMenu] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const exportMenuRef = useRef<HTMLDivElement>(null)
+
+  const handleExport = useCallback(async (format: 'json' | 'png' | 'charx') => {
+    if (!editingCharacterId || !character) return
+    setExporting(true)
+    setShowExportMenu(false)
+    const formatLabel = format === 'charx' ? 'CHARX' : format === 'png' ? 'PNG' : 'JSON'
+    const toastId = toast.info(`Preparing ${formatLabel} export\u2026`, { title: 'Exporting', duration: 60_000, dismissible: false })
+    try {
+      await charactersApi.exportCharacter(editingCharacterId, format, character.name)
+      toast.dismiss(toastId)
+      toast.success(`${character.name} exported as ${formatLabel}`)
+    } catch (err) {
+      console.error('[Export] Failed:', err)
+      toast.dismiss(toastId)
+      toast.error(`Export failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      setExporting(false)
+    }
+  }, [editingCharacterId, character])
+
+  // Close export menu on outside click
+  useEffect(() => {
+    if (!showExportMenu) return
+    const handler = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setShowExportMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showExportMenu])
 
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
@@ -423,14 +565,14 @@ export default function CharacterEditorPage() {
                 <div className={styles.header}>
                   <div
                     className={styles.avatarZone}
-                    onClick={() => fileRef.current?.click()}
+                    onClick={() => { if (avatarUploadProgress === null) fileRef.current?.click() }}
                     onDrop={handleAvatarDrop}
                     onDragOver={(e) => e.preventDefault()}
                     title="Click or drop to change avatar"
                   >
                     <LazyImage
                       key={avatarKey}
-                      src={getCharacterAvatarUrl(character) ?? ''}
+                      src={getCharacterAvatarLargeUrl(character) ?? ''}
                       alt={character.name}
                       className={styles.avatarImg}
                       fallback={
@@ -439,8 +581,12 @@ export default function CharacterEditorPage() {
                         </div>
                       }
                     />
-                    <div className={styles.avatarOverlay}>
-                      <Upload size={14} />
+                    <div className={clsx(styles.avatarOverlay, avatarUploadProgress !== null && styles.avatarOverlayUploading)}>
+                      {avatarUploadProgress !== null ? (
+                        <span className={styles.avatarProgressText}>{avatarUploadProgress}%</span>
+                      ) : (
+                        <Upload size={14} />
+                      )}
                     </div>
                     <input
                       ref={fileRef}
@@ -468,6 +614,26 @@ export default function CharacterEditorPage() {
                     <button type="button" className={styles.actionBtn} onClick={handleOpenChat} title="Open Chat">
                       <MessageSquare size={14} />
                     </button>
+                    <div className={styles.exportWrapper} ref={exportMenuRef}>
+                      <button
+                        type="button"
+                        className={styles.actionBtn}
+                        onClick={() => !exporting && setShowExportMenu((v) => !v)}
+                        title="Export"
+                        disabled={exporting}
+                      >
+                        {exporting
+                          ? <Loader2 size={14} className={styles.exportSpinner} />
+                          : <Download size={14} />}
+                      </button>
+                      {showExportMenu && (
+                        <div className={styles.exportDropdown}>
+                          <button onClick={() => handleExport('json')}>Export as JSON (CCSv3)</button>
+                          <button onClick={() => handleExport('png')}>Export as PNG (Embedded)</button>
+                          <button onClick={() => handleExport('charx')}>Export as CHARX (Lumiverse)</button>
+                        </div>
+                      )}
+                    </div>
                     <button type="button" className={styles.actionBtn} onClick={handleDuplicate} title="Duplicate">
                       <Copy size={14} />
                     </button>
@@ -504,25 +670,31 @@ export default function CharacterEditorPage() {
                 <div className={styles.tabContent}>
                   {activeTab === 'core' && (
                     <>
-                      <Field
+                      <AlternateFieldEditor
                         label="Description"
                         helper="The character's physical appearance, backstory, and other details."
                         value={fields.description || ''}
+                        alternates={character?.extensions?.alternate_fields?.description}
                         onChange={(v) => handleFieldChange('description', v)}
+                        onAlternatesChange={(variants) => handleAlternatesChange('description', variants)}
                         rows={5}
                       />
-                      <Field
+                      <AlternateFieldEditor
                         label="Personality"
                         helper="Key personality traits and behavioral patterns."
                         value={fields.personality || ''}
+                        alternates={character?.extensions?.alternate_fields?.personality}
                         onChange={(v) => handleFieldChange('personality', v)}
+                        onAlternatesChange={(variants) => handleAlternatesChange('personality', variants)}
                         rows={4}
                       />
-                      <Field
+                      <AlternateFieldEditor
                         label="Scenario"
                         helper="The setting or situation for the roleplay."
                         value={fields.scenario || ''}
+                        alternates={character?.extensions?.alternate_fields?.scenario}
                         onChange={(v) => handleFieldChange('scenario', v)}
+                        onAlternatesChange={(variants) => handleAlternatesChange('scenario', variants)}
                         rows={3}
                       />
                     </>
@@ -650,6 +822,15 @@ export default function CharacterEditorPage() {
                           </div>
                         </div>
                       </div>
+                      <AlternateAvatarManager
+                        primaryImageId={character?.image_id || null}
+                        alternates={(character?.extensions?.alternate_avatars || []) as AlternateAvatarEntry[]}
+                        onChange={handleAlternateAvatarsChange}
+                        openCropFlow={openAltAvatarCropFlow}
+                        activeChatAvatarId={activeChatId ? activeChatAvatarId : undefined}
+                        onAvatarSelect={activeChatId ? handleAvatarSelect : undefined}
+                        uploadProgress={altAvatarUploadProgress}
+                      />
                     </>
                   )}
 
@@ -666,7 +847,7 @@ export default function CharacterEditorPage() {
                         {galleryItems.map((item) => (
                           <div key={item.id} className={styles.galleryItem}>
                             <LazyImage
-                              src={characterGalleryApi.thumbnailUrl(item.image_id)}
+                              src={characterGalleryApi.smallUrl(item.image_id)}
                               alt={item.caption || 'Gallery image'}
                               className={styles.galleryThumb}
                               fallback={<div className={styles.galleryThumbPlaceholder} />}
@@ -808,6 +989,7 @@ export default function CharacterEditorPage() {
     </AnimatePresence>
 
     <ImageCropModal {...cropModalProps} />
+    <ImageCropModal {...altAvatarCropProps} />
 
     {showDeleteConfirm && (
       <ConfirmationModal

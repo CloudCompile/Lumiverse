@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type LlmMessage, type LlmMessagePart } from "../types";
+import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
 
 const API_VERSION = "2023-06-01";
 
@@ -68,10 +68,16 @@ export class AnthropicProvider implements LlmProvider {
       .map((c: any) => c.thinking)
       .join("");
 
+    const toolUseBlocks = blocks.filter((c: any) => c.type === "tool_use");
+    const toolCalls: ToolCallResult[] | undefined = toolUseBlocks.length > 0
+      ? toolUseBlocks.map((c: any) => ({ name: c.name, args: c.input ?? {}, call_id: c.id }))
+      : undefined;
+
     return {
       content: textContent,
       reasoning: thinkingContent || undefined,
-      finish_reason: data.stop_reason || "end_turn",
+      finish_reason: toolCalls ? "tool_calls" : (data.stop_reason || "end_turn"),
+      tool_calls: toolCalls,
       usage: data.usage
         ? {
             prompt_tokens: data.usage.input_tokens,
@@ -107,6 +113,10 @@ export class AnthropicProvider implements LlmProvider {
     let buffer = "";
     let streamInputTokens = 0;
 
+    // Tool call accumulation — Anthropic streams tool_use as content blocks
+    const pendingToolCalls: { id: string; name: string; inputJson: string }[] = [];
+    let currentToolIdx = -1;
+
     try {
     while (true) {
       const { done, value } = await reader.read();
@@ -126,11 +136,18 @@ export class AnthropicProvider implements LlmProvider {
           if (data.type === "message_start" && data.message?.usage) {
             // Capture input token count from message_start (output tokens arrive in message_delta)
             streamInputTokens = data.message.usage.input_tokens || 0;
+          } else if (data.type === "content_block_start") {
+            if (data.content_block?.type === "tool_use") {
+              pendingToolCalls.push({ id: data.content_block.id, name: data.content_block.name, inputJson: "" });
+              currentToolIdx = pendingToolCalls.length - 1;
+            }
           } else if (data.type === "content_block_delta") {
             if (data.delta?.type === "thinking_delta") {
               yield { token: "", reasoning: data.delta.thinking };
             } else if (data.delta?.type === "text_delta") {
               yield { token: data.delta.text };
+            } else if (data.delta?.type === "input_json_delta" && currentToolIdx >= 0) {
+              pendingToolCalls[currentToolIdx].inputJson += data.delta.partial_json;
             }
           } else if (data.type === "message_delta") {
             const outputTokens = data.usage?.output_tokens || 0;
@@ -141,8 +158,19 @@ export class AnthropicProvider implements LlmProvider {
                   total_tokens: streamInputTokens + outputTokens,
                 }
               : undefined;
-            if (data.delta?.stop_reason) {
-              yield { token: "", finish_reason: data.delta.stop_reason, usage };
+
+            const stopReason = data.delta?.stop_reason;
+            if (stopReason) {
+              // Emit accumulated tool calls when Anthropic signals tool_use stop
+              const toolCalls: ToolCallResult[] | undefined = pendingToolCalls.length > 0
+                ? pendingToolCalls.map(tc => ({ name: tc.name, args: JSON.parse(tc.inputJson || "{}"), call_id: tc.id }))
+                : undefined;
+              yield {
+                token: "",
+                finish_reason: toolCalls ? "tool_calls" : stopReason,
+                tool_calls: toolCalls,
+                usage,
+              };
             } else if (usage) {
               yield { token: "", usage };
             }

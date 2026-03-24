@@ -16,9 +16,9 @@ export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaF
   const [creating, setCreating] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const handleCropComplete = useCallback((file: File) => {
-    setAvatarFile(file)
-    const url = URL.createObjectURL(file)
+  const handleCropComplete = useCallback((croppedFile: File, _originalFile: File) => {
+    setAvatarFile(croppedFile)
+    const url = URL.createObjectURL(croppedFile)
     setAvatarPreview(url)
   }, [])
 

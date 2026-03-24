@@ -57,6 +57,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
     activeChatId: null,
     activeCharacterId: null,
     activeChatWallpaper: null,
+    activeChatAvatarId: null,
     messages: [],
     isStreaming: false,
     streamingContent: '',
@@ -73,6 +74,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         activeChatId: chatId,
         activeCharacterId: characterId,
         activeChatWallpaper: null,
+        activeChatAvatarId: null,
         messages: [],
         isStreaming: false,
         streamingContent: '',
@@ -86,6 +88,8 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
     },
 
     setActiveChatWallpaper: (wallpaper) => set({ activeChatWallpaper: wallpaper }),
+
+    setActiveChatAvatarId: (imageId) => set({ activeChatAvatarId: imageId }),
 
     setMessages: (messages, total?) =>
       set({ messages: sortMessagesByPosition(messages), totalChatLength: total ?? messages.length }),

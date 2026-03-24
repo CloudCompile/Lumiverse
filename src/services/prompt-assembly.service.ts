@@ -43,8 +43,8 @@ import { readFileSync } from "fs";
 // Attachment resolution — read image/audio files from disk into base64
 // ---------------------------------------------------------------------------
 
-function resolveAttachmentBase64(userId: string, imageId: string): string | null {
-  const filePath = imagesSvc.getImageFilePath(userId, imageId, false);
+async function resolveAttachmentBase64(userId: string, imageId: string): Promise<string | null> {
+  const filePath = await imagesSvc.getImageFilePath(userId, imageId);
   if (!filePath) return null;
   try {
     const buffer = readFileSync(filePath);
@@ -52,6 +52,45 @@ function resolveAttachmentBase64(userId: string, imageId: string): string | null
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Alternate field resolution — per-chat variant overrides
+// ---------------------------------------------------------------------------
+
+const ALTERNATE_FIELD_NAMES = ["description", "personality", "scenario"] as const;
+
+/**
+ * Resolves per-chat alternate field selections onto a character object.
+ * Returns a shallow copy with overridden fields, or the original if no overrides apply.
+ */
+function resolveCharacterWithAlternateFields(character: Character, chat: Chat): Character {
+  const selections = chat.metadata?.alternate_field_selections as
+    | Record<string, string>
+    | undefined;
+  if (!selections) return character;
+
+  const altFields = character.extensions?.alternate_fields as
+    | Record<string, Array<{ id: string; label: string; content: string }>>
+    | undefined;
+  if (!altFields) return character;
+
+  let hasOverride = false;
+  const overrides: Record<string, string> = {};
+
+  for (const field of ALTERNATE_FIELD_NAMES) {
+    const variantId = selections[field];
+    if (!variantId) continue;
+    const variants = altFields[field];
+    if (!Array.isArray(variants)) continue;
+    const variant = variants.find((v) => v.id === variantId);
+    if (variant) {
+      overrides[field] = variant.content;
+      hasOverride = true;
+    }
+  }
+
+  return hasOverride ? { ...character, ...overrides } : character;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,8 +321,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     ? resolveGroupCharacterNames(chat, (cid) =>
         mutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(ctx.userId, cid)?.name)
     : undefined;
+  // Resolve alternate field overrides from per-chat bindings
+  const effectiveCharacter = resolveCharacterWithAlternateFields(character, chat);
+
   const macroEnv: MacroEnv = buildEnv({
-    character,
+    character: effectiveCharacter,
     persona,
     chat,
     messages,
@@ -292,7 +334,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     groupCharacterNames,
     groupNotMutedNames,
     targetCharacterId: ctx.targetCharacterId,
-    targetCharacterName: ctx.targetCharacterId ? character.name : undefined,
+    targetCharacterName: ctx.targetCharacterId ? effectiveCharacter.name : undefined,
   });
 
   // Batch-load all settings needed for assembly in a single query
@@ -449,7 +491,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
           // Build multipart content: text + attachment parts
           const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolvedContent }];
           for (const att of attachments) {
-            const b64 = resolveAttachmentBase64(ctx.userId, att.image_id);
+            const b64 = await resolveAttachmentBase64(ctx.userId, att.image_id);
             if (!b64) continue;
             if (att.type === "image") {
               parts.push({ type: "image", data: b64, mime_type: att.mime_type });
@@ -3079,8 +3121,11 @@ async function legacyAssembly(
       ? resolveGroupCharacterNames(chatObj, (cid) =>
           legacyMutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(userId, cid)?.name)
       : undefined;
+    // Resolve alternate field overrides from per-chat bindings (legacy path)
+    const legacyEffectiveChar = resolveCharacterWithAlternateFields(character as Character, chatObj);
+
     macroEnv = buildEnv({
-      character: character as Character,
+      character: legacyEffectiveChar,
       persona: persona ?? null,
       chat: chatObj,
       messages,
@@ -3088,7 +3133,7 @@ async function legacyAssembly(
       connection: connection ?? null,
       groupCharacterNames: groupNames,
       groupNotMutedNames: legacyNotMuted,
-      targetCharacterName: isGroup ? (character as Character).name : undefined,
+      targetCharacterName: isGroup ? legacyEffectiveChar.name : undefined,
     });
     // Populate reasoning macros
     if (userId) {
@@ -3112,11 +3157,12 @@ async function legacyAssembly(
     return text;
   };
 
-  // Build a system prompt from the character card
+  // Build a system prompt from the character card (use effective character for alternate fields)
+  const legacyChar = character && chat ? resolveCharacterWithAlternateFields(character as Character, chat as Chat) : character;
   const systemParts: string[] = [];
-  if (character?.description) systemParts.push(character.description);
-  if (character?.personality) systemParts.push(`Personality: ${character.personality}`);
-  if (character?.scenario) systemParts.push(`Scenario: ${character.scenario}`);
+  if (legacyChar?.description) systemParts.push(legacyChar.description);
+  if (legacyChar?.personality) systemParts.push(`Personality: ${legacyChar.personality}`);
+  if (legacyChar?.scenario) systemParts.push(`Scenario: ${legacyChar.scenario}`);
   if (persona?.description) systemParts.push(`[User persona: ${persona.description}]`);
 
   if (systemParts.length > 0) {
@@ -3158,7 +3204,7 @@ async function legacyAssembly(
       const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolved }];
       for (const att of attachments) {
         if (!att.image_id || !userId) continue;
-        const b64 = resolveAttachmentBase64(userId, att.image_id as string);
+        const b64 = await resolveAttachmentBase64(userId, att.image_id as string);
         if (!b64) continue;
         if (att.type === "image") {
           parts.push({ type: "image", data: b64, mime_type: att.mime_type });

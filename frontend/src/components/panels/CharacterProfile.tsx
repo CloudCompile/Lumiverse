@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, type CSSProperties } from 'react'
 import { useParams } from 'react-router'
 import { charactersApi } from '@/api/characters'
-import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
 import LazyImage from '@/components/shared/LazyImage'
 import { EditorSection, FormField, TextInput, TextArea } from '@/components/shared/FormComponents'
@@ -42,7 +42,7 @@ export default function CharacterProfile() {
       .finally(() => setLoading(false))
   }, [charId])
 
-  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
+  const avatarUrl = getCharacterAvatarLargeUrl(character) ?? ''
 
   useEffect(() => {
     if (!avatarUrl) {

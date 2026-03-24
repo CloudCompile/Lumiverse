@@ -1,0 +1,140 @@
+.labelRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.addVariantLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  color: var(--lumiverse-text-dim);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color var(--lumiverse-transition-fast);
+  flex-shrink: 0;
+}
+
+.addVariantLink:hover {
+  color: var(--lumiverse-primary);
+}
+
+.variantBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+
+.variantTabWrapper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.variantTab {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--lumiverse-fill);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 6px;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast);
+  white-space: nowrap;
+}
+
+.variantTab:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+}
+
+.variantTabActive {
+  background: var(--lumiverse-primary);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-primary);
+}
+
+.variantActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.variantActions button {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0;
+  transition: color var(--lumiverse-transition-fast);
+}
+
+.variantActions button:hover {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-hover);
+}
+
+.addVariantBtn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px dashed var(--lumiverse-border);
+  border-radius: 6px;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.addVariantBtn:hover {
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary);
+}
+
+.renameWrapper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.renameInput {
+  width: 80px;
+  padding: 3px 6px;
+  font-size: 11px;
+  background: var(--lumiverse-fill);
+  border: 1px solid var(--lumiverse-primary);
+  border-radius: 4px;
+  color: var(--lumiverse-text);
+  outline: none;
+}
+
+.renameConfirm {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--lumiverse-primary);
+  cursor: pointer;
+  padding: 0;
+}

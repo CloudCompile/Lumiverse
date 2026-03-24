@@ -121,6 +121,7 @@ export default function CharacterGrid({
                   isFavorite={favSet.has(character.id)}
                   isSelected={batchSet.has(character.id)}
                   batchMode={batchMode}
+                  useLargeTier={!forcedColumns}
                   onOpen={onOpen}
                   onEdit={onEdit}
                   onToggleFavorite={onToggleFavorite}

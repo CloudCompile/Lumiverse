@@ -381,7 +381,7 @@ export default function ExpressionEditorTab({ characterId }: Props) {
                     }}
                   >
                     <img
-                      src={characterGalleryApi.thumbnailUrl(item.image_id)}
+                      src={characterGalleryApi.smallUrl(item.image_id)}
                       alt={item.caption || ''}
                       className={styles.galleryPickImage}
                     />

@@ -118,6 +118,7 @@ export function useWebSocket() {
         if (payload.chatId === state.activeChatId) {
           if (state.isGroupChat && payload.characterId) {
             state.setActiveGroupCharacter(payload.characterId)
+            state.setRespondingCharacterId(payload.characterId)
           }
           if (state.activeGenerationId !== payload.generationId) {
             state.startStreaming(payload.generationId, payload.targetMessageId)
@@ -186,9 +187,10 @@ export function useWebSocket() {
               })
             }
 
-            // In group chats, mark the character as spoken and keep the loop alive
+            // In group chats, mark the character as spoken and clear responding state
             if (state.isGroupChat && state.activeGroupCharacterId) {
               state.markCharacterSpoken(state.activeGroupCharacterId)
+              state.setRespondingCharacterId(null)
             }
 
             // End streaming immediately, then reconcile the full message list
@@ -434,6 +436,10 @@ export function useWebSocket() {
         const state = store.getState()
         if (payload.chatId === state.activeChatId) {
           state.setActiveExpression(payload.label, payload.imageId, payload.characterId)
+          // In group chats, also populate per-character expression map
+          if (state.isGroupChat && payload.characterId) {
+            state.setGroupExpression(payload.characterId, payload.label, payload.imageId)
+          }
         }
       }),
     ]

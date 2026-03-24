@@ -10,6 +10,8 @@ export const createExpressionSlice: StateCreator<ExpressionSlice> = (set) => ({
   previousExpressionImageId: null,
   expressionCharacterId: null,
   expressionDisplay: { ...DEFAULT_EXPRESSION_DISPLAY },
+  groupExpressions: {},
+  respondingCharacterId: null,
 
   setActiveExpression: (label, imageId, characterId) =>
     set((state) => ({
@@ -18,6 +20,17 @@ export const createExpressionSlice: StateCreator<ExpressionSlice> = (set) => ({
       currentExpressionImageId: imageId,
       expressionCharacterId: characterId,
     })),
+
+  setGroupExpression: (characterId, label, imageId) =>
+    set((state) => ({
+      groupExpressions: { ...state.groupExpressions, [characterId]: { label, imageId } },
+    })),
+
+  setGroupExpressions: (map) => set({ groupExpressions: map }),
+
+  clearGroupExpressions: () => set({ groupExpressions: {}, respondingCharacterId: null }),
+
+  setRespondingCharacterId: (characterId) => set({ respondingCharacterId: characterId }),
 
   setExpressionDisplay: (partial) =>
     set((state) => {

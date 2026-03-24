@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers } from 'lucide-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
@@ -9,7 +9,7 @@ import { embeddingsApi } from '@/api/embeddings'
 import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
 import { imagesApi } from '@/api/images'
-import { getPersonaAvatarUrlById } from '@/lib/avatarUrls'
+import { getPersonaAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import type { MessageAttachment } from '@/types/api'
@@ -27,8 +27,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [text, setText] = useState('')
   const [dryRunning, setDryRunning] = useState(false)
   const [authorsNoteOpen, setAuthorsNoteOpen] = useState(false)
-  const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras'>(null)
-  const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras'>(null)
+  const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields'>(null)
+  const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields'>(null)
   const [popoverClosing, setPopoverClosing] = useState(false)
   const [sendPersonaId, setSendPersonaId] = useState<string | null>(null)
   const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; title: string; avatar_path: string | null; image_id: string | null }>>([])
@@ -75,6 +75,46 @@ export default function InputArea({ chatId }: InputAreaProps) {
       .then((cfg) => setHasExpressions(!!cfg?.enabled && Object.keys(cfg.mappings || {}).length > 0))
       .catch(() => setHasExpressions(false))
   }, [activeCharacterId])
+
+  // Track alternate fields for the active character
+  type AltFieldVariant = { id: string; label: string; content: string }
+  const [altFieldsData, setAltFieldsData] = useState<Record<string, AltFieldVariant[]>>({})
+  const [altFieldSelections, setAltFieldSelections] = useState<Record<string, string>>({})
+  const hasAltFields = Object.values(altFieldsData).some((arr) => arr.length > 0)
+
+  useEffect(() => {
+    if (!activeCharacterId) { setAltFieldsData({}); return }
+    charactersApi.get(activeCharacterId)
+      .then((c) => {
+        const af = c.extensions?.alternate_fields as Record<string, AltFieldVariant[]> | undefined
+        setAltFieldsData(af && typeof af === 'object' ? af : {})
+      })
+      .catch(() => setAltFieldsData({}))
+  }, [activeCharacterId])
+
+  // Load per-chat alternate field selections
+  useEffect(() => {
+    if (!chatId || !hasAltFields) { setAltFieldSelections({}); return }
+    chatsApi.get(chatId, { messages: false })
+      .then((chat) => setAltFieldSelections((chat.metadata?.alternate_field_selections as Record<string, string>) || {}))
+      .catch(() => setAltFieldSelections({}))
+  }, [chatId, hasAltFields])
+
+  const handleAltFieldSelect = useCallback(async (field: string, variantId: string | null) => {
+    const newSelections = { ...altFieldSelections }
+    if (variantId) newSelections[field] = variantId
+    else delete newSelections[field]
+    setAltFieldSelections(newSelections)
+    try {
+      const chat = await chatsApi.get(chatId, { messages: false })
+      const metadata = { ...(chat.metadata || {}) }
+      if (Object.keys(newSelections).length > 0) metadata.alternate_field_selections = newSelections
+      else delete metadata.alternate_field_selections
+      await chatsApi.update(chatId, { metadata })
+    } catch (err) {
+      console.error('[AltFields] Failed to save:', err)
+    }
+  }, [chatId, altFieldSelections])
 
   // iPhone-specific: match input bar bottom corners to device screen curvature
   const screenCornerRadius = useDeviceFrameRadius()
@@ -224,7 +264,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
           original_filename: file.name,
           width: image.width ?? undefined,
           height: image.height ?? undefined,
-          previewUrl: isImage ? imagesApi.thumbnailUrl(image.id) : undefined,
+          previewUrl: isImage ? imagesApi.smallUrl(image.id) : undefined,
         }
         setPendingAttachments((prev) => [...prev, att])
       }
@@ -583,6 +623,17 @@ export default function InputArea({ chatId }: InputAreaProps) {
               <UserCircle size={14} />
               {sendPersonaId && <span className={styles.badge}>1</span>}
             </button>
+            {hasAltFields && (
+              <button
+                type="button"
+                className={clsx(styles.actionBtn, openPopover === 'altFields' && styles.actionBtnActive)}
+                onClick={() => setOpenPopover((p) => (p === 'altFields' ? null : 'altFields'))}
+                title="Alternate fields"
+              >
+                <Layers size={14} />
+                {Object.keys(altFieldSelections).length > 0 && <span className={styles.badge}>{Object.keys(altFieldSelections).length}</span>}
+              </button>
+            )}
             <button
               type="button"
               className={clsx(styles.actionBtn, openPopover === 'guides' && styles.actionBtnActive)}
@@ -707,7 +758,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                       {p.avatar_path || p.image_id ? (
                         <img
                           className={styles.personaAvatarImg}
-                          src={getPersonaAvatarUrlById(p.id, p.image_id) || undefined}
+                          src={getPersonaAvatarThumbUrlById(p.id, p.image_id) || undefined}
                           alt={p.name}
                           loading="lazy"
                         />
@@ -887,6 +938,47 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 </button>
               </div>
               <InputBarExtensionActions onClose={() => setOpenPopover(null)} />
+            </div>
+          )}
+
+          {renderPopover === 'altFields' && (
+            <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
+              <div className={styles.quickSetName}>Alternate Fields</div>
+              {(['description', 'personality', 'scenario'] as const).map((field) => {
+                const variants = altFieldsData[field]
+                if (!Array.isArray(variants) || variants.length === 0) return null
+                const selectedId = altFieldSelections[field] || ''
+                return (
+                  <div key={field} className={styles.popRowBtn} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'default' }}>
+                    <span style={{ textTransform: 'capitalize' }}>{field}</span>
+                    <select
+                      style={{
+                        marginLeft: 8,
+                        flex: 1,
+                        minWidth: 0,
+                        padding: '3px 6px',
+                        fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))',
+                        background: 'var(--lumiverse-fill-hover)',
+                        border: '1px solid var(--lumiverse-border)',
+                        borderRadius: 6,
+                        color: 'var(--lumiverse-text)',
+                        outline: 'none',
+                        cursor: 'pointer',
+                      }}
+                      value={selectedId}
+                      onChange={(e) => handleAltFieldSelect(field, e.target.value || null)}
+                    >
+                      <option value="">Default</option>
+                      {variants.map((v) => (
+                        <option key={v.id} value={v.id}>{v.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )
+              })}
+              {Object.values(altFieldsData).every((arr) => !arr?.length) && (
+                <div className={styles.popEmpty}>No alternate fields configured.</div>
+              )}
             </div>
           )}
         </div>

@@ -11,7 +11,7 @@
 
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/store'
-import { getCharacterAvatarUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { extractPalette, type ImagePalette } from '@/lib/colorExtraction'
 import { deriveCharacterOverlay, deriveCharacterNameVars } from '@/lib/characterTheme'
 import type { ThemeConfig } from '@/types/theme'
@@ -29,7 +29,7 @@ export function useCharacterTheme() {
   const activeCharacter = activeCharacterId
     ? characters.find((entry) => entry.id === activeCharacterId) ?? null
     : null
-  const avatarUrl = getCharacterAvatarUrlById(activeCharacterId, activeCharacter?.image_id ?? null)
+  const avatarUrl = getCharacterAvatarThumbUrlById(activeCharacterId, activeCharacter?.image_id ?? null)
   const avatarCacheKey = activeCharacterId
     ? `${activeCharacterId}:${activeCharacter?.image_id ?? 'legacy'}:${activeCharacter?.avatar_path ?? 'none'}`
     : null

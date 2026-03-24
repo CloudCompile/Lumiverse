@@ -87,6 +87,22 @@ export async function patch<T>(path: string, body?: any): Promise<T> {
   return handleResponse<T>(res)
 }
 
+export async function getBlob(path: string, params?: Record<string, any>): Promise<Blob> {
+  const url = new URL(`${BASE_URL}${path}`, window.location.origin)
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v))
+    }
+  }
+  const res = await fetch(url.toString(), { credentials: 'include' })
+  if (!res.ok) {
+    let body: any
+    try { body = await res.json() } catch { body = null }
+    throw new ApiError(res.status, res.statusText, body)
+  }
+  return res.blob()
+}
+
 export async function upload<T>(path: string, formData: FormData): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',

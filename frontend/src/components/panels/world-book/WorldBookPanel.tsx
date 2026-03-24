@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Globe, X, User, FileUp, Settings, Search } from 'lucide-react'
+import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Download, Globe, X, User, FileUp, Settings, Search } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import { worldBooksApi } from '@/api/world-books'
@@ -49,6 +49,10 @@ export default function WorldBookPanel() {
   const [deleteBookConfirm, setDeleteBookConfirm] = useState<string | null>(null)
   const [deleteEntryConfirm, setDeleteEntryConfirm] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
+  const [convertPreview, setConvertPreview] = useState<{
+    total: number; eligible: number; constant_skipped: number
+    already_vectorized: number; empty_skipped: number; disabled_skipped: number
+  } | null>(null)
 
   // Debounce refs
   const bookNameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -261,6 +265,41 @@ export default function WorldBookPanel() {
     }
   }, [selectedBookId, loadEntries])
 
+  const handleConvertToVectorizedPreview = useCallback(async () => {
+    if (!selectedBookId) return
+    try {
+      const preview = await worldBooksApi.getConvertToVectorizedPreview(selectedBookId)
+      setConvertPreview(preview)
+    } catch {
+      setVectorStatus('Failed to load conversion preview')
+    }
+  }, [selectedBookId])
+
+  const handleConvertToVectorized = useCallback(async () => {
+    if (!selectedBookId) return
+    setConvertPreview(null)
+    try {
+      setReindexing(true)
+      const result = await worldBooksApi.convertToVectorized(selectedBookId)
+      setVectorSummary(result.summary)
+      setVectorStatus(`Converted ${result.converted} entries. Reindexing vectors...`)
+      await loadEntries(selectedBookId)
+      const reindexResult = await worldBooksApi.reindexVectors(selectedBookId, {
+        onProgress: (p) => {
+          setVectorStatus(`Reindexing... ${formatWorldBookReindexStatus(p)}`)
+        },
+      })
+      const finalStatus = formatWorldBookReindexStatus(reindexResult)
+      setVectorStatus(`Done: ${finalStatus}`)
+      await loadEntries(selectedBookId)
+      await loadVectorSummary(selectedBookId)
+    } catch {
+      setVectorStatus('Failed to convert and reindex')
+    } finally {
+      setReindexing(false)
+    }
+  }, [selectedBookId, loadEntries, loadVectorSummary])
+
   const handleDiagnostics = useCallback(async () => {
     if (!selectedBookId || !activeChatId) return
     setShowDiagnosticsModal(true)
@@ -362,6 +401,55 @@ export default function WorldBookPanel() {
 
   const activeGlobalBooks = books.filter((b) => (globalWorldBooks ?? []).includes(b.id))
   const selectedBook = books.find((book) => book.id === selectedBookId) ?? null
+
+  // Export popover
+  const [exportPopoverOpen, setExportPopoverOpen] = useState(false)
+  const exportBtnRef = useRef<HTMLButtonElement>(null)
+  const exportPopoverRef = useRef<HTMLDivElement>(null)
+  const [exportPopoverPos, setExportPopoverPos] = useState<{ top: number; left: number } | null>(null)
+
+  useEffect(() => {
+    if (!exportPopoverOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (
+        exportPopoverRef.current && !exportPopoverRef.current.contains(e.target as Node) &&
+        exportBtnRef.current && !exportBtnRef.current.contains(e.target as Node)
+      ) {
+        setExportPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [exportPopoverOpen])
+
+  const openExportPopover = useCallback(() => {
+    setExportPopoverOpen((prev) => {
+      const next = !prev
+      if (next && exportBtnRef.current) {
+        const rect = exportBtnRef.current.getBoundingClientRect()
+        setExportPopoverPos({ top: rect.bottom + 4, left: rect.right })
+      }
+      return next
+    })
+  }, [])
+
+  const handleExport = useCallback(async (format: 'lumiverse' | 'character_book' | 'sillytavern') => {
+    if (!selectedBookId) return
+    setExportPopoverOpen(false)
+    try {
+      const data = await worldBooksApi.export(selectedBookId, format)
+      const safeName = (bookName || 'world-book').replace(/[^a-zA-Z0-9_-]/g, '_')
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${safeName}_${format}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      console.error('Export failed:', err)
+    }
+  }, [selectedBookId, bookName])
 
   return (
     <div className={styles.panel}>
@@ -498,8 +586,39 @@ export default function WorldBookPanel() {
           onClick={() => setShowImport(true)}
           title="Import Book"
         >
-          <Upload size={14} />
+          <Download size={14} />
         </button>
+        {selectedBookId && (
+          <div className={styles.exportWrapper}>
+            <button
+              ref={exportBtnRef}
+              type="button"
+              className={styles.iconBtn}
+              onClick={openExportPopover}
+              title="Export Book"
+            >
+              <Upload size={14} />
+            </button>
+            {exportPopoverOpen && exportPopoverPos && createPortal(
+              <div
+                ref={exportPopoverRef}
+                className={styles.exportPopover}
+                style={{ top: exportPopoverPos.top, left: exportPopoverPos.left }}
+              >
+                <button type="button" className={styles.exportPopoverItem} onClick={() => handleExport('lumiverse')}>
+                  Lumiverse (.json)
+                </button>
+                <button type="button" className={styles.exportPopoverItem} onClick={() => handleExport('character_book')}>
+                  Character Book (.json)
+                </button>
+                <button type="button" className={styles.exportPopoverItem} onClick={() => handleExport('sillytavern')}>
+                  SillyTavern (.json)
+                </button>
+              </div>,
+              document.body
+            )}
+          </div>
+        )}
         {!isMobile && (
           <button
             type="button"
@@ -567,27 +686,6 @@ export default function WorldBookPanel() {
                     <span>{vectorSummary.pending} pending</span>
                     <span>{vectorSummary.error} errors</span>
                   </div>
-                  <label className={styles.bulkSemanticToggle}>
-                    <input
-                      ref={bulkSemanticToggleRef}
-                      type="checkbox"
-                      className={styles.bulkSemanticCheckbox}
-                      checked={allNonEmptySemanticEnabled}
-                      disabled={semanticUpdating || nonEmptyEntryCount === 0}
-                      onChange={(event) => handleBulkSemanticActivation(event.target.checked)}
-                    />
-                    <span className={styles.bulkSemanticBody}>
-                      <span className={styles.bulkSemanticTitle}>Use semantic activation for all non-empty entries</span>
-                      <span className={styles.bulkSemanticMeta}>
-                        {nonEmptyEntryCount > 0
-                          ? `${enabledNonEmptyCount} of ${nonEmptyEntryCount} non-empty entries are opted in.`
-                          : 'Add content to at least one entry before enabling semantic activation.'}
-                      </span>
-                    </span>
-                  </label>
-                  <span className={styles.bulkSemanticHint}>
-                    This only changes entry opt-in. Reindex semantic search after changing it.
-                  </span>
                 </div>
               )}
               <div className={styles.bookActionRow}>
@@ -598,6 +696,14 @@ export default function WorldBookPanel() {
                   disabled={reindexing}
                 >
                   {reindexing ? 'Reindexing...' : 'Reindex semantic search'}
+                </button>
+                <button
+                  type="button"
+                  className={styles.subtleActionBtn}
+                  onClick={handleConvertToVectorizedPreview}
+                  disabled={reindexing || semanticUpdating}
+                >
+                  Convert to Vectorized
                 </button>
                 <button
                   type="button"
@@ -744,6 +850,31 @@ export default function WorldBookPanel() {
             setDeleteEntryConfirm(null)
           }}
           onCancel={() => setDeleteEntryConfirm(null)}
+        />
+      )}
+
+      {/* Convert to vectorized confirmation */}
+      {convertPreview && (
+        <ConfirmationModal
+          isOpen={true}
+          title="Convert to Vectorized"
+          message={
+            convertPreview.eligible === 0
+              ? 'No entries are eligible for conversion. All non-constant entries are either already vectorized, empty, or disabled.'
+              : <>
+                  <p>This will enable semantic activation for <strong>{convertPreview.eligible}</strong> {convertPreview.eligible === 1 ? 'entry' : 'entries'} and immediately start reindexing.</p>
+                  <ul style={{ textAlign: 'left', margin: '8px 0', paddingLeft: '20px', fontSize: '12px', opacity: 0.8 }}>
+                    {convertPreview.constant_skipped > 0 && <li>{convertPreview.constant_skipped} constant {convertPreview.constant_skipped === 1 ? 'entry' : 'entries'} skipped (always active)</li>}
+                    {convertPreview.already_vectorized > 0 && <li>{convertPreview.already_vectorized} already vectorized</li>}
+                    {convertPreview.empty_skipped > 0 && <li>{convertPreview.empty_skipped} empty {convertPreview.empty_skipped === 1 ? 'entry' : 'entries'} skipped</li>}
+                    {convertPreview.disabled_skipped > 0 && <li>{convertPreview.disabled_skipped} disabled {convertPreview.disabled_skipped === 1 ? 'entry' : 'entries'} skipped</li>}
+                  </ul>
+                </>
+          }
+          variant="safe"
+          confirmText={convertPreview.eligible > 0 ? 'Convert & Reindex' : 'OK'}
+          onConfirm={convertPreview.eligible > 0 ? handleConvertToVectorized : () => setConvertPreview(null)}
+          onCancel={() => setConvertPreview(null)}
         />
       )}
 

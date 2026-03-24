@@ -12,8 +12,9 @@
     build-only   - Build frontend only
     backend-only - Start backend only, skip frontend serving
     dev          - Start backend in watch mode
-    setup        - Run setup wizard only
-    migrate-st   - Run SillyTavern migration helper
+    setup           - Run setup wizard only
+    reset-password  - Reset owner account password
+    migrate-st      - Run SillyTavern migration helper
 
 .PARAMETER Build
     Rebuild the frontend before starting the backend
@@ -26,7 +27,7 @@
 #>
 
 param(
-    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "migrate-st")]
+    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "reset-password", "migrate-st")]
     [string]$Mode = "all",
 
     [Alias("b")]
@@ -141,6 +142,13 @@ function Invoke-Setup {
     Install-Deps $BackendDir "backend"
     Push-Location $BackendDir
     try { & bun run scripts/setup-wizard.ts } finally { Pop-Location }
+}
+
+function Invoke-ResetPassword {
+    Install-Deps $BackendDir "backend"
+    Write-Info "Launching password reset..."
+    Push-Location $BackendDir
+    try { & bun run reset-password } finally { Pop-Location }
 }
 
 function Invoke-MigrateST {
@@ -269,6 +277,9 @@ switch ($Mode) {
     }
     "setup" {
         Invoke-Setup
+    }
+    "reset-password" {
+        Invoke-ResetPassword
     }
     "migrate-st" {
         Invoke-MigrateST
