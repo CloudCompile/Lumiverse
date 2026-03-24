@@ -2,8 +2,7 @@ import { useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
-import { charactersApi } from '@/api/characters'
-import { personasApi } from '@/api/personas'
+import { getCharacterAvatarUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
 import type { Message } from '@/types/api'
 
 /**
@@ -87,6 +86,7 @@ export function useMessageCard(message: Message, chatId: string) {
 
   const userPersonaId = typeof message.extra?.persona_id === 'string' ? message.extra.persona_id : null
   const messagePersona = userPersonaId ? personas.find((p) => p.id === userPersonaId) : null
+  const activePersona = activePersonaId ? personas.find((p) => p.id === activePersonaId) ?? null : null
   const activeCharacter = activeCharacterId ? characters.find((c) => c.id === activeCharacterId) : null
 
   // In group chats, assistant messages carry character_id in message.extra
@@ -107,11 +107,14 @@ export function useMessageCard(message: Message, chatId: string) {
 
   const effectiveCharId = messageCharacterId || activeCharacterId
   const avatarUrl = isUser
-    ? (userPersonaId ? personasApi.avatarUrl(userPersonaId) : null)
-    : (effectiveCharId ? charactersApi.avatarUrl(effectiveCharId) : null)
+    ? getPersonaAvatarUrlById(
+        userPersonaId ?? activePersona?.id ?? null,
+        messagePersona?.image_id ?? activePersona?.image_id ?? null
+      )
+    : getCharacterAvatarUrlById(effectiveCharId, effectiveCharacter?.image_id ?? null)
 
   const macroUserName = useMemo(() => {
-    const fallback = personas.find((p) => p.id === activePersonaId)?.name ?? 'User'
+    const fallback = activePersona?.name ?? 'User'
 
     if (isUser) {
       return message.name || fallback
@@ -126,7 +129,7 @@ export function useMessageCard(message: Message, chatId: string) {
 
     const firstUser = messages.find((m) => m.is_user && m.name?.trim())
     return firstUser?.name || fallback
-  }, [messages, message.id, message.name, isUser, personas, activePersonaId])
+  }, [messages, message.id, message.name, isUser, activePersona])
 
   const handleEdit = useCallback(() => {
     if (!message.is_user) {

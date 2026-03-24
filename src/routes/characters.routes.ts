@@ -6,6 +6,9 @@ import * as cardSvc from "../services/character-card.service";
 import * as gallerySvc from "../services/character-gallery.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
+import { createAvatarResolverResponse } from "../utils/avatar-cache";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
 
 const app = new Hono();
 
@@ -348,18 +351,22 @@ app.get("/:id/avatar", (c) => {
   if (info.image_id) {
     const filepath = images.getImageFilePath(userId, info.image_id);
     if (filepath) {
-      const response = new Response(Bun.file(filepath));
-      response.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-      return response;
+      return createAvatarResolverResponse(
+        filepath,
+        info.image_id,
+        c.req.header("If-None-Match")
+      );
     }
   }
 
   if (info.avatar_path) {
     const filepath = files.getAvatarPath(info.avatar_path);
     if (filepath) {
-      const response = new Response(Bun.file(filepath));
-      response.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-      return response;
+      return createAvatarResolverResponse(
+        filepath,
+        info.avatar_path,
+        c.req.header("If-None-Match")
+      );
     }
   }
 
@@ -389,7 +396,11 @@ app.post("/:id/avatar", async (c) => {
   const image = await images.uploadImage(userId, file);
   svc.setCharacterImage(userId, char.id, image.id);
   svc.setCharacterAvatar(userId, char.id, image.filename);
-  return c.json({ image_id: image.id, avatar_path: image.filename });
+  const updated = svc.getCharacter(userId, char.id);
+  if (!updated) return c.json({ error: "Not found" }, 404);
+
+  eventBus.emit(EventType.CHARACTER_EDITED, { id: char.id, character: updated }, userId);
+  return c.json(updated);
 });
 
 app.post("/import-bulk", async (c) => {

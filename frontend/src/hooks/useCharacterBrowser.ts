@@ -370,8 +370,7 @@ export function useCharacterBrowser() {
   // Upload avatar
   const uploadAvatar = useCallback(
     async (id: string, file: File) => {
-      await charactersApi.uploadAvatar(id, file)
-      const updated = await charactersApi.get(id)
+      const updated = await charactersApi.uploadAvatar(id, file)
       updateCharacterInStore(id, updated)
       return updated
     },

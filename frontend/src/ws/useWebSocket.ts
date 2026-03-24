@@ -309,6 +309,22 @@ export function useWebSocket() {
         syncExtensions(true)
       }),
 
+      wsClient.on(EventType.CHARACTER_EDITED, (payload: { id: string; character?: import('@/types/api').Character }) => {
+        if (payload?.character) {
+          store.getState().updateCharacter(payload.id, payload.character)
+        }
+      }),
+
+      wsClient.on(EventType.PERSONA_CHANGED, (payload: { id: string; persona?: import('@/types/api').Persona; deleted?: boolean }) => {
+        if (payload?.deleted) {
+          store.getState().removePersona(payload.id)
+          return
+        }
+        if (payload?.persona) {
+          store.getState().updatePersona(payload.id, payload.persona)
+        }
+      }),
+
       // World Info activation
       wsClient.on(EventType.WORLD_INFO_ACTIVATED, (payload: { chatId: string; entries: ActivatedWorldInfoEntry[]; stats?: WorldInfoStats }) => {
         const state = store.getState()

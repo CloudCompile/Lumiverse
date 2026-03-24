@@ -3,6 +3,9 @@ import * as svc from "../services/personas.service";
 import * as files from "../services/files.service";
 import * as images from "../services/images.service";
 import { parsePagination } from "../services/pagination";
+import { createAvatarResolverResponse } from "../utils/avatar-cache";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
 
 const app = new Hono();
 
@@ -44,24 +47,28 @@ app.delete("/:id", (c) => {
 
 app.get("/:id/avatar", (c) => {
   const userId = c.get("userId");
-  const persona = svc.getPersona(userId, c.req.param("id"));
-  if (!persona) return c.json({ error: "Not found" }, 404);
+  const info = svc.getPersonaAvatarInfo(userId, c.req.param("id"));
+  if (!info) return c.json({ error: "Not found" }, 404);
 
-  if (persona.image_id) {
-    const filepath = images.getImageFilePath(userId, persona.image_id);
+  if (info.image_id) {
+    const filepath = images.getImageFilePath(userId, info.image_id);
     if (filepath) {
-      const response = new Response(Bun.file(filepath));
-      response.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-      return response;
+      return createAvatarResolverResponse(
+        filepath,
+        info.image_id,
+        c.req.header("If-None-Match")
+      );
     }
   }
 
-  if (persona.avatar_path) {
-    const filepath = files.getAvatarPath(persona.avatar_path);
+  if (info.avatar_path) {
+    const filepath = files.getAvatarPath(info.avatar_path);
     if (filepath) {
-      const response = new Response(Bun.file(filepath));
-      response.headers.set("Cache-Control", "public, max-age=31536000, immutable");
-      return response;
+      return createAvatarResolverResponse(
+        filepath,
+        info.avatar_path,
+        c.req.header("If-None-Match")
+      );
     }
   }
 
@@ -91,7 +98,11 @@ app.post("/:id/avatar", async (c) => {
   const image = await images.uploadImage(userId, file);
   svc.setPersonaImage(userId, persona.id, image.id);
   svc.setPersonaAvatar(userId, persona.id, image.filename);
-  return c.json({ image_id: image.id, avatar_path: image.filename });
+  const updated = svc.getPersona(userId, persona.id);
+  if (!updated) return c.json({ error: "Not found" }, 404);
+
+  eventBus.emit(EventType.PERSONA_CHANGED, { id: persona.id, persona: updated }, userId);
+  return c.json(updated);
 });
 
 export { app as personasRoutes };

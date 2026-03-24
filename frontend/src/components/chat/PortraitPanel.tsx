@@ -4,6 +4,7 @@ import { X } from 'lucide-react'
 import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
+import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import LazyImage from '@/components/shared/LazyImage'
 import ImageLightbox from './ImageLightbox'
 import type { Character, CharacterGalleryItem } from '@/types/api'
@@ -16,10 +17,18 @@ interface PortraitPanelProps {
 
 export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const characters = useStore((s) => s.characters)
   const togglePortraitPanel = useStore((s) => s.togglePortraitPanel)
+  const storedCharacter = activeCharacterId
+    ? characters.find((entry) => entry.id === activeCharacterId) ?? null
+    : null
   const [character, setCharacter] = useState<Character | null>(null)
   const [gallery, setGallery] = useState<CharacterGalleryItem[]>([])
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (storedCharacter) setCharacter(storedCharacter)
+  }, [storedCharacter])
 
   useEffect(() => {
     if (!activeCharacterId) return
@@ -37,7 +46,7 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
 
   if (!activeCharacterId) return null
 
-  const avatarUrl = charactersApi.avatarUrl(activeCharacterId)
+  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
   const charName = character?.name || ''
 
   return (

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, type CSSProperties } from 'react'
 import { useParams } from 'react-router'
 import { charactersApi } from '@/api/characters'
+import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
 import LazyImage from '@/components/shared/LazyImage'
 import { EditorSection, FormField, TextInput, TextArea } from '@/components/shared/FormComponents'
@@ -13,9 +14,11 @@ import styles from './CharacterProfile.module.css'
 export default function CharacterProfile() {
   const params = useParams<{ id: string }>()
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const characters = useStore((s) => s.characters)
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
   const setDrawerTab = useStore((s) => s.setDrawerTab)
   const charId = params.id || activeCharacterId
+  const storedCharacter = charId ? characters.find((entry) => entry.id === charId) ?? null : null
   const [character, setCharacter] = useState<Character | null>(null)
   const [loading, setLoading] = useState(false)
   const [heroTextVars, setHeroTextVars] = useState<CSSProperties | undefined>(undefined)
@@ -27,6 +30,10 @@ export default function CharacterProfile() {
   }, [charId, setEditingCharacterId, setDrawerTab])
 
   useEffect(() => {
+    if (storedCharacter) setCharacter(storedCharacter)
+  }, [storedCharacter])
+
+  useEffect(() => {
     if (!charId) return
     setLoading(true)
     charactersApi.get(charId)
@@ -35,7 +42,7 @@ export default function CharacterProfile() {
       .finally(() => setLoading(false))
   }, [charId])
 
-  const avatarUrl = character ? charactersApi.avatarUrl(character.id) : ''
+  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
 
   useEffect(() => {
     if (!avatarUrl) {

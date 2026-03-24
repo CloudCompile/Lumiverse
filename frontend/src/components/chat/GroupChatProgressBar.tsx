@@ -1,5 +1,5 @@
 import { useStore } from '@/store'
-import { charactersApi } from '@/api/characters'
+import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import styles from './GroupChatProgressBar.module.css'
 import clsx from 'clsx'
 
@@ -20,6 +20,7 @@ export default function GroupChatProgressBar() {
           const char = characters.find((c) => c.id === id)
           const isActive = id === activeGroupCharacterId
           const hasSpoken = roundCharactersSpoken.includes(id)
+          const avatarUrl = getCharacterAvatarUrl(char)
           return (
             <div key={id}>
               {i > 0 && <span className={styles.connector} />}
@@ -33,7 +34,7 @@ export default function GroupChatProgressBar() {
               >
                 {char?.avatar_path || char?.image_id ? (
                   <img
-                    src={charactersApi.avatarUrl(id)}
+                    src={avatarUrl || undefined}
                     alt={char?.name}
                     className={styles.dotAvatar}
                   />

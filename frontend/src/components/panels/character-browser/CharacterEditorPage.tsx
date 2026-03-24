@@ -3,12 +3,12 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
 import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
-import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
 import { worldBooksApi } from '@/api/world-books'
 import { useStore } from '@/store'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
+import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -430,7 +430,7 @@ export default function CharacterEditorPage() {
                   >
                     <LazyImage
                       key={avatarKey}
-                      src={charactersApi.avatarUrl(character.id)}
+                      src={getCharacterAvatarUrl(character) ?? ''}
                       alt={character.name}
                       className={styles.avatarImg}
                       fallback={

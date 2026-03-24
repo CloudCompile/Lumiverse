@@ -1,8 +1,8 @@
 import { useCallback } from 'react'
 import { useStore } from '@/store'
-import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
+import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import styles from './GroupChatMemberBar.module.css'
 import clsx from 'clsx'
 
@@ -75,6 +75,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
         const isActive = id === activeGroupCharacterId
         const isMuted = mutedCharacterIds.includes(id)
         const talk = char?.talkativeness ?? 0.5
+        const avatarUrl = getCharacterAvatarUrl(char)
         return (
           <button
             key={id}
@@ -97,7 +98,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
           >
             {char?.avatar_path || char?.image_id ? (
               <img
-                src={charactersApi.avatarUrl(id)}
+                src={avatarUrl || undefined}
                 alt={char?.name}
                 className={styles.avatar}
                 loading="lazy"

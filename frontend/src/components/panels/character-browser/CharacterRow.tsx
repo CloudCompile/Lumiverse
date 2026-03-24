@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Star, Pencil } from 'lucide-react'
-import { charactersApi } from '@/api/characters'
+import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import { getTagColor } from '@/lib/tagColors'
 import LazyImage from '@/components/shared/LazyImage'
 import type { Character, CharacterSummary } from '@/types/api'
@@ -28,9 +28,7 @@ export default memo(function CharacterRow({
   onToggleFavorite,
   onToggleBatch,
 }: CharacterRowProps) {
-  const avatarUrl = character.image_id
-    ? charactersApi.imageUrl(character.image_id)
-    : charactersApi.avatarUrl(character.id)
+  const avatarUrl = getCharacterAvatarUrl(character) ?? ''
   const tags = character.tags?.slice(0, 3) || []
 
   const handleClick = () => {

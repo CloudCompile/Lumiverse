@@ -1,8 +1,7 @@
 import { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
 import { useChunkedMessages } from '@/hooks/useChunkedMessages'
 import { useStore } from '@/store'
-import { charactersApi } from '@/api/characters'
-import { personasApi } from '@/api/personas'
+import { getCharacterAvatarUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
 import MessageCard from './MessageCard'
 import MessageContent from './MessageContent'
 import ReasoningBlock from './ReasoningBlock'
@@ -68,8 +67,8 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const activePersona = personas.find((p) => p.id === activePersonaId)
   const userName = activePersona?.name ?? 'User'
   const avatarUrl = isImpersonateStream
-    ? (activePersonaId ? personasApi.avatarUrl(activePersonaId) : null)
-    : (streamCharacterId ? charactersApi.avatarUrl(streamCharacterId) : null)
+    ? getPersonaAvatarUrlById(activePersonaId, activePersona?.image_id ?? null)
+    : getCharacterAvatarUrlById(streamCharacterId, streamCharacter?.image_id ?? null)
 
   // Intersection observer for loading more
   const sentinelRef = useRef<HTMLDivElement>(null)
