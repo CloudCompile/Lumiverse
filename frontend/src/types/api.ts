@@ -508,6 +508,7 @@ export interface EmbeddingConfig {
   api_url: string;
   model: string;
   dimensions: number | null;
+  send_dimensions: boolean;
   retrieval_top_k: number;
   hybrid_weight_mode: 'keyword_first' | 'balanced' | 'vector_first';
   preferred_context_size: number;

@@ -1601,13 +1601,24 @@ function EmbeddingsSettings() {
         />
       </div>
 
+      <label className={styles.toggle}>
+        <input
+          type="checkbox"
+          checked={cfg.send_dimensions ?? false}
+          onChange={(e) => update({ send_dimensions: e.target.checked })}
+        />
+        <span>Send dimensions to provider</span>
+      </label>
+      <p className={styles.toggleHint}>
+        When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value.
+      </p>
+
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Vector Recall Size (top-k)</label>
         <input
           className={styles.numberInput}
           type="number"
           min={1}
-          max={50}
           value={cfg.retrieval_top_k}
           onChange={(e) => update({ retrieval_top_k: Number(e.target.value || 1) })}
         />
@@ -1941,7 +1952,7 @@ function AdvancedSettings() {
           <input
             className={styles.numberInput}
             type="number"
-            min={1} max={50}
+            min={1}
             value={cfg.retrievalTopK}
             onChange={(e) => update({ retrievalTopK: Number(e.target.value) || 4 })}
           />

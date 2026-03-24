@@ -33,6 +33,7 @@ export interface EmbeddingConfig {
   api_url: string;
   model: string;
   dimensions: number | null;
+  send_dimensions: boolean;
   retrieval_top_k: number;
   hybrid_weight_mode: "keyword_first" | "balanced" | "vector_first";
   preferred_context_size: number;
@@ -82,7 +83,7 @@ export interface ChatMemorySettings {
 
   // --- Retrieval ---
   queryContextSize: number;       // Default 6. Range: 1–64. Messages used to build query vector
-  retrievalTopK: number;          // Default 4. Range: 1–50
+  retrievalTopK: number;          // Default 4. Range: 1+
   similarityThreshold: number;    // Default 0 (disabled). Range: 0–2
 
   // --- Query ---
@@ -141,7 +142,7 @@ export function normalizeChatMemorySettings(input: any): ChatMemorySettings {
     chunkOverlapTokens: clampInt(input?.chunkOverlapTokens, 0, 500, d.chunkOverlapTokens),
     exclusionWindow: clampInt(input?.exclusionWindow, 5, 100, d.exclusionWindow),
     queryContextSize: clampInt(input?.queryContextSize, 1, 64, d.queryContextSize),
-    retrievalTopK: clampInt(input?.retrievalTopK, 1, 50, d.retrievalTopK),
+    retrievalTopK: clampInt(input?.retrievalTopK, 1, Infinity, d.retrievalTopK),
     similarityThreshold: clampFloat(input?.similarityThreshold, 0, 2, d.similarityThreshold),
     queryStrategy: ["recent_messages", "last_user_message", "weighted_recent"].includes(input?.queryStrategy)
       ? input.queryStrategy : d.queryStrategy,
@@ -272,6 +273,7 @@ function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): Embed
     api_url: PROVIDER_DEFAULT_URL[provider],
     model: providerDefaultModel(provider),
     dimensions: null,
+    send_dimensions: false,
     retrieval_top_k: 4,
     hybrid_weight_mode: "balanced",
     preferred_context_size: 6,
@@ -294,9 +296,10 @@ function normalizeConfig(input: any): EmbeddingConfig {
     api_url: typeof input?.api_url === "string" && input.api_url.trim() ? input.api_url.trim() : base.api_url,
     model: typeof input?.model === "string" && input.model.trim() ? input.model.trim() : base.model,
     dimensions: Number.isFinite(input?.dimensions) && input.dimensions > 0 ? Math.floor(input.dimensions) : null,
+    send_dimensions: input?.send_dimensions !== undefined ? !!input.send_dimensions : base.send_dimensions,
     retrieval_top_k:
       Number.isFinite(input?.retrieval_top_k) && input.retrieval_top_k > 0
-        ? Math.min(50, Math.floor(input.retrieval_top_k))
+        ? Math.floor(input.retrieval_top_k)
         : base.retrieval_top_k,
     hybrid_weight_mode:
       input?.hybrid_weight_mode === "keyword_first" ||
@@ -690,8 +693,9 @@ async function requestEmbeddings(
   const body: Record<string, any> = {
     model: cfg.model,
     input: texts,
+    encoding_format: "float",
   };
-  if (!options?.omitDimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
+  if (!options?.omitDimensions && cfg.send_dimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
 
   const url = resolveEmbeddingUrl(cfg.api_url);
   const res = await fetch(url, {
