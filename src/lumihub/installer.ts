@@ -416,8 +416,8 @@ export async function installWorldbook(
       // Fetch from Chub API
       const resp = await safeFetch(payload.importUrl, {
         headers: { Accept: "application/json" },
-        timeout: 15_000,
-        maxSize: 10 * 1024 * 1024,
+        timeoutMs: 15_000,
+        maxBytes: 10 * 1024 * 1024,
       });
 
       if (!resp.ok) {
