@@ -2179,8 +2179,10 @@ function AdvancedSettings() {
 }
 
 function LumiHubSettings() {
-  const [lumihubUrl, setLumihubUrl] = useState('')
-  const [instanceName, setInstanceName] = useState('My Lumiverse')
+  const user = useStore((s) => s.user)
+  const defaultInstanceName = user?.name ? `${user.name}'s Lumiverse` : 'My Lumiverse'
+  const [lumihubUrl, setLumihubUrl] = useState('https://lumi.spot')
+  const [instanceName, setInstanceName] = useState(defaultInstanceName)
   const [status, setStatus] = useState<{
     linked: boolean
     lumihub_url?: string
