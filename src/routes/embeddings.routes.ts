@@ -43,9 +43,37 @@ app.post("/world-books/:bookId/reindex", async (c) => {
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
-        const send = (event: string, data: any) => {
-          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        let closed = false;
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(heartbeat);
+          try {
+            controller.close();
+          } catch {
+            // Controller may already be closed/cancelled by the client.
+          }
         };
+        const send = (event: string, data: any) => {
+          if (closed) return false;
+          try {
+            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+            return true;
+          } catch {
+            closed = true;
+            clearInterval(heartbeat);
+            return false;
+          }
+        };
+        const heartbeat = setInterval(() => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`:\n\n`));
+          } catch {
+            closed = true;
+            clearInterval(heartbeat);
+          }
+        }, 5000);
 
         send("progress", {
           total: entries.length,
@@ -61,13 +89,18 @@ app.post("/world-books/:bookId/reindex", async (c) => {
         try {
           const result = await embeddingsSvc.reindexWorldBookEntries(userId, entries, {
             batchSize,
-            onProgress: (progress) => send("progress", progress),
+            onProgress: (progress) => {
+              send("progress", progress);
+            },
           });
           send("done", { success: true, ...result });
         } catch (err: any) {
           send("error", { error: err.message || "Reindex failed" });
         }
-        controller.close();
+        close();
+      },
+      cancel() {
+        // Client disconnected or request timed out.
       },
     });
 
