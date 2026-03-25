@@ -156,6 +156,9 @@ export function useGitOps(
         if (line.trim()) addLog(`  ${line.trim()}`, "system");
       }
 
+      // Clear Bun transpiler cache to avoid stale bytecode
+      Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
+
       // Check which files changed
       const diffFiles = runGit("diff", "--name-only", "HEAD@{1}", "HEAD");
       const changedFiles = diffFiles.ok ? diffFiles.out : "";
@@ -261,6 +264,9 @@ export function useGitOps(
 
       setCurrentBranch(target);
       addLog(`Checked out '${target}'.`, "system");
+
+      // Clear Bun transpiler cache to avoid stale bytecode across branches
+      Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
 
       // Pull latest
       addLog("Pulling latest changes...", "system");

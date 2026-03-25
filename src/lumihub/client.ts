@@ -3,8 +3,8 @@
  * Handles reconnection with exponential backoff, heartbeats, and dispatches
  * install commands to the installer module.
  */
-import type { LumiHubWSMessage, InstallCharacterPayload } from "./types";
-import { installCharacter } from "./installer";
+import type { LumiHubWSMessage, InstallCharacterPayload, InstallWorldbookPayload } from "./types";
+import { installCharacter, installWorldbook } from "./installer";
 import { updateLastConnected } from "../services/lumihub-link.service";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -103,7 +103,7 @@ class LumiHubWSClient {
           type: "instance_info",
           id: crypto.randomUUID(),
           payload: {
-            capabilities: ["character_import", "chub_import"],
+            capabilities: ["character_import", "chub_import", "worldbook_import"],
             version: "1.0.0",
           },
           timestamp: Date.now(),
@@ -112,6 +112,10 @@ class LumiHubWSClient {
 
       case "install_character":
         this.handleInstallCharacter(msg);
+        break;
+
+      case "install_worldbook":
+        this.handleInstallWorldbook(msg);
         break;
 
       default:
@@ -144,6 +148,33 @@ class LumiHubWSClient {
     if (!result.success) {
       eventBus.emit(EventType.LUMIHUB_INSTALL_FAILED, {
         characterName: payload.characterName,
+        error: result.error,
+      });
+    }
+  }
+
+  private async handleInstallWorldbook(msg: LumiHubWSMessage): Promise<void> {
+    const payload = msg.payload as InstallWorldbookPayload;
+    console.log(`[LumiHub WS] Worldbook install request: ${payload.worldbookName} (source: ${payload.source})`);
+
+    eventBus.emit(EventType.LUMIHUB_INSTALL_STARTED, {
+      characterName: payload.worldbookName,
+      source: payload.source,
+    });
+
+    const result = await installWorldbook(msg.id, payload);
+
+    this.send({
+      type: "install_result",
+      id: crypto.randomUUID(),
+      replyTo: msg.id,
+      payload: result,
+      timestamp: Date.now(),
+    });
+
+    if (!result.success) {
+      eventBus.emit(EventType.LUMIHUB_INSTALL_FAILED, {
+        characterName: payload.worldbookName,
         error: result.error,
       });
     }

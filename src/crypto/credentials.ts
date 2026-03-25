@@ -4,7 +4,7 @@
  * Stores the owner's username and password hash in `data/owner.credentials`
  * so that plaintext passwords never need to appear in .env or on disk.
  *
- * The password hash is produced by BetterAuth's hashPassword() (scrypt-based)
+ * The password hash is scrypt-based (salt:key hex format, see crypto/password.ts)
  * and is the same format stored in the `account` table — meaning the reset
  * script and seed logic can write directly to both locations.
  *

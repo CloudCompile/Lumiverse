@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
-import { hashPassword } from "better-auth/crypto";
+import { hashPassword } from "../src/crypto/password";
 import { createIdentityFile, bytesToHex } from "../src/crypto/identity";
 import { writeOwnerCredentials } from "../src/crypto/credentials";
 import {

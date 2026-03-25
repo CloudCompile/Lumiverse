@@ -29,3 +29,21 @@ export interface InstallResultPayload {
   error?: string;
   errorCode?: "DUPLICATE" | "PARSE_ERROR" | "STORAGE_ERROR" | "UNKNOWN";
 }
+
+export interface InstallWorldbookPayload {
+  source: "lumihub" | "chub";
+  worldbookId: string;
+  worldbookName: string;
+  /** Inline worldbook data (for lumihub-sourced). */
+  worldbookData?: { name: string; description: string; entries: Record<string, any>[] };
+  /** Import URL for Chub-sourced lorebooks. */
+  importUrl?: string;
+}
+
+export interface InstallWorldbookResultPayload {
+  requestId: string;
+  success: boolean;
+  worldbookId?: string;
+  worldbookName?: string;
+  error?: string;
+}

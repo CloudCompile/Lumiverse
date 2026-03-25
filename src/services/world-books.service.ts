@@ -443,6 +443,35 @@ export function deleteEntry(userId: string, id: string): boolean {
   return deleted;
 }
 
+// --- Import helpers ---
+
+/**
+ * Convert SillyTavern numeric role (0=system, 1=user, 2=assistant) or string
+ * role to the string format Lumiverse expects. Returns null for unknown/unset.
+ */
+function normalizeImportRole(role: any): string | null {
+  if (role === 0 || role === "system") return "system";
+  if (role === 1 || role === "user") return "user";
+  if (role === 2 || role === "assistant") return "assistant";
+  if (typeof role === "string" && role) return role;
+  return null;
+}
+
+/**
+ * Resolve order_value for an imported entry. Prefers displayIndex (ST's visual
+ * ordering set by drag-and-drop), then explicit ordering fields, then the
+ * iteration index so entries retain their original source ordering.
+ */
+function resolveImportOrder(raw: any, index: number): number {
+  // displayIndex — SillyTavern's visual ordering (most reliable for user intent)
+  if (raw.displayIndex !== undefined && raw.displayIndex !== null) return raw.displayIndex;
+  // insertion_order / order_value / order — explicit prompt-injection ordering
+  const explicit = raw.insertion_order ?? raw.order_value ?? raw.order;
+  if (explicit !== undefined && explicit !== null) return explicit;
+  // Last resort: preserve source iteration order
+  return index;
+}
+
 // --- World Book Import (standalone JSON) ---
 
 export function importWorldBook(
@@ -471,7 +500,8 @@ export function importWorldBook(
   }
 
   let entryCount = 0;
-  for (const raw of rawEntries) {
+  for (let i = 0; i < rawEntries.length; i++) {
+    const raw = rawEntries[i];
     const keys: string[] = Array.isArray(raw.keys) ? raw.keys
       : Array.isArray(raw.key) ? raw.key
       : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
@@ -492,7 +522,7 @@ export function importWorldBook(
     const knownFields = new Set([
       "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
       "enabled", "disabled", "disable",
-      "insertion_order", "order_value", "order", "position", "depth", "role", "selective",
+      "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
       "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
       "group", "group_name", "group_override", "groupOverride",
       "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
@@ -514,10 +544,10 @@ export function importWorldBook(
       content: raw.content || "",
       comment,
       disabled: !enabled,
-      order_value: raw.insertion_order ?? raw.order_value ?? raw.order ?? 100,
+      order_value: resolveImportOrder(raw, i),
       position: raw.position ?? 0,
       depth: raw.depth ?? 4,
-      role: raw.role || undefined,
+      role: normalizeImportRole(raw.role) || undefined,
       selective: raw.selective ?? false,
       constant: raw.constant ?? false,
       case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,
@@ -591,7 +621,8 @@ export function importWorldBookBulk(
   let entryCount = 0;
 
   const tx = db.transaction(() => {
-    for (const raw of rawEntries) {
+    for (let i = 0; i < rawEntries.length; i++) {
+      const raw = rawEntries[i];
       const keys: string[] = Array.isArray(raw.keys) ? raw.keys
         : Array.isArray(raw.key) ? raw.key
         : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
@@ -612,7 +643,7 @@ export function importWorldBookBulk(
       const bulkKnownFields = new Set([
         "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
         "enabled", "disabled", "disable",
-        "insertion_order", "order_value", "order", "position", "depth", "role", "selective",
+        "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
         "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
         "group", "group_name", "group_override", "groupOverride",
         "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
@@ -636,8 +667,8 @@ export function importWorldBookBulk(
         comment,
         raw.position ?? 0,
         raw.depth ?? 4,
-        raw.role || null,
-        raw.insertion_order ?? raw.order_value ?? raw.order ?? 100,
+        normalizeImportRole(raw.role),
+        resolveImportOrder(raw, i),
         raw.selective ? 1 : 0,
         raw.constant ? 1 : 0,
         !enabled ? 1 : 0,
@@ -699,7 +730,8 @@ export function importCharacterBook(
   const entries = characterBook.entries || [];
   let entryCount = 0;
 
-  for (const raw of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const raw = entries[i];
     const keys: string[] = Array.isArray(raw.keys) ? raw.keys
       : Array.isArray(raw.key) ? raw.key
       : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
@@ -721,7 +753,7 @@ export function importCharacterBook(
     const knownFields = new Set([
       "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
       "enabled", "disabled", "disable",
-      "insertion_order", "order_value", "order", "position", "depth", "role", "selective",
+      "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
       "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
       "group", "group_name", "group_override", "groupOverride",
       "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
@@ -743,10 +775,10 @@ export function importCharacterBook(
       content: raw.content || "",
       comment,
       disabled: !enabled,
-      order_value: raw.insertion_order ?? raw.order_value ?? raw.order ?? 100,
+      order_value: resolveImportOrder(raw, i),
       position: raw.position ?? 0,
       depth: raw.depth ?? 4,
-      role: raw.role || undefined,
+      role: normalizeImportRole(raw.role) || undefined,
       selective: raw.selective ?? false,
       constant: raw.constant ?? false,
       case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,

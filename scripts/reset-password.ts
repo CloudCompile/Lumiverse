@@ -19,7 +19,7 @@ import { existsSync } from "fs";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import Database from "bun:sqlite";
-import { hashPassword } from "better-auth/crypto";
+import { hashPassword } from "../src/crypto/password";
 import { readIdentityFile } from "../src/crypto/identity";
 import { writeOwnerCredentials, ownerCredentialsExist, readOwnerCredentials } from "../src/crypto/credentials";
 import {

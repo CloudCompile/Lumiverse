@@ -1,6 +1,6 @@
 import { join, resolve } from "path";
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { hashPassword } from "better-auth/crypto";
+import { hashPassword } from "../crypto/password";
 import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";

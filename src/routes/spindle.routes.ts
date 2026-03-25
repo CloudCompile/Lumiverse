@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { verifyPassword } from "better-auth/crypto";
+import { verifyPassword } from "../crypto/password";
 import { getDb } from "../db/connection";
 import * as managerSvc from "../spindle/manager.service";
 import { PRIVILEGED_PERMISSIONS } from "../spindle/manager.service";

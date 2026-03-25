@@ -3,7 +3,7 @@ import { requireOwner } from "../auth/middleware";
 import { auth, allowCreation } from "../auth";
 import { getDb } from "../db/connection";
 import { getUserBaseDir } from "../auth/provision";
-import { hashPassword, verifyPassword } from "better-auth/crypto";
+import { hashPassword, verifyPassword } from "../crypto/password";
 import { rmSync, existsSync } from "fs";
 
 const app = new Hono();

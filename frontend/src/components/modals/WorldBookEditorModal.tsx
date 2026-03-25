@@ -274,8 +274,6 @@ export default function WorldBookEditorModal() {
     setPostImportBook(result.world_book)
   }, [])
 
-  const selectedEntry = filteredEntries.find((e) => e.id === selectedEntryId) || null
-
   return createPortal(
     <div className={styles.overlay} onClick={closeModal}>
       <motion.div
@@ -445,42 +443,51 @@ export default function WorldBookEditorModal() {
               {/* Entry list */}
               <div className={styles.entryList}>
                 {filteredEntries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className={clsx(styles.entryRow, selectedEntryId === entry.id && styles.entryRowActive)}
-                    onClick={() => setSelectedEntryId(entry.id === selectedEntryId ? null : entry.id)}
-                  >
-                    <span className={styles.entryComment}>
-                      {entry.comment || '(unnamed)'}
-                    </span>
-                    <span className={styles.entryKeys}>
-                      {entry.key.length > 0 ? entry.key.join(', ') : '-'}
-                    </span>
-                    <input
-                      type="checkbox"
-                      className={styles.entryToggle}
-                      checked={!entry.disabled}
-                      title={entry.disabled ? 'Disabled' : 'Enabled'}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={() => updateEntry(entry.id, { disabled: !entry.disabled })}
-                    />
-                    <span
-                      className={styles.entryDeleteBtn}
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setDeleteEntryConfirm(entry.id)
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
+                  <div key={entry.id}>
+                    <div
+                      className={clsx(styles.entryRow, selectedEntryId === entry.id && styles.entryRowActive)}
+                      onClick={() => setSelectedEntryId(entry.id === selectedEntryId ? null : entry.id)}
+                    >
+                      <span className={styles.entryComment}>
+                        {entry.comment || '(unnamed)'}
+                      </span>
+                      <span className={styles.entryKeys}>
+                        {entry.key.length > 0 ? entry.key.join(', ') : '-'}
+                      </span>
+                      <input
+                        type="checkbox"
+                        className={styles.entryToggle}
+                        checked={!entry.disabled}
+                        title={entry.disabled ? 'Disabled' : 'Enabled'}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => updateEntry(entry.id, { disabled: !entry.disabled })}
+                      />
+                      <span
+                        className={styles.entryDeleteBtn}
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => {
                           e.stopPropagation()
                           setDeleteEntryConfirm(entry.id)
-                        }
-                      }}
-                    >
-                      <Trash2 size={11} />
-                    </span>
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.stopPropagation()
+                            setDeleteEntryConfirm(entry.id)
+                          }
+                        }}
+                      >
+                        <Trash2 size={11} />
+                      </span>
+                    </div>
+                    {/* Inline editor below selected entry */}
+                    {selectedEntryId === entry.id && (
+                      <WorldBookEntryEditor
+                        entry={entry}
+                        onUpdate={debouncedUpdateEntry}
+                        onImmediateUpdate={updateEntry}
+                      />
+                    )}
                   </div>
                 ))}
                 {entries.length === 0 && (
@@ -501,15 +508,6 @@ export default function WorldBookEditorModal() {
                   </button>
                 )}
               </div>
-
-              {/* Entry editor */}
-              {selectedEntry && (
-                <WorldBookEntryEditor
-                  entry={selectedEntry}
-                  onUpdate={debouncedUpdateEntry}
-                  onImmediateUpdate={updateEntry}
-                />
-              )}
             </div>
           ) : (
             <div className={styles.content}>

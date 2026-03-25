@@ -11,7 +11,8 @@ import { safeFetch } from "../utils/safe-fetch";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { getFirstUserId } from "../auth/seed";
-import type { InstallCharacterPayload, InstallResultPayload } from "./types";
+import * as wbSvc from "../services/world-books.service";
+import type { InstallCharacterPayload, InstallResultPayload, InstallWorldbookPayload, InstallWorldbookResultPayload } from "./types";
 
 /**
  * Install a character from a LumiHub remote command.
@@ -391,4 +392,74 @@ async function installFromChub(
     characterId: character.id,
     characterName: final?.name || name,
   };
+}
+
+/**
+ * Install a worldbook from a LumiHub remote command.
+ */
+export async function installWorldbook(
+  requestId: string,
+  payload: InstallWorldbookPayload
+): Promise<InstallWorldbookResultPayload> {
+  const userId = getFirstUserId();
+  if (!userId) {
+    return { requestId, success: false, error: "No owner user configured on this Lumiverse instance" };
+  }
+
+  try {
+    let importData: { name: string; description: string; entries: any[] };
+
+    if (payload.source === "lumihub" && payload.worldbookData) {
+      // Inline worldbook data from LumiHub
+      importData = payload.worldbookData;
+    } else if (payload.source === "chub" && payload.importUrl) {
+      // Fetch from Chub API
+      const resp = await safeFetch(payload.importUrl, {
+        headers: { Accept: "application/json" },
+        timeout: 15_000,
+        maxSize: 10 * 1024 * 1024,
+      });
+
+      if (!resp.ok) {
+        return { requestId, success: false, error: `Failed to fetch lorebook from Chub: ${resp.status}` };
+      }
+
+      const json = await resp.json() as any;
+      const def = json.node?.definition;
+      if (!def) {
+        return { requestId, success: false, error: "No definition found in Chub lorebook response" };
+      }
+
+      const rawEntries = def.embedded_lorebook?.entries || [];
+      importData = {
+        name: def.name || payload.worldbookName,
+        description: def.description || "",
+        entries: rawEntries,
+      };
+    } else {
+      return { requestId, success: false, error: "Missing worldbook data or import URL" };
+    }
+
+    if (importData.entries.length === 0) {
+      return { requestId, success: false, error: "No lorebook entries found" };
+    }
+
+    const result = await wbSvc.importWorldBook(userId, importData);
+
+    eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
+      characterId: result.worldBook.id,
+      characterName: importData.name,
+      source: payload.source,
+    }, userId);
+
+    return {
+      requestId,
+      success: true,
+      worldbookId: result.worldBook.id,
+      worldbookName: importData.name,
+    };
+  } catch (err: any) {
+    console.error("[LumiHub Installer] Worldbook install error:", err);
+    return { requestId, success: false, error: err.message || "Unknown error during worldbook install" };
+  }
 }
