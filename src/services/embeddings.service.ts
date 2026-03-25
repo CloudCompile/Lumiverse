@@ -979,6 +979,14 @@ export async function reindexWorldBookEntries(
     skipped_disabled_or_empty: 0,
     failed: 0,
   };
+  const emitProgress = () => {
+    if (!options?.onProgress) return;
+    try {
+      options.onProgress({ ...progress });
+    } catch (err) {
+      console.warn("[embeddings] Progress callback failed:", err);
+    }
+  };
   const toIndex: WorldBookEntry[] = [];
   const notEnabled: WorldBookEntry[] = [];
   const disabledOrEmpty: WorldBookEntry[] = [];
@@ -1001,7 +1009,7 @@ export async function reindexWorldBookEntries(
     updateWorldBookEntryVectorState(entry.id, "not_enabled", null, null);
     progress.removed += 1;
     progress.current += 1;
-    options?.onProgress?.({ ...progress });
+    emitProgress();
   }
 
   for (const entry of disabledOrEmpty) {
@@ -1009,7 +1017,7 @@ export async function reindexWorldBookEntries(
     updateWorldBookEntryVectorState(entry.id, "pending", null, null);
     progress.removed += 1;
     progress.current += 1;
-    options?.onProgress?.({ ...progress });
+    emitProgress();
   }
 
   const cfg = await getEmbeddingConfig(userId);
@@ -1019,7 +1027,7 @@ export async function reindexWorldBookEntries(
       updateWorldBookEntryVectorState(entry.id, "pending", null, null);
       progress.removed += 1;
       progress.current += 1;
-      options?.onProgress?.({ ...progress });
+      emitProgress();
     }
     return progress;
   }
@@ -1060,14 +1068,14 @@ export async function reindexWorldBookEntries(
       updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "indexed", now, null);
       progress.indexed += batch.length;
       progress.current += batch.length;
-      options?.onProgress?.({ ...progress });
+      emitProgress();
     } catch (err) {
       console.warn("[embeddings] Batch embedding failed:", err);
       const message = err instanceof Error ? err.message : "Batch vector indexing failed";
       updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "error", null, message);
       progress.failed += batch.length;
       progress.current += batch.length;
-      options?.onProgress?.({ ...progress });
+      emitProgress();
     }
   }
 
