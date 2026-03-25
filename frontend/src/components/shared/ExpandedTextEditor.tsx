@@ -11,61 +11,101 @@ import s from './ExpandedTextEditor.module.css'
 // ============================================================================
 
 function highlightSyntax(text: string): ReactNode[] {
-  type Span = { start: number; end: number; cls: string }
-  const spans: Span[] = []
+  let keyCounter = 0
+  const k = () => keyCounter++
 
-  // Find balanced {{…}} macro spans (supports nesting)
-  let i = 0
-  while (i < text.length - 1) {
-    if (text[i] === '{' && text[i + 1] === '{') {
-      let depth = 1
-      let j = i + 2
-      while (j < text.length - 1 && depth > 0) {
-        if (text[j] === '{' && text[j + 1] === '{') { depth++; j += 2 }
-        else if (text[j] === '}' && text[j + 1] === '}') { depth--; j += 2 }
-        else { j++ }
-      }
-      if (depth === 0) {
-        spans.push({ start: i, end: j, cls: s.hlMacro })
-        i = j
-      } else {
-        i += 2
-      }
-    } else {
-      i++
+  /** Find position of first `}` in the balanced closing `}}` for a macro. */
+  function findClose(str: string, start: number): number {
+    let depth = 1
+    let j = start
+    while (j < str.length - 1 && depth > 0) {
+      if (str[j] === '{' && str[j + 1] === '{') { depth++; j += 2 }
+      else if (str[j] === '}' && str[j + 1] === '}') { depth--; if (depth === 0) return j; j += 2 }
+      else j++
     }
+    return -1
   }
 
-  // Find other syntax elements via regex, skipping macro regions
-  const otherRegex = /(```[\s\S]*?```)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(^#{1,6}\s.+$)|(`[^`\n]+`)/gm
-  let match: RegExpExecArray | null
-  while ((match = otherRegex.exec(text)) !== null) {
-    const mStart = match.index
-    const mEnd = mStart + match[0].length
-    if (spans.some(sp => mStart < sp.end && mEnd > sp.start)) continue
-
-    let cls: string
-    if (match[1]) cls = s.hlCode
-    else if (match[2]) cls = s.hlBold
-    else if (match[3]) cls = s.hlItalic
-    else if (match[4]) cls = s.hlHeading
-    else cls = s.hlInlineCode
-
-    spans.push({ start: mStart, end: mEnd, cls })
+  /** Highlight plain text (no macros): XML/HTML tags. */
+  function highlightPlain(str: string): ReactNode[] {
+    if (!str) return []
+    const nodes: ReactNode[] = []
+    const re = /<\/?[a-zA-Z_][\w.-]*(?:\s+[^>]*)?\s*\/?>/g
+    let last = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(str)) !== null) {
+      if (m.index > last) nodes.push(str.slice(last, m.index))
+      nodes.push(<span key={k()} className={s.hlXmlTag}>{m[0]}</span>)
+      last = m.index + m[0].length
+    }
+    if (last < str.length) nodes.push(str.slice(last))
+    return nodes
   }
 
-  // Sort by position and build token array
-  spans.sort((a, b) => a.start - b.start)
-
-  const tokens: ReactNode[] = []
-  let lastIndex = 0
-  for (const span of spans) {
-    if (span.start > lastIndex) tokens.push(text.slice(lastIndex, span.start))
-    tokens.push(<span key={span.start} className={span.cls}>{text.slice(span.start, span.end)}</span>)
-    lastIndex = span.end
+  /** Process `::` separators and nested content inside a macro body. */
+  function processArgs(str: string): ReactNode[] {
+    const nodes: ReactNode[] = []
+    let i = 0
+    while (i < str.length) {
+      // :: separator
+      if (i < str.length - 1 && str[i] === ':' && str[i + 1] === ':') {
+        nodes.push(<span key={k()} className={s.hlSep}>{'::'}</span>)
+        i += 2
+        continue
+      }
+      // Nested macro
+      if (i < str.length - 1 && str[i] === '{' && str[i + 1] === '{') {
+        const ci = findClose(str, i + 2)
+        if (ci !== -1) {
+          nodes.push(...emitMacro(str.slice(i + 2, ci)))
+          i = ci + 2
+          continue
+        }
+      }
+      // Plain text within args
+      const start = i
+      while (i < str.length) {
+        if (i < str.length - 1 && ((str[i] === ':' && str[i + 1] === ':') || (str[i] === '{' && str[i + 1] === '{'))) break
+        i++
+      }
+      if (i > start) nodes.push(...highlightPlain(str.slice(start, i)))
+    }
+    return nodes
   }
-  if (lastIndex < text.length) tokens.push(text.slice(lastIndex))
-  return tokens
+
+  /** Emit a single macro: brackets + name + args. `inner` is content between {{ and }}. */
+  function emitMacro(inner: string): ReactNode[] {
+    const nodes: ReactNode[] = []
+    nodes.push(<span key={k()} className={s.hlBracket}>{'{{'}</span>)
+    const nameMatch = inner.match(/^([a-zA-Z_]\w*)/)
+    if (nameMatch) {
+      nodes.push(<span key={k()} className={s.hlMacroName}>{nameMatch[1]}</span>)
+      const rest = inner.slice(nameMatch[1].length)
+      if (rest.length > 0) nodes.push(...processArgs(rest))
+    } else {
+      nodes.push(...processArgs(inner))
+    }
+    nodes.push(<span key={k()} className={s.hlBracket}>{'}}'}</span>)
+    return nodes
+  }
+
+  /** Top-level: split on macros, highlight plain segments with XML tags. */
+  const result: ReactNode[] = []
+  let i = 0
+  while (i < text.length) {
+    if (i < text.length - 1 && text[i] === '{' && text[i + 1] === '{') {
+      const ci = findClose(text, i + 2)
+      if (ci !== -1) {
+        result.push(...emitMacro(text.slice(i + 2, ci)))
+        i = ci + 2
+        continue
+      }
+    }
+    const start = i
+    while (i < text.length && !(i < text.length - 1 && text[i] === '{' && text[i + 1] === '{')) i++
+    if (i > start) result.push(...highlightPlain(text.slice(start, i)))
+  }
+  return result
 }
 
 // ============================================================================

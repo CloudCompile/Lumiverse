@@ -212,38 +212,23 @@
 
 /* ── Syntax highlight tokens ── */
 
-.hlMacro {
+.hlBracket {
+  color: #c792ea;
+  font-weight: 700;
+}
+
+.hlMacroName {
   color: var(--lumiverse-primary, #9370db);
-  font-weight: 600;
-}
-
-.hlBold {
-  color: var(--lumiverse-text);
   font-weight: 700;
 }
 
-.hlItalic {
-  color: var(--lumiverse-text-muted);
-  font-style: italic;
+.hlSep {
+  color: var(--lumiverse-text-dim, #666);
+  opacity: 0.6;
 }
 
-.hlHeading {
-  color: #60a5fa;
-  font-weight: 700;
-}
-
-.hlCode {
-  color: #34d399;
-  background: rgba(16, 185, 129, 0.08);
-  border-radius: 3px;
-  padding: 0 2px;
-}
-
-.hlInlineCode {
-  color: #f59e0b;
-  background: rgba(245, 158, 11, 0.08);
-  border-radius: 3px;
-  padding: 0 2px;
+.hlXmlTag {
+  color: #82aaff;
 }
 
 /* ── Macro sidebar ── */
