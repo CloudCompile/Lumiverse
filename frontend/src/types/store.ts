@@ -549,6 +549,7 @@ export interface GroupChatSlice {
   startNewRound: (total: number) => void
   setNudgeLoopActive: (active: boolean) => void
   setActiveGroupCharacter: (characterId: string | null) => void
+  setGroupCharacterIds: (ids: string[]) => void
   setMutedCharacterIds: (ids: string[]) => void
   toggleMuteCharacter: (characterId: string) => string[]
 }

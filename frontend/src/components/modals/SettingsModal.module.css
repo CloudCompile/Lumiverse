@@ -939,6 +939,98 @@
   padding: 8px;
 }
 
+/* ── LumiHub link ── */
+
+.lumihubCard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--lumiverse-border-neutral);
+  background: var(--lumiverse-fill-subtle);
+}
+
+.lumihubStatusRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lumihubDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.lumihubDotOnline {
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+}
+
+.lumihubDotOffline {
+  background: var(--lumiverse-text-dim);
+}
+
+.lumihubStatusText {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lumiverse-text);
+}
+
+.lumihubMeta {
+  font-size: 12px;
+  color: var(--lumiverse-text-muted);
+}
+
+.lumihubInput {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text);
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color var(--lumiverse-transition-fast);
+}
+
+.lumihubInput:focus {
+  border-color: var(--lumiverse-primary);
+}
+
+.lumihubInput::placeholder {
+  color: var(--lumiverse-text-dim);
+}
+
+.lumihubPrimaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--lumiverse-primary);
+  background: var(--lumiverse-primary-020);
+  color: var(--lumiverse-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast);
+  align-self: flex-start;
+}
+
+.lumihubPrimaryBtn:hover {
+  background: var(--lumiverse-primary-030, rgba(139, 92, 246, 0.15));
+}
+
+.lumihubPrimaryBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 @media (max-width: 600px) {
   .overlay {
     align-items: stretch;

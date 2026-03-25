@@ -30,6 +30,7 @@ import { characterGalleryRoutes } from "./routes/character-gallery.routes";
 import { embeddingsRoutes } from "./routes/embeddings.routes";
 import { tokenizersRoutes } from "./routes/tokenizers.routes";
 import { spindleOAuthRoutes } from "./routes/spindle-oauth.routes";
+import { lumihubCallbackRoute, lumihubRoutes } from "./routes/lumihub.routes";
 import { systemRoutes } from "./routes/system.routes";
 import { migrateRoutes } from "./routes/migrate.routes";
 import { presetProfilesRoutes } from "./routes/preset-profiles.routes";
@@ -106,6 +107,9 @@ app.on(["POST", "GET"], "/api/auth/*", (c) => {
 // OAuth callback route — unauthenticated, before auth middleware
 app.route("/api/spindle-oauth", spindleOAuthRoutes);
 
+// LumiHub callback — unauthenticated (PKCE code proves authorization)
+app.route("/api/v1/lumihub", lumihubCallbackRoute);
+
 // Auth middleware — AFTER auth handler, BEFORE routes
 app.use("/api/v1/*", requireAuth);
 
@@ -136,6 +140,7 @@ app.route("/api/v1/migrate", migrateRoutes);
 app.route("/api/v1/preset-profiles", presetProfilesRoutes);
 app.route("/api/v1/regex-scripts", regexScriptsRoutes);
 app.route("/api/v1/characters/:characterId/expressions", expressionsRoutes);
+app.route("/api/v1/lumihub", lumihubRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

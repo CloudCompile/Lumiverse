@@ -1,0 +1,31 @@
+/** Shared message format for the LumiHub <-> Lumiverse WebSocket protocol. */
+export interface LumiHubWSMessage {
+  type: string;
+  id: string;
+  payload?: unknown;
+  timestamp: number;
+  replyTo?: string;
+}
+
+export interface InstallCharacterPayload {
+  source: "lumihub" | "chub";
+  characterId: string;
+  characterName: string;
+  /** Full CCSv3 card JSON (for lumihub-sourced characters). */
+  cardData?: Record<string, any>;
+  /** Base64-encoded avatar image. */
+  avatarBase64?: string;
+  /** MIME type of the avatar (e.g. "image/png"). */
+  avatarMime?: string;
+  /** Import URL for Chub-sourced characters. */
+  importUrl?: string;
+}
+
+export interface InstallResultPayload {
+  requestId: string;
+  success: boolean;
+  characterId?: string;
+  characterName?: string;
+  error?: string;
+  errorCode?: "DUPLICATE" | "PARSE_ERROR" | "STORAGE_ERROR" | "UNKNOWN";
+}

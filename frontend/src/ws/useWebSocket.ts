@@ -442,6 +442,16 @@ export function useWebSocket() {
           }
         }
       }),
+      // LumiHub remote install notifications
+      wsClient.on(EventType.LUMIHUB_INSTALL_STARTED, (payload: { characterName: string; source: string }) => {
+        toast.info(`Installing "${payload.characterName}" from LumiHub...`, { title: 'LumiHub' })
+      }),
+      wsClient.on(EventType.LUMIHUB_INSTALL_COMPLETED, (payload: { characterId: string; characterName: string }) => {
+        toast.success(`"${payload.characterName}" installed successfully`, { title: 'LumiHub' })
+      }),
+      wsClient.on(EventType.LUMIHUB_INSTALL_FAILED, (payload: { characterName: string; error: string }) => {
+        toast.error(`Failed to install "${payload.characterName}": ${payload.error}`, { title: 'LumiHub' })
+      }),
     ]
 
     return () => {

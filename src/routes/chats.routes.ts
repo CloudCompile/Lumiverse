@@ -66,6 +66,25 @@ app.post("/:id/unmute/:characterId", (c) => {
   return c.json(updated);
 });
 
+// Group chat member management
+app.post("/:id/members/:characterId", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const updated = svc.addGroupMember(userId, c.req.param("id"), c.req.param("characterId"), {
+    skip_greeting: body.skip_greeting,
+    greeting_index: body.greeting_index,
+  });
+  if (!updated) return c.json({ error: "Not found, not a group chat, character not found, or already a member" }, 400);
+  return c.json(updated);
+});
+
+app.delete("/:id/members/:characterId", (c) => {
+  const userId = c.get("userId");
+  const updated = svc.removeGroupMember(userId, c.req.param("id"), c.req.param("characterId"));
+  if (!updated) return c.json({ error: "Not found, not a group chat, not a member, or cannot remove (minimum 2 members)" }, 400);
+  return c.json(updated);
+});
+
 app.get("/:id", (c) => {
   const userId = c.get("userId");
   const chat = svc.getChat(userId, c.req.param("id"));

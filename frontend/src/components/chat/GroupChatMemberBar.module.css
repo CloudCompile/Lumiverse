@@ -142,3 +142,94 @@
 .talkLow .avatarFallback {
   border-color: rgba(255, 255, 255, 0.04);
 }
+
+/* ── Add Member Button ── */
+.addMemberBtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 52px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px dashed var(--lumiverse-border);
+  background: none;
+  cursor: pointer;
+  transition: all 180ms ease;
+  flex-shrink: 0;
+  color: var(--lumiverse-text-dim);
+}
+
+.addMemberBtn:hover {
+  background: var(--lumiverse-fill, rgba(255, 255, 255, 0.06));
+  border-color: var(--lumiverse-primary-050);
+  color: var(--lumiverse-primary);
+}
+
+/* ── Context Menu ── */
+.contextMenu {
+  position: fixed;
+  z-index: 10003;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--lumiverse-bg-darker, #0e0e14);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(16px);
+  animation: contextMenuIn 120ms ease-out;
+  transform-origin: top left;
+}
+
+@keyframes contextMenuIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.contextMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--lumiverse-text);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 120ms ease;
+  text-align: left;
+}
+
+.contextMenuItem:hover:not(:disabled) {
+  background: var(--lumiverse-fill, rgba(255, 255, 255, 0.06));
+}
+
+.contextMenuItem:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.contextMenuItemDanger {
+  color: var(--lumiverse-error, #e54545);
+}
+
+.contextMenuItemDanger:hover:not(:disabled) {
+  background: rgba(229, 69, 69, 0.1);
+}
+
+.contextMenuDivider {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--lumiverse-border);
+}

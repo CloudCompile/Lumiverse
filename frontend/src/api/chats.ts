@@ -50,6 +50,14 @@ export const chatsApi = {
     return post<Chat>(`/chats/${chatId}/unmute/${characterId}`, {})
   },
 
+  addMember(chatId: string, characterId: string, options?: { skip_greeting?: boolean; greeting_index?: number }) {
+    return post<Chat>(`/chats/${chatId}/members/${characterId}`, options || {})
+  },
+
+  removeMember(chatId: string, characterId: string) {
+    return del<void>(`/chats/${chatId}/members/${characterId}`)
+  },
+
   reattributeUserMessages(chatId: string, personaId: string) {
     return post<{ success: true; updated: number; persona_id: string; persona_name: string }>(
       `/chats/${chatId}/reattribute-user-messages`,

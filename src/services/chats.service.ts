@@ -269,6 +269,88 @@ export function setGroupMute(userId: string, chatId: string, characterId: string
   return updateChat(userId, chatId, { metadata: newMetadata });
 }
 
+// ---- Group chat member management ----
+
+export function addGroupMember(
+  userId: string,
+  chatId: string,
+  characterId: string,
+  options?: { skip_greeting?: boolean; greeting_index?: number }
+): Chat | null {
+  const chat = getChat(userId, chatId);
+  if (!chat || !chat.metadata?.group) return null;
+
+  const characterIds: string[] = chat.metadata.character_ids || [];
+  if (characterIds.includes(characterId)) return null;
+
+  const character = getCharacter(userId, characterId);
+  if (!character) return null;
+
+  const newMetadata = { ...chat.metadata, character_ids: [...characterIds, characterId] };
+  const updated = updateChat(userId, chatId, { metadata: newMetadata });
+
+  if (updated && !options?.skip_greeting) {
+    let greeting = character.first_mes;
+    if (options?.greeting_index !== undefined && options.greeting_index >= 1 && character.alternate_greetings?.length) {
+      const altIdx = options.greeting_index - 1;
+      if (altIdx < character.alternate_greetings.length) {
+        greeting = character.alternate_greetings[altIdx];
+      }
+    }
+    if (greeting) {
+      createMessage(chatId, {
+        is_user: false,
+        name: character.name,
+        content: greeting,
+      }, userId);
+    }
+  }
+
+  return updated;
+}
+
+export function removeGroupMember(userId: string, chatId: string, characterId: string): Chat | null {
+  const chat = getChat(userId, chatId);
+  if (!chat || !chat.metadata?.group) return null;
+
+  const characterIds: string[] = chat.metadata.character_ids || [];
+  if (!characterIds.includes(characterId)) return null;
+  if (characterIds.length <= 2) return null;
+
+  const newCharacterIds = characterIds.filter((id) => id !== characterId);
+
+  // Clean up muted list
+  const mutedIds: string[] = Array.isArray(chat.metadata.muted_character_ids)
+    ? chat.metadata.muted_character_ids.filter((id: string) => id !== characterId)
+    : [];
+
+  // Clean up per-character expression state
+  const groupExpressions = chat.metadata.group_expressions
+    ? { ...chat.metadata.group_expressions }
+    : undefined;
+  if (groupExpressions && characterId in groupExpressions) {
+    delete groupExpressions[characterId];
+  }
+
+  const newMetadata = {
+    ...chat.metadata,
+    character_ids: newCharacterIds,
+    muted_character_ids: mutedIds,
+    ...(groupExpressions !== undefined && { group_expressions: groupExpressions }),
+  };
+
+  // If the removed character was the primary character_id on the chat row,
+  // reassign to the first remaining member
+  if (chat.character_id === characterId) {
+    const now = Math.floor(Date.now() / 1000);
+    getDb()
+      .query("UPDATE chats SET character_id = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+      .run(newCharacterIds[0], now, chatId, userId);
+  }
+
+  return updateChat(userId, chatId, { metadata: newMetadata });
+}
+
 export function reattributeUserMessages(userId: string, chatId: string, personaId: string, personaName: string): number | null {
   const chat = getChat(userId, chatId);
   if (!chat) return null;

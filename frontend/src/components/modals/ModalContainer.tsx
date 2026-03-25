@@ -10,6 +10,7 @@ import ToolEditorModal from '@/components/panels/creator-workshop/ToolEditorModa
 import DryRunModal from './DryRunModal'
 import PromptItemizerModal from './PromptItemizerModal'
 import GroupChatCreatorModal from './GroupChatCreatorModal'
+import AddGroupMemberModal from '@/components/chat/AddGroupMemberModal'
 import ManageChatsModal from './ManageChatsModal'
 import ChatPickerModal from './ChatPickerModal'
 import PermissionRequestModal from './PermissionRequestModal'
@@ -75,6 +76,7 @@ export default function ModalContainer() {
       {activeModal === 'dryRun' && <DryRunModal />}
       {activeModal === 'promptItemizer' && <PromptItemizerModal />}
       {activeModal === 'groupChatCreator' && <GroupChatCreatorModal />}
+      {activeModal === 'addGroupMember' && modalProps.chatId && <AddGroupMemberModal />}
       {activeModal === 'manageChats' && <ManageChatsModal />}
       {activeModal === 'chatPicker' && modalProps.characterId && modalProps.characterName && (
         <ChatPickerModal

@@ -53,6 +53,8 @@ export const createGroupChatSlice: StateCreator<GroupChatSlice> = (set, get) => 
 
   setActiveGroupCharacter: (characterId) => set({ activeGroupCharacterId: characterId }),
 
+  setGroupCharacterIds: (ids) => set({ groupCharacterIds: ids }),
+
   setMutedCharacterIds: (ids) => set({ mutedCharacterIds: ids }),
 
   toggleMuteCharacter: (characterId) => {

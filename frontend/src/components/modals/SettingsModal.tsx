@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
-import { X, Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity } from 'lucide-react'
+import { X, Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity, Globe } from 'lucide-react'
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import { embeddingsApi } from '@/api/embeddings'
@@ -32,6 +32,7 @@ const BASE_VIEWS = [
   { id: 'embeddings', icon: Database, label: 'Embeddings' },
   { id: 'appearance', icon: Palette, label: 'Appearance' },
   { id: 'advanced', icon: Sliders, label: 'Advanced' },
+  { id: 'lumihub', icon: Globe, label: 'LumiHub' },
   { id: 'danger', icon: Shield, label: 'Danger Zone' },
   { id: 'diagnostics', icon: Activity, label: 'Diagnostics' },
 ] as const
@@ -121,6 +122,8 @@ function SettingsView({ view }: { view: string }) {
       return <AdvancedSettings />
     case 'embeddings':
       return <EmbeddingsSettings />
+    case 'lumihub':
+      return <LumiHubSettings />
     case 'danger':
       return <DangerZone />
     case 'tokenizers':
@@ -2171,6 +2174,186 @@ function AdvancedSettings() {
           </>
         )}
       </CollapsibleSection>
+    </div>
+  )
+}
+
+function LumiHubSettings() {
+  const [lumihubUrl, setLumihubUrl] = useState('')
+  const [instanceName, setInstanceName] = useState('My Lumiverse')
+  const [status, setStatus] = useState<{
+    linked: boolean
+    lumihub_url?: string
+    instance_name?: string
+    connected?: boolean
+    last_connected_at?: string | null
+  } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [linking, setLinking] = useState(false)
+  const [unlinking, setUnlinking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchStatus = async () => {
+    try {
+      const res = await fetch('/api/v1/lumihub/status', { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        setStatus(data)
+        if (data.lumihub_url) setLumihubUrl(data.lumihub_url)
+        if (data.instance_name) setInstanceName(data.instance_name)
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchStatus()
+    const interval = setInterval(fetchStatus, 10_000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const handleLink = async () => {
+    if (!lumihubUrl.trim()) {
+      setError('Enter your LumiHub URL')
+      return
+    }
+    setError(null)
+    setLinking(true)
+    try {
+      const res = await fetch('/api/v1/lumihub/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ lumihub_url: lumihubUrl.trim(), instance_name: instanceName.trim() || 'My Lumiverse', redirect_origin: window.location.origin }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        setError((body as any).error || 'Failed to start linking')
+        return
+      }
+      const data = await res.json() as { authorize_url: string }
+      window.open(data.authorize_url, '_blank')
+      // Poll for status change
+      const poll = setInterval(async () => {
+        const checkRes = await fetch('/api/v1/lumihub/status', { credentials: 'include' })
+        if (checkRes.ok) {
+          const checkData = await checkRes.json()
+          if (checkData.linked) {
+            clearInterval(poll)
+            setStatus(checkData)
+            setLinking(false)
+          }
+        }
+      }, 2000)
+      // Stop polling after 5 minutes
+      setTimeout(() => { clearInterval(poll); setLinking(false) }, 5 * 60 * 1000)
+    } catch (err: any) {
+      setError(err.message || 'Failed to connect to LumiHub')
+      setLinking(false)
+    }
+  }
+
+  const handleUnlink = async () => {
+    setUnlinking(true)
+    try {
+      await fetch('/api/v1/lumihub/unlink', { method: 'POST', credentials: 'include' })
+      setStatus({ linked: false })
+      setLumihubUrl('')
+    } catch {
+      setError('Failed to unlink')
+    } finally {
+      setUnlinking(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className={styles.settingsSection}>
+        <h3 className={styles.sectionTitle}>LumiHub</h3>
+        <span className={styles.helperText}>Loading...</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles.settingsSection}>
+      <h3 className={styles.sectionTitle}>LumiHub</h3>
+      <span className={styles.helperText}>
+        Link this Lumiverse instance to LumiHub to install characters directly from the web.
+      </span>
+
+      {status?.linked ? (
+        <div className={styles.lumihubCard}>
+          <div className={styles.lumihubStatusRow}>
+            <span className={clsx(styles.lumihubDot, status.connected ? styles.lumihubDotOnline : styles.lumihubDotOffline)} />
+            <span className={styles.lumihubStatusText}>
+              {status.connected ? 'Connected' : 'Disconnected'} — {status.instance_name}
+            </span>
+          </div>
+
+          <div className={styles.field}>
+            <span className={styles.fieldLabel}>LumiHub URL</span>
+            <span className={styles.lumihubMeta}>{status.lumihub_url}</span>
+          </div>
+
+          {status.last_connected_at && (
+            <div className={styles.field}>
+              <span className={styles.fieldLabel}>Last Connected</span>
+              <span className={styles.lumihubMeta}>
+                {new Date(status.last_connected_at).toLocaleString()}
+              </span>
+            </div>
+          )}
+
+          <button
+            className={clsx(styles.smallBtn, styles.textBtnDanger)}
+            onClick={handleUnlink}
+            disabled={unlinking}
+          >
+            {unlinking ? 'Unlinking...' : 'Unlink from LumiHub'}
+          </button>
+        </div>
+      ) : (
+        <div className={styles.lumihubCard}>
+          <div className={styles.field}>
+            <span className={styles.fieldLabel}>LumiHub URL</span>
+            <input
+              className={styles.lumihubInput}
+              type="text"
+              placeholder="https://lumi.spot"
+              value={lumihubUrl}
+              onChange={(e) => setLumihubUrl(e.target.value)}
+            />
+          </div>
+
+          <div className={styles.field}>
+            <span className={styles.fieldLabel}>Instance Name</span>
+            <input
+              className={styles.lumihubInput}
+              type="text"
+              placeholder="My Lumiverse"
+              value={instanceName}
+              onChange={(e) => setInstanceName(e.target.value)}
+            />
+            <span className={styles.helperText}>
+              A label to identify this instance on LumiHub (e.g. &quot;Home PC&quot;, &quot;Laptop&quot;)
+            </span>
+          </div>
+
+          <button
+            className={styles.lumihubPrimaryBtn}
+            onClick={handleLink}
+            disabled={linking}
+          >
+            {linking ? 'Waiting for approval...' : 'Link to LumiHub'}
+          </button>
+        </div>
+      )}
+
+      {error && <span className={styles.errorText}>{error}</span>}
     </div>
   )
 }

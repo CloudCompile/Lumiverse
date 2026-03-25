@@ -46,6 +46,11 @@ eventBus.setServer(server);
 
 console.log(`Lumiverse Backend listening on ${server.hostname}:${server.port}`);
 
+// Auto-connect to LumiHub if linked
+import("./lumihub/client").then(({ autoConnect }) => {
+  autoConnect().catch((err) => console.error("[LumiHub] Auto-connect failed:", err));
+});
+
 // Log trusted origins so it's visible in the runner and easy to verify that LAN IPs were detected and applied automatically.
 if (env.trustAnyOrigin) {
   console.log("[Auth] Trusted origins: ALL (TRUST_ANY_ORIGIN enabled)");
