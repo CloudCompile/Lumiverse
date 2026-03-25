@@ -157,6 +157,11 @@ export interface UISlice {
   addToast: (toast: Omit<Toast, 'id'>) => string
   removeToast: (id: string) => void
   clearToasts: () => void
+
+  // Badging
+  badgeCount: number
+  incrementBadgeCount: () => void
+  resetBadgeCount: () => void
 }
 
 // ---- OOC Style Type ----
@@ -279,6 +284,7 @@ export interface SettingsSlice {
   quickReplySets: QuickReplySet[]
   wallpaper: WallpaperSettings
   thumbnailSettings: { smallSize: number, largeSize: number }
+  pushNotificationPreferences: { enabled: boolean, events: { generation_ended: boolean, generation_error: boolean } }
   setWallpaper: (settings: Partial<WallpaperSettings>) => void
   setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K]) => void
   setTheme: (theme: ThemeConfig | null) => void
@@ -442,10 +448,36 @@ export interface PendingPermissionRequest {
   reason?: string
 }
 
+export interface PendingTextEditorRequest {
+  requestId: string
+  extensionId: string
+  title: string
+  value: string
+  placeholder: string
+}
+
+export interface PendingContextMenuRequest {
+  requestId: string
+  extensionId: string
+  position: { x: number; y: number }
+  items: PendingContextMenuItem[]
+}
+
+export interface PendingContextMenuItem {
+  key: string
+  label: string
+  disabled?: boolean
+  danger?: boolean
+  active?: boolean
+  type?: 'item' | 'divider'
+}
+
 export interface SpindleSlice {
   extensions: ExtensionInfo[]
   spindlePrivileged: boolean
   pendingPermissionRequest: PendingPermissionRequest | null
+  pendingTextEditor: PendingTextEditorRequest | null
+  pendingContextMenu: PendingContextMenuRequest | null
   loadExtensions: () => Promise<void>
   installExtension: (githubUrl: string, branch?: string | null) => Promise<void>
   updateExtension: (id: string) => Promise<void>
@@ -458,6 +490,10 @@ export interface SpindleSlice {
   revokePermission: (id: string, permission: string) => Promise<void>
   showPermissionRequest: (request: PendingPermissionRequest) => void
   resolvePermissionRequest: (id: string, approved: boolean) => Promise<void>
+  openTextEditor: (request: PendingTextEditorRequest) => void
+  closeTextEditor: (requestId: string, text: string, cancelled: boolean) => void
+  openContextMenu: (request: PendingContextMenuRequest) => void
+  closeContextMenu: (requestId: string, selectedKey: string | null) => void
 }
 
 // ---- Summary Slice ----

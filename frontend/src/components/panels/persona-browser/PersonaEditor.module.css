@@ -39,7 +39,7 @@
   align-items: center;
   justify-content: center;
   color: var(--lumiverse-primary-muted);
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
 }
 
 .avatarOverlay {
@@ -48,7 +48,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--lumiverse-fill-heavy);
   color: white;
   opacity: 0;
   transition: opacity var(--lumiverse-transition-fast);
@@ -302,7 +302,7 @@
 }
 
 .bindingToggleActive {
-  background: rgba(147, 112, 219, 0.12);
+  background: var(--lumiverse-primary-015);
   border-color: var(--lumiverse-primary);
   color: var(--lumiverse-primary);
 }

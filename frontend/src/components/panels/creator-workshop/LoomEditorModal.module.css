@@ -2,7 +2,7 @@
   position: fixed;
   inset: 0;
   bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--lumiverse-modal-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;

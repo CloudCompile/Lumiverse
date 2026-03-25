@@ -66,3 +66,63 @@ spindle.registerMacro({
 | `registerMacro(def)` | Register a macro with metadata and an optional handler |
 | `unregisterMacro(name)` | Remove a registered macro |
 | `updateMacroValue(name, value)` | Push the latest value for a registered macro (fire-and-forget) |
+
+---
+
+## Resolving Macros Programmatically
+
+Resolve `{{macro}}` placeholders in arbitrary text using the full Lumiverse macro engine. Useful for extensions that build their own prompts and want to support the same macro syntax users are familiar with.
+
+### `spindle.macros.resolve(template, options?)`
+
+```ts
+const { text } = await spindle.macros.resolve(
+  'Hello {{user}}, I am {{char}}! The scenario is: {{scenario}}',
+  { chatId: 'abc123', characterId: 'xyz456' },
+)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `template` | `string` | Text containing `{{macro}}` placeholders |
+| `options.chatId` | `string?` | Chat ID for full context (messages, variables, etc.) |
+| `options.characterId` | `string?` | Character ID (inferred from chat if omitted) |
+| `options.userId` | `string?` | For operator-scoped extensions only |
+
+**Returns:** `Promise<{ text: string; diagnostics: Array<{ message: string; offset: number; length: number }> }>`
+
+- `text` — the fully resolved string
+- `diagnostics` — any warnings from the macro engine (unknown macros, evaluation errors, etc.)
+
+### Context Levels
+
+The macros that resolve depend on how much context you provide:
+
+| Context Provided | Available Macros |
+|---|---|
+| Nothing | Time/date (`{{time}}`, `{{date}}`), random (`{{random}}`), primitives (`{{space}}`, `{{newline}}`) |
+| `characterId` only | Above + character fields (`{{char}}`, `{{description}}`, `{{personality}}`, `{{scenario}}`, etc.) |
+| `chatId` + `characterId` | Above + chat context (`{{lastMessage}}`, `{{messageCount}}`, variables (`{{getvar::key}}`), etc.) |
+
+### Example: Custom Prompt with Macros
+
+```ts
+const template = `You are {{char}}. {{personality}}
+The current scenario: {{scenario}}
+There are {{messageCount}} messages in this conversation.`
+
+const { text } = await spindle.macros.resolve(template, {
+  chatId: activeChatId,
+  characterId: activeCharacterId,
+})
+
+const result = await spindle.generate.quiet({
+  messages: [
+    { role: 'system', content: text },
+    { role: 'user', content: 'Continue the story.' },
+  ],
+})
+```
+
+!!! tip "Macros vs Generate"
+    `generate.quiet()` and `generate.raw()` do **not** resolve macros in messages — they send them directly to the LLM provider. Use `spindle.macros.resolve()` to expand macros before passing text to generation.

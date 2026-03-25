@@ -42,9 +42,7 @@ export const createPersonasSlice: StateCreator<PersonasSlice> = (set, get) => ({
   updatePersona: (id, persona) =>
     set((s) => {
       const existingIndex = s.personas.findIndex((p) => p.id === id)
-      if (existingIndex === -1) {
-        return { personas: [persona, ...s.personas] }
-      }
+      if (existingIndex === -1) return {}
 
       const personas = [...s.personas]
       personas[existingIndex] = persona

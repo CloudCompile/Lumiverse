@@ -43,11 +43,11 @@
   padding: 2px 4px;
   gap: 2px;
   border-radius: 16px;
-  background: rgba(0, 0, 0, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--lumiverse-fill-heavy);
+  border: 1px solid var(--lumiverse-border);
   font-family: ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace;
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--lumiverse-text-dim);
   letter-spacing: 0.04em;
 }
 
@@ -57,16 +57,16 @@
   background: transparent;
   border: none;
   border-radius: 6px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--lumiverse-text-dim);
 }
 
 .bubble .btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.8);
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
 }
 
 .bubble .btn:disabled {
-  color: rgba(255, 255, 255, 0.15);
+  color: var(--lumiverse-text-hint);
   opacity: 1;
 }
 

@@ -6,9 +6,12 @@
   bottom: calc(0px - var(--ios-viewport-offset, 0px));
   z-index: 10020;
   background: var(--lumiverse-modal-backdrop, rgba(0, 0, 0, 0.55));
-  backdrop-filter: blur(12px) saturate(1.1);
-  -webkit-backdrop-filter: blur(12px) saturate(1.1);
   display: flex;
+}
+
+:global([data-glass]) .overlay {
+  backdrop-filter: blur(var(--lcs-glass-blur, 14px)) saturate(1.1);
+  -webkit-backdrop-filter: blur(var(--lcs-glass-blur, 14px)) saturate(1.1);
   justify-content: center;
   align-items: flex-start;
   padding: 15vh 8px 8px;

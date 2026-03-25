@@ -62,9 +62,9 @@
 }
 
 .badgeActive {
-  background: rgba(147, 112, 219, 0.15);
+  background: var(--lumiverse-primary-015);
   color: var(--lumiverse-primary);
-  border: 1px solid rgba(147, 112, 219, 0.2);
+  border: 1px solid var(--lumiverse-primary-020);
 }
 
 .badgeOff {
@@ -128,7 +128,7 @@
 
 .textarea:focus {
   border-color: var(--lumiverse-primary);
-  box-shadow: 0 0 0 3px rgba(147, 112, 219, 0.1);
+  box-shadow: 0 0 0 3px var(--lumiverse-primary-015);
 }
 
 .textarea:disabled {
@@ -175,13 +175,13 @@
 
 .actionBtnPrimary {
   background: var(--lumiverse-primary-light);
-  border-color: rgba(147, 112, 219, 0.2);
+  border-color: var(--lumiverse-primary-020);
   color: var(--lumiverse-primary);
 }
 
 .actionBtnPrimary:hover:not(:disabled) {
-  background: rgba(147, 112, 219, 0.2);
-  border-color: rgba(147, 112, 219, 0.35);
+  background: var(--lumiverse-primary-020);
+  border-color: var(--lumiverse-primary-020);
   color: var(--lumiverse-primary);
 }
 
@@ -234,12 +234,12 @@
 
 .radioSelected {
   background: var(--lumiverse-primary-light);
-  border-color: rgba(147, 112, 219, 0.3);
+  border-color: var(--lumiverse-primary-020);
   color: var(--lumiverse-primary);
 }
 
 .radioSelected:hover {
-  background: rgba(147, 112, 219, 0.15);
+  background: var(--lumiverse-primary-015);
   color: var(--lumiverse-primary);
 }
 
@@ -285,7 +285,7 @@
 
 .fieldInput:focus {
   border-color: var(--lumiverse-primary);
-  box-shadow: 0 0 0 3px rgba(147, 112, 219, 0.1);
+  box-shadow: 0 0 0 3px var(--lumiverse-primary-015);
 }
 
 .fieldSelect {
@@ -303,7 +303,7 @@
 
 .fieldSelect:focus {
   border-color: var(--lumiverse-primary);
-  box-shadow: 0 0 0 3px rgba(147, 112, 219, 0.1);
+  box-shadow: 0 0 0 3px var(--lumiverse-primary-015);
 }
 
 .fieldRow {
@@ -341,7 +341,7 @@
 .spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(147, 112, 219, 0.2);
+  border: 2px solid var(--lumiverse-primary-020);
   border-top-color: var(--lumiverse-primary);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;

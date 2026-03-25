@@ -59,6 +59,8 @@ interface GenerationLifecycle {
   continueMessageId?: string;
   /** For continue: original content to prepend to generated text */
   continueOriginalContent?: string;
+  /** For continue: separator between original content and generated text */
+  continuePostfix?: string;
   /** Resolved character name for saved messages */
   characterName: string;
   /** Assembly breakdown for WS event */
@@ -526,6 +528,11 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     if (lastMsg) {
       lifecycle.continueMessageId = lastMsg.id;
       lifecycle.continueOriginalContent = lastMsg.content;
+      // Resolve continuePostfix from the preset's completion settings so it can
+      // be inserted between original content and generated text when saving.
+      const cpPresetId = input.preset_id || connection.preset_id;
+      const cpPreset = cpPresetId ? presetsSvc.getPreset(input.userId, cpPresetId) : null;
+      lifecycle.continuePostfix = cpPreset?.prompts?.completionSettings?.continuePostfix || "";
     }
   }
 
@@ -1065,6 +1072,12 @@ async function runGeneration(
             content: closedContent,
             ...(Object.keys(abortExtra).length > 0 ? { extra: abortExtra } : {}),
           });
+        } else if (lifecycle.continueMessageId && closedContent) {
+          // Continue aborted: merge partial content into existing assistant message
+          const abortCombined = (lifecycle.continueOriginalContent ?? "") + (lifecycle.continuePostfix ?? "") + closedContent;
+          const existingContinueExtra = chatsSvc.getMessage(userId, lifecycle.continueMessageId)?.extra;
+          const continueAbortExtra = fullReasoning ? { ...existingContinueExtra, reasoning: fullReasoning } : undefined;
+          chatsSvc.updateMessage(userId, lifecycle.continueMessageId, { content: abortCombined, ...(continueAbortExtra ? { extra: continueAbortExtra } : {}) });
         } else if (closedContent) {
           // Normal generation with no staged message — save partial content as a new message
           const isImpersonate = lifecycle.generationType === "impersonate";
@@ -1138,8 +1151,9 @@ async function runGeneration(
           chatsSvc.updateMessage(userId, messageId, { extra: { ...chatsSvc.getMessage(userId, messageId)?.extra, reasoning: fullReasoning } });
         }
       } else if (lifecycle.continueMessageId) {
-        // Continue: append generated text to existing assistant message
-        const combined = (lifecycle.continueOriginalContent ?? "") + fullContent;
+        // Continue: append generated text to existing assistant message,
+        // inserting the continuePostfix separator (e.g. newline, double newline)
+        const combined = (lifecycle.continueOriginalContent ?? "") + (lifecycle.continuePostfix ?? "") + fullContent;
         const existingExtra = chatsSvc.getMessage(userId, lifecycle.continueMessageId)?.extra;
         const continueExtra = fullReasoning ? { ...existingExtra, reasoning: fullReasoning } : undefined;
         const updated = chatsSvc.updateMessage(userId, lifecycle.continueMessageId, { content: combined, ...(continueExtra ? { extra: continueExtra } : {}) });

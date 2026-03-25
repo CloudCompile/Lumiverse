@@ -1,7 +1,9 @@
-import { useRef, useCallback, useEffect, useState } from 'react'
+import { useRef, useCallback, useEffect, useState, useMemo } from 'react'
 import type { FloatWidgetState } from '@/store/slices/spindle-placement'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
+import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/components/shared/ContextMenu'
+import { useLongPress } from '@/hooks/useLongPress'
 import styles from './SpindleFloatWidget.module.css'
 
 interface Props {
@@ -16,7 +18,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
   const dragging = useRef(false)
   const offset = useRef({ x: 0, y: 0 })
   const [pos, setPos] = useState({ x: widget.x, y: widget.y })
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
 
   const size = isMobile
     ? { width: Math.min(widget.width, 40), height: Math.min(widget.height, 40) }
@@ -88,17 +90,30 @@ export default function SpindleFloatWidget({ widget }: Props) {
     })
   }, [snapToEdge, updateFloatWidget, widget.id])
 
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setContextMenu({ x: e.clientX, y: e.clientY })
-  }, [])
+  const longPress = useLongPress({
+    onLongPress: (pos) => setContextMenu(pos),
+  })
 
-  useEffect(() => {
-    if (!contextMenu) return
-    const dismiss = () => setContextMenu(null)
-    window.addEventListener('click', dismiss)
-    return () => window.removeEventListener('click', dismiss)
-  }, [contextMenu])
+  const menuItems: ContextMenuEntry[] = useMemo(() => [
+    {
+      key: 'hide',
+      label: 'Hide Widget',
+      onClick: () => { setPlacementHidden(widget.id, true); setContextMenu(null) },
+    },
+    {
+      key: 'reset',
+      label: 'Reset Position',
+      onClick: () => {
+        const reset = {
+          x: window.innerWidth - size.width - 16,
+          y: window.innerHeight - size.height - 16,
+        }
+        setPos(reset)
+        updateFloatWidget(widget.id, reset)
+        setContextMenu(null)
+      },
+    },
+  ], [setPlacementHidden, updateFloatWidget, widget.id, size.width, size.height])
 
   if (!widget.visible) return null
 
@@ -116,7 +131,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onContextMenu={handleContextMenu}
+        {...longPress}
       >
         <div className={styles.content} ref={(el) => {
           if (el && !el.contains(widget.root)) {
@@ -125,36 +140,11 @@ export default function SpindleFloatWidget({ widget }: Props) {
         }} />
       </div>
 
-      {contextMenu && (
-        <div
-          className={styles.contextMenu}
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <button
-            className={styles.contextMenuItem}
-            onClick={() => {
-              setPlacementHidden(widget.id, true)
-              setContextMenu(null)
-            }}
-          >
-            Hide Widget
-          </button>
-          <button
-            className={styles.contextMenuItem}
-            onClick={() => {
-              const reset = {
-                x: window.innerWidth - size.width - 16,
-                y: window.innerHeight - size.height - 16,
-              }
-              setPos(reset)
-              updateFloatWidget(widget.id, reset)
-              setContextMenu(null)
-            }}
-          >
-            Reset Position
-          </button>
-        </div>
-      )}
+      <ContextMenu
+        position={contextMenu}
+        items={menuItems}
+        onClose={() => setContextMenu(null)}
+      />
     </>
   )
 }

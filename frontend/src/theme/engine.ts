@@ -91,7 +91,14 @@ export function generateThemeVariables(
   vars['--lumiverse-danger-020'] = rgba(239, 68, 68, 0.2)
   vars['--lumiverse-danger-050'] = rgba(239, 68, 68, 0.5)
   vars['--lumiverse-success'] = success
+  vars['--lumiverse-success-015'] = rgba(34, 197, 94, 0.15)
+  vars['--lumiverse-success-020'] = rgba(34, 197, 94, 0.2)
+  vars['--lumiverse-success-050'] = rgba(34, 197, 94, 0.5)
   vars['--lumiverse-warning'] = warning
+  vars['--lumiverse-warning-015'] = rgba(245, 158, 11, 0.15)
+  vars['--lumiverse-warning-020'] = rgba(245, 158, 11, 0.2)
+  vars['--lumiverse-warning-050'] = rgba(245, 158, 11, 0.5)
+  vars['--lumiverse-error'] = vars['--lumiverse-danger']
 
   // ── Backgrounds ──
   if (isDark) {
@@ -284,8 +291,18 @@ export function generateThemeVariables(
       vars['--lumiverse-danger-020'] = hexRgba(bc.danger, 0.2)
       vars['--lumiverse-danger-050'] = hexRgba(bc.danger, 0.5)
     }
-    if (bc.success) vars['--lumiverse-success'] = bc.success
-    if (bc.warning) vars['--lumiverse-warning'] = bc.warning
+    if (bc.success) {
+      vars['--lumiverse-success'] = bc.success
+      vars['--lumiverse-success-015'] = hexRgba(bc.success, 0.15)
+      vars['--lumiverse-success-020'] = hexRgba(bc.success, 0.2)
+      vars['--lumiverse-success-050'] = hexRgba(bc.success, 0.5)
+    }
+    if (bc.warning) {
+      vars['--lumiverse-warning'] = bc.warning
+      vars['--lumiverse-warning-015'] = hexRgba(bc.warning, 0.15)
+      vars['--lumiverse-warning-020'] = hexRgba(bc.warning, 0.2)
+      vars['--lumiverse-warning-050'] = hexRgba(bc.warning, 0.5)
+    }
     if (bc.speech) vars['--lumiverse-prose-dialogue'] = bc.speech
     if (bc.thoughts) vars['--lumiverse-prose-italic'] = bc.thoughts
   }

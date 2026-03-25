@@ -15,6 +15,7 @@ export const createUISlice: StateCreator<UISlice> = (set) => ({
   portraitPanelOpen: false,
   commandPaletteOpen: false,
   toasts: [],
+  badgeCount: 0,
 
   openModal: (name, props = {}) => set({ activeModal: name, modalProps: props }),
   closeModal: () => set({ activeModal: null, modalProps: {} }),
@@ -51,4 +52,7 @@ export const createUISlice: StateCreator<UISlice> = (set) => ({
     set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
 
   clearToasts: () => set({ toasts: [] }),
+
+  incrementBadgeCount: () => set((state) => ({ badgeCount: state.badgeCount + 1 })),
+  resetBadgeCount: () => set({ badgeCount: 0 }),
 })

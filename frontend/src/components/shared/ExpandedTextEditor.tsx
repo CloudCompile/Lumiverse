@@ -358,28 +358,24 @@ export function ExpandableTextarea({
 
   return (
     <div className={s.textareaWrapper}>
-      {!expanded && (
-        <>
-          <textarea
-            ref={textareaRef}
-            className={className}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            onSelect={handleSelect}
-            placeholder={placeholder}
-            rows={rows}
-            spellCheck={spellCheck}
-          />
-          <button
-            className={s.expandBtn}
-            onClick={handleExpand}
-            title="Expand editor"
-            type="button"
-          >
-            <Maximize2 size={13} />
-          </button>
-        </>
-      )}
+      <textarea
+        ref={textareaRef}
+        className={className}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onSelect={handleSelect}
+        placeholder={placeholder}
+        rows={rows}
+        spellCheck={spellCheck}
+      />
+      <button
+        className={s.expandBtn}
+        onClick={handleExpand}
+        title="Expand editor"
+        type="button"
+      >
+        <Maximize2 size={13} />
+      </button>
       {expanded && (
         <ExpandedTextEditor
           value={value}
@@ -390,7 +386,6 @@ export function ExpandableTextarea({
           initialCursorPos={cursorPosRef.current}
           macros={macros}
           onRefreshMacros={onRefreshMacros}
-          inline
         />
       )}
     </div>

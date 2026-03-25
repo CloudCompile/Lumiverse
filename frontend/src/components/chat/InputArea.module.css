@@ -375,7 +375,7 @@
   height: 16px;
   border: none;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--lumiverse-fill-deepest);
   color: #fff;
   cursor: pointer;
   padding: 0;

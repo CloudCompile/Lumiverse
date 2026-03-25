@@ -178,6 +178,36 @@ async function doLoadFrontendExtension(
         registerInputBarAction(options) {
           return createInputBarActionHandle(extensionId, manifest.name, options)
         },
+        showContextMenu(options: {
+          position: { x: number; y: number }
+          items: Array<{
+            key: string
+            label: string
+            disabled?: boolean
+            danger?: boolean
+            active?: boolean
+            type?: 'item' | 'divider'
+          }>
+        }): Promise<{ selectedKey: string | null }> {
+          const requestId = generateUUID()
+
+          return new Promise<{ selectedKey: string | null }>((resolve) => {
+            const handler = ((e: CustomEvent) => {
+              if (e.detail.requestId !== requestId) return
+              window.removeEventListener('spindle:context-menu-resolved', handler)
+              resolve({ selectedKey: e.detail.selectedKey })
+            }) as EventListener
+
+            window.addEventListener('spindle:context-menu-resolved', handler)
+
+            useStore.getState().openContextMenu({
+              requestId,
+              extensionId,
+              position: options.position,
+              items: options.items,
+            })
+          })
+        },
       },
       uploads: {
         async pickFile(options) {
@@ -256,6 +286,13 @@ async function doLoadFrontendExtension(
             })
           })
         },
+      },
+      getActiveChat() {
+        const state = useStore.getState()
+        return {
+          chatId: state.activeChatId ?? null,
+          characterId: state.activeCharacterId ?? null,
+        }
       },
       sendToBackend(payload: unknown): void {
         // Send via WebSocket to the backend worker

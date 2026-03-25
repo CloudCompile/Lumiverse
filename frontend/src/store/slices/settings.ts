@@ -82,6 +82,8 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'sidecarSettings',
   // Image optimization (thumbnail tier sizes)
   'thumbnailSettings',
+  // Push notification preferences
+  'pushNotificationPreferences',
 ])
 
 // ── Debounced batch persistence ──────────────────────────────────────────
@@ -224,6 +226,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   },
 
   thumbnailSettings: { smallSize: 300, largeSize: 700 },
+  pushNotificationPreferences: { enabled: true, events: { generation_ended: true, generation_error: false } },
 
   setWallpaper: (partial) =>
     set((state) => {

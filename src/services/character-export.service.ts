@@ -8,6 +8,7 @@ import { listGallery } from "./character-gallery.service";
 import { getImage, getImageFilePath } from "./images.service";
 import { exportWorldBook } from "./world-books.service";
 import { isNsfwExpressionLabel } from "./character-card.service";
+import { getCharacterBoundScripts } from "./regex-scripts.service";
 import type { Character } from "../types/character";
 
 // ── CRC-32 (lookup table) ───────────────────────────────────────────────────
@@ -251,6 +252,7 @@ export interface LumiverseModulesExport {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  regex_scripts?: import("./character-card.service").BundledRegexScript[];
 }
 
 /** Sanitize a string for use as a filename component inside the archive. */
@@ -342,9 +344,33 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
     modules.alternate_avatars = altAvatars;
   }
 
+  // Character-bound regex scripts
+  const boundScripts = getCharacterBoundScripts(userId, characterId);
+  if (boundScripts.length > 0) {
+    modules.regex_scripts = boundScripts.map((s) => ({
+      name: s.name,
+      find_regex: s.find_regex,
+      replace_string: s.replace_string,
+      flags: s.flags,
+      placement: s.placement,
+      scope: s.scope,
+      scope_id: null, // Will be rebound to new character on import
+      target: s.target,
+      min_depth: s.min_depth,
+      max_depth: s.max_depth,
+      trim_strings: s.trim_strings,
+      run_on_edit: s.run_on_edit,
+      substitute_macros: s.substitute_macros,
+      disabled: s.disabled,
+      sort_order: s.sort_order,
+      description: s.description,
+      metadata: { ...s.metadata, source: "charx_bundle" },
+    }));
+  }
+
   // Only include lumiverse_modules.json if there's content
   const hasModules =
-    modules.expressions || modules.alternate_fields || modules.alternate_avatars;
+    modules.expressions || modules.alternate_fields || modules.alternate_avatars || modules.regex_scripts;
   if (hasModules) {
     entries["lumiverse_modules.json"] = new TextEncoder().encode(
       JSON.stringify(modules, null, 2)

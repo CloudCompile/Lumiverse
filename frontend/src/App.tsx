@@ -12,6 +12,7 @@ import ModalContainer from '@/components/modals/ModalContainer'
 import SpindleUIManager from '@/components/spindle/SpindleUIManager'
 import ToastContainer from '@/components/shared/ToastContainer'
 import useIsMobile from '@/hooks/useIsMobile'
+import { useBadging } from '@/hooks/useBadging'
 import styles from './App.module.css'
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
   useThemeApplicator()
   useCharacterTheme()
   useAppInit()
+  useBadging()
 
   const isMobile = useIsMobile()
   const dockPanels = useStore((s) => s.dockPanels)

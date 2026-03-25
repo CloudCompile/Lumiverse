@@ -36,6 +36,7 @@ import { migrateRoutes } from "./routes/migrate.routes";
 import { presetProfilesRoutes } from "./routes/preset-profiles.routes";
 import { regexScriptsRoutes } from "./routes/regex-scripts.routes";
 import { expressionsRoutes } from "./routes/expressions.routes";
+import { pushRoutes } from "./routes/push.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -140,6 +141,7 @@ app.route("/api/v1/migrate", migrateRoutes);
 app.route("/api/v1/preset-profiles", presetProfilesRoutes);
 app.route("/api/v1/regex-scripts", regexScriptsRoutes);
 app.route("/api/v1/characters/:characterId/expressions", expressionsRoutes);
+app.route("/api/v1/push", pushRoutes);
 app.route("/api/v1/lumihub", lumihubRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
@@ -153,6 +155,20 @@ app.get("/api/ws", wsHandler);
 
 // Serve frontend static files if FRONTEND_DIR is configured
 if (env.frontendDir) {
+  // Cache headers for frontend static files:
+  // - /assets/* have content hashes in filenames → immutable, cache forever
+  // - Everything else (index.html, sw.js, manifest.json, SPA fallback) → revalidate every time
+  // API routes are unaffected (they set their own headers).
+  app.use("*", async (c, next) => {
+    await next();
+    const path = c.req.path;
+    if (path.startsWith("/assets/")) {
+      c.res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    } else if (!path.startsWith("/api/")) {
+      c.res.headers.set("Cache-Control", "no-cache");
+    }
+  });
+
   app.use(
     "*",
     serveStatic({ root: env.frontendDir })

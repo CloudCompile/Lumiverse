@@ -1,5 +1,6 @@
 import type { StateCreator } from 'zustand'
-import type { SpindleSlice, PendingPermissionRequest } from '@/types/store'
+import type { SpindleSlice, PendingPermissionRequest, PendingTextEditorRequest, PendingContextMenuRequest } from '@/types/store'
+import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/loader'
 
@@ -7,6 +8,8 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
   spindlePrivileged: false,
   pendingPermissionRequest: null,
+  pendingTextEditor: null,
+  pendingContextMenu: null,
 
   loadExtensions: async () => {
     try {
@@ -128,6 +131,33 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     window.dispatchEvent(
       new CustomEvent('spindle:permission-resolved', {
         detail: { requestId: id, approved, granted },
+      })
+    )
+  },
+
+  openTextEditor: (request: PendingTextEditorRequest) => {
+    set({ pendingTextEditor: request })
+  },
+
+  closeTextEditor: (requestId: string, text: string, cancelled: boolean) => {
+    set({ pendingTextEditor: null })
+    wsClient.send({
+      type: 'SPINDLE_TEXT_EDITOR_RESULT',
+      requestId,
+      text,
+      cancelled,
+    })
+  },
+
+  openContextMenu: (request: PendingContextMenuRequest) => {
+    set({ pendingContextMenu: request })
+  },
+
+  closeContextMenu: (requestId: string, selectedKey: string | null) => {
+    set({ pendingContextMenu: null })
+    window.dispatchEvent(
+      new CustomEvent('spindle:context-menu-resolved', {
+        detail: { requestId, selectedKey },
       })
     )
   },

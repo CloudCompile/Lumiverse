@@ -80,9 +80,9 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.7);
+  background: var(--lumiverse-fill-heavy);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text);
   cursor: pointer;
   opacity: 0;
   z-index: 2;
@@ -98,7 +98,7 @@
 }
 
 .editBtn:hover {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--lumiverse-fill-deepest);
   border-color: var(--lumiverse-primary-050);
   color: white;
   transform: scale(1.1);
@@ -114,9 +114,9 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.7);
+  background: var(--lumiverse-fill-heavy);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text);
   cursor: pointer;
   opacity: 0;
   z-index: 2;
@@ -133,7 +133,7 @@
 }
 
 .favBtn:hover {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--lumiverse-fill-deepest);
   border-color: rgba(255, 193, 7, 0.4);
   transform: scale(1.1);
 }

@@ -3,10 +3,14 @@ import { initDatabase } from "./db/connection";
 import { runMigrations } from "./db/migrate";
 import { startAllExtensions } from "./spindle/lifecycle";
 import { initIdentity } from "./crypto/init";
+import { initVapidKeys } from "./crypto/vapid";
 import { eventBus } from "./ws/bus";
 
 // Resolve encryption identity (file > env migration > generate)
 await initIdentity();
+
+// Initialize VAPID keys for Web Push (auto-generates on first run)
+await initVapidKeys();
 
 // Initialize database and run migrations synchronously
 const db = initDatabase();
@@ -23,6 +27,10 @@ seedTokenizers();
 
 // Import app after database is ready (auth config needs getDb())
 const { default: app, websocket } = await import("./app");
+
+// Register push notification EventBus listeners
+const { initPushListeners } = await import("./services/push.service");
+initPushListeners();
 
 // Start extensions after app is imported but before serving —
 // ensures extension macros are registered in the global registry

@@ -144,6 +144,35 @@ _install_bun_termux() {
   fi
 }
 
+# Set up convenience aliases in Termux's ~/.bashrc when proot-distro is available.
+# This lets users type 'p' to enter proot or 'l' to launch Lumiverse directly.
+setup_proot_aliases() {
+  if [[ "$IS_TERMUX" != true ]]; then return; fi
+  if ! command -v proot-distro &>/dev/null; then return; fi
+
+  local bashrc="$HOME/.bashrc"
+
+  # Skip if aliases already exist (ours or user-defined) to avoid duplicates
+  if [[ -f "$bashrc" ]] && grep -qE "^alias [pl]=" "$bashrc"; then
+    return
+  fi
+
+  info "proot-distro detected — adding convenience aliases to ~/.bashrc..."
+
+  touch "$bashrc" 2>/dev/null || true
+  cat >> "$bashrc" <<'ALIASES'
+
+# Lumiverse proot-distro aliases
+alias p='proot-distro login ubuntu'
+alias l='proot-distro login ubuntu -- bash -lc "export BUN_INSTALL=/root/.bun; export PATH=\$BUN_INSTALL/bin:\$PATH; echo Using bun at: /root/.bun/bin/bun; /root/.bun/bin/bun --version; cd /root/Lumiverse && ./start.sh"'
+ALIASES
+
+  ok "Added aliases to ~/.bashrc: 'p' (proot login), 'l' (launch Lumiverse in proot)"
+
+  # Refresh environment so aliases and env vars take effect in this session
+  source "$bashrc" 2>/dev/null || true
+}
+
 ensure_bun() {
   # ── Try to resolve an existing Bun installation ──────────────────────────
   if _resolve_bun; then
@@ -225,9 +254,14 @@ install_deps() {
 
   info "Installing $name dependencies..."
 
-  if [[ "$IS_TERMUX" == true ]]; then
+  if [[ "$IS_TERMUX" == true || "$IS_PROOT" == true ]]; then
     # Android doesn't support hardlinks — use file copy backend instead.
     # Without this, bun install fails with EPERM on node_modules linking.
+    # Clear Bun's install cache first — proot filesystem emulation can
+    # corrupt cached packages, causing random "Cannot find package" errors.
+    if [[ -d "$HOME/.bun/install/cache" ]]; then
+      rm -rf "$HOME/.bun/install/cache"
+    fi
     (cd "$dir" && bun install --backend=copyfile)
   else
     (cd "$dir" && bun install)
@@ -281,15 +315,27 @@ start_backend() {
     set +a
   fi
 
+  # Disable the Ink TUI runner on Termux/proot — the React/Ink devDependencies
+  # are unreliable on Android's filesystem and the TUI doesn't render well on
+  # mobile terminal emulators.
+  if [[ "$IS_TERMUX" == true || "$IS_PROOT" == true ]]; then
+    USE_RUNNER=false
+  fi
+
   # Decide: visual runner or plain process
   if [[ "$USE_RUNNER" == true ]] && [[ -t 1 ]]; then
-    # Interactive terminal — use the visual runner
+    # Interactive terminal — use the visual runner (fall back to plain if it crashes)
     local runner_args=""
     if [[ "$MODE" == "dev" ]]; then
       runner_args="-- --dev"
     fi
-    (cd "$BACKEND_DIR" && bun run scripts/runner.tsx $runner_args)
-  else
+    (cd "$BACKEND_DIR" && bun run scripts/runner.tsx $runner_args) || {
+      warn "Visual runner failed — falling back to plain mode..."
+      USE_RUNNER=false
+    }
+  fi
+
+  if [[ "$USE_RUNNER" != true ]]; then
     # Non-interactive (piped, CI, --no-runner) — plain process
     echo ""
     echo -e "${BOLD}Starting Lumiverse Backend on port ${PORT:-7860}...${NC}"
@@ -315,6 +361,7 @@ elif [[ "$IS_PROOT" == true ]]; then
   info "Running inside proot-distro (Android)"
 fi
 
+setup_proot_aliases
 ensure_bun
 
 case "$MODE" in

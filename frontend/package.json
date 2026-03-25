@@ -1,7 +1,7 @@
 {
   "name": "lumiverse-frontend",
   "private": true,
-  "version": "0.5.7",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,7 +20,7 @@
     "highlight.js": "^11.11.1",
     "immer": "^10.1.1",
     "lucide-react": "^0.468.0",
-    "lumiverse-spindle-types": "0.2.0",
+    "lumiverse-spindle-types": "0.2.8",
     "marked": "^15.0.4",
     "motion": "^12.0.0",
     "react": "^19.0.0",
@@ -38,6 +38,11 @@
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.3",
     "vite": "^6.0.5",
-    "vite-plugin-pwa": "^1.2.0"
+    "vite-plugin-pwa": "^1.2.0",
+    "workbox-background-sync": "^7.4.0",
+    "workbox-expiration": "^7.4.0",
+    "workbox-precaching": "^7.4.0",
+    "workbox-routing": "^7.4.0",
+    "workbox-strategies": "^7.4.0"
   }
 }

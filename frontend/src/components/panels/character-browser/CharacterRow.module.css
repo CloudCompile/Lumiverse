@@ -18,7 +18,7 @@
 }
 
 .selected {
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
 }
 
 .editBtn {
@@ -71,7 +71,7 @@
   font-size: 14px;
   font-weight: 600;
   color: var(--lumiverse-primary-muted);
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
 }
 
 .info {

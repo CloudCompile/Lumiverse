@@ -117,7 +117,7 @@
   inset: 0;
   bottom: calc(0px - var(--ios-viewport-offset, 0px));
   z-index: 9991;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--lumiverse-fill-heavy);
 }
 
 /* ── Drawer ── */

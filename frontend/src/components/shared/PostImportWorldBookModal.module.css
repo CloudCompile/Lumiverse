@@ -1,9 +1,13 @@
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 6, 10, 0.62);
-  backdrop-filter: blur(6px);
+  background: var(--lumiverse-modal-backdrop, rgba(4, 6, 10, 0.62));
   display: flex;
+}
+
+:global([data-glass]) .overlay {
+  backdrop-filter: blur(var(--lcs-glass-soft-blur, 8px));
+  -webkit-backdrop-filter: blur(var(--lcs-glass-soft-blur, 8px));
   align-items: center;
   justify-content: center;
   z-index: 1500;
@@ -93,7 +97,7 @@
   margin: 16px 20px 0;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(255, 86, 86, 0.12);
+  background: var(--lumiverse-danger-015);
   color: #ff9b9b;
   font-size: 13px;
 }

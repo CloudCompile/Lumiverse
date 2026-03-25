@@ -38,6 +38,7 @@ These are always available:
 | `"ui_panels"` | Create floating widgets and docked edge panels that overlay/consume screen space |
 | `"app_manipulation"` | Mount unrestricted portals into the document body that persist across routes |
 | `"oauth"` | Register an OAuth callback handler to receive authorization redirects from external services |
+| `"push_notification"` | Send OS-level push notifications to users' devices even when the app is closed or backgrounded |
 
 Users grant permissions individually from the Extensions panel. Your extension should degrade gracefully if a permission isn't granted.
 

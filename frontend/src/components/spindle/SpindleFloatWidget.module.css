@@ -43,34 +43,6 @@
   pointer-events: auto;
 }
 
-.contextMenu {
-  position: fixed;
-  z-index: 11000;
-  min-width: 140px;
-  padding: 4px;
-  border-radius: 8px;
-  background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  box-shadow: var(--lumiverse-shadow-lg);
-}
-
-.contextMenuItem {
-  display: block;
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  color: var(--lumiverse-text);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: background 0.1s ease;
-}
-
-.contextMenuItem:hover {
-  background: var(--lumiverse-fill-subtle);
-}
 
 @media (max-width: 600px) {
   .widget {

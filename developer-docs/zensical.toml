@@ -43,6 +43,8 @@ nav = [
     { "OAuth" = "backend-api/oauth.md" },
     { "Logging" = "backend-api/logging.md" },
     { "Toast Notifications" = "backend-api/toast.md" },
+    { "Push Notifications" = "backend-api/push-notifications.md" },
+    { "User Presence" = "backend-api/user-presence.md" },
     { "Frontend Communication" = "backend-api/frontend-communication.md" },
   ] },
   { "Frontend API" = [

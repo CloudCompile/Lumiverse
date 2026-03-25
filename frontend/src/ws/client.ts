@@ -37,6 +37,7 @@ export class WebSocketClient {
         this.reconnectTimer = null
       }
       this.startPing()
+      this.startVisibilityTracking()
       this.emit(EventType.CONNECTED, {})
     }
 
@@ -78,6 +79,7 @@ export class WebSocketClient {
   disconnect() {
     this.shouldReconnect = false
     this.stopPing()
+    this.stopVisibilityTracking()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -122,6 +124,27 @@ export class WebSocketClient {
       clearInterval(this.pingTimer)
       this.pingTimer = null
     }
+  }
+
+  private visibilityHandler: (() => void) | null = null
+
+  private startVisibilityTracking() {
+    this.stopVisibilityTracking()
+    // Send current state immediately on connect
+    this.sendVisibility()
+    this.visibilityHandler = () => this.sendVisibility()
+    document.addEventListener('visibilitychange', this.visibilityHandler)
+  }
+
+  private stopVisibilityTracking() {
+    if (this.visibilityHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityHandler)
+      this.visibilityHandler = null
+    }
+  }
+
+  private sendVisibility() {
+    this.send({ type: 'visibility', visible: document.visibilityState === 'visible' })
   }
 
   private scheduleReconnect() {

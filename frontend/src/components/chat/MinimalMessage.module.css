@@ -49,12 +49,12 @@
 
 .card:hover {
   background: var(--lumiverse-bg-elevated);
-  border-color: rgba(255, 255, 255, 0.09);
+  border-color: var(--lumiverse-border);
   box-shadow: 0 0 16px var(--lumiverse-primary-010);
 }
 
 :global([data-theme-mode='light']) .card:hover {
-  border-color: rgba(0, 0, 0, 0.08);
+  border-color: var(--lumiverse-fill-subtle);
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.04);
 }
 
@@ -62,7 +62,7 @@
 .hidden {
   opacity: 0.4;
   border-style: dashed;
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: var(--lumiverse-border);
   filter: brightness(0.6) saturate(0.5);
   transition:
     opacity var(--lcs-transition),

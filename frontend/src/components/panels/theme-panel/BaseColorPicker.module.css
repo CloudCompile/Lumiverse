@@ -136,7 +136,7 @@
   height: 16px;
   border-radius: 50%;
   background: #fff;
-  border: 2px solid rgba(0, 0, 0, 0.3);
+  border: 2px solid var(--lumiverse-fill-strong);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   pointer-events: none;
   transform: translate(-50%, -50%);

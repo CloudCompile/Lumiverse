@@ -9,6 +9,8 @@ class EventBus {
   private sessionToClient = new Map<string, ServerWebSocket<unknown>>();
   private clientToSession = new Map<ServerWebSocket<unknown>, string>();
   private listeners = new Map<EventType, Set<Listener>>();
+  /** Per-user visibility: true if at least one session reports visible. */
+  private userVisibility = new Map<string, Map<string, boolean>>();
 
   /** Store the Bun server reference so we can use native publish(). */
   setServer(server: import("bun").Server<unknown>): void {
@@ -45,6 +47,7 @@ class EventBus {
 
   removeClient(ws: ServerWebSocket<unknown>): void {
     const userId = this.clientToUser.get(ws);
+    const sessionId = this.clientToSession.get(ws);
     if (userId) {
       try {
         ws.unsubscribe(`user:${userId}`);
@@ -53,8 +56,8 @@ class EventBus {
         // Socket may already be closed
       }
       this.clientToUser.delete(ws);
+      if (sessionId) this.removeSessionVisibility(userId, sessionId);
     }
-    const sessionId = this.clientToSession.get(ws);
     if (sessionId) {
       // Only remove from session map if this socket is still the current one
       if (this.sessionToClient.get(sessionId) === ws) {
@@ -103,6 +106,43 @@ class EventBus {
         });
       }
     }
+  }
+
+  // ─── User Visibility ─────────────────────────────────────────────────
+
+  /**
+   * Record a visibility state change for a user session.
+   * Called when the frontend sends a "visibility" message over the WebSocket.
+   */
+  setUserVisibility(userId: string, sessionId: string, visible: boolean): void {
+    if (!this.userVisibility.has(userId)) {
+      this.userVisibility.set(userId, new Map());
+    }
+    this.userVisibility.get(userId)!.set(sessionId, visible);
+  }
+
+  /**
+   * Remove a session's visibility entry.
+   * Called when a WebSocket disconnects.
+   */
+  removeSessionVisibility(userId: string, sessionId: string): void {
+    const sessions = this.userVisibility.get(userId);
+    if (!sessions) return;
+    sessions.delete(sessionId);
+    if (sessions.size === 0) this.userVisibility.delete(userId);
+  }
+
+  /**
+   * Returns true if the user has at least one session with the app visible/focused.
+   * Returns false if no sessions are connected or all sessions report hidden.
+   */
+  isUserVisible(userId: string): boolean {
+    const sessions = this.userVisibility.get(userId);
+    if (!sessions || sessions.size === 0) return false;
+    for (const visible of sessions.values()) {
+      if (visible) return true;
+    }
+    return false;
   }
 
   get clientCount(): number {

@@ -45,7 +45,7 @@
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: rgba(147, 112, 219, 0.1);
+  background: var(--lumiverse-primary-010);
   color: var(--lumiverse-primary);
 }
 
@@ -131,7 +131,7 @@
 }
 
 .packActionBtnDanger:hover {
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--lumiverse-danger-015);
   color: var(--lumiverse-error, #ef4444);
 }
 
@@ -279,7 +279,7 @@
 }
 
 .itemActionBtnDanger:hover {
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--lumiverse-danger-015);
   color: var(--lumiverse-error, #ef4444);
 }
 

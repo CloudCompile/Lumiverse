@@ -5,7 +5,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--lumiverse-modal-backdrop);
 }
 
 .modal {
@@ -325,7 +325,7 @@
 .poolSummaryCard {
   border: 1px solid var(--lumiverse-border);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -341,7 +341,7 @@
 .poolRow {
   border: 1px solid var(--lumiverse-border);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -479,14 +479,14 @@
   gap: 8px;
   padding: 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
   cursor: pointer;
   transition: all var(--lumiverse-transition-fast);
 }
 
 .displayModeCard:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--lumiverse-fill-subtle);
   border-color: var(--lumiverse-text-dim);
 }
 
@@ -509,7 +509,7 @@
 .previewLine {
   height: 4px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--lumiverse-fill);
 }
 
 /* ── Minimal preview ── */
@@ -655,8 +655,8 @@
   width: 30px;
   height: 4px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.55);
-  border: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: var(--lumiverse-fill-heavy);
+  border: 0.5px solid var(--lumiverse-border);
 }
 
 .previewBubbleContent {
@@ -709,7 +709,7 @@
 
 .segmentedBtn:hover {
   color: var(--lumiverse-text);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--lumiverse-fill-subtle);
 }
 
 .segmentedBtnActive {
@@ -847,7 +847,7 @@
 
 .warningText {
   font-size: 11px;
-  color: #f59e0b;
+  color: var(--lumiverse-warning);
 }
 
 .inlineLinkBtn {
@@ -863,7 +863,7 @@
 .card {
   border: 1px solid var(--lumiverse-border);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
 }
 
 .cardRow {
@@ -965,7 +965,7 @@
 }
 
 .lumihubDotOnline {
-  background: #4ade80;
+  background: var(--lumiverse-success);
   box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
 }
 

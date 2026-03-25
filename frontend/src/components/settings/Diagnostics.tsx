@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Copy, Check, RefreshCw, Server, Monitor, Puzzle } from 'lucide-react'
+import { Copy, Check, RefreshCw, Server, Monitor, Puzzle, Bell, Send } from 'lucide-react'
 import { useStore } from '@/store'
 import { systemApi, type SystemInfo } from '@/api/system'
+import { pushApi } from '@/api/push'
 import { BASE_URL } from '@/api/client'
 import styles from './Diagnostics.module.css'
 import clsx from 'clsx'
@@ -50,6 +51,15 @@ function checkFeatures(): Record<string, boolean> {
     'Clipboard API': 'clipboard' in navigator,
     'Notifications': 'Notification' in window,
     'SharedArrayBuffer': typeof SharedArrayBuffer !== 'undefined',
+  }
+}
+
+function checkPwaFeatures(): Record<string, boolean> {
+  return {
+    'Push API': 'PushManager' in window,
+    'Background Sync': 'SyncManager' in window,
+    'App Badge': 'setAppBadge' in navigator,
+    'Periodic Sync': 'PeriodicSyncManager' in window,
   }
 }
 
@@ -235,6 +245,9 @@ export default function Diagnostics() {
         </div>
       </div>
 
+      {/* PWA Capabilities Section */}
+      <PwaCapabilitiesSection />
+
       {/* Extensions Section */}
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
@@ -256,6 +269,84 @@ export default function Diagnostics() {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function PwaCapabilitiesSection() {
+  const addToast = useStore((s) => s.addToast)
+  const pwaFeatures = checkPwaFeatures()
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const [sending, setSending] = useState(false)
+
+  const handleDelayedPush = useCallback(async () => {
+    setSending(true)
+    setCountdown(10)
+
+    // Countdown timer
+    const interval = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval)
+          return null
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    // Send the push after 10 seconds
+    setTimeout(async () => {
+      try {
+        const result = await pushApi.test()
+        if (!result.success) {
+          addToast({ type: 'warning', message: 'No push subscriptions found. Subscribe in Notifications settings first.' })
+        }
+      } catch (err: any) {
+        addToast({ type: 'error', message: err.message || 'Push test failed' })
+      } finally {
+        setSending(false)
+      }
+    }, 10_000)
+  }, [addToast])
+
+  return (
+    <div className={styles.section}>
+      <div className={styles.sectionHeader}>
+        <Bell size={14} />
+        <span>PWA Capabilities</span>
+      </div>
+      <div className={styles.grid}>
+        <div className={styles.featureRow}>
+          <span className={styles.featureLabel}>Service Worker APIs</span>
+          <div className={styles.featureTags}>
+            {Object.entries(pwaFeatures).map(([name, supported]) => (
+              <span key={name} className={clsx(styles.featureTag, supported ? styles.featureOk : styles.featureMissing)}>
+                {name}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className={styles.infoRow}>
+          <span className={styles.infoLabel}>Notification Permission</span>
+          <span className={styles.infoValue}>
+            {typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'}
+          </span>
+        </div>
+        <div className={styles.infoRow}>
+          <span className={styles.infoLabel}>Delayed Push Test</span>
+          <span className={styles.infoValue}>
+            <button
+              type="button"
+              className={styles.copyBtn}
+              onClick={handleDelayedPush}
+              disabled={sending}
+            >
+              <Send size={12} />
+              {countdown !== null ? `Sending in ${countdown}s...` : 'Send in 10s'}
+            </button>
+          </span>
+        </div>
       </div>
     </div>
   )

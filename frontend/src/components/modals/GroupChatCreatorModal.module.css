@@ -22,7 +22,7 @@
   display: flex;
   flex-direction: column;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5),
-    0 0 40px rgba(147, 112, 219, 0.2);
+    0 0 40px var(--lumiverse-primary-020);
 }
 
 .closeBtn {
@@ -83,13 +83,13 @@
   flex: 1;
   min-height: 0;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+  scrollbar-color: var(--lumiverse-fill-subtle) transparent;
 }
 
 .body::-webkit-scrollbar { width: 4px; }
 .body::-webkit-scrollbar-track { background: transparent; }
 .body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--lumiverse-fill-subtle);
   border-radius: 4px;
 }
 
@@ -202,7 +202,7 @@
 
 .charItem:hover {
   background: var(--lumiverse-fill, rgba(255, 255, 255, 0.06));
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: var(--lumiverse-border);
 }
 
 .charItemSelected {
@@ -294,7 +294,7 @@
 
 .greetingCard:hover {
   background: var(--lumiverse-fill, rgba(255, 255, 255, 0.06));
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: var(--lumiverse-border);
 }
 
 .greetingCardActive {

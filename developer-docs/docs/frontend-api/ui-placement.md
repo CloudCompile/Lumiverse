@@ -186,6 +186,100 @@ action.destroy()
 
 Clicking an extension action in the Extras popover fires all registered `onClick` handlers and automatically closes the popover.
 
+## Context Menu (free — no permission needed)
+
+Show a themed context menu at any screen position and wait for the user's selection. The menu is rendered by Lumiverse using the system theme — it automatically matches the user's accent color, glass mode, and dark/light preference. On mobile, pair this with a long-press gesture to replace right-click.
+
+```ts
+const { selectedKey } = await ctx.ui.showContextMenu({
+  position: { x: event.clientX, y: event.clientY },
+  items: [
+    { key: 'small', label: 'Small', active: currentSize === 'small' },
+    { key: 'medium', label: 'Medium', active: currentSize === 'medium' },
+    { key: 'large', label: 'Large', active: currentSize === 'large' },
+    { key: 'div', label: '', type: 'divider' },
+    { key: 'reset', label: 'Reset Position' },
+    { key: 'delete', label: 'Delete Widget', danger: true },
+  ],
+})
+
+if (selectedKey === 'small') {
+  // handle selection
+} else if (selectedKey === null) {
+  // user dismissed the menu without selecting
+}
+```
+
+The method returns a Promise that resolves when the user selects an item or dismisses the menu.
+
+### SpindleContextMenuOptions
+
+| Field | Type | Description |
+|---|---|---|
+| `position` | `{ x: number, y: number }` | Screen coordinates to anchor the menu |
+| `items` | `SpindleContextMenuItemDef[]` | Menu entries (see below) |
+
+### SpindleContextMenuItemDef
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `key` | `string` | *required* | Unique key returned when this item is selected |
+| `label` | `string` | *required* | Display text (ignored for dividers) |
+| `type` | `'item' \| 'divider'` | `'item'` | Set to `'divider'` for a visual separator |
+| `disabled` | `boolean` | `false` | Greyed out and not clickable |
+| `danger` | `boolean` | `false` | Rendered in red/danger style |
+| `active` | `boolean` | `false` | Highlighted to indicate current selection |
+
+### SpindleContextMenuResult
+
+| Field | Type | Description |
+|---|---|---|
+| `selectedKey` | `string \| null` | The `key` of the chosen item, or `null` if the menu was dismissed |
+
+### Mobile Support
+
+The context menu is triggered by `contextmenu` events (right-click on desktop), but mobile browsers don't reliably fire this event. To support mobile users, add a long-press (touch-and-hold) gesture:
+
+```ts
+let longPressTimer: ReturnType<typeof setTimeout> | null = null
+let longPressFired = false
+let longPressStart = { x: 0, y: 0 }
+
+element.addEventListener('touchstart', (e) => {
+  longPressFired = false
+  const touch = e.touches[0]
+  longPressStart = { x: touch.clientX, y: touch.clientY }
+  longPressTimer = setTimeout(() => {
+    longPressFired = true
+    navigator.vibrate?.(50) // haptic feedback
+    showContextMenu(touch.clientX, touch.clientY)
+  }, 500)
+}, { passive: true })
+
+element.addEventListener('touchmove', (e) => {
+  if (!longPressTimer) return
+  const touch = e.touches[0]
+  const dx = Math.abs(touch.clientX - longPressStart.x)
+  const dy = Math.abs(touch.clientY - longPressStart.y)
+  if (dx > 10 || dy > 10) {
+    clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+}, { passive: true })
+
+element.addEventListener('touchend', (e) => {
+  if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null }
+  if (longPressFired) { e.preventDefault(); longPressFired = false }
+})
+```
+
+!!! tip "Why use the system context menu?"
+    - **Themed automatically** — matches the user's accent color, glass blur, dark/light mode
+    - **Viewport-clamped** — the menu repositions itself to stay on screen
+    - **Keyboard accessible** — dismisses on Escape
+    - **Consistent UX** — users get the same look and feel across all extensions
+    - **No CSS to maintain** — no need to ship your own menu styles
+
 ## Capacity Limits
 
 | Placement | Per Extension | Global |

@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useStore } from '@/store'
 import { presetsApi } from '@/api/presets'
+import { regexApi } from '@/api/regex'
+import { toast } from '@/lib/toast'
 import { getMacroCatalog } from '@/api/macros'
 import type { LoomPreset, PromptBlock, LoomConnectionProfile, MacroGroup } from '@/lib/loom/types'
 import {
@@ -298,6 +300,23 @@ export function useLoomBuilder() {
       await refreshRegistry()
       setActiveLoomPreset(created.id)
       setActivePreset(newLoom)
+
+      // Import embedded regex scripts if present
+      const embeddedRegex = stData.extensions?.regex_scripts
+      if (Array.isArray(embeddedRegex) && embeddedRegex.length > 0) {
+        try {
+          const regexResult = await regexApi.importScripts(embeddedRegex)
+          if (regexResult.imported > 0) {
+            const { loadRegexScripts } = useStore.getState() as any
+            if (loadRegexScripts) await loadRegexScripts()
+            toast.success(`Imported ${regexResult.imported} regex script${regexResult.imported !== 1 ? 's' : ''} from preset`)
+          }
+          if (regexResult.errors.length > 0) {
+            toast.error(`${regexResult.errors.length} regex script${regexResult.errors.length !== 1 ? 's' : ''} failed to import`)
+          }
+        } catch { /* regex import is best-effort */ }
+      }
+
       return newLoom
     } catch (err: any) {
       setError(err.message)

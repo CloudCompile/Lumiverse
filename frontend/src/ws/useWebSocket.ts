@@ -193,6 +193,11 @@ export function useWebSocket() {
               state.setRespondingCharacterId(null)
             }
 
+            // Increment app badge when generation completes while tab is hidden
+            if (document.hidden) {
+              store.getState().incrementBadgeCount()
+            }
+
             // End streaming immediately, then reconcile the full message list
             // from backend source-of-truth to avoid id/index race conditions.
             state.endStreaming()
@@ -403,6 +408,10 @@ export function useWebSocket() {
 
       wsClient.on(EventType.SPINDLE_FRONTEND_MSG, (payload: { extensionId: string; data: unknown }) => {
         routeBackendMessage(payload.extensionId, payload.data)
+      }),
+
+      wsClient.on(EventType.SPINDLE_TEXT_EDITOR_OPEN, (payload: { requestId: string; extensionId: string; title: string; value: string; placeholder: string }) => {
+        store.getState().openTextEditor(payload)
       }),
 
       wsClient.on(EventType.SPINDLE_TOAST, (payload: { extensionId: string; extensionName: string; type: 'success' | 'warning' | 'error' | 'info'; message: string; title?: string; duration?: number }) => {

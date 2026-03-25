@@ -75,7 +75,7 @@
 }
 
 .tabBtnActive {
-  background: rgba(147, 112, 219, 0.15);
+  background: var(--lumiverse-primary-015);
   color: var(--lumiverse-primary-muted);
 }
 
@@ -144,5 +144,5 @@
 .iconBtnActive {
   border-color: var(--lumiverse-primary);
   color: var(--lumiverse-primary-muted);
-  background: rgba(147, 112, 219, 0.1);
+  background: var(--lumiverse-primary-010);
 }

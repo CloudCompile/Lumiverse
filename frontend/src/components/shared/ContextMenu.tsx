@@ -1,0 +1,122 @@
+import { useRef, useEffect, useLayoutEffect, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import clsx from 'clsx'
+import styles from './ContextMenu.module.css'
+
+export interface ContextMenuPos {
+  x: number
+  y: number
+}
+
+export interface ContextMenuItem {
+  key: string
+  label: string
+  icon?: ReactNode
+  onClick: () => void
+  disabled?: boolean
+  danger?: boolean
+  active?: boolean
+}
+
+export interface ContextMenuSection {
+  key: string
+  type: 'divider'
+}
+
+export interface ContextMenuCustom {
+  key: string
+  type: 'custom'
+  content: ReactNode
+}
+
+export type ContextMenuEntry = ContextMenuItem | ContextMenuSection | ContextMenuCustom
+
+interface ContextMenuProps {
+  position: ContextMenuPos | null
+  items: ContextMenuEntry[]
+  onClose: () => void
+}
+
+function isDivider(e: ContextMenuEntry): e is ContextMenuSection {
+  return 'type' in e && e.type === 'divider'
+}
+
+function isCustom(e: ContextMenuEntry): e is ContextMenuCustom {
+  return 'type' in e && e.type === 'custom'
+}
+
+export default function ContextMenu({ position, items, onClose }: ContextMenuProps) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Dismiss on click outside, Escape, or scroll.
+  // Listen on both mousedown and pointerdown because some elements (e.g.
+  // Spindle float widgets) call preventDefault() on pointerdown which
+  // suppresses the subsequent mousedown event.
+  useEffect(() => {
+    if (!position) return
+    const handleDown = (e: MouseEvent | PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
+    }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('mousedown', handleDown)
+    document.addEventListener('pointerdown', handleDown)
+    document.addEventListener('keydown', handleKey)
+    window.addEventListener('scroll', onClose, true)
+    return () => {
+      document.removeEventListener('mousedown', handleDown)
+      document.removeEventListener('pointerdown', handleDown)
+      document.removeEventListener('keydown', handleKey)
+      window.removeEventListener('scroll', onClose, true)
+    }
+  }, [position, onClose])
+
+  // Clamp to viewport
+  useLayoutEffect(() => {
+    if (!position || !ref.current) return
+    const el = ref.current
+    const rect = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    if (rect.right > vw - 8) {
+      el.style.left = `${vw - rect.width - 8}px`
+    }
+    if (rect.bottom > vh - 8) {
+      el.style.top = `${vh - rect.height - 8}px`
+    }
+  }, [position])
+
+  if (!position) return null
+
+  return createPortal(
+    <div
+      ref={ref}
+      className={styles.contextMenu}
+      style={{ top: position.y, left: position.x }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {items.map((entry) => {
+        if (isDivider(entry)) {
+          return <div key={entry.key} className={styles.divider} />
+        }
+        if (isCustom(entry)) {
+          return <div key={entry.key} className={styles.custom}>{entry.content}</div>
+        }
+        return (
+          <button
+            key={entry.key}
+            type="button"
+            className={clsx(styles.item, entry.danger && styles.itemDanger, entry.active && styles.itemActive)}
+            onClick={entry.onClick}
+            disabled={entry.disabled}
+          >
+            {entry.icon}
+            <span>{entry.label}</span>
+          </button>
+        )
+      })}
+    </div>,
+    document.body
+  )
+}

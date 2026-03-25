@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
-import { X, Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity, Globe } from 'lucide-react'
+import { X, Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity, Globe, Bell } from 'lucide-react'
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import { embeddingsApi } from '@/api/embeddings'
@@ -13,6 +13,7 @@ import ModeSelector from '@/components/panels/theme-panel/ModeSelector'
 import UserManagement from '@/components/settings/UserManagement'
 import TokenizerManager from '@/components/settings/TokenizerManager'
 import Diagnostics from '@/components/settings/Diagnostics'
+import NotificationSettings from '@/components/settings/NotificationSettings'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import styles from './SettingsModal.module.css'
 import clsx from 'clsx'
@@ -31,6 +32,7 @@ const BASE_VIEWS = [
   { id: 'extensionPools', icon: HardDrive, label: 'Extension Pools' },
   { id: 'embeddings', icon: Database, label: 'Embeddings' },
   { id: 'appearance', icon: Palette, label: 'Appearance' },
+  { id: 'notifications', icon: Bell, label: 'Notifications' },
   { id: 'advanced', icon: Sliders, label: 'Advanced' },
   { id: 'lumihub', icon: Globe, label: 'LumiHub' },
   { id: 'danger', icon: Shield, label: 'Danger Zone' },
@@ -130,6 +132,8 @@ function SettingsView({ view }: { view: string }) {
       return <TokenizerManager />
     case 'users':
       return <UserManagement />
+    case 'notifications':
+      return <NotificationSettings />
     case 'diagnostics':
       return <Diagnostics />
     default:

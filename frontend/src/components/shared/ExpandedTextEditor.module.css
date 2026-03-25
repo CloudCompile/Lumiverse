@@ -4,7 +4,7 @@
   position: fixed;
   inset: 0;
   bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--lumiverse-fill-deepest);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -22,7 +22,7 @@
   max-width: clamp(340px, 94vw, min(900px, var(--lumiverse-content-max-width, 900px)));
   height: 80vh;
   max-height: 80vh;
-  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.6), 0 0 1px rgba(147, 112, 219, 0.2);
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.6), 0 0 1px var(--lumiverse-primary-020);
   overflow: hidden;
 }
 

@@ -8,6 +8,8 @@ import { EventType } from '@/types/ws-events'
 import { expressionsApi } from '@/api/expressions'
 import { EXPRESSION_SIZE_PRESETS } from '@/types/expressions'
 import type { ExpressionConfig, ExpressionDisplaySize } from '@/types/expressions'
+import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/components/shared/ContextMenu'
+import { useLongPress } from '@/hooks/useLongPress'
 import styles from './ExpressionDisplay.module.css'
 
 export default function ExpressionDisplay() {
@@ -156,7 +158,7 @@ export default function ExpressionDisplay() {
 
   // ── Sizing ──
   const [pos, setPos] = useState({ x: display.x, y: display.y })
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
   const dragging = useRef(false)
   const resizing = useRef(false)
   const offset = useRef({ x: 0, y: 0 })
@@ -318,17 +320,11 @@ export default function ExpressionDisplay() {
     setExpressionDisplay({ sizePreset: 'custom', customWidth: customSize.width, customHeight: customSize.height })
   }, [customSize, setExpressionDisplay])
 
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setContextMenu({ x: e.clientX, y: e.clientY })
-  }, [])
+  const longPress = useLongPress({
+    onLongPress: (pos) => setContextMenu(pos),
+  })
 
-  useEffect(() => {
-    if (!contextMenu) return
-    const dismiss = () => setContextMenu(null)
-    window.addEventListener('click', dismiss)
-    return () => window.removeEventListener('click', dismiss)
-  }, [contextMenu])
+  const handleContextMenu = longPress.onContextMenu
 
   const selectSize = useCallback(
     (preset: ExpressionDisplaySize) => {
@@ -367,6 +363,67 @@ export default function ExpressionDisplay() {
       || null
   }
 
+  const contextMenuItems: ContextMenuEntry[] = useMemo(() => [
+    ...(['small', 'medium', 'large'] as const).map((preset) => ({
+      key: `size-${preset}`,
+      label: `Size: ${preset.charAt(0).toUpperCase() + preset.slice(1)}`,
+      active: display.sizePreset === preset,
+      onClick: () => selectSize(preset),
+    })),
+    { key: 'div-1', type: 'divider' as const },
+    {
+      key: 'opacity',
+      type: 'custom' as const,
+      content: (
+        <div className={styles.opacityRow}>
+          <span>Opacity</span>
+          <input
+            type="range"
+            className={styles.opacitySlider}
+            min={0.1}
+            max={1}
+            step={0.05}
+            value={display.opacity}
+            onChange={(e) => setExpressionDisplay({ opacity: parseFloat(e.target.value) })}
+          />
+        </div>
+      ),
+    },
+    { key: 'div-2', type: 'divider' as const },
+    {
+      key: 'frame',
+      label: display.frameless ? 'Show Frame' : 'Hide Frame',
+      onClick: () => { setExpressionDisplay({ frameless: !display.frameless }); setContextMenu(null) },
+    },
+    {
+      key: 'click-through',
+      label: display.clickThrough ? 'Disable Click-Through' : 'Enable Click-Through',
+      active: display.clickThrough,
+      onClick: () => { setExpressionDisplay({ clickThrough: !display.clickThrough }); setContextMenu(null) },
+    },
+    {
+      key: 'minimize',
+      label: 'Minimize',
+      onClick: () => { toggleMinimized(); setContextMenu(null) },
+    },
+    {
+      key: 'hide',
+      label: 'Hide Expression Display',
+      onClick: () => { setExpressionDisplay({ enabled: false }); setContextMenu(null) },
+    },
+    {
+      key: 'reset',
+      label: 'Reset Position',
+      onClick: () => {
+        const nx = window.innerWidth - containerSize.width - 24
+        const ny = window.innerHeight - containerSize.height - 100
+        setPos({ x: nx, y: ny })
+        setExpressionDisplay({ x: nx, y: ny })
+        setContextMenu(null)
+      },
+    },
+  ], [display.sizePreset, display.opacity, display.frameless, display.clickThrough, containerSize, selectSize, setExpressionDisplay, toggleMinimized])
+
   // ── Visibility gate ──
   if (!display.enabled) return null
   if (!isGroupExpressionMode && (!hasExpressions || !currentImageUrl)) return null
@@ -404,6 +461,9 @@ export default function ExpressionDisplay() {
           onPointerMove={handlePointerMove}
           onPointerUp={handleMinimizedPointerUp}
           onContextMenu={handleContextMenu}
+          onTouchStart={longPress.onTouchStart}
+          onTouchMove={longPress.onTouchMove}
+          onTouchEnd={longPress.onTouchEnd}
           title={minimizedTitle}
         >
           <span className={styles.minimizedIcon}>
@@ -413,89 +473,9 @@ export default function ExpressionDisplay() {
             }
           </span>
         </div>
-        {renderContextMenu()}
+        <ContextMenu position={contextMenu} items={contextMenuItems} onClose={() => setContextMenu(null)} />
       </>,
       document.body
-    )
-  }
-
-  function renderContextMenu() {
-    if (!contextMenu) return null
-    return (
-      <div
-        className={styles.contextMenu}
-        style={{ left: contextMenu.x, top: contextMenu.y }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {(['small', 'medium', 'large'] as const).map((preset) => (
-          <button
-            key={preset}
-            className={display.sizePreset === preset ? styles.contextMenuActive : styles.contextMenuItem}
-            onClick={() => selectSize(preset)}
-          >
-            Size: {preset.charAt(0).toUpperCase() + preset.slice(1)}
-          </button>
-        ))}
-        <div className={styles.contextMenuDivider} />
-        <div className={styles.opacityRow}>
-          <span>Opacity</span>
-          <input
-            type="range"
-            className={styles.opacitySlider}
-            min={0.1}
-            max={1}
-            step={0.05}
-            value={display.opacity}
-            onChange={(e) => setExpressionDisplay({ opacity: parseFloat(e.target.value) })}
-          />
-        </div>
-        <div className={styles.contextMenuDivider} />
-        <button
-          className={styles.contextMenuItem}
-          onClick={() => {
-            setExpressionDisplay({ frameless: !display.frameless })
-            setContextMenu(null)
-          }}
-        >
-          {display.frameless ? 'Show Frame' : 'Hide Frame'}
-        </button>
-        <button
-          className={display.clickThrough ? styles.contextMenuActive : styles.contextMenuItem}
-          onClick={() => {
-            setExpressionDisplay({ clickThrough: !display.clickThrough })
-            setContextMenu(null)
-          }}
-        >
-          {display.clickThrough ? 'Disable Click-Through' : 'Enable Click-Through'}
-        </button>
-        <button
-          className={styles.contextMenuItem}
-          onClick={() => { toggleMinimized(); setContextMenu(null) }}
-        >
-          Minimize
-        </button>
-        <button
-          className={styles.contextMenuItem}
-          onClick={() => {
-            setExpressionDisplay({ enabled: false })
-            setContextMenu(null)
-          }}
-        >
-          Hide Expression Display
-        </button>
-        <button
-          className={styles.contextMenuItem}
-          onClick={() => {
-            const x = window.innerWidth - containerSize.width - 24
-            const y = window.innerHeight - containerSize.height - 100
-            setPos({ x, y })
-            setExpressionDisplay({ x, y })
-            setContextMenu(null)
-          }}
-        >
-          Reset Position
-        </button>
-      </div>
     )
   }
 
@@ -524,6 +504,9 @@ export default function ExpressionDisplay() {
           opacity: display.opacity,
         }}
         onContextMenu={!display.clickThrough ? handleContextMenu : undefined}
+        onTouchStart={!display.clickThrough ? longPress.onTouchStart : undefined}
+        onTouchMove={!display.clickThrough ? longPress.onTouchMove : undefined}
+        onTouchEnd={!display.clickThrough ? longPress.onTouchEnd : undefined}
       >
         {/* Drag handle — always interactive even in click-through mode */}
         {display.frameless ? (
@@ -533,6 +516,9 @@ export default function ExpressionDisplay() {
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onContextMenu={display.clickThrough ? handleContextMenu : undefined}
+            onTouchStart={display.clickThrough ? longPress.onTouchStart : undefined}
+            onTouchMove={display.clickThrough ? longPress.onTouchMove : undefined}
+            onTouchEnd={display.clickThrough ? longPress.onTouchEnd : undefined}
           >
             <span className={styles.handleName}>{handleDisplayName}</span>
             <button type="button" className={styles.handleBtn} onClick={(e) => { e.stopPropagation(); toggleMinimized() }}>
@@ -549,6 +535,9 @@ export default function ExpressionDisplay() {
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onContextMenu={display.clickThrough ? handleContextMenu : undefined}
+            onTouchStart={display.clickThrough ? longPress.onTouchStart : undefined}
+            onTouchMove={display.clickThrough ? longPress.onTouchMove : undefined}
+            onTouchEnd={display.clickThrough ? longPress.onTouchEnd : undefined}
           >
             <span className={styles.handleName}>{handleDisplayName}</span>
             <button type="button" className={styles.handleBtn} onClick={(e) => { e.stopPropagation(); toggleMinimized() }}>
@@ -653,7 +642,7 @@ export default function ExpressionDisplay() {
         />
       </div>
 
-      {renderContextMenu()}
+      <ContextMenu position={contextMenu} items={contextMenuItems} onClose={() => setContextMenu(null)} />
     </>,
     document.body
   )

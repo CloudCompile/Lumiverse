@@ -88,6 +88,16 @@ export function createFloatWidgetHandle(
 
   const dragEndHandlers = new Set<(pos: { x: number; y: number }) => void>()
 
+  // Listen for drag-end events from the SpindleFloatWidget component
+  const handleDragEndEvent = ((e: CustomEvent) => {
+    if (e.detail?.widgetId !== widgetId) return
+    const pos = { x: e.detail.x as number, y: e.detail.y as number }
+    for (const handler of dragEndHandlers) {
+      try { handler(pos) } catch {}
+    }
+  }) as EventListener
+  window.addEventListener('spindle:float-drag-end', handleDragEndEvent)
+
   getStore().registerFloatWidget({
     id: widgetId,
     extensionId,
@@ -120,6 +130,7 @@ export function createFloatWidgetHandle(
       return w?.visible ?? true
     },
     destroy() {
+      window.removeEventListener('spindle:float-drag-end', handleDragEndEvent)
       getStore().unregisterFloatWidget(widgetId)
       dragEndHandlers.clear()
     },

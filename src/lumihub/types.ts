@@ -19,6 +19,8 @@ export interface InstallCharacterPayload {
   avatarMime?: string;
   /** Import URL for Chub-sourced characters. */
   importUrl?: string;
+  /** When true, extract the embedded character_book as a standalone worldbook and associate it. */
+  importEmbeddedWorldbook?: boolean;
 }
 
 export interface InstallResultPayload {

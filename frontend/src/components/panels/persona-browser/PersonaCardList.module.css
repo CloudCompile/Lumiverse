@@ -32,12 +32,12 @@
 }
 
 .rowSelected {
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
   border-color: var(--lumiverse-primary);
 }
 
 .rowActive {
-  box-shadow: 0 0 12px rgba(147, 112, 219, 0.35);
+  box-shadow: 0 0 12px var(--lumiverse-primary-020);
 }
 
 .avatar {
@@ -63,7 +63,7 @@
   align-items: center;
   justify-content: center;
   color: var(--lumiverse-primary-muted);
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
 }
 
 .info {

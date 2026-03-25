@@ -101,7 +101,7 @@
 
 .dangerBtn:hover {
   color: var(--lumiverse-danger);
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--lumiverse-danger-015);
 }
 
 .form {

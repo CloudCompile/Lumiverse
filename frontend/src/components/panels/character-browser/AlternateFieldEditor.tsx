@@ -51,18 +51,29 @@ export default function AlternateFieldEditor({
     ? alternates?.find((v) => v.id === activeVariantId) ?? null
     : null
 
-  const activeContent = activeVariant ? activeVariant.content : value
+  // Maintain local content state for variants so the textarea doesn't read
+  // stale store data between debounced saves (which caused cursor jumps).
+  const [localVariantContent, setLocalVariantContent] = useState('')
+  const prevVariantIdRef = useRef<string | null>(null)
+
+  // Re-sync local content when the active variant switches
+  if (activeVariantId !== prevVariantIdRef.current) {
+    prevVariantIdRef.current = activeVariantId
+    setLocalVariantContent(activeVariant?.content ?? '')
+  }
+
+  const activeContent = activeVariantId ? localVariantContent : value
 
   const handleContentChange = useCallback(
     (newContent: string) => {
       if (activeVariantId && alternates) {
-        // Editing an alternate variant
+        setLocalVariantContent(newContent)
         const updated = alternates.map((v) =>
           v.id === activeVariantId ? { ...v, content: newContent } : v
         )
         onAlternatesChange(updated)
       } else {
-        // Editing the default
+        // Editing the default — parent maintains local state via setFields()
         onChange(newContent)
       }
     },

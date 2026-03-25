@@ -18,7 +18,7 @@
   padding: 8px 12px;
   border-radius: 8px;
   background: var(--lumiverse-primary-light);
-  border: 1px solid rgba(147, 112, 219, 0.2);
+  border: 1px solid var(--lumiverse-primary-020);
   color: var(--lumiverse-primary);
   font-size: 13px;
   font-weight: 500;
@@ -27,7 +27,7 @@
 }
 
 .createBtn:hover {
-  background: rgba(147, 112, 219, 0.15);
+  background: var(--lumiverse-primary-015);
 }
 
 .form {

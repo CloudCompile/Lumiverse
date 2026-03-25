@@ -58,12 +58,12 @@
 }
 
 .btn:hover {
-  background: rgba(147, 112, 219, 0.1);
+  background: var(--lumiverse-primary-010);
   color: var(--lumiverse-primary);
 }
 
 .btn:active {
-  background: rgba(147, 112, 219, 0.18);
+  background: var(--lumiverse-primary-020);
 }
 
 .btn + .btn {

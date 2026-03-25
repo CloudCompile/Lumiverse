@@ -78,6 +78,7 @@
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
+  padding: 12px 14px;
 }
 
 .formGroup {
@@ -204,7 +205,7 @@
    ============================================================================ */
 
 .categoryHeader {
-  background: rgba(0, 0, 0, 0.1);
+  background: var(--lumiverse-fill-subtle);
   border-color: var(--lumiverse-border-neutral, rgba(128, 128, 128, 0.2));
   cursor: pointer;
   user-select: none;
@@ -214,7 +215,7 @@
 }
 
 .categoryHeader:hover {
-  background: rgba(0, 0, 0, 0.15);
+  background: var(--lumiverse-fill);
 }
 
 .categoryName {
@@ -258,9 +259,9 @@
 }
 
 .badgeAssistant {
-  background: rgba(245, 158, 11, 0.12);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.1);
+  background: var(--lumiverse-warning-015);
+  color: var(--lumiverse-warning);
+  border: 1px solid var(--lumiverse-warning-015);
 }
 
 .badgeUserAppend {
@@ -270,9 +271,9 @@
 }
 
 .badgeAssistantAppend {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.25);
+  background: var(--lumiverse-warning-020);
+  color: var(--lumiverse-warning);
+  border: 1px solid var(--lumiverse-warning-020);
 }
 
 .badgeMarker {
@@ -321,7 +322,7 @@
 
 .iconBtnDanger:hover {
   color: var(--lumiverse-danger, #ef4444);
-  background: rgba(239, 68, 68, 0.08);
+  background: var(--lumiverse-danger-015);
 }
 
 .dragHandle {
@@ -531,7 +532,7 @@
 }
 
 .menuButtonDanger:hover {
-  background: rgba(239, 68, 68, 0.08);
+  background: var(--lumiverse-danger-015);
 }
 
 .sectionLabel {
@@ -555,11 +556,11 @@
 
 .postHistoryNote {
   font-size: 11px;
-  color: var(--lumiverse-warning, #f59e0b);
+  color: var(--lumiverse-warning);
   padding: 6px 10px;
   background: rgba(245, 158, 11, 0.06);
   border-radius: 8px;
-  border: 1px solid rgba(245, 158, 11, 0.1);
+  border: 1px solid var(--lumiverse-warning-015);
   margin-top: 6px;
 }
 
@@ -1072,7 +1073,7 @@
   position: fixed;
   inset: 0;
   bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--lumiverse-modal-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1253,7 +1254,7 @@
 
 .previewDiagWarn {
   font-size: 10px;
-  color: var(--lumiverse-warning, #f59e0b);
+  color: var(--lumiverse-warning);
   display: flex;
   align-items: center;
   gap: 4px;

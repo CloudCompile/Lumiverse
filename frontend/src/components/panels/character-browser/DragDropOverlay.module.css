@@ -1,7 +1,7 @@
 .overlay {
   position: absolute;
   inset: 0;
-  background: rgba(147, 112, 219, 0.1);
+  background: var(--lumiverse-primary-010);
   border: 2px dashed var(--lumiverse-primary);
   border-radius: 12px;
   display: flex;

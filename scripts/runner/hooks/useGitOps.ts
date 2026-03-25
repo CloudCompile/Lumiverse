@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { join } from "path";
+import { existsSync, rmSync } from "fs";
 import { runGit, getUpstreamRef, getCurrentBranch } from "../lib/git.js";
 import { PROJECT_ROOT, UPDATE_CHECK_INTERVAL_MS } from "../lib/constants.js";
 import type { LogSource } from "./useLogBuffer.js";
@@ -123,7 +124,7 @@ export function useGitOps(
       updatingRef.current = true;
       setUpdateState((prev) => ({ ...prev, inProgress: true }));
 
-      addLog("Pulling latest changes...", "system");
+      addLog("Preparing update...", "system");
 
       // Stash local changes
       const status = runGit("status", "--porcelain");
@@ -132,7 +133,20 @@ export function useGitOps(
         runGit("stash", "push", "-m", "lumiverse-runner-auto-stash");
       }
 
-      // Pull
+      // 1) Clear Bun transpiler cache to avoid stale bytecode
+      addLog("Clearing transpiler cache...", "system");
+      Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
+
+      // 2) Delete frontend/dist to prevent git conflicts and ensure clean rebuild
+      const frontendDir = join(PROJECT_ROOT, "frontend");
+      const frontendDistDir = join(frontendDir, "dist");
+      if (existsSync(frontendDistDir)) {
+        addLog("Removing frontend/dist...", "system");
+        rmSync(frontendDistDir, { recursive: true, force: true });
+      }
+
+      // 3) Pull latest
+      addLog("Pulling latest changes...", "system");
       const pullProc = Bun.spawn(["git", "pull", "--ff-only"], {
         cwd: PROJECT_ROOT,
         stdout: "pipe",
@@ -147,6 +161,14 @@ export function useGitOps(
           `Update failed: ${pullErr.trim() || pullOut.trim()}`,
           "system"
         );
+        // Rebuild frontend to restore deleted dist
+        addLog("Rebuilding frontend to restore dist...", "system");
+        const recoveryBuild = Bun.spawn(["bun", "run", "build"], {
+          cwd: frontendDir,
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await recoveryBuild.exited;
         updatingRef.current = false;
         setUpdateState((prev) => ({ ...prev, inProgress: false }));
         return;
@@ -156,65 +178,42 @@ export function useGitOps(
         if (line.trim()) addLog(`  ${line.trim()}`, "system");
       }
 
-      // Clear Bun transpiler cache to avoid stale bytecode
-      Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
+      // 4) Install dependencies and rebuild
+      addLog("Installing backend dependencies...", "system");
+      const installProc = Bun.spawn(["bun", "install"], {
+        cwd: PROJECT_ROOT,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      await installProc.exited;
+      addLog("Backend dependencies updated.", "system");
 
-      // Check which files changed
-      const diffFiles = runGit("diff", "--name-only", "HEAD@{1}", "HEAD");
-      const changedFiles = diffFiles.ok ? diffFiles.out : "";
+      addLog("Installing frontend dependencies...", "system");
+      const feInstallProc = Bun.spawn(["bun", "install"], {
+        cwd: frontendDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      await feInstallProc.exited;
+      addLog("Frontend dependencies updated.", "system");
 
-      // Reinstall backend deps if package.json changed
-      if (changedFiles.includes("package.json")) {
+      addLog("Rebuilding frontend...", "system");
+      const buildProc = Bun.spawn(["bun", "run", "build"], {
+        cwd: frontendDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const buildOut = await new Response(buildProc.stdout).text();
+      const buildErr = await new Response(buildProc.stderr).text();
+      const buildCode = await buildProc.exited;
+
+      if (buildCode !== 0) {
         addLog(
-          "package.json changed — reinstalling backend dependencies...",
+          `Frontend build failed: ${buildErr.trim() || buildOut.trim()}`,
           "system"
         );
-        const installProc = Bun.spawn(["bun", "install"], {
-          cwd: PROJECT_ROOT,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        await installProc.exited;
-        addLog("Backend dependencies updated.", "system");
-      }
-
-      // Check for frontend changes
-      const frontendDir = join(PROJECT_ROOT, "frontend");
-      const hasFrontendChanges = changedFiles
-        .split("\n")
-        .some((f: string) => f.startsWith("frontend/"));
-
-      if (hasFrontendChanges) {
-        addLog(
-          "Frontend changes detected — installing dependencies...",
-          "system"
-        );
-        const feInstallProc = Bun.spawn(["bun", "install"], {
-          cwd: frontendDir,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        await feInstallProc.exited;
-        addLog("Frontend dependencies updated.", "system");
-
-        addLog("Rebuilding frontend...", "system");
-        const buildProc = Bun.spawn(["bun", "run", "build"], {
-          cwd: frontendDir,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const buildOut = await new Response(buildProc.stdout).text();
-        const buildErr = await new Response(buildProc.stderr).text();
-        const buildCode = await buildProc.exited;
-
-        if (buildCode !== 0) {
-          addLog(
-            `Frontend build failed: ${buildErr.trim() || buildOut.trim()}`,
-            "system"
-          );
-        } else {
-          addLog("Frontend rebuilt successfully.", "system");
-        }
+      } else {
+        addLog("Frontend rebuilt successfully.", "system");
       }
 
       addLog("Update complete. Restarting server...", "system");
@@ -249,6 +248,17 @@ export function useGitOps(
         );
       }
 
+      // Clear Bun transpiler cache before switching
+      addLog("Clearing transpiler cache...", "system");
+      Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
+
+      // Delete frontend/dist to prevent conflicts and ensure clean rebuild
+      const frontendDistDir = join(PROJECT_ROOT, "frontend", "dist");
+      if (existsSync(frontendDistDir)) {
+        addLog("Removing frontend/dist...", "system");
+        rmSync(frontendDistDir, { recursive: true, force: true });
+      }
+
       // Checkout
       const checkout = runGit("checkout", target);
       if (!checkout.ok) {
@@ -256,6 +266,14 @@ export function useGitOps(
           `Failed to checkout '${target}': ${checkout.out}`,
           "system"
         );
+        // Rebuild frontend to restore deleted dist
+        addLog("Rebuilding frontend to restore dist...", "system");
+        const recoveryBuild = Bun.spawn(["bun", "run", "build"], {
+          cwd: join(PROJECT_ROOT, "frontend"),
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await recoveryBuild.exited;
         addLog("Restarting server on current branch...", "system");
         setBranchSwitchInProgress(false);
         await onRestart();
@@ -264,9 +282,6 @@ export function useGitOps(
 
       setCurrentBranch(target);
       addLog(`Checked out '${target}'.`, "system");
-
-      // Clear Bun transpiler cache to avoid stale bytecode across branches
-      Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
 
       // Pull latest
       addLog("Pulling latest changes...", "system");

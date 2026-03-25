@@ -10,6 +10,13 @@ import './theme/global.css'
 // Register service worker for PWA support — autoUpdate reloads on new versions
 registerSW({ immediate: true })
 
+// Navigate when a push notification is clicked (SW posts NAVIGATE message)
+navigator.serviceWorker?.addEventListener('message', (event) => {
+  if (event.data?.type === 'NAVIGATE') {
+    router.navigate(event.data.url)
+  }
+})
+
 // Capture the no-keyboard viewport height at load time. On iOS PWA,
 // window.innerHeight may shrink with the keyboard (same as visualViewport),
 // making it useless as a reference. This value is recaptured on orientation

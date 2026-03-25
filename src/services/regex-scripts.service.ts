@@ -305,6 +305,16 @@ export function toggleRegexScript(userId: string, id: string, disabled: boolean)
   return updated;
 }
 
+// ── Character-bound query ────────────────────────────────────────────────────
+
+/** Returns all regex scripts scoped to a specific character (for bundling into .charx exports). */
+export function getCharacterBoundScripts(userId: string, characterId: string): RegexScript[] {
+  const rows = getDb()
+    .query("SELECT * FROM regex_scripts WHERE user_id = ? AND scope = 'character' AND scope_id = ? ORDER BY sort_order ASC, created_at ASC")
+    .all(userId, characterId) as any[];
+  return rows.map(rowToRegexScript);
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────────────────
 
 /**
@@ -451,6 +461,56 @@ export function exportRegexScripts(userId: string, ids?: string[]): RegexScriptE
   };
 }
 
+// SillyTavern regex_placement enum → Lumiverse placement strings
+const ST_PLACEMENT_MAP: Record<number, RegexPlacement> = {
+  // 0 = MD_DISPLAY (deprecated in ST, map to user_input as closest equivalent)
+  0: "user_input",
+  1: "user_input",
+  2: "ai_output",
+  // 3 = SLASH_COMMAND (no equivalent, skip)
+  // 4 = sendAs (legacy, skip)
+  5: "world_info",
+  6: "reasoning",
+};
+
+// SillyTavern substitute_find_regex enum → Lumiverse macro mode
+const ST_SUBSTITUTE_MAP: Record<number, "none" | "raw" | "escaped"> = {
+  0: "none",
+  1: "raw",
+  2: "escaped",
+};
+
+/**
+ * Parse a SillyTavern `/pattern/flags` regex literal into pattern + flags.
+ * Falls back to treating the whole string as the pattern if it's not in literal form.
+ */
+function parseRegexLiteral(findRegex: string): { pattern: string; flags: string } {
+  const match = findRegex.match(/^\/(.+)\/([gimsuy]*)$/s);
+  if (match) {
+    return { pattern: match[1], flags: match[2] || "gi" };
+  }
+  return { pattern: findRegex, flags: "gi" };
+}
+
+function convertStPlacement(placement: any[]): RegexPlacement[] {
+  const result: RegexPlacement[] = [];
+  for (const p of placement) {
+    if (typeof p === "string" && VALID_PLACEMENTS.has(p)) {
+      result.push(p as RegexPlacement);
+    } else if (typeof p === "number" && ST_PLACEMENT_MAP[p]) {
+      result.push(ST_PLACEMENT_MAP[p]);
+    }
+  }
+  // Deduplicate
+  return [...new Set(result)];
+}
+
+function convertStTarget(item: any): RegexTarget {
+  if (item.markdownOnly) return "display";
+  if (item.promptOnly) return "prompt";
+  return "response";
+}
+
 export function importRegexScripts(
   userId: string,
   payload: any
@@ -459,30 +519,55 @@ export function importRegexScripts(
   let imported = 0;
   let skipped = 0;
 
-  // Detect SillyTavern format
-  const scripts = Array.isArray(payload)
-    ? payload
-    : payload?.scripts ?? [];
+  // Normalize input: accept array, { scripts: [] }, or single object
+  let scripts: any[];
+  if (Array.isArray(payload)) {
+    scripts = payload;
+  } else if (Array.isArray(payload?.scripts)) {
+    scripts = payload.scripts;
+  } else if (payload && typeof payload === "object" && (payload.scriptName || payload.findRegex || payload.find_regex || payload.name)) {
+    // Single script object
+    scripts = [payload];
+  } else {
+    scripts = [];
+  }
 
   for (let i = 0; i < scripts.length; i++) {
     let item = scripts[i];
 
     // SillyTavern format conversion
     if (item.scriptName || item.findRegex) {
+      const { pattern, flags } = parseRegexLiteral(item.findRegex ?? item.find_regex ?? "");
+
+      // Convert numeric placement array to string values
+      const rawPlacement = Array.isArray(item.placement) ? item.placement : ["ai_output"];
+      const placement = convertStPlacement(rawPlacement);
+
+      // Convert substituteRegex enum (0=none, 1=raw, 2=escaped)
+      const subVal = Number(item.substituteRegex ?? 0);
+      const substitute_macros = ST_SUBSTITUTE_MAP[subVal] ?? "none";
+
+      // Convert promptOnly/markdownOnly booleans to target
+      const target = convertStTarget(item);
+
+      // Normalize depth: ST uses -1 for "any"
+      const minDepth = item.minDepth ?? item.min_depth ?? null;
+      const maxDepth = item.maxDepth ?? item.max_depth ?? null;
+
       item = {
         name: item.scriptName ?? item.name ?? `Imported Script ${i + 1}`,
-        find_regex: item.findRegex ?? item.find_regex,
+        find_regex: pattern,
         replace_string: item.replaceString ?? item.replace_string ?? "",
-        flags: item.flags ?? "gi",
-        placement: item.placement ?? ["ai_output"],
+        flags,
+        placement: placement.length > 0 ? placement : ["ai_output"],
         scope: item.scope ?? "global",
         scope_id: item.scope_id ?? null,
-        target: item.target ?? "response",
-        min_depth: item.minDepth ?? item.min_depth ?? null,
-        max_depth: item.maxDepth ?? item.max_depth ?? null,
+        target,
+        min_depth: (typeof minDepth === "number" && minDepth >= 0) ? minDepth : null,
+        max_depth: (typeof maxDepth === "number" && maxDepth >= 0) ? maxDepth : null,
         trim_strings: item.trimStrings ?? item.trim_strings ?? [],
         run_on_edit: item.runOnEdit ?? item.run_on_edit ?? false,
-        substitute_macros: item.substituteRegex !== undefined ? (item.substituteRegex ? "raw" : "none") : (item.substitute_macros ?? "none"),
+        substitute_macros,
         disabled: item.disabled ?? false,
         sort_order: item.sort_order ?? i,
         description: item.description ?? "",

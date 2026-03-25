@@ -20,7 +20,7 @@
   background: var(--lumiverse-gradient-modal);
   border-radius: 16px;
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px rgba(147, 112, 219, 0.15);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px var(--lumiverse-primary-015);
   overflow: hidden;
 }
 
@@ -49,9 +49,9 @@
   font-size: 11px;
   font-weight: 500;
   border-radius: 6px;
-  background: rgba(147, 112, 219, 0.15);
+  background: var(--lumiverse-primary-015);
   color: var(--lumiverse-primary, #9370db);
-  border: 1px solid rgba(147, 112, 219, 0.2);
+  border: 1px solid var(--lumiverse-primary-020);
   white-space: nowrap;
 }
 
@@ -87,7 +87,7 @@
 }
 
 .body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--lumiverse-fill);
   border-radius: 4px;
 }
 
@@ -109,7 +109,7 @@
   margin-bottom: 8px;
   border-radius: 10px;
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
   overflow: hidden;
 }
 
@@ -118,7 +118,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
   border-bottom: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.04));
 }
 
@@ -134,8 +134,8 @@
 }
 
 .roleSystem {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
+  background: var(--lumiverse-warning-015);
+  color: var(--lumiverse-warning);
 }
 
 .roleUser {
@@ -144,8 +144,8 @@
 }
 
 .roleAssistant {
-  background: rgba(147, 112, 219, 0.15);
-  color: #9370db;
+  background: var(--lumiverse-primary-015);
+  color: var(--lumiverse-primary);
 }
 
 .messageContent {
@@ -165,7 +165,7 @@
 }
 
 .messageContent::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--lumiverse-fill-subtle);
   border-radius: 4px;
 }
 
@@ -180,7 +180,7 @@
   margin-bottom: 8px;
   border-radius: 10px;
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
   overflow: hidden;
 }
 
@@ -200,7 +200,7 @@
 }
 
 .collapsibleHeader:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--lumiverse-fill-subtle);
 }
 
 .chevron {
@@ -240,7 +240,7 @@
   gap: 8px;
   padding: 6px 10px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--lumiverse-fill-subtle);
   font-size: 12px;
   min-height: 30px;
 }
@@ -266,7 +266,7 @@
   text-transform: uppercase;
   letter-spacing: 0.03em;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--lumiverse-fill-subtle);
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.4));
   flex-shrink: 0;
 }
@@ -294,8 +294,8 @@
 .prefillSection {
   margin-bottom: 8px;
   border-radius: 10px;
-  border: 1px solid rgba(147, 112, 219, 0.15);
-  background: rgba(147, 112, 219, 0.05);
+  border: 1px solid var(--lumiverse-primary-015);
+  background: var(--lumiverse-primary-010);
   padding: 10px 12px;
 }
 

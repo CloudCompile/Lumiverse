@@ -7,8 +7,12 @@
   justify-content: center;
   padding: 20px;
   background: var(--lumiverse-modal-backdrop, rgba(3, 5, 9, 0.72));
-  backdrop-filter: blur(8px);
   z-index: 10002;
+}
+
+:global([data-glass]) .backdrop {
+  backdrop-filter: blur(var(--lcs-glass-soft-blur, 8px));
+  -webkit-backdrop-filter: blur(var(--lcs-glass-soft-blur, 8px));
 }
 
 .modal {

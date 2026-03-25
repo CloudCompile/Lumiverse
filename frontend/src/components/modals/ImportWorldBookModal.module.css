@@ -6,7 +6,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--lumiverse-modal-backdrop);
 }
 
 .modal {
@@ -171,8 +171,8 @@
 .error {
   padding: 8px 12px;
   border-radius: 6px;
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: var(--lumiverse-danger-015);
+  border: 1px solid var(--lumiverse-danger-020);
   color: var(--lumiverse-error, #ef4444);
   font-size: 12px;
 }

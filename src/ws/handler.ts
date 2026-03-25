@@ -118,6 +118,24 @@ export const wsHandler = upgradeWebSocket((c) => {
           return;
         }
 
+        if (data.type === "visibility") {
+          if (userId && sessionId) {
+            eventBus.setUserVisibility(userId, sessionId, !!data.visible);
+          }
+          return;
+        }
+
+        if (data.type === "SPINDLE_TEXT_EDITOR_RESULT") {
+          if (userId && data.requestId) {
+            eventBus.emit(EventType.SPINDLE_TEXT_EDITOR_RESULT, {
+              requestId: data.requestId,
+              text: data.text,
+              cancelled: !!data.cancelled,
+            }, userId);
+          }
+          return;
+        }
+
         if (data.type === "SPINDLE_BACKEND_MSG") {
           const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
           if (!extensionId) return;

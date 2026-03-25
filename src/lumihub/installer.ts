@@ -59,6 +59,44 @@ export async function installCharacter(
   }
 }
 
+/**
+ * If the character has an embedded character_book and the payload requests it,
+ * extract it as a standalone worldbook and associate it with the character.
+ */
+function maybeExtractWorldbook(
+  userId: string,
+  characterId: string,
+  characterName: string,
+  payload: InstallCharacterPayload
+): void {
+  if (!payload.importEmbeddedWorldbook) return;
+
+  const character = svc.getCharacter(userId, characterId);
+  const charBook = character?.extensions?.character_book;
+  if (!charBook || !charBook.entries || charBook.entries.length === 0) return;
+
+  try {
+    const { worldBook } = wbSvc.importCharacterBook(userId, characterId, characterName, charBook);
+    // Associate the worldbook with the character
+    svc.updateCharacter(userId, characterId, {
+      extensions: {
+        ...(character.extensions || {}),
+        world_book_id: worldBook.id,
+      },
+    });
+  } catch (err) {
+    console.warn("[LumiHub Installer] Embedded worldbook extraction failed:", err);
+  }
+}
+
+/** Emit CHARACTER_EDITED so the frontend gallery refreshes immediately. */
+function notifyCharacterCreated(userId: string, characterId: string): void {
+  const character = svc.getCharacter(userId, characterId);
+  if (character) {
+    eventBus.emit(EventType.CHARACTER_EDITED, { id: characterId, character }, userId);
+  }
+}
+
 /** Install from inline CCSv3 card data (LumiHub-sourced characters). */
 async function installFromCardData(
   requestId: string,
@@ -85,9 +123,12 @@ async function installFromCardData(
     }
   }
 
+  maybeExtractWorldbook(userId, character.id, payload.characterName, payload);
+
   const final = svc.getCharacter(userId, character.id);
 
-  // Notify the Lumiverse frontend
+  // Refresh gallery + notify the Lumiverse frontend
+  notifyCharacterCreated(userId, character.id);
   eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
     characterId: character.id,
     characterName: final?.name || payload.characterName,
@@ -209,6 +250,23 @@ async function installFromUrl(
       await exprSvc.importFromAssets(userId, character.id, expressionAssets);
     }
 
+    // Import regex scripts from Lumiverse modules (bundled .charx)
+    if (lumiverseModules?.regex_scripts?.length) {
+      try {
+        const regexSvc = await import("../services/regex-scripts.service");
+        for (const bundled of lumiverseModules.regex_scripts) {
+          try {
+            regexSvc.createRegexScript(userId, {
+              ...bundled,
+              scope: "character",
+              scope_id: character.id,
+              metadata: { ...bundled.metadata, source: "charx_bundle" },
+            });
+          } catch { /* skip individual failures */ }
+        }
+      } catch { /* skip if regex service unavailable */ }
+    }
+
     // Import RisuAI regex scripts
     if (risuModule?.regex?.length) {
       const scripts = cardSvc.convertRisuRegexScripts(risuModule.regex, character.id);
@@ -221,8 +279,11 @@ async function installFromUrl(
       }
     }
 
+    maybeExtractWorldbook(userId, character.id, payload.characterName, payload);
+
     const final = svc.getCharacter(userId, character.id);
 
+    notifyCharacterCreated(userId, character.id);
     eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
       characterId: character.id,
       characterName: final?.name || payload.characterName,
@@ -247,8 +308,11 @@ async function installFromUrl(
     svc.setCharacterImage(userId, character.id, image.id);
     svc.setCharacterAvatar(userId, character.id, image.filename);
 
+    maybeExtractWorldbook(userId, character.id, payload.characterName, payload);
+
     const final = svc.getCharacter(userId, character.id);
 
+    notifyCharacterCreated(userId, character.id);
     eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
       characterId: character.id,
       characterName: final?.name || payload.characterName,
@@ -275,8 +339,11 @@ async function installFromUrl(
   const cardInput = cardSvc.parseCardJson(json);
   const character = svc.createCharacter(userId, cardInput);
 
+  maybeExtractWorldbook(userId, character.id, payload.characterName, payload);
+
   const final = svc.getCharacter(userId, character.id);
 
+  notifyCharacterCreated(userId, character.id);
   eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
     characterId: character.id,
     characterName: final?.name || payload.characterName,
@@ -378,8 +445,11 @@ async function installFromChub(
     } catch { /* avatar fetch failed, character still imported */ }
   }
 
+  maybeExtractWorldbook(userId, character.id, name, payload);
+
   const final = svc.getCharacter(userId, character.id);
 
+  notifyCharacterCreated(userId, character.id);
   eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
     characterId: character.id,
     characterName: final?.name || name,

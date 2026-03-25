@@ -212,6 +212,7 @@ export function convertRisuRegexScripts(
       scope: "character",
       scope_id: characterId,
       target,
+      disabled: r.ableFlag === false,
       sort_order: i,
       description: `Imported from RisuAI module`,
       metadata: { source: "risuai_module", original_type: r.type },
@@ -354,6 +355,26 @@ export interface CharxExpressionAsset {
   file: File;
 }
 
+export interface BundledRegexScript {
+  name: string;
+  find_regex: string;
+  replace_string: string;
+  flags: string;
+  placement: string[];
+  scope: string;
+  scope_id: string | null;
+  target: string;
+  min_depth: number | null;
+  max_depth: number | null;
+  trim_strings: string[];
+  run_on_edit: boolean;
+  substitute_macros: string;
+  disabled: boolean;
+  sort_order: number;
+  description: string;
+  metadata: Record<string, any>;
+}
+
 export interface LumiverseModules {
   version: number;
   /** True when any expression label matches NSFW content keywords. */
@@ -365,6 +386,7 @@ export interface LumiverseModules {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  regex_scripts?: BundledRegexScript[];
 }
 
 export interface CharxResult {

@@ -870,6 +870,89 @@ const spindleApi: SpindleAPI = {
     },
   },
 
+  push: {
+    async send(
+      input: { title: string; body: string; tag?: string; url?: string; icon?: string; rawTitle?: boolean },
+      userId?: string,
+    ): Promise<{ sent: number }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "push_send",
+        requestId,
+        title: input.title,
+        body: input.body,
+        tag: input.tag,
+        url: input.url,
+        icon: input.icon,
+        rawTitle: input.rawTitle,
+        userId,
+      } as any);
+      return result as { sent: number };
+    },
+    async getStatus(userId?: string): Promise<{
+      available: boolean;
+      subscriptionCount: number;
+    }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "push_get_status",
+        requestId,
+        userId,
+      } as any);
+      return result as { available: boolean; subscriptionCount: number };
+    },
+  },
+
+  textEditor: {
+    async open(options?: {
+      title?: string;
+      value?: string;
+      placeholder?: string;
+      userId?: string;
+    }): Promise<{ text: string; cancelled: boolean }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "text_editor_open",
+        requestId,
+        title: options?.title,
+        value: options?.value,
+        placeholder: options?.placeholder,
+        userId: options?.userId,
+      } as any);
+      return result as { text: string; cancelled: boolean };
+    },
+  },
+
+  macros: {
+    async resolve(
+      template: string,
+      options?: { chatId?: string; characterId?: string; userId?: string },
+    ): Promise<{ text: string; diagnostics: Array<{ message: string; offset: number; length: number }> }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "macros_resolve",
+        requestId,
+        template,
+        chatId: options?.chatId,
+        characterId: options?.characterId,
+        userId: options?.userId,
+      } as any);
+      return result as { text: string; diagnostics: Array<{ message: string; offset: number; length: number }> };
+    },
+  },
+
+  users: {
+    async isVisible(userId?: string): Promise<boolean> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "user_is_visible",
+        requestId,
+        userId,
+      } as any);
+      return result as boolean;
+    },
+  },
+
   oauth: {
     onCallback(
       handler: (params: Record<string, string>) => Promise<{ html?: string } | void>

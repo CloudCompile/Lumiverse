@@ -172,7 +172,7 @@
   height: 20px;
   border: 1px solid var(--lumiverse-border);
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--lumiverse-fill-deepest);
   color: #fff;
   display: inline-flex;
   align-items: center;

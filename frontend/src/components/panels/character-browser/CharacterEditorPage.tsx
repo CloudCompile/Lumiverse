@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download, Loader2 } from 'lucide-react'
+import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download, Loader2, Code2 } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
 import { imagesApi } from '@/api/images'
 import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
+import { regexApi } from '@/api/regex'
 import { useStore } from '@/store'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
@@ -16,6 +17,7 @@ import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { Character, CharacterGalleryItem } from '@/types/api'
+import type { RegexScript } from '@/types/regex'
 import { toast } from '@/lib/toast'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
@@ -66,6 +68,8 @@ export default function CharacterEditorPage() {
   const [saving, setSaving] = useState(false)
   const [galleryItems, setGalleryItems] = useState<CharacterGalleryItem[]>([])
   const [worldBooks, setWorldBooks] = useState<Array<{ id: string; name: string }>>([])
+  const [boundRegexScripts, setBoundRegexScripts] = useState<RegexScript[]>([])
+  const [allRegexScripts, setAllRegexScripts] = useState<RegexScript[]>([])
   const [galleryUploading, setGalleryUploading] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [avatarUploadProgress, setAvatarUploadProgress] = useState<number | null>(null)
@@ -140,6 +144,24 @@ export default function CharacterEditorPage() {
   useEffect(() => {
     fetchGallery()
   }, [fetchGallery])
+
+  // Fetch regex scripts (all + character-bound) when character changes
+  const fetchRegexScripts = useCallback(async () => {
+    if (!editingCharacterId) return
+    try {
+      const [allRes, boundRes] = await Promise.all([
+        regexApi.list({ limit: 500 }),
+        regexApi.list({ limit: 500, scope: 'character', character_id: editingCharacterId }),
+      ])
+      setAllRegexScripts(allRes.data)
+      // Filter to only scripts actually scoped to this character
+      setBoundRegexScripts(boundRes.data.filter((s) => s.scope === 'character' && s.scope_id === editingCharacterId))
+    } catch { /* no-op */ }
+  }, [editingCharacterId])
+
+  useEffect(() => {
+    fetchRegexScripts()
+  }, [fetchRegexScripts])
 
   useEffect(() => {
     let cancelled = false
@@ -372,6 +394,31 @@ export default function CharacterEditorPage() {
       }
     },
     [debouncedSave]
+  )
+
+  const handleBindRegex = useCallback(
+    async (scriptId: string) => {
+      if (!editingCharacterId) return
+      try {
+        await regexApi.update(scriptId, { scope: 'character', scope_id: editingCharacterId })
+        fetchRegexScripts()
+      } catch (err: any) {
+        toast.error(err.body?.error || err.message || 'Failed to bind regex')
+      }
+    },
+    [editingCharacterId, fetchRegexScripts]
+  )
+
+  const handleUnbindRegex = useCallback(
+    async (scriptId: string) => {
+      try {
+        await regexApi.update(scriptId, { scope: 'global', scope_id: null })
+        fetchRegexScripts()
+      } catch (err: any) {
+        toast.error(err.body?.error || err.message || 'Failed to unbind regex')
+      }
+    },
+    [fetchRegexScripts]
   )
 
   const clearActivatedWorldInfo = useStore((s) => s.clearActivatedWorldInfo)
@@ -965,6 +1012,65 @@ export default function CharacterEditorPage() {
                           )}
                         </div>
                       )}
+                      <div className={styles.fieldGroup}>
+                        <span className={styles.fieldLabel}>Character-Bound Regex Scripts</span>
+                        <span className={styles.fieldHelper}>
+                          Regex scripts attached to this character. These will be bundled with .charx exports.
+                        </span>
+
+                        {boundRegexScripts.length > 0 && (
+                          <div className={styles.regexList}>
+                            {boundRegexScripts.map((s) => (
+                              <div key={s.id} className={styles.regexItem}>
+                                <Code2 size={14} className={styles.regexIcon} />
+                                <span className={clsx(styles.regexName, s.disabled && styles.regexNameDisabled)}>
+                                  {s.name}
+                                </span>
+                                <span className={styles.regexTarget}>{s.target}</span>
+                                <button
+                                  type="button"
+                                  className={styles.regexUnbindBtn}
+                                  title="Unbind from character (make global)"
+                                  onClick={() => handleUnbindRegex(s.id)}
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {(() => {
+                          const unboundGlobals = allRegexScripts.filter(
+                            (s) => s.scope === 'global' && !boundRegexScripts.some((b) => b.id === s.id)
+                          )
+                          if (unboundGlobals.length === 0 && boundRegexScripts.length === 0) {
+                            return (
+                              <span className={styles.fieldHelper}>
+                                No regex scripts found. Create one in the Regex panel first.
+                              </span>
+                            )
+                          }
+                          if (unboundGlobals.length === 0) return null
+                          return (
+                            <select
+                              className={styles.fieldInput}
+                              value=""
+                              onChange={(e) => {
+                                if (e.target.value) handleBindRegex(e.target.value)
+                              }}
+                            >
+                              <option value="">Bind a global regex to this character...</option>
+                              {unboundGlobals.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.name} ({s.target})
+                                </option>
+                              ))}
+                            </select>
+                          )
+                        })()}
+                      </div>
+
                       <div className={styles.fieldGroup}>
                         <span className={styles.fieldLabel}>Extensions (JSON)</span>
                         <span className={styles.fieldHelper}>

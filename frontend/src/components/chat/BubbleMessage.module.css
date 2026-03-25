@@ -101,7 +101,7 @@
 /* Hidden draft message — dimmed, darkened, dashed border */
 .hidden {
   opacity: 0.4;
-  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border: 1px dashed var(--lumiverse-border);
   filter: brightness(0.6) saturate(0.5);
   transition:
     opacity var(--lcs-transition),
@@ -185,7 +185,7 @@
   border-radius: 12px;
   overflow: hidden;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--lumiverse-fill-subtle);
   box-shadow:
     0 0 0 0.5px rgba(255, 255, 255, 0.08),
     0 2px 8px rgba(0, 0, 0, 0.3);
@@ -260,12 +260,12 @@
   border-radius: 16px;
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   font-family: ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--lumiverse-text);
   letter-spacing: 0.02em;
   flex-wrap: wrap;
   gap: 0;
-  background: rgba(0, 0, 0, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--lumiverse-fill-deepest);
+  border: 1px solid var(--lumiverse-border);
   line-height: 1;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }

@@ -776,6 +776,25 @@ export class WorkerHost {
       case "log":
         this.handleLog(msg.level, msg.message);
         break;
+      // ─── Push Notifications (gated: "push_notification") ──────────────
+      case "push_send":
+        this.handlePushSend(msg.requestId, msg.title, msg.body, msg.tag, msg.url, msg.userId, msg.icon, msg.rawTitle);
+        break;
+      case "push_get_status":
+        this.handlePushGetStatus(msg.requestId, msg.userId);
+        break;
+      // ─── User Visibility (free tier — no permission needed) ─────────────
+      case "user_is_visible":
+        this.handleUserIsVisible(msg.requestId, msg.userId);
+        break;
+      // ─── Text Editor (free tier — no permission needed) ─────────────────
+      case "text_editor_open":
+        this.handleTextEditorOpen(msg.requestId, msg.title, msg.value, msg.placeholder, msg.userId);
+        break;
+      // ─── Macro Resolution (free tier — no permission needed) ────────────
+      case "macros_resolve":
+        this.handleMacrosResolve(msg.requestId, msg.template, msg.chatId, msg.characterId, msg.userId);
+        break;
     }
   }
 
@@ -3826,6 +3845,280 @@ export class WorkerHost {
       case "error":
         console.error(prefix, message);
         break;
+    }
+  }
+
+  // ─── Push Notifications (gated: "push_notification") ─────────────────
+
+  private async handlePushSend(
+    requestId: string,
+    title: string,
+    body: string,
+    tag?: string,
+    url?: string,
+    userId?: string,
+    icon?: string,
+    rawTitle?: boolean,
+  ): Promise<void> {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "push_notification")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} push_notification — Push notification permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      // Build the payload and enforce the 4 KB Web Push payload limit
+      const sanitizedTitle = rawTitle
+        ? (title || "").slice(0, 200)
+        : `${this.manifest.name}: ${(title || "").slice(0, 200)}`;
+
+      // Validate icon URL — must be a relative path (no external URLs)
+      let sanitizedIcon: string | undefined;
+      if (icon && typeof icon === "string" && icon.startsWith("/")) {
+        sanitizedIcon = icon;
+      }
+
+      const payload = {
+        title: sanitizedTitle,
+        body: body || "",
+        tag: tag ? `ext-${this.manifest.identifier}-${tag}`.slice(0, 100) : undefined,
+        data: { url: url || "/", characterName: this.manifest.name },
+        icon: sanitizedIcon,
+      };
+
+      // Truncate body if the total payload exceeds PushForge's limit
+      // (4078 bytes minus 2 bytes padding prefix = 4076 bytes usable)
+      const MAX_PAYLOAD_BYTES = 4076;
+      const encoder = new TextEncoder();
+      const measure = () => encoder.encode(JSON.stringify(payload)).byteLength;
+
+      if (measure() > MAX_PAYLOAD_BYTES) {
+        // Calculate how many bytes are available for the body
+        const withoutBody = { ...payload, body: "" };
+        const overhead = encoder.encode(JSON.stringify(withoutBody)).byteLength;
+        const available = MAX_PAYLOAD_BYTES - overhead - 10; // 10 bytes margin for ellipsis + quotes
+
+        // Binary search for the right body length
+        let lo = 0, hi = payload.body.length;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >>> 1;
+          const candidate = { ...payload, body: payload.body.slice(0, mid) };
+          if (encoder.encode(JSON.stringify(candidate)).byteLength <= MAX_PAYLOAD_BYTES) {
+            lo = mid;
+          } else {
+            hi = mid - 1;
+          }
+        }
+
+        if (lo < payload.body.length) {
+          // Try to break at a sentence boundary
+          let trimmed = payload.body.slice(0, lo);
+          const lastSentence = Math.max(
+            trimmed.lastIndexOf('. '),
+            trimmed.lastIndexOf('! '),
+            trimmed.lastIndexOf('? '),
+          );
+          if (lastSentence > lo * 0.5) {
+            trimmed = trimmed.slice(0, lastSentence + 1);
+          }
+          payload.body = trimmed;
+        }
+      }
+
+      const pushSvc = await import("../services/push.service");
+      const sent = await pushSvc.sendPushToUser(resolvedUserId, payload);
+      this.postToWorker({ type: "response", requestId, result: { sent } });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handlePushGetStatus(requestId: string, userId?: string): Promise<void> {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "push_notification")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} push_notification — Push notification permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const pushSvc = await import("../services/push.service");
+      const subs = pushSvc.listSubscriptions(resolvedUserId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          available: subs.length > 0,
+          subscriptionCount: subs.length,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── User Visibility (free tier) ────────────────────────────────────
+
+  private handleUserIsVisible(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: eventBus.isUserVisible(resolvedUserId),
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Text Editor (free tier) ────────────────────────────────────────
+
+  private handleTextEditorOpen(
+    requestId: string,
+    title?: string,
+    value?: string,
+    placeholder?: string,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+
+      const editorRequestId = `spindle-editor:${this.extensionId}:${requestId}`;
+
+      // Listen for the result from the frontend
+      const unsub = eventBus.on(EventType.SPINDLE_TEXT_EDITOR_RESULT, (msg) => {
+        if (msg.payload?.requestId !== editorRequestId) return;
+        unsub();
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: {
+            text: msg.payload.text ?? value ?? "",
+            cancelled: !!msg.payload.cancelled,
+          },
+        });
+      });
+
+      // Send the open request to the user's frontend
+      eventBus.emit(
+        EventType.SPINDLE_TEXT_EDITOR_OPEN,
+        {
+          requestId: editorRequestId,
+          extensionId: this.extensionId,
+          title: title ?? "Edit Text",
+          value: value ?? "",
+          placeholder: placeholder ?? "",
+        },
+        resolvedUserId,
+      );
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Macro Resolution (free tier) ───────────────────────────────────
+
+  private async handleMacrosResolve(
+    requestId: string,
+    template: string,
+    chatId?: string,
+    characterId?: string,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+
+      if (!template) {
+        this.postToWorker({ type: "response", requestId, result: { text: "", diagnostics: [] } });
+        return;
+      }
+
+      const { evaluate, buildEnv, initMacros, registry } = await import("../macros");
+      initMacros();
+
+      const chatsSvc = await import("../services/chats.service");
+      const charactersSvc = await import("../services/characters.service");
+      const personasSvc = await import("../services/personas.service");
+      const connectionsSvc = await import("../services/connections.service");
+
+      let env;
+
+      if (chatId) {
+        const chat = chatsSvc.getChat(resolvedUserId, chatId);
+        if (chat) {
+          const charId = characterId || chat.character_id;
+          const character = charactersSvc.getCharacter(resolvedUserId, charId);
+          if (character) {
+            const persona = personasSvc.resolvePersonaOrDefault(resolvedUserId);
+            const messages = chatsSvc.getMessages(resolvedUserId, chatId);
+            const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
+
+            env = buildEnv({
+              character,
+              persona,
+              chat,
+              messages,
+              generationType: "normal",
+              connection,
+            });
+          }
+        }
+      }
+
+      if (!env && characterId) {
+        const character = charactersSvc.getCharacter(resolvedUserId, characterId);
+        if (character) {
+          const persona = personasSvc.resolvePersonaOrDefault(resolvedUserId);
+          const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
+
+          env = buildEnv({
+            character,
+            persona,
+            chat: { id: "", character_id: character.id, name: "", metadata: {}, created_at: 0, updated_at: 0 } as any,
+            messages: [],
+            generationType: "normal",
+            connection,
+          });
+        }
+      }
+
+      if (!env) {
+        // Minimal fallback
+        const persona = personasSvc.getDefaultPersona(resolvedUserId);
+        const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
+        env = {
+          names: {
+            user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
+            charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", groupLastSpeaker: "",
+          },
+          character: {
+            name: "", description: "", personality: "", scenario: "", persona: persona?.description || "",
+            mesExamples: "", mesExamplesRaw: "", systemPrompt: "", postHistoryInstructions: "",
+            depthPrompt: "", creatorNotes: "", version: "", creator: "", firstMessage: "",
+          },
+          chat: {
+            id: "", messageCount: 0, lastMessage: "", lastMessageName: "", lastUserMessage: "",
+            lastCharMessage: "", lastMessageId: -1, firstIncludedMessageId: -1, lastSwipeId: 0, currentSwipeId: 0,
+          },
+          system: {
+            model: connection?.model || "", maxPrompt: 0, maxContext: 0, maxResponse: 0,
+            lastGenerationType: "normal", isMobile: false,
+          },
+          variables: { local: new Map(), global: new Map() },
+          dynamicMacros: {},
+          extra: {},
+        };
+      }
+
+      const result = await evaluate(template, env, registry);
+      this.postToWorker({ type: "response", requestId, result: { text: result.text, diagnostics: result.diagnostics } });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
     }
   }
 

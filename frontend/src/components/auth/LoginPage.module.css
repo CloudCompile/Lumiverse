@@ -164,7 +164,7 @@
   border: 1px solid var(--lumiverse-border);
   box-shadow:
     var(--lumiverse-shadow-xl),
-    0 0 80px -20px rgba(147, 112, 219, 0.08);
+    0 0 80px -20px var(--lumiverse-primary-015);
   overflow: hidden;
 }
 
@@ -211,7 +211,7 @@
 .inputWrap {
   position: relative;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--lumiverse-fill-hover);
   border: 1px solid var(--lumiverse-border);
   transition:
     border-color var(--lumiverse-transition-fast),
@@ -261,7 +261,7 @@
   margin-top: 4px;
   transition: opacity var(--lumiverse-transition-fast);
   box-shadow:
-    0 2px 12px rgba(147, 112, 219, 0.2),
+    0 2px 12px var(--lumiverse-primary-020),
     var(--lumiverse-highlight-inset);
 }
 
@@ -287,7 +287,7 @@
   display: inline-block;
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  border: 2px solid var(--lumiverse-text-hint);
   border-top-color: #fff;
   border-radius: 50%;
   animation: loginSpin 0.7s linear infinite;

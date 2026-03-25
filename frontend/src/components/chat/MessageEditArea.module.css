@@ -33,12 +33,12 @@
 
 .reasoningTextarea {
   min-height: 70px;
-  border-color: rgba(147, 112, 219, 0.25);
-  background: rgba(147, 112, 219, 0.04);
+  border-color: var(--lumiverse-primary-020);
+  background: var(--lumiverse-primary-010);
 }
 
 .reasoningTextarea:focus {
-  border-color: rgba(147, 112, 219, 0.5);
+  border-color: var(--lumiverse-primary-050);
 }
 
 .contentSection {

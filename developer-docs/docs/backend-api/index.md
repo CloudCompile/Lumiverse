@@ -32,4 +32,5 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [OAuth](oauth.md) | `oauth` | OAuth callback handler registration |
 | [Logging](logging.md) | Free | Server console logging |
 | [Toast Notifications](toast.md) | Free | Show success/warning/error/info toasts in the frontend |
+| [Push Notifications](push-notifications.md) | `push_notification` | Send OS-level push notifications to user devices |
 | [Frontend Communication](frontend-communication.md) | Free | Message passing to/from frontend |

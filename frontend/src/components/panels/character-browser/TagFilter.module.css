@@ -99,7 +99,7 @@
 }
 
 .tagItemSelected {
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
 }
 
 .tagPill {

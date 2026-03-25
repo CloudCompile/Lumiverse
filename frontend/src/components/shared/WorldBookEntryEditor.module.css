@@ -133,7 +133,7 @@
 }
 
 .vectorStatusNotEnabled {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--lumiverse-fill-subtle);
   color: var(--lumiverse-text-muted);
 }
 
@@ -148,7 +148,7 @@
 }
 
 .vectorStatusError {
-  background: rgba(255, 86, 86, 0.14);
+  background: var(--lumiverse-danger-015);
   color: #ff9b9b;
 }
 

@@ -48,7 +48,7 @@
 }
 
 .dotSpoken .dotAvatar {
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: var(--lumiverse-border-hover);
 }
 
 .dotAvatarFallback {
@@ -71,13 +71,13 @@
 }
 
 .dotSpoken .dotAvatarFallback {
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: var(--lumiverse-border-hover);
 }
 
 .connector {
   width: 12px;
   height: 2px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--lumiverse-fill-subtle);
   border-radius: 1px;
   flex-shrink: 0;
 }

@@ -152,7 +152,7 @@
 .infoBoxList code {
   padding: 1px 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
   font-family: "SF Mono", "Fira Code", monospace;
   font-size: 0.9em;
@@ -206,7 +206,7 @@
 .quirksHint code {
   padding: 1px 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
   font-family: "SF Mono", "Fira Code", monospace;
   font-size: 0.9em;

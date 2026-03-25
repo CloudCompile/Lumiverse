@@ -124,8 +124,8 @@
 }
 
 .badgePrompt {
-  color: var(--lumiverse-warning, #f59e0b);
-  border-color: var(--lumiverse-warning, #f59e0b);
+  color: var(--lumiverse-warning);
+  border-color: var(--lumiverse-warning);
 }
 
 .badgeResponse {

@@ -4,7 +4,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 8px 12px;
-  background: rgba(147, 112, 219, 0.08);
+  background: var(--lumiverse-primary-010);
   border: 1px solid var(--lumiverse-primary);
   border-radius: 10px;
 }

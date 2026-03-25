@@ -133,7 +133,7 @@
   gap: 3px;
   font-weight: 600;
   color: var(--lumiverse-primary-muted);
-  background: rgba(147, 112, 219, 0.12);
+  background: var(--lumiverse-primary-015);
   border: 1px solid var(--lumiverse-primary-020);
   padding: 1px 6px;
   border-radius: 20px;
@@ -151,7 +151,7 @@
   justify-content: center;
   border-radius: 7px;
   background: rgba(10, 10, 14, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--lumiverse-border);
   color: var(--lumiverse-text-dim);
   opacity: 0;
   cursor: pointer;
@@ -164,7 +164,7 @@
 
 .gridDeleteBtn:hover {
   color: var(--lumiverse-danger);
-  border-color: rgba(239, 68, 68, 0.3);
+  border-color: var(--lumiverse-danger-020);
 }
 
 /* ---- List layout ---- */
@@ -229,7 +229,7 @@
   justify-content: center;
   border-radius: 6px;
   background: rgba(10, 10, 14, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--lumiverse-border);
   color: var(--lumiverse-text-dim);
   opacity: 0;
   cursor: pointer;
@@ -242,7 +242,7 @@
 
 .listDeleteBtn:hover {
   color: var(--lumiverse-danger);
-  border-color: rgba(239, 68, 68, 0.3);
+  border-color: var(--lumiverse-danger-020);
 }
 
 /* ---- Empty state ---- */
