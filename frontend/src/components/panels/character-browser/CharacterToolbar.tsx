@@ -82,7 +82,7 @@ export default function CharacterToolbar({
 
   return (
     <div className={styles.toolbar}>
-      {/* Search bar */}
+      {/* Search bar with create action */}
       <div className={styles.searchBar}>
         <Search size={14} className={styles.searchIcon} />
         <input
@@ -97,11 +97,16 @@ export default function CharacterToolbar({
             <X size={14} />
           </button>
         )}
+        <ImportMenu
+          onImportFile={onImportFile}
+          onImportUrl={onImportUrl}
+          onCreateNew={onCreateNew}
+          importLoading={importLoading}
+        />
       </div>
 
-      {/* Controls row */}
-      <div className={styles.controls}>
-        {/* Filter tabs */}
+      {/* Filter + Sort + View + Actions — single row */}
+      <div className={styles.controlRow}>
         <div className={styles.filterTabs}>
           <button
             type="button"
@@ -137,7 +142,6 @@ export default function CharacterToolbar({
           </button>
         </div>
 
-        {/* Sort */}
         <div className={styles.sortContainer} ref={sortRef}>
           <button
             type="button"
@@ -185,7 +189,6 @@ export default function CharacterToolbar({
           )}
         </div>
 
-        {/* View mode */}
         <button
           type="button"
           className={styles.iconBtn}
@@ -204,15 +207,6 @@ export default function CharacterToolbar({
           {viewMode === 'grid' ? <Columns2 size={14} /> : viewMode === 'columns' ? <List size={14} /> : <LayoutGrid size={14} />}
         </button>
 
-        {/* Import */}
-        <ImportMenu
-          onImportFile={onImportFile}
-          onImportUrl={onImportUrl}
-          onCreateNew={onCreateNew}
-          importLoading={importLoading}
-        />
-
-        {/* Group Chat */}
         {onGroupChat && (
           <button
             type="button"
@@ -224,7 +218,6 @@ export default function CharacterToolbar({
           </button>
         )}
 
-        {/* Batch mode */}
         <button
           type="button"
           className={clsx(styles.iconBtn, batchMode && styles.iconBtnActive)}

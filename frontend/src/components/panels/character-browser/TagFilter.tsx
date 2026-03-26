@@ -42,7 +42,7 @@ export default function TagFilter({
     ? allTags.filter((t) => t.tag.toLowerCase().includes(search.toLowerCase()))
     : allTags
 
-  if (allTags.length === 0) return null
+  if (allTags.length === 0) return <div className={styles.placeholder} />
 
   return (
     <div className={styles.container} ref={ref}>

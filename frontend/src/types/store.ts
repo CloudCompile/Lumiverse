@@ -11,6 +11,7 @@ export interface ChatSlice {
   isStreaming: boolean
   streamingContent: string
   streamingReasoning: string
+  streamingReasoningDuration: number | null
   streamingError: string | null
   activeGenerationId: string | null
   regeneratingMessageId: string | null

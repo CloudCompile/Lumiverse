@@ -14,6 +14,8 @@ import type { WorldBook, WorldBookEntry, WorldBookVectorSummary, WorldInfoSettin
 import styles from './WorldBookPanel.module.css'
 import clsx from 'clsx'
 
+const POSITION_SHORT = ['Before Main', 'After Main', 'Before AN', 'After AN', '@ Depth']
+
 export default function WorldBookPanel() {
   const openModal = useStore((s) => s.openModal)
   const isMobile = useIsMobile()
@@ -718,40 +720,49 @@ export default function WorldBookPanel() {
             {filteredEntries.map((entry) => (
               <div key={entry.id}>
                 <div
-                  className={clsx(styles.entryRow, selectedEntryId === entry.id && styles.entryRowActive)}
+                  className={clsx(styles.entryRow, selectedEntryId === entry.id && styles.entryRowActive, entry.disabled && styles.entryRowDisabled)}
                   onClick={() => setSelectedEntryId(entry.id === selectedEntryId ? null : entry.id)}
                 >
-                  <span className={styles.entryComment}>
-                    {entry.comment || '(unnamed)'}
-                  </span>
-                  <span className={styles.entryKeys}>
-                    {entry.key.length > 0 ? entry.key.join(', ') : '-'}
-                  </span>
-                  <input
-                    type="checkbox"
-                    className={styles.entryToggle}
-                    checked={!entry.disabled}
-                    title={entry.disabled ? 'Disabled' : 'Enabled'}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={() => updateEntry(entry.id, { disabled: !entry.disabled })}
-                  />
-                  <span
-                    className={styles.entryDeleteBtn}
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setDeleteEntryConfirm(entry.id)
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
+                  <div className={styles.entryTop}>
+                    <span className={styles.entryComment}>
+                      {entry.comment || '(unnamed)'}
+                    </span>
+                    <input
+                      type="checkbox"
+                      className={styles.entryToggle}
+                      checked={!entry.disabled}
+                      title={entry.disabled ? 'Disabled' : 'Enabled'}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => updateEntry(entry.id, { disabled: !entry.disabled })}
+                    />
+                    <span
+                      className={styles.entryDeleteBtn}
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
                         e.stopPropagation()
                         setDeleteEntryConfirm(entry.id)
-                      }
-                    }}
-                  >
-                    <Trash2 size={11} />
-                  </span>
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.stopPropagation()
+                          setDeleteEntryConfirm(entry.id)
+                        }
+                      }}
+                    >
+                      <Trash2 size={11} />
+                    </span>
+                  </div>
+                  <div className={styles.entryMeta}>
+                    <span className={clsx(styles.entryBadge, entry.constant ? styles.badgeConstant : entry.vectorized ? styles.badgeVector : styles.badgeTrigger)}>
+                      {entry.constant ? 'Constant' : entry.vectorized ? 'Vector' : 'Trigger'}
+                    </span>
+                    <span className={styles.entryMetaItem}>Ord: {entry.order_value}</span>
+                    {entry.position === 4
+                      ? <span className={styles.entryMetaItem}>@ Depth {entry.depth}</span>
+                      : <span className={styles.entryMetaItem}>{POSITION_SHORT[entry.position] ?? `Pos ${entry.position}`}</span>
+                    }
+                  </div>
                 </div>
                 {/* Inline editor below selected entry */}
                 {selectedEntryId === entry.id && (

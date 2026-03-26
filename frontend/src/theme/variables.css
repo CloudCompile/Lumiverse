@@ -105,6 +105,12 @@
   --lumiverse-transition: 200ms ease;
   --lumiverse-transition-fast: 150ms ease;
 
+  /* Button sizing */
+  --lumiverse-btn-icon: 32px;
+  --lumiverse-btn-icon-sm: 28px;
+  --lumiverse-btn-icon-xs: 22px;
+  --lumiverse-btn-tab: 32px;
+
   /* Typography */
   --lumiverse-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
   --lumiverse-font-mono: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
@@ -128,4 +134,13 @@
   --lumiverse-prose-bold: inherit;
   --lumiverse-prose-dialogue: var(--lumiverse-primary-text);
   --lumiverse-prose-blockquote: var(--lumiverse-text-muted);
+}
+
+@media (max-width: 600px) {
+  :root {
+    --lumiverse-btn-icon: 40px;
+    --lumiverse-btn-icon-sm: 34px;
+    --lumiverse-btn-icon-xs: 28px;
+    --lumiverse-btn-tab: 38px;
+  }
 }

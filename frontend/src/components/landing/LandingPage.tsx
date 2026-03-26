@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { useNavigate } from 'react-router'
 import { motion, AnimatePresence } from 'motion/react'
-import { RefreshCw, MessageSquarePlus, Loader2, MessageSquare, Trash2 } from 'lucide-react'
+import { MessageSquarePlus, Loader2, MessageSquare, Trash2 } from 'lucide-react'
 import { chatsApi } from '@/api/chats'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/ws/events'
 import { getCharacterAvatarLargeUrlById } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
 import { useScrollGate } from '@/hooks/useScrollGate'
@@ -80,6 +82,10 @@ interface ChatCardProps {
 
 function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
   const characters = useStore((s) => s.characters)
+  const tiltRef = useRef<HTMLDivElement>(null)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const rectRef = useRef<DOMRect | null>(null)
+
   const liveCharacter = item.character_id
     ? characters.find((entry) => entry.id === item.character_id) ?? null
     : null
@@ -90,53 +96,99 @@ function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
       )
     : null
 
+  const handleMouseEnter = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
+    const tilt = tiltRef.current
+    const card = cardRef.current
+    if (!tilt || !card) return
+    rectRef.current = tilt.getBoundingClientRect()
+    tilt.classList.add(styles.tilting)
+    const rect = rectRef.current
+    const mx = (e.clientX - rect.left) / rect.width
+    const my = (e.clientY - rect.top) / rect.height
+    tilt.style.transform =
+      `rotateX(${(my - 0.5) * -18}deg) rotateY(${(mx - 0.5) * 18}deg) scale3d(1.04,1.04,1.04)`
+    card.style.setProperty('--shine-x', `${mx * 100}%`)
+    card.style.setProperty('--shine-y', `${my * 100}%`)
+  }, [])
+
+  const handleMouseMove = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
+    const tilt = tiltRef.current
+    const card = cardRef.current
+    const rect = rectRef.current
+    if (!tilt || !card || !rect) return
+    const mx = (e.clientX - rect.left) / rect.width
+    const my = (e.clientY - rect.top) / rect.height
+    tilt.style.transform =
+      `rotateX(${(my - 0.5) * -18}deg) rotateY(${(mx - 0.5) * 18}deg) scale3d(1.04,1.04,1.04)`
+    card.style.setProperty('--shine-x', `${mx * 100}%`)
+    card.style.setProperty('--shine-y', `${my * 100}%`)
+  }, [])
+
+  const handleMouseLeave = useCallback(() => {
+    const tilt = tiltRef.current
+    const card = cardRef.current
+    if (!tilt || !card) return
+    tilt.classList.remove(styles.tilting)
+    tilt.style.transform = ''
+    card.style.removeProperty('--shine-x')
+    card.style.removeProperty('--shine-y')
+    rectRef.current = null
+  }, [])
+
   return (
-    <motion.div
-      className={styles.card}
-      variants={cardVariants}
-      whileHover={{ y: -3 }}
-      transition={{ duration: 0.2 }}
+    <div
+      ref={tiltRef}
+      className={styles.cardTilt}
+      onMouseEnter={handleMouseEnter}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
     >
-      {onDelete && (
-        <button
-          type="button"
-          className={styles.deleteBtn}
-          onClick={(e) => {
-            e.stopPropagation()
-            onDelete()
-          }}
-          title="Delete chat"
-        >
-          <Trash2 size={14} strokeWidth={1.5} />
-        </button>
-      )}
-      <button type="button" className={styles.cardBtn} onClick={onClick}>
-        <div className={styles.cardImage}>
-          <LazyImage
-            src={avatarUrl}
-            alt={item.character_name}
-            fallback={
-              <div className={styles.cardAvatarFallback}>
-                {item.character_name?.[0]?.toUpperCase() || '?'}
-              </div>
-            }
-          />
-          <div className={styles.cardImageOverlay} />
-        </div>
-        <div className={styles.cardContent}>
-          <h3 className={styles.cardName}>{item.character_name}</h3>
-          <div className={styles.cardMeta}>
-            {item.chat_count > 1 && (
-              <span className={styles.chatCountBadge}>
-                <MessageSquare size={10} strokeWidth={2} />
-                {item.chat_count}
-              </span>
-            )}
-            <span className={styles.cardTime}>{formatRelativeTime(item.updated_at)}</span>
+      <motion.div
+        ref={cardRef}
+        className={styles.card}
+        variants={cardVariants}
+      >
+        {onDelete && (
+          <button
+            type="button"
+            className={styles.deleteBtn}
+            onClick={(e) => {
+              e.stopPropagation()
+              onDelete()
+            }}
+            title="Delete chat"
+          >
+            <Trash2 size={14} strokeWidth={1.5} />
+          </button>
+        )}
+        <button type="button" className={styles.cardBtn} onClick={onClick}>
+          <div className={styles.cardImage}>
+            <LazyImage
+              src={avatarUrl}
+              alt={item.character_name}
+              fallback={
+                <div className={styles.cardAvatarFallback}>
+                  {item.character_name?.[0]?.toUpperCase() || '?'}
+                </div>
+              }
+            />
+            <div className={styles.cardImageOverlay} />
           </div>
-        </div>
-      </button>
-    </motion.div>
+          <div className={styles.cardContent}>
+            <h3 className={styles.cardName}>{item.character_name}</h3>
+            <div className={styles.cardMeta}>
+              {item.chat_count > 1 && (
+                <span className={styles.chatCountBadge}>
+                  <MessageSquare size={10} strokeWidth={2} />
+                  {item.chat_count}
+                </span>
+              )}
+              <span className={styles.cardTime}>{formatRelativeTime(item.updated_at)}</span>
+            </div>
+          </div>
+        </button>
+      </motion.div>
+    </div>
   )
 }
 
@@ -190,6 +242,13 @@ export default function LandingPage() {
 
   useEffect(() => {
     fetchChats()
+  }, [fetchChats])
+
+  // Listen for chat deletions (from command palette, chat view, etc.) and refresh
+  useEffect(() => {
+    return wsClient.on(EventType.CHAT_DELETED, () => {
+      fetchChats()
+    })
   }, [fetchChats])
 
   // Infinite scroll: load more when sentinel is visible
@@ -278,57 +337,36 @@ export default function LandingPage() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.1 }}
         >
-          <div className={styles.headerLeft}>
-            <div className={styles.logo}>
-              <div className={styles.logoIcon}>
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="28" height="28">
-                  <g transform="rotate(-12, 32, 32)">
-                    <ellipse cx="32" cy="12" rx="18" ry="6" fill="#8B5A2B" />
-                    <ellipse cx="32" cy="12" rx="14" ry="4" fill="#A0522D" />
-                    <rect x="14" y="12" width="36" height="40" fill="#8B5FC7" />
-                    <line x1="14" y1="18" x2="50" y2="18" stroke="#7A4EB8" strokeWidth="1.5" />
-                    <line x1="14" y1="24" x2="50" y2="24" stroke="#7A4EB8" strokeWidth="1.5" />
-                    <line x1="14" y1="30" x2="50" y2="30" stroke="#7A4EB8" strokeWidth="1.5" />
-                    <line x1="14" y1="36" x2="50" y2="36" stroke="#7A4EB8" strokeWidth="1.5" />
-                    <line x1="14" y1="42" x2="50" y2="42" stroke="#7A4EB8" strokeWidth="1.5" />
-                    <line x1="14" y1="48" x2="50" y2="48" stroke="#7A4EB8" strokeWidth="1.5" />
-                    <rect x="14" y="12" width="8" height="40" fill="#A78BD4" opacity="0.5" />
-                    <ellipse cx="32" cy="52" rx="18" ry="6" fill="#8B5A2B" />
-                    <rect x="14" y="48" width="36" height="4" fill="#8B5FC7" />
-                    <ellipse cx="32" cy="52" rx="14" ry="4" fill="#A0522D" />
-                    <ellipse cx="32" cy="52" rx="5" ry="2" fill="#5D3A1A" />
-                    <path d="M 48 35 Q 55 38 52 45 Q 49 52 56 58" fill="none" stroke="#8B5FC7" strokeWidth="2" strokeLinecap="round" />
-                  </g>
-                </svg>
-              </div>
-              <div className={styles.logoText}>
-                <h1>Lumiverse</h1>
-                <span>Continue your story</span>
-              </div>
+          <div className={styles.logo}>
+            <div className={styles.logoIcon}>
+              <div className={styles.logoGlow} />
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="28" height="28">
+                <g transform="rotate(-12, 32, 32)">
+                  <ellipse cx="32" cy="12" rx="18" ry="6" fill="#8B5A2B" />
+                  <ellipse cx="32" cy="12" rx="14" ry="4" fill="#A0522D" />
+                  <rect x="14" y="12" width="36" height="40" fill="#8B5FC7" />
+                  <line x1="14" y1="18" x2="50" y2="18" stroke="#7A4EB8" strokeWidth="1.5" />
+                  <line x1="14" y1="24" x2="50" y2="24" stroke="#7A4EB8" strokeWidth="1.5" />
+                  <line x1="14" y1="30" x2="50" y2="30" stroke="#7A4EB8" strokeWidth="1.5" />
+                  <line x1="14" y1="36" x2="50" y2="36" stroke="#7A4EB8" strokeWidth="1.5" />
+                  <line x1="14" y1="42" x2="50" y2="42" stroke="#7A4EB8" strokeWidth="1.5" />
+                  <line x1="14" y1="48" x2="50" y2="48" stroke="#7A4EB8" strokeWidth="1.5" />
+                  <rect x="14" y="12" width="8" height="40" fill="#A78BD4" opacity="0.5" />
+                  <ellipse cx="32" cy="52" rx="18" ry="6" fill="#8B5A2B" />
+                  <rect x="14" y="48" width="36" height="4" fill="#8B5FC7" />
+                  <ellipse cx="32" cy="52" rx="14" ry="4" fill="#A0522D" />
+                  <ellipse cx="32" cy="52" rx="5" ry="2" fill="#5D3A1A" />
+                  <path d="M 48 35 Q 55 38 52 45 Q 49 52 56 58" fill="none" stroke="#8B5FC7" strokeWidth="2" strokeLinecap="round" />
+                </g>
+              </svg>
             </div>
-          </div>
-
-          <div className={styles.headerRight}>
-            <motion.button
-              className={styles.headerBtn}
-              onClick={handleNewChat}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              type="button"
-              title="New chat"
-            >
-              <MessageSquarePlus size={16} strokeWidth={1.5} />
-            </motion.button>
-            <motion.button
-              className={styles.headerBtn}
-              onClick={fetchChats}
-              disabled={loading}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              type="button"
-            >
-              <RefreshCw size={16} strokeWidth={1.5} className={loading ? styles.spin : ''} />
-            </motion.button>
+            <div className={styles.logoText}>
+              <h1>Lumiverse</h1>
+              <button type="button" className={styles.taglineBtn} onClick={handleNewChat}>
+                <span>Continue your story</span>
+                <MessageSquarePlus size={13} strokeWidth={1.5} />
+              </button>
+            </div>
           </div>
         </motion.header>
 

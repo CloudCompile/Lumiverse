@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { Copy, Check, Pencil, Trash2, EyeOff, Eye, GitBranch } from 'lucide-react'
+import { Copy, Check, Pencil, Trash2, EyeOff, Eye, GitBranch, BarChart3 } from 'lucide-react'
 import styles from './BubbleActions.module.css'
 
 interface BubbleActionsProps {
@@ -7,12 +7,13 @@ interface BubbleActionsProps {
   onDelete: () => void
   onToggleHidden: () => void
   onFork: () => void
+  onPromptBreakdown?: () => void
   isHidden: boolean
   content: string
   className?: string
 }
 
-export default function BubbleActions({ onEdit, onDelete, onToggleHidden, onFork, isHidden, content, className }: BubbleActionsProps) {
+export default function BubbleActions({ onEdit, onDelete, onToggleHidden, onFork, onPromptBreakdown, isHidden, content, className }: BubbleActionsProps) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback(() => {
@@ -40,6 +41,11 @@ export default function BubbleActions({ onEdit, onDelete, onToggleHidden, onFork
       <button type="button" onClick={onFork} title="Fork chat here" aria-label="Fork chat">
         <GitBranch size={13} />
       </button>
+      {onPromptBreakdown && (
+        <button type="button" onClick={onPromptBreakdown} title="Prompt breakdown" aria-label="Prompt breakdown">
+          <BarChart3 size={13} />
+        </button>
+      )}
       <button type="button" onClick={onDelete} title="Delete" aria-label="Delete">
         <Trash2 size={13} />
       </button>

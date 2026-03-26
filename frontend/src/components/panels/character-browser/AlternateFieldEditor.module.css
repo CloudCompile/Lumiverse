@@ -90,8 +90,8 @@
 }
 
 .addVariantBtn {
-  width: 24px;
-  height: 24px;
+  width: var(--lumiverse-btn-icon-sm);
+  height: var(--lumiverse-btn-icon-sm);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -141,14 +141,10 @@ export default function ViewportDrawer() {
 
   const handleTabClick = useCallback(
     (tabId: string) => {
-      if (drawerOpen && activeTab === tabId) {
-        closeDrawer()
-      } else {
-        setDrawerTab(tabId)
-        openDrawer(tabId)
-      }
+      setDrawerTab(tabId)
+      openDrawer(tabId)
     },
-    [drawerOpen, activeTab, closeDrawer, setDrawerTab, openDrawer]
+    [setDrawerTab, openDrawer]
   )
 
   const isRight = drawerSettings.side === 'right'

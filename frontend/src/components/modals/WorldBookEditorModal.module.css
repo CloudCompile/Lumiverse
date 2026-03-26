@@ -37,8 +37,8 @@
 }
 
 .closeBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -98,8 +98,8 @@
 }
 
 .newBookBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -481,52 +481,100 @@
 .entryList {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
 }
 
 .entryRow {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid transparent;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 5%, var(--lumiverse-fill-subtle));
+  border: 1px solid color-mix(in srgb, var(--lumiverse-primary) 8%, transparent);
   cursor: pointer;
   transition: all var(--lumiverse-transition-fast);
 }
 
 .entryRow:hover {
-  border-color: var(--lumiverse-border);
+  background: color-mix(in srgb, var(--lumiverse-primary) 8%, var(--lumiverse-fill-subtle));
+  border-color: color-mix(in srgb, var(--lumiverse-primary) 15%, transparent);
 }
 
 .entryRowActive,
 .entryRowActive:hover {
-  border-color: var(--lumiverse-primary);
-  background: var(--lumiverse-primary-light);
+  border-color: var(--lumiverse-primary-050);
+  background: var(--lumiverse-primary-015);
+  border-radius: 8px 8px 0 0;
+  border-bottom-color: transparent;
+}
+
+.entryRowDisabled {
+  opacity: 0.5;
+}
+
+.entryTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .entryComment {
   flex: 1;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 550;
   color: var(--lumiverse-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
-.entryKeys {
-  font-size: 11px;
+.entryMeta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.entryBadge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 4px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.badgeConstant {
+  background: rgba(245, 158, 11, 0.14);
+  color: rgba(245, 178, 51, 0.9);
+}
+
+.badgeVector {
+  background: rgba(34, 197, 94, 0.14);
+  color: rgba(74, 207, 124, 0.9);
+}
+
+.badgeTrigger {
+  background: var(--lumiverse-fill);
   color: var(--lumiverse-text-dim);
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.entryMetaItem {
+  font-size: 10px;
+  color: var(--lumiverse-text-dim);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--lumiverse-fill);
+  line-height: 1.5;
   white-space: nowrap;
 }
 
 .entryToggle {
   accent-color: var(--lumiverse-primary);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .entryDeleteBtn {

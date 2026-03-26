@@ -12,7 +12,7 @@
 .itemRow {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
 }
 
 .itemBtn {
@@ -81,13 +81,13 @@
 
 .itemActions {
   display: flex;
-  gap: 2px;
+  gap: 4px;
   flex-shrink: 0;
 }
 
 .actionBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;

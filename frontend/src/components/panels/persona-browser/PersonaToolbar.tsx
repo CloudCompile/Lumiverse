@@ -10,6 +10,8 @@ import {
   LayoutGrid,
   List,
   Plus,
+  FolderPlus,
+  Check,
   RefreshCw,
 } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
@@ -29,6 +31,7 @@ interface PersonaToolbarProps {
   viewMode: PersonaViewMode
   onViewModeChange: (mode: PersonaViewMode) => void
   onCreateClick: () => void
+  onCreateFolder: (name: string) => void
   onRefresh: () => void
   filteredCount: number
   totalCount: number
@@ -51,12 +54,18 @@ export default function PersonaToolbar({
   viewMode,
   onViewModeChange,
   onCreateClick,
+  onCreateFolder,
   onRefresh,
   filteredCount,
   totalCount,
 }: PersonaToolbarProps) {
   const [sortOpen, setSortOpen] = useState(false)
+  const [showCreatePopover, setShowCreatePopover] = useState(false)
+  const [creatingFolderMode, setCreatingFolderMode] = useState(false)
+  const [creatingFolderName, setCreatingFolderName] = useState('')
   const sortRef = useRef<HTMLDivElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (!sortOpen) return
@@ -69,9 +78,37 @@ export default function PersonaToolbar({
     return () => document.removeEventListener('mousedown', handler)
   }, [sortOpen])
 
+  useEffect(() => {
+    if (!showCreatePopover) return
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setShowCreatePopover(false)
+        setCreatingFolderMode(false)
+        setCreatingFolderName('')
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showCreatePopover])
+
+  useEffect(() => {
+    if (creatingFolderMode && folderInputRef.current) {
+      folderInputRef.current.focus()
+    }
+  }, [creatingFolderMode])
+
+  const handleConfirmFolder = () => {
+    const trimmed = creatingFolderName.trim()
+    if (!trimmed) return
+    onCreateFolder(trimmed)
+    setCreatingFolderMode(false)
+    setCreatingFolderName('')
+    setShowCreatePopover(false)
+  }
+
   return (
     <div className={styles.toolbar}>
-      {/* Search bar */}
+      {/* Search bar with create action */}
       <div className={styles.searchBar}>
         <Search size={14} className={styles.searchIcon} />
         <input
@@ -86,11 +123,76 @@ export default function PersonaToolbar({
             <X size={14} />
           </button>
         )}
+        <div className={styles.createPopoverWrapper} ref={popoverRef}>
+          <button
+            type="button"
+            className={styles.iconBtn}
+            onClick={() => setShowCreatePopover(!showCreatePopover)}
+            title="Add"
+          >
+            <Plus size={14} />
+          </button>
+          {showCreatePopover && (
+            <div className={styles.createPopover}>
+              {creatingFolderMode ? (
+                <div className={styles.createPopoverInput}>
+                  <input
+                    ref={folderInputRef}
+                    value={creatingFolderName}
+                    onChange={(e) => setCreatingFolderName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleConfirmFolder()
+                      if (e.key === 'Escape') {
+                        setCreatingFolderMode(false)
+                        setCreatingFolderName('')
+                      }
+                    }}
+                    placeholder="Folder name..."
+                    className={styles.createPopoverField}
+                  />
+                  <button
+                    className={styles.createPopoverBtn}
+                    onClick={handleConfirmFolder}
+                    disabled={!creatingFolderName.trim()}
+                  >
+                    <Check size={12} />
+                  </button>
+                  <button
+                    className={styles.createPopoverBtn}
+                    onClick={() => {
+                      setCreatingFolderMode(false)
+                      setCreatingFolderName('')
+                    }}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    className={styles.createPopoverOption}
+                    onClick={() => {
+                      onCreateClick()
+                      setShowCreatePopover(false)
+                    }}
+                  >
+                    <Plus size={12} /> New Persona
+                  </button>
+                  <button
+                    className={clsx(styles.createPopoverOption, styles.createPopoverFolder)}
+                    onClick={() => setCreatingFolderMode(true)}
+                  >
+                    <FolderPlus size={12} /> New Folder
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Controls row */}
-      <div className={styles.controls}>
-        {/* Filter pills */}
+      {/* Filter + Sort + View + Refresh */}
+      <div className={styles.controlRow}>
         <div className={styles.filterTabs}>
           <button
             type="button"
@@ -118,7 +220,6 @@ export default function PersonaToolbar({
           </button>
         </div>
 
-        {/* Sort */}
         <div className={styles.sortContainer} ref={sortRef}>
           <button
             type="button"
@@ -155,7 +256,6 @@ export default function PersonaToolbar({
           </button>
         </div>
 
-        {/* View mode */}
         <button
           type="button"
           className={styles.iconBtn}
@@ -165,17 +265,6 @@ export default function PersonaToolbar({
           {viewMode === 'grid' ? <List size={14} /> : <LayoutGrid size={14} />}
         </button>
 
-        {/* Create */}
-        <button
-          type="button"
-          className={styles.iconBtn}
-          onClick={onCreateClick}
-          title="New persona"
-        >
-          <Plus size={14} />
-        </button>
-
-        {/* Refresh */}
         <button
           type="button"
           className={styles.iconBtn}
@@ -185,7 +274,6 @@ export default function PersonaToolbar({
           <RefreshCw size={14} />
         </button>
 
-        {/* Count */}
         <span className={styles.count}>
           {filteredCount}/{totalCount}
         </span>

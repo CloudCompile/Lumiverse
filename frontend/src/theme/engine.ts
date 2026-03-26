@@ -101,11 +101,13 @@ export function generateThemeVariables(
   vars['--lumiverse-error'] = vars['--lumiverse-danger']
 
   // ── Backgrounds ──
+  // When glass is off in dark mode, make primary container backgrounds fully opaque
+  const bgA = isDark ? (glass ? 0.95 : 1) : 1
+  const bgElevA = isDark ? (glass ? 0.9 : 1) : 1
   if (isDark) {
-    // Dark mode: low-sat, low-L backgrounds with accent tint
-    vars['--lumiverse-bg'] = hsla(h, bgSat, 12, 0.95)
-    vars['--lumiverse-bg-elevated'] = hsla(h, bgSat, 15, 0.9)
-    vars['--lumiverse-bg-hover'] = hsla(h, bgSat, 19, 0.9)
+    vars['--lumiverse-bg'] = hsla(h, bgSat, 12, bgA)
+    vars['--lumiverse-bg-elevated'] = hsla(h, bgSat, 15, bgElevA)
+    vars['--lumiverse-bg-hover'] = hsla(h, bgSat, 19, bgElevA)
     vars['--lumiverse-bg-dark'] = rgba(0, 0, 0, 0.15)
     vars['--lumiverse-bg-darker'] = rgba(0, 0, 0, 0.25)
     vars['--lumiverse-bg-040'] = hsla(h, bgSat, 12, 0.4)
@@ -200,8 +202,8 @@ export function generateThemeVariables(
 
   // ── Card backgrounds ──
   if (isDark) {
-    vars['--lumiverse-card-bg'] = `linear-gradient(165deg, ${hsla(h, bgSat, 12, 0.95)} 0%, ${hsla(h, bgSat, 10, 0.9)} 50%, ${hsla(h, bgSat, 8, 0.95)} 100%)`
-    vars['--lumiverse-card-image-bg'] = `linear-gradient(135deg, ${hsla(h, bgSat, 9, 0.8)} 0%, ${hsla(h, bgSat, 13, 0.6)} 100%)`
+    vars['--lumiverse-card-bg'] = `linear-gradient(165deg, ${hsla(h, bgSat, 12, bgA)} 0%, ${hsla(h, bgSat, 10, bgElevA)} 50%, ${hsla(h, bgSat, 8, bgA)} 100%)`
+    vars['--lumiverse-card-image-bg'] = `linear-gradient(135deg, ${hsla(h, bgSat, 9, glass ? 0.8 : 1)} 0%, ${hsla(h, bgSat, 13, glass ? 0.6 : 1)} 100%)`
   } else {
     vars['--lumiverse-card-bg'] = `linear-gradient(165deg, ${hsla(h, s * 0.15, 99, 1)} 0%, ${hsla(h, s * 0.15, 97, 1)} 50%, ${hsla(h, s * 0.15, 95, 1)} 100%)`
     vars['--lumiverse-card-image-bg'] = `linear-gradient(135deg, ${hsla(h, s * 0.15, 95, 0.8)} 0%, ${hsla(h, s * 0.15, 97, 0.6)} 100%)`

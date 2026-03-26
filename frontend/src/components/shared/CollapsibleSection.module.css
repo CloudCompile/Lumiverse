@@ -19,8 +19,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: var(--lumiverse-btn-icon-sm);
+  height: var(--lumiverse-btn-icon-sm);
   border-radius: 6px;
   background: var(--lumiverse-primary-010);
   color: var(--lumiverse-primary);

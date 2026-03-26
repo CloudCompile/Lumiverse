@@ -215,6 +215,9 @@ export function createGroupChat(userId: string, input: CreateGroupChatInput): Ch
 
 export function deleteChat(userId: string, id: string): boolean {
   const result = getDb().query("DELETE FROM chats WHERE id = ? AND user_id = ?").run(id, userId);
+  if (result.changes > 0) {
+    eventBus.emit(EventType.CHAT_DELETED, { id }, userId);
+  }
   return result.changes > 0;
 }
 

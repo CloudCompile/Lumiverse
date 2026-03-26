@@ -19,6 +19,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
   // for text streaming while halving render overhead vs. RAF at 60fps.
   let rawStreamContent = ''
   let rawStreamReasoning = ''
+  let reasoningStartedAt = 0
   let streamFlushTimer = 0
   let lastFlushTime = 0
   const STREAM_FLUSH_INTERVAL = 32
@@ -62,6 +63,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
     isStreaming: false,
     streamingContent: '',
     streamingReasoning: '',
+    streamingReasoningDuration: null,
     streamingError: null,
     activeGenerationId: null,
     regeneratingMessageId: null,
@@ -148,10 +150,12 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       cancelStreamFlush()
       rawStreamContent = ''
       rawStreamReasoning = ''
+      reasoningStartedAt = 0
       set({
         isStreaming: true,
         streamingContent: '',
         streamingReasoning: '',
+        streamingReasoningDuration: null,
         streamingError: null,
         activeGenerationId: null,
         regeneratingMessageId: regeneratingMessageId ?? null,
@@ -187,10 +191,12 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       cancelStreamFlush()
       rawStreamContent = ''
       rawStreamReasoning = ''
+      reasoningStartedAt = 0
       set({
         isStreaming: true,
         streamingContent: '',
         streamingReasoning: '',
+        streamingReasoningDuration: null,
         streamingError: null,
         activeGenerationId: generationId,
         regeneratingMessageId: regeneratingMessageId ?? null,
@@ -202,11 +208,15 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       // server-side in generate.service.ts. The backend emits pre-separated
       // tokens: regular content tokens here, reasoning tokens via
       // appendStreamReasoning. This avoids duplicating the state machine.
+      if (reasoningStartedAt && !get().streamingReasoningDuration) {
+        set({ streamingReasoningDuration: Date.now() - reasoningStartedAt })
+      }
       rawStreamContent += token
       scheduleStreamFlush()
     },
 
     appendStreamReasoning: (token) => {
+      if (!reasoningStartedAt) reasoningStartedAt = Date.now()
       rawStreamReasoning += token
       scheduleStreamFlush()
     },
@@ -222,7 +232,8 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       cancelStreamFlush()
       rawStreamContent = ''
       rawStreamReasoning = ''
-      set({ isStreaming: false, streamingContent: '', streamingReasoning: '', streamingError: null, activeGenerationId: null, regeneratingMessageId: null, streamingGenerationType: null })
+      reasoningStartedAt = 0
+      set({ isStreaming: false, streamingContent: '', streamingReasoning: '', streamingReasoningDuration: null, streamingError: null, activeGenerationId: null, regeneratingMessageId: null, streamingGenerationType: null })
     },
 
     stopStreaming: () => {
@@ -231,7 +242,8 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       cancelStreamFlush()
       rawStreamContent = ''
       rawStreamReasoning = ''
-      set({ isStreaming: false, streamingContent: '', streamingReasoning: '', streamingError: null, activeGenerationId: null, regeneratingMessageId: null, streamingGenerationType: null })
+      reasoningStartedAt = 0
+      set({ isStreaming: false, streamingContent: '', streamingReasoning: '', streamingReasoningDuration: null, streamingError: null, activeGenerationId: null, regeneratingMessageId: null, streamingGenerationType: null })
     },
 
     setStreamingError: (error) => {
@@ -240,7 +252,8 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
       cancelStreamFlush()
       rawStreamContent = ''
       rawStreamReasoning = ''
-      set({ streamingError: error, isStreaming: false, activeGenerationId: null, regeneratingMessageId: null, streamingGenerationType: null })
+      reasoningStartedAt = 0
+      set({ streamingError: error, isStreaming: false, streamingReasoningDuration: null, activeGenerationId: null, regeneratingMessageId: null, streamingGenerationType: null })
     },
 
     markGenerationEnded: (generationId) => {

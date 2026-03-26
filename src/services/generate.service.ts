@@ -942,6 +942,8 @@ async function runGeneration(
   }
 
   let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
+  let reasoningStartedAt = 0;
+  let reasoningDurationMs = 0;
 
   // ── Guided CoT detection ───────────────────────────────────────────
   // When autoParse is enabled, detect the user's configured reasoning
@@ -963,6 +965,9 @@ async function runGeneration(
 
   function emitContentToken(text: string) {
     if (!text) return;
+    if (reasoningStartedAt && !reasoningDurationMs) {
+      reasoningDurationMs = Date.now() - reasoningStartedAt;
+    }
     fullContent += text;
     eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
       generationId, chatId, token: text,
@@ -971,6 +976,7 @@ async function runGeneration(
 
   function emitReasoningToken(text: string) {
     if (!text) return;
+    if (!reasoningStartedAt) reasoningStartedAt = Date.now();
     fullReasoning += text;
     eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
       generationId, chatId, token: text, type: "reasoning",
@@ -1098,6 +1104,7 @@ async function runGeneration(
 
       // Emit reasoning tokens (provider thinking/extended thinking)
       if (chunk.reasoning) {
+        if (!reasoningStartedAt) reasoningStartedAt = Date.now();
         fullReasoning += chunk.reasoning;
         eventBus.emit(EventType.STREAM_TOKEN_RECEIVED, {
           generationId,
@@ -1188,6 +1195,16 @@ async function runGeneration(
       if (streamUsage) {
         const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
         chatsSvc.updateMessage(userId, messageId, { extra: { ...existing, usage: streamUsage } });
+      }
+
+      // Compute reasoning duration if content tokens never arrived (reasoning-only response)
+      if (reasoningStartedAt && !reasoningDurationMs) {
+        reasoningDurationMs = Date.now() - reasoningStartedAt;
+      }
+      // Persist reasoning duration in message extra when reasoning was detected
+      if (reasoningDurationMs > 0) {
+        const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
+        chatsSvc.updateMessage(userId, messageId, { extra: { ...existing, reasoningDuration: reasoningDurationMs } });
       }
 
       // Compute and store breakdown for the generated message

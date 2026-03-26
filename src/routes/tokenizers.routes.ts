@@ -60,6 +60,16 @@ app.post("/test", async (c) => {
   }
 });
 
+app.post("/count", async (c) => {
+  const body = await c.req.json();
+  if (!body.model_id || !body.text) return c.json({ error: "model_id and text are required" }, 400);
+  const count = await tokenizerSvc.countForModel(body.model_id, body.text);
+  return c.json({
+    token_count: count,
+    char_count: body.text.length,
+  });
+});
+
 // ---- Model Patterns ----
 
 app.get("/patterns", (c) => {

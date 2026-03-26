@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, Upload } from 'lucide-react'
+import { Plus, Upload, Search } from 'lucide-react'
 import { useStore } from '@/store'
 import { packsApi } from '@/api/packs'
 import type { Pack, PackWithItems } from '@/types/api'
@@ -151,7 +151,8 @@ export default function PackBrowser() {
     <div className={styles.panel}>
       {/* Toolbar */}
       <div className={styles.toolbar}>
-        <div className={styles.toolbarTop}>
+        <div className={styles.searchBar}>
+          <Search size={14} className={styles.searchIcon} />
           <input
             type="text"
             className={styles.searchInput}
@@ -169,11 +170,11 @@ export default function PackBrowser() {
           </button>
           <button
             type="button"
-            className={styles.primaryBtn}
+            className={styles.iconBtn}
             onClick={() => { setEditingPack(null); setShowPackEditor(true) }}
+            title="New pack"
           >
-            <Plus size={13} />
-            New
+            <Plus size={14} />
           </button>
         </div>
         <div className={styles.filterTabs}>

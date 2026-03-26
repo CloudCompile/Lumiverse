@@ -180,8 +180,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   padding: 0;
   border-radius: var(--lumiverse-radius);
   background: var(--lumiverse-fill);

@@ -22,8 +22,8 @@
 }
 
 .editBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -112,8 +112,8 @@
 }
 
 .favBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;

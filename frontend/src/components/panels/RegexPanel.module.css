@@ -26,8 +26,8 @@
 }
 
 .iconBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -173,8 +173,8 @@
 }
 
 .deleteBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -363,4 +363,139 @@
   color: var(--lumiverse-text-dim);
   font-size: 13px;
   text-align: center;
+}
+
+/* ── Folder Headers ──────────────────────────────── */
+
+.folderHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  margin-top: 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.folderHeader:hover {
+  background: var(--lumiverse-surface-hover);
+}
+
+.folderChevron {
+  color: var(--lumiverse-text-dim);
+  flex-shrink: 0;
+  transition: transform var(--lumiverse-transition-fast);
+}
+
+.folderChevronOpen {
+  transform: rotate(90deg);
+}
+
+.folderName {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--lumiverse-text-dim);
+}
+
+.folderCount {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--lumiverse-surface);
+  color: var(--lumiverse-text-dim);
+}
+
+/* ── Create Popover ──────────────────────────────── */
+
+.createPopoverWrapper {
+  position: relative;
+}
+
+.createPopover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 160px;
+  background: var(--lumiverse-bg);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  z-index: 50;
+  padding: 4px;
+}
+
+.createPopoverOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  text-align: left;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.createPopoverOption:hover {
+  background: var(--lumiverse-surface-hover);
+}
+
+.createPopoverFolder {
+  border-top: 1px solid var(--lumiverse-border);
+  border-radius: 0 0 6px 6px;
+}
+
+.createPopoverInput {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+}
+
+.createPopoverField {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  font-size: 11px;
+  outline: none;
+}
+
+.createPopoverField:focus {
+  border-color: var(--lumiverse-primary);
+}
+
+.createPopoverBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.createPopoverBtn:hover {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-subtle);
+}
+
+.createPopoverBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }

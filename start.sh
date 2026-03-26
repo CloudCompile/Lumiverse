@@ -33,7 +33,8 @@ err()   { echo -e "${RED}[error]${NC} $*" >&2; }
 
 IS_TERMUX=false
 IS_PROOT=false
-TERMUX_BUN_METHOD=""  # "direct" | "grun" — how to invoke bun on Termux
+TERMUX_BUN_METHOD=""  # "direct" | "grun" | "proot" — how to invoke bun on Termux
+TERMUX_BUN_PATH=""    # Full resolved path to bun binary (needed for grun/proot)
 
 # Detect native Termux: $PREFIX is always set in Termux shell sessions
 if [[ -n "${PREFIX:-}" && -d "/data/data/com.termux" ]]; then
@@ -44,13 +45,47 @@ elif [[ -f "/etc/os-release" && -d "/data/data/com.termux" ]] 2>/dev/null; then
 fi
 
 # ─── Bun execution wrapper ─────────────────────────────────────────────────
-# On Termux, bun may need glibc-runner (grun) to execute.
-# All bun invocations outside install_deps() should use _bun instead of bun.
+# On Termux, the raw bun binary can't execute natively (glibc vs bionic libc).
+# _bun routes through the best available method. _proot_bun always wraps in
+# proot for operations that need syscall interception (e.g. bun install).
 _bun() {
-  if [[ "$TERMUX_BUN_METHOD" == "grun" ]]; then
-    grun bun "$@"
+  if [[ "$IS_TERMUX" == true && -n "$TERMUX_BUN_PATH" ]]; then
+    case "$TERMUX_BUN_METHOD" in
+      direct)
+        # bun-termux wrapper handles linker + /proc/self/exe
+        "$TERMUX_BUN_PATH" "$@" ;;
+      grun)
+        # glibc-runner invokes ld.so explicitly (must use full path)
+        grun "$TERMUX_BUN_PATH" "$@" ;;
+      proot)
+        # proot intercepts syscalls + explicit glibc linker invocation
+        proot --link2symlink -0 \
+          "${PREFIX}/glibc/lib/ld-linux-aarch64.so.1" \
+          --library-path "${PREFIX}/glibc/lib" \
+          "$TERMUX_BUN_PATH" "$@" ;;
+      *)
+        "$TERMUX_BUN_PATH" "$@" ;;
+    esac
   else
     bun "$@"
+  fi
+}
+
+# Like _bun but guarantees proot wrapping — used for bun install where
+# Android's seccomp filter blocks syscalls even when grun works otherwise.
+_proot_bun() {
+  local bun_path="${TERMUX_BUN_PATH:-$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")}"
+  local glibc_ld="${PREFIX:-/data/data/com.termux/files/usr}/glibc/lib/ld-linux-aarch64.so.1"
+
+  if [[ "$TERMUX_BUN_METHOD" == "direct" ]]; then
+    # bun-termux wrapper handles linker; proot adds syscall interception
+    proot --link2symlink -0 "$bun_path" "$@"
+  elif [[ -x "$glibc_ld" ]]; then
+    # Explicit glibc linker + proot for full coverage
+    proot --link2symlink -0 "$glibc_ld" --library-path "${PREFIX}/glibc/lib" "$bun_path" "$@"
+  else
+    # Last resort — hope proot alone handles it
+    proot --link2symlink -0 "$bun_path" "$@"
   fi
 }
 
@@ -112,14 +147,24 @@ _resolve_bun() {
     # On Termux, the binary may exist with +x but fail to execute due to
     # missing glibc linker or seccomp restrictions. Verify it actually runs.
     if [[ "$IS_TERMUX" == true ]]; then
-      # Method 1: direct execution (bun-termux wrapper or native)
+      # Tier 1: direct execution (bun-termux wrapper or native)
       if "$try" --version &>/dev/null 2>&1; then
         TERMUX_BUN_METHOD="direct"
+        TERMUX_BUN_PATH="$try"
         return 0
       fi
-      # Method 2: grun (glibc-runner) — invokes glibc's ld.so explicitly
+      # Tier 2: grun (glibc-runner) — invokes glibc's ld.so explicitly
       if command -v grun &>/dev/null && grun "$try" --version &>/dev/null 2>&1; then
         TERMUX_BUN_METHOD="grun"
+        TERMUX_BUN_PATH="$try"
+        return 0
+      fi
+      # Tier 3: proot + explicit glibc linker (slower but most compatible)
+      local glibc_ld="${PREFIX:-}/glibc/lib/ld-linux-aarch64.so.1"
+      if [[ -x "$glibc_ld" ]] && command -v proot &>/dev/null \
+         && proot --link2symlink -0 "$glibc_ld" --library-path "${PREFIX}/glibc/lib" "$try" --version &>/dev/null 2>&1; then
+        TERMUX_BUN_METHOD="proot"
+        TERMUX_BUN_PATH="$try"
         return 0
       fi
       continue  # Binary exists but can't execute — try next candidate
@@ -178,13 +223,21 @@ _install_bun_termux() {
     info "bun-termux wrapper already present, skipping..."
   fi
 
-  # Determine which execution method works
+  # Determine which execution method works (same 3-tier detection as _resolve_bun)
   local bun_bin="${BUN_INSTALL}/bin/bun"
+  local glibc_ld="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
   if [[ -x "$bun_bin" ]] && "$bun_bin" --version &>/dev/null 2>&1; then
     TERMUX_BUN_METHOD="direct"
+    TERMUX_BUN_PATH="$bun_bin"
   elif command -v grun &>/dev/null && grun "$bun_bin" --version &>/dev/null 2>&1; then
     TERMUX_BUN_METHOD="grun"
+    TERMUX_BUN_PATH="$bun_bin"
     warn "Using grun (glibc-runner) to execute Bun — bun-termux wrapper not functional"
+  elif [[ -x "$glibc_ld" ]] && command -v proot &>/dev/null \
+       && proot --link2symlink -0 "$glibc_ld" --library-path "${PREFIX}/glibc/lib" "$bun_bin" --version &>/dev/null 2>&1; then
+    TERMUX_BUN_METHOD="proot"
+    TERMUX_BUN_PATH="$bun_bin"
+    warn "Using proot + glibc linker to execute Bun (slower — bun-termux and grun both failed)"
   fi
 }
 
@@ -222,11 +275,11 @@ ensure_bun() {
   if _resolve_bun; then
     local ver
     ver="$(_bun --version 2>/dev/null || echo 'unknown')"
-    if [[ "$TERMUX_BUN_METHOD" == "grun" ]]; then
-      ok "Bun $ver found (via glibc-runner)"
-    else
-      ok "Bun $ver found"
-    fi
+    case "$TERMUX_BUN_METHOD" in
+      grun)  ok "Bun $ver found (via glibc-runner)" ;;
+      proot) ok "Bun $ver found (via proot + glibc linker)" ;;
+      *)     ok "Bun $ver found" ;;
+    esac
     return
   fi
 
@@ -249,11 +302,11 @@ ensure_bun() {
   if _resolve_bun; then
     local ver
     ver="$(_bun --version 2>/dev/null || echo 'unknown')"
-    if [[ "$TERMUX_BUN_METHOD" == "grun" ]]; then
-      ok "Bun $ver installed (via glibc-runner)"
-    else
-      ok "Bun $ver installed successfully"
-    fi
+    case "$TERMUX_BUN_METHOD" in
+      grun)  ok "Bun $ver installed (via glibc-runner)" ;;
+      proot) ok "Bun $ver installed (via proot + glibc linker)" ;;
+      *)     ok "Bun $ver installed successfully" ;;
+    esac
     return
   fi
 
@@ -317,16 +370,10 @@ install_deps() {
     if [[ -d "$HOME/.bun/install/cache" ]]; then
       rm -rf "$HOME/.bun/install/cache"
     fi
-    # Wrap bun install in proot to intercept syscalls blocked by Android's
-    # seccomp filter. Without this, bun install can crash with "Bad system
-    # call" (SIGSYS) on operations that use blocked syscalls.
-    # --link2symlink: converts hardlink attempts to symlinks (Android limitation)
-    # -0: fake root UID for permission checks
-    if [[ "$TERMUX_BUN_METHOD" == "grun" ]]; then
-      (cd "$dir" && proot --link2symlink -0 grun bun install --backend=copyfile)
-    else
-      (cd "$dir" && proot --link2symlink -0 bun install --backend=copyfile)
-    fi
+    # Always wrap bun install in proot on Termux — Android's seccomp filter
+    # blocks certain syscalls that bun install needs, causing "Bad system call"
+    # (SIGSYS) errors. _proot_bun handles both linker and syscall issues.
+    (cd "$dir" && _proot_bun install --backend=copyfile)
   elif [[ "$IS_PROOT" == true ]]; then
     # Inside proot-distro: proot already intercepts syscalls, just need copyfile backend
     if [[ -d "$HOME/.bun/install/cache" ]]; then

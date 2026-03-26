@@ -5,6 +5,8 @@ import { X, ChevronDown, ChevronRight } from 'lucide-react'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
+import { useFolders } from '@/hooks/useFolders'
+import FolderDropdown from '@/components/shared/FolderDropdown'
 import type { RegexPlacement, RegexTarget, RegexScope, RegexMacroMode } from '@/types/regex'
 import styles from './RegexEditorModal.module.css'
 import clsx from 'clsx'
@@ -57,6 +59,7 @@ export default function RegexEditorModal() {
   const scriptId = modalProps?.scriptId as string
   const script = useMemo(() => regexScripts.find((s) => s.id === scriptId), [regexScripts, scriptId])
 
+  const { folders, createFolder } = useFolders('regexScriptFolders', regexScripts)
   const replaceRef = useRef<HTMLTextAreaElement>(null)
 
   // Local state mirrors script for editing
@@ -73,6 +76,7 @@ export default function RegexEditorModal() {
   const [trimStrings, setTrimStrings] = useState('')
   const [runOnEdit, setRunOnEdit] = useState(false)
   const [description, setDescription] = useState('')
+  const [folder, setFolder] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [presetsOpen, setPresetsOpen] = useState(false)
 
@@ -95,6 +99,7 @@ export default function RegexEditorModal() {
       setTrimStrings(script.trim_strings.join(', '))
       setRunOnEdit(script.run_on_edit)
       setDescription(script.description)
+      setFolder(script.folder || '')
     }
   }, [script])
 
@@ -132,12 +137,13 @@ export default function RegexEditorModal() {
         trim_strings: trimStrings ? trimStrings.split(',').map((s) => s.trim()).filter(Boolean) : [],
         run_on_edit: runOnEdit,
         description,
+        folder,
       })
       closeModal()
     } catch (err: any) {
       toast.error(err.body?.error || err.message)
     }
-  }, [scriptId, name, findRegex, replaceString, flags, placement, target, scope, minDepth, maxDepth, substituteMacros, trimStrings, runOnEdit, description, updateRegexScript, closeModal])
+  }, [scriptId, name, findRegex, replaceString, flags, placement, target, scope, minDepth, maxDepth, substituteMacros, trimStrings, runOnEdit, description, folder, updateRegexScript, closeModal])
 
   if (!script) return null
 
@@ -175,18 +181,29 @@ export default function RegexEditorModal() {
         </div>
 
         <div className={styles.body}>
-          {/* Name */}
-          <div className={styles.field}>
-            <label className={styles.fieldLabel}>Name</label>
-            <input className={styles.fieldInput} value={name} onChange={(e) => setName(e.target.value)} placeholder="Script name" />
+          {/* Identity row: Name + Folder side by side */}
+          <div className={styles.identityRow}>
+            <div className={clsx(styles.field, styles.fieldGrow)}>
+              <label className={styles.fieldLabel}>Name</label>
+              <input className={styles.fieldInput} value={name} onChange={(e) => setName(e.target.value)} placeholder="Script name" />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Folder</label>
+              <FolderDropdown
+                folders={folders}
+                selectedFolder={folder}
+                onSelect={setFolder}
+                onCreateFolder={createFolder}
+              />
+            </div>
           </div>
 
           {/* Common Patterns (collapsible) */}
           <div className={styles.section}>
-            <div className={styles.sectionTitle} onClick={() => setPresetsOpen(!presetsOpen)}>
-              {presetsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              Common Patterns
-            </div>
+            <button type="button" className={styles.sectionToggle} onClick={() => setPresetsOpen(!presetsOpen)}>
+              {presetsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              <span>Presets</span>
+            </button>
             {presetsOpen && (
               <div className={styles.presetGrid}>
                 {FIND_PRESETS.map((p) => (
@@ -203,16 +220,34 @@ export default function RegexEditorModal() {
             )}
           </div>
 
-          {/* Find + Replace */}
+          {/* Find pattern + inline flags */}
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>Find &amp; Replace</div>
+            <div className={styles.sectionLabel}>Find &amp; Replace</div>
             <div className={styles.field}>
-              <label className={styles.fieldLabel}>
-                Find Pattern
-                <span className={styles.fieldHint}>
-                  Use (parentheses) to capture groups for use in Replace
-                </span>
-              </label>
+              <div className={styles.findHeader}>
+                <label className={styles.fieldLabel}>
+                  Pattern
+                  <span className={styles.fieldHint}>Use (groups) to capture for Replace</span>
+                </label>
+                <div className={styles.flagPills}>
+                  {[
+                    { f: 'g', hint: 'Global' },
+                    { f: 'i', hint: 'Case insensitive' },
+                    { f: 'm', hint: 'Multiline' },
+                    { f: 's', hint: 'Dotall' },
+                  ].map(({ f, hint }) => (
+                    <button
+                      key={f}
+                      type="button"
+                      className={clsx(styles.flagPill, flags.includes(f) && styles.flagPillActive)}
+                      onClick={() => toggleFlag(f)}
+                      title={hint}
+                    >
+                      {f}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <textarea
                 className={styles.monoInput}
                 value={findRegex}
@@ -222,31 +257,11 @@ export default function RegexEditorModal() {
               />
             </div>
             <div className={styles.field}>
-              <label className={styles.fieldLabel}>Flags</label>
-              <div className={styles.flagsRow}>
-                {[
-                  { f: 'g', label: 'g', hint: 'Global — replace all matches, not just the first' },
-                  { f: 'i', label: 'i', hint: 'Case insensitive' },
-                  { f: 'm', label: 'm', hint: 'Multiline — ^ and $ match line boundaries' },
-                  { f: 's', label: 's', hint: 'Dotall — . also matches newlines' },
-                ].map(({ f, label, hint }) => (
-                  <label key={f} className={styles.flagCheck} title={hint}>
-                    <input type="checkbox" checked={flags.includes(f)} onChange={() => toggleFlag(f)} />
-                    <span>{label}</span>
-                    <span className={styles.flagHint}>{hint.split(' — ')[0]}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className={styles.field}>
               <label className={styles.fieldLabel}>
-                Replace With
-                <span className={styles.fieldHint}>
-                  What matched text becomes — click tokens to insert, supports HTML
-                </span>
+                Replace with
+                <span className={styles.fieldHint}>Supports $1 groups and HTML</span>
               </label>
               <div className={styles.tokenBar}>
-                <span className={styles.tokenBarLabel}>Insert:</span>
                 {REPLACE_TOKENS.map((t) => (
                   <button
                     key={t.label}
@@ -258,7 +273,6 @@ export default function RegexEditorModal() {
                   </button>
                 ))}
                 <span className={styles.tokenDivider} />
-                <span className={styles.tokenBarLabel}>HTML:</span>
                 {REPLACE_HTML_PRESETS.slice(0, 4).map((t) => (
                   <button
                     key={t.label}
@@ -275,69 +289,83 @@ export default function RegexEditorModal() {
                 className={styles.monoInput}
                 value={replaceString}
                 onChange={(e) => setReplaceString(e.target.value)}
-                placeholder={'Leave empty to delete matches\n$& = full match, $1 = group 1, $2 = group 2\nHTML is supported: <b>$1</b>, <span class="x">$&</span>'}
-                rows={3}
+                placeholder="Leave empty to delete matches, or use $1, $& and HTML"
+                rows={2}
               />
             </div>
           </div>
 
-          {/* Targeting */}
+          {/* Targeting — compact 2-col grid */}
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>Targeting</div>
-            <div className={styles.targetGrid}>
-              <div className={styles.field}>
-                <label className={styles.fieldLabel}>Applies to messages from</label>
-                <div className={styles.checkRow}>
-                  {([
-                    { p: 'user_input' as const, label: 'User messages' },
-                    { p: 'ai_output' as const, label: 'AI responses' },
-                    { p: 'world_info' as const, label: 'World Info / System' },
-                    { p: 'reasoning' as const, label: 'CoT / Reasoning' },
-                  ]).map(({ p, label }) => (
-                    <label key={p} className={styles.flagCheck}>
-                      <input type="checkbox" checked={placement.includes(p)} onChange={() => togglePlacement(p)} />
-                      {label}
-                    </label>
-                  ))}
+            <div className={styles.sectionLabel}>Targeting</div>
+            <div className={styles.targetCols}>
+              <div className={styles.targetCol}>
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>Pipeline</label>
+                  <div className={styles.segmented}>
+                    {([
+                      { t: 'prompt' as const, label: 'Prompt' },
+                      { t: 'response' as const, label: 'Response' },
+                      { t: 'display' as const, label: 'Display' },
+                    ]).map(({ t, label }) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={clsx(styles.segmentedBtn, target === t && styles.segmentedBtnActive)}
+                        onClick={() => setTarget(t)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>Scope</label>
+                  <div className={styles.segmented}>
+                    {(['global', 'character', 'chat'] as RegexScope[]).map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className={clsx(styles.segmentedBtn, scope === s && styles.segmentedBtnActive)}
+                        onClick={() => setScope(s)}
+                      >
+                        {s.charAt(0).toUpperCase() + s.slice(1)}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className={styles.field}>
-                <label className={styles.fieldLabel}>Pipeline stage</label>
-                <div className={styles.radioRow}>
-                  {([
-                    { t: 'prompt' as const, label: 'Prompt', hint: 'Modifies what the AI sees' },
-                    { t: 'response' as const, label: 'Response', hint: 'Modifies saved AI output' },
-                    { t: 'display' as const, label: 'Display', hint: 'Visual only, never saved' },
-                  ]).map(({ t, label, hint }) => (
-                    <label key={t} className={styles.radioLabel} title={hint}>
-                      <input type="radio" name="target" checked={target === t} onChange={() => setTarget(t)} />
-                      <span>{label}</span>
-                      <span className={styles.radioHint}>{hint}</span>
-                    </label>
-                  ))}
+              <div className={styles.targetCol}>
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>Applies to</label>
+                  <div className={styles.placementGrid}>
+                    {([
+                      { p: 'user_input' as const, label: 'User' },
+                      { p: 'ai_output' as const, label: 'AI' },
+                      { p: 'world_info' as const, label: 'WI' },
+                      { p: 'reasoning' as const, label: 'CoT' },
+                    ]).map(({ p, label }) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className={clsx(styles.placementChip, placement.includes(p) && styles.placementChipActive)}
+                        onClick={() => togglePlacement(p)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <div className={styles.field}>
-                <label className={styles.fieldLabel}>Scope</label>
-                <div className={styles.radioRow}>
-                  {(['global', 'character', 'chat'] as RegexScope[]).map((s) => (
-                    <label key={s} className={styles.radioLabel}>
-                      <input type="radio" name="scope" checked={scope === s} onChange={() => setScope(s)} />
-                      {s.charAt(0).toUpperCase() + s.slice(1)}
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className={styles.field}>
-                <label className={styles.fieldLabel}>
-                  Message depth range
-                  <span className={styles.fieldHint}>0 = latest message</span>
-                </label>
-                <div className={styles.depthRow}>
-                  <span className={styles.depthLabel}>From</span>
-                  <input className={styles.depthInput} type="number" min="0" value={minDepth} onChange={(e) => setMinDepth(e.target.value)} placeholder="any" />
-                  <span className={styles.depthLabel}>to</span>
-                  <input className={styles.depthInput} type="number" min="0" value={maxDepth} onChange={(e) => setMaxDepth(e.target.value)} placeholder="any" />
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>
+                    Depth range
+                    <span className={styles.fieldHint}>0 = latest</span>
+                  </label>
+                  <div className={styles.depthRow}>
+                    <input className={styles.depthInput} type="number" min="0" value={minDepth} onChange={(e) => setMinDepth(e.target.value)} placeholder="any" />
+                    <span className={styles.depthSep}>&ndash;</span>
+                    <input className={styles.depthInput} type="number" min="0" value={maxDepth} onChange={(e) => setMaxDepth(e.target.value)} placeholder="any" />
+                  </div>
                 </div>
               </div>
             </div>
@@ -345,43 +373,46 @@ export default function RegexEditorModal() {
 
           {/* Advanced (collapsible) */}
           <div className={styles.section}>
-            <div className={styles.sectionTitle} onClick={() => setAdvancedOpen(!advancedOpen)}>
-              {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              Advanced
-            </div>
+            <button type="button" className={styles.sectionToggle} onClick={() => setAdvancedOpen(!advancedOpen)}>
+              {advancedOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              <span>Advanced</span>
+            </button>
             {advancedOpen && (
               <div className={styles.advancedContent}>
-                <div className={styles.field}>
-                  <label className={styles.fieldLabel}>
-                    Macro substitution in find pattern
-                    <span className={styles.fieldHint}>Expand {'{{macros}}'} in the regex before matching</span>
-                  </label>
-                  <div className={styles.radioRow}>
-                    {([
-                      { m: 'none' as const, label: 'None', hint: 'Pattern used as-is' },
-                      { m: 'raw' as const, label: 'Raw', hint: 'Macros expanded literally' },
-                      { m: 'escaped' as const, label: 'Escaped', hint: 'Macros escaped for regex safety' },
-                    ]).map(({ m, label, hint }) => (
-                      <label key={m} className={styles.radioLabel} title={hint}>
-                        <input type="radio" name="macros" checked={substituteMacros === m} onChange={() => setSubstituteMacros(m)} />
-                        {label}
-                      </label>
-                    ))}
+                <div className={styles.advancedRow}>
+                  <div className={styles.field}>
+                    <label className={styles.fieldLabel}>Macro substitution</label>
+                    <div className={styles.segmented}>
+                      {([
+                        { m: 'none' as const, label: 'None' },
+                        { m: 'raw' as const, label: 'Raw' },
+                        { m: 'escaped' as const, label: 'Escaped' },
+                      ]).map(({ m, label }) => (
+                        <button
+                          key={m}
+                          type="button"
+                          className={clsx(styles.segmentedBtn, substituteMacros === m && styles.segmentedBtnActive)}
+                          onClick={() => setSubstituteMacros(m)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                  <label className={styles.inlineToggle}>
+                    <input type="checkbox" checked={runOnEdit} onChange={(e) => setRunOnEdit(e.target.checked)} />
+                    <span>Run on edit</span>
+                  </label>
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>
                     Trim strings
-                    <span className={styles.fieldHint}>Strings to strip from the result after replacement (comma separated)</span>
+                    <span className={styles.fieldHint}>comma separated</span>
                   </label>
                   <input className={styles.fieldInput} value={trimStrings} onChange={(e) => setTrimStrings(e.target.value)} placeholder="e.g. [OOC], (OOC)" />
                 </div>
-                <label className={styles.toggleRow}>
-                  <input type="checkbox" checked={runOnEdit} onChange={(e) => setRunOnEdit(e.target.checked)} />
-                  Run when user edits messages
-                </label>
                 <div className={styles.field}>
-                  <label className={styles.fieldLabel}>Description / Notes</label>
+                  <label className={styles.fieldLabel}>Notes</label>
                   <textarea className={styles.descTextarea} value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="What does this script do?" />
                 </div>
               </div>
@@ -390,31 +421,25 @@ export default function RegexEditorModal() {
 
           {/* Live Test */}
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>Live Test</div>
+            <div className={styles.sectionLabel}>Live Test</div>
             <div className={styles.testSection}>
-              <div className={styles.field}>
-                <label className={styles.fieldLabel}>Input</label>
-                <textarea
-                  className={styles.testInput}
-                  value={testInput}
-                  onChange={(e) => setTestInput(e.target.value)}
-                  placeholder="Paste sample text here to test your regex..."
-                  rows={3}
-                />
-              </div>
+              <textarea
+                className={styles.testInput}
+                value={testInput}
+                onChange={(e) => setTestInput(e.target.value)}
+                placeholder="Paste sample text to test..."
+                rows={2}
+              />
               {testResult && (
-                <>
+                <div className={styles.testResultArea}>
                   <div className={styles.testMeta}>
                     <span className={styles.matchBadge}>
                       {testResult.matches} match{testResult.matches !== 1 ? 'es' : ''}
                     </span>
                     {testResult.error && <span className={styles.testError}>{testResult.error}</span>}
                   </div>
-                  <div className={styles.field}>
-                    <label className={styles.fieldLabel}>Output</label>
-                    <div className={styles.testOutput}>{testResult.result}</div>
-                  </div>
-                </>
+                  <div className={styles.testOutput}>{testResult.result}</div>
+                </div>
               )}
               {testInput && !findRegex && (
                 <div className={styles.testHint}>Enter a find pattern above to see results</div>

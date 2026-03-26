@@ -221,24 +221,33 @@ export default function ExpressionDisplay() {
     ? expressionsApi.imageUrl(currentExpressionImageId)
     : null
 
-  // Preload images (single mode + group mode)
+  // Preload images and track readiness so we never show a partially-scanned image
+  const [readyUrls, setReadyUrls] = useState<Set<string>>(() => new Set())
+  const preloadedRef = useRef<Set<string>>(new Set())
+
+  const preloadImage = useCallback((url: string) => {
+    if (!url || preloadedRef.current.has(url)) return
+    preloadedRef.current.add(url)
+    const img = new Image()
+    img.onload = () => setReadyUrls(prev => {
+      const next = new Set(prev)
+      next.add(url)
+      return next
+    })
+    img.src = url
+  }, [])
+
   useEffect(() => {
-    if (currentImageUrl) {
-      const img = new Image()
-      img.src = currentImageUrl
-    }
-  }, [currentImageUrl])
+    if (currentImageUrl) preloadImage(currentImageUrl)
+  }, [currentImageUrl, preloadImage])
 
   useEffect(() => {
     if (!isGroupExpressionMode) return
     for (const charId of groupExpressionCharIds) {
       const url = getGroupCharImageUrl(charId)
-      if (url) {
-        const img = new Image()
-        img.src = url
-      }
+      if (url) preloadImage(url)
     }
-  }, [isGroupExpressionMode, groupExpressionCharIds, groupExpressions, groupConfigs])
+  }, [isGroupExpressionMode, groupExpressionCharIds, groupExpressions, groupConfigs, preloadImage])
 
   const clampPos = useCallback(
     (x: number, y: number) => {
@@ -583,7 +592,7 @@ export default function ExpressionDisplay() {
                   onMouseLeave={() => setHoveredCharId(null)}
                 >
                   <AnimatePresence mode="sync">
-                    {imageUrl && (
+                    {imageUrl && readyUrls.has(imageUrl) && (
                       <motion.img
                         key={imageUrl}
                         src={imageUrl}
@@ -613,7 +622,7 @@ export default function ExpressionDisplay() {
             onPointerUp={!display.clickThrough ? handlePointerUp : undefined}
           >
             <AnimatePresence mode="sync">
-              {currentImageUrl && (
+              {currentImageUrl && readyUrls.has(currentImageUrl) && (
                 <motion.img
                   key={currentImageUrl}
                   src={currentImageUrl}

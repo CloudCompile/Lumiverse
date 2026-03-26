@@ -897,13 +897,13 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
         <div className={s.accordionBody}>
           <div className={s.settingsField}>
             <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Assistant Prefill</span>
-            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantPrefill ?? defaults.assistantPrefill} onChange={e => handleChange('assistantPrefill', e.target.value)} placeholder="Claude only \u2014 prepended to response" spellCheck={false} />
-            <span className={s.settingsHint}>Claude only \u2014 prepended to assistant response</span>
+            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantPrefill ?? defaults.assistantPrefill} onChange={e => handleChange('assistantPrefill', e.target.value)} placeholder="Claude only — prepended to response" spellCheck={false} />
+            <span className={s.settingsHint}>Claude only — prepended to assistant response</span>
           </div>
           <div className={s.settingsField}>
             <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Impersonation Prefill</span>
-            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantImpersonation ?? defaults.assistantImpersonation} onChange={e => handleChange('assistantImpersonation', e.target.value)} placeholder="Claude only \u2014 prefill when impersonating" spellCheck={false} />
-            <span className={s.settingsHint}>Claude only \u2014 prefill when impersonating</span>
+            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantImpersonation ?? defaults.assistantImpersonation} onChange={e => handleChange('assistantImpersonation', e.target.value)} placeholder="Claude only — prefill when impersonating" spellCheck={false} />
+            <span className={s.settingsHint}>Claude only — prefill when impersonating</span>
           </div>
           <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
             <label className={s.checkboxLabel}>

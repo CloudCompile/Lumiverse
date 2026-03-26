@@ -41,16 +41,17 @@
   border: none;
 }
 
-.controls {
+.controlRow {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .filterTabs {
   display: flex;
   align-items: center;
+  flex: 1;
+  min-width: 0;
   background: var(--lumiverse-fill-subtle);
   border-radius: 6px;
   overflow: hidden;
@@ -61,8 +62,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  flex: 1;
+  min-width: var(--lumiverse-btn-tab);
+  height: var(--lumiverse-btn-tab);
   background: transparent;
   border: none;
   color: var(--lumiverse-text-dim);
@@ -126,8 +128,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   border-radius: 6px;
   background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);

@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, Hash, Loader2 } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import clsx from 'clsx'
 import type { WorldBookEntry } from '@/types/api'
 import { getVectorIndexStatusDescription, getVectorIndexStatusLabel } from '@/lib/worldBookVectorization'
+import { tokenizersApi } from '@/api/tokenizers'
+import { useStore } from '@/store'
 import NumberStepper from './NumberStepper'
 import styles from './WorldBookEntryEditor.module.css'
 
@@ -48,6 +50,13 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           ? styles.vectorStatusPending
           : styles.vectorStatusNotEnabled
 
+  // Token count state
+  const [tokenCounting, setTokenCounting] = useState(false)
+  const [tokenCount, setTokenCount] = useState<number | null>(null)
+  const [tokenCountApprox, setTokenCountApprox] = useState(false)
+  const activeProfileId = useStore((s) => s.activeProfileId)
+  const profiles = useStore((s) => s.profiles)
+
   // Local state for text fields to prevent prop-sync from overwriting in-progress edits
   const [content, setContent] = useState(entry.content)
   const [comment, setComment] = useState(entry.comment)
@@ -63,11 +72,39 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
     setComment(entry.comment)
     setPrimaryKeys(entry.key.join(', '))
     setSecondaryKeys(entry.keysecondary.join(', '))
+    setTokenCount(null)
+    setTokenCountApprox(false)
   }, [entry])
+
+  const handleCountTokens = useCallback(async () => {
+    const profile = profiles.find(p => p.id === activeProfileId) || profiles.find(p => p.is_default)
+    setTokenCounting(true)
+    try {
+      if (profile?.model) {
+        const result = await tokenizersApi.countForModel(profile.model, content)
+        if (result.token_count != null) {
+          setTokenCount(result.token_count)
+          setTokenCountApprox(false)
+        } else {
+          setTokenCount(Math.ceil(content.length / 4))
+          setTokenCountApprox(true)
+        }
+      } else {
+        setTokenCount(Math.ceil(content.length / 4))
+        setTokenCountApprox(true)
+      }
+    } catch {
+      setTokenCount(Math.ceil(content.length / 4))
+      setTokenCountApprox(true)
+    }
+    setTokenCounting(false)
+  }, [activeProfileId, profiles, content])
 
   const handleContentChange = useCallback(
     (v: string) => {
       setContent(v)
+      setTokenCount(null)
+      setTokenCountApprox(false)
       onUpdate(entry.id, { content: v })
     },
     [entry.id, onUpdate]
@@ -134,7 +171,21 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           />
         </div>
         <div className={styles.entryField}>
-          <label className={styles.fieldLabel}>Content</label>
+          <div className={styles.fieldLabelRow}>
+            <label className={styles.fieldLabel}>Content</label>
+            <button
+              type="button"
+              className={styles.tokenCountBtn}
+              onClick={handleCountTokens}
+              disabled={tokenCounting || !content.trim()}
+              title="Estimate token count using current model's tokenizer"
+            >
+              {tokenCounting ? <Loader2 size={11} className={styles.tokenCountSpin} /> : <Hash size={11} />}
+              {tokenCount != null
+                ? <span className={styles.tokenCountValue}>{tokenCountApprox ? '~' : ''}{tokenCount.toLocaleString()} tokens</span>
+                : 'Count tokens'}
+            </button>
+          </div>
           <ExpandableTextarea
             className={styles.entryTextarea}
             value={content}

@@ -18,7 +18,47 @@ import LorebookImportModal from '@/components/modals/LorebookImportModal'
 import ExpressionsImportModal from '@/components/modals/ExpressionsImportModal'
 import AlternateFieldsSummaryModal from '@/components/modals/AlternateFieldsSummaryModal'
 import Pagination from '@/components/shared/Pagination'
+import type { CharacterViewMode } from '@/types/store'
 import styles from './CharacterBrowser.module.css'
+
+function CharacterSkeletons({ viewMode }: { viewMode: CharacterViewMode }) {
+  if (viewMode === 'list') {
+    return (
+      <div className={styles.skeletonList}>
+        {Array.from({ length: 8 }).map((_, i) => (
+          <div key={i} className={styles.skeletonRow}>
+            <div className={`${styles.skeletonRowAvatar} ${styles.skeletonShimmer}`} style={{ animationDelay: `${i * 0.08}s` }} />
+            <div className={styles.skeletonRowText}>
+              <div className={`${styles.skeletonRowTitle} ${styles.skeletonShimmer}`} style={{ animationDelay: `${i * 0.08}s` }} />
+              <div className={`${styles.skeletonRowSub} ${styles.skeletonShimmer}`} style={{ animationDelay: `${i * 0.08 + 0.1}s` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const d = (i: number, offset = 0) => ({ animationDelay: `${i * 0.08 + offset}s` })
+
+  return (
+    <div className={viewMode === 'columns' ? styles.skeletonColumns : styles.skeletonGrid}>
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className={styles.skeletonCard}>
+          <div className={`${styles.skeletonCardImage} ${styles.skeletonShimmer}`} style={d(i)} />
+          <div className={styles.skeletonCardInfo}>
+            <div className={`${styles.skeletonCardName} ${styles.skeletonShimmer}`} style={d(i, 0.04)} />
+            <div className={`${styles.skeletonCardCreator} ${styles.skeletonShimmer}`} style={d(i, 0.08)} />
+            <div className={styles.skeletonCardTags}>
+              <div className={`${styles.skeletonCardTag} ${styles.skeletonShimmer}`} style={d(i, 0.12)} />
+              <div className={`${styles.skeletonCardTag} ${styles.skeletonShimmer}`} style={d(i, 0.14)} />
+              <div className={`${styles.skeletonCardTag} ${styles.skeletonShimmer}`} style={d(i, 0.16)} />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 export default function CharacterBrowser() {
   const browser = useCharacterBrowser()
@@ -111,14 +151,12 @@ export default function CharacterBrowser() {
         onGroupChat={() => openModal('groupChatCreator')}
       />
 
-      {browser.allTags.length > 0 && (
-        <TagFilter
-          allTags={browser.allTags}
-          selectedTags={browser.selectedTags}
-          onToggleTag={browser.toggleSelectedTag}
-          onClearTags={() => browser.setSelectedTags([])}
-        />
-      )}
+      <TagFilter
+        allTags={browser.allTags}
+        selectedTags={browser.selectedTags}
+        onToggleTag={browser.toggleSelectedTag}
+        onClearTags={() => browser.setSelectedTags([])}
+      />
 
       {browser.batchMode && (
         <BatchBar
@@ -182,7 +220,7 @@ export default function CharacterBrowser() {
           )}
 
           {browser.loading ? (
-            <div className={styles.loadingState}>Loading characters...</div>
+            <CharacterSkeletons viewMode={browser.viewMode} />
           ) : browser.totalFiltered === 0 ? (
             <div className={styles.emptyState}>
               {browser.searchQuery ? 'No characters match your search' : 'No characters yet'}

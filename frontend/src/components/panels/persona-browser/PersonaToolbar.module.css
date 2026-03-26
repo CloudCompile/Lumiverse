@@ -41,16 +41,17 @@
   border: none;
 }
 
-.controls {
+.controlRow {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .filterTabs {
   display: flex;
   align-items: center;
+  flex: 1;
+  min-width: 0;
   background: var(--lumiverse-fill-subtle);
   border-radius: 6px;
   overflow: hidden;
@@ -61,8 +62,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  flex: 1;
+  min-width: var(--lumiverse-btn-tab);
+  height: var(--lumiverse-btn-tab);
   background: transparent;
   border: none;
   color: var(--lumiverse-text-dim);
@@ -126,8 +128,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   border-radius: 6px;
   background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
@@ -146,4 +148,95 @@
   color: var(--lumiverse-text-dim);
   margin-left: auto;
   white-space: nowrap;
+}
+
+/* ── Create Popover ──────────────────────────────── */
+
+.createPopoverWrapper {
+  position: relative;
+}
+
+.createPopover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 170px;
+  background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle));
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  z-index: 50;
+  padding: 4px;
+}
+
+.createPopoverOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  text-align: left;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.createPopoverOption:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+
+.createPopoverFolder {
+  border-top: 1px solid var(--lumiverse-border);
+  border-radius: 0 0 6px 6px;
+}
+
+.createPopoverInput {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+}
+
+.createPopoverField {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  font-size: 11px;
+  outline: none;
+}
+
+.createPopoverField:focus {
+  border-color: var(--lumiverse-primary);
+}
+
+.createPopoverBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--lumiverse-btn-icon-sm);
+  min-height: var(--lumiverse-btn-icon-sm);
+  padding: 6px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.createPopoverBtn:hover {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-subtle);
+}
+
+.createPopoverBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }

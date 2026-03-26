@@ -147,7 +147,7 @@
   flex-direction: column;
   width: 56px;
   flex-shrink: 0;
-  background: var(--lumiverse-bg-deep);
+  background: color-mix(in srgb, var(--lumiverse-primary) 6%, var(--lumiverse-bg-deep));
   padding: 8px 2px;
   gap: 4px;
   border-right: 1px solid var(--lumiverse-primary-020);
@@ -180,12 +180,12 @@
 
 .tabListWrap::before {
   top: 0;
-  background: linear-gradient(to bottom, var(--lumiverse-bg-deep), transparent);
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--lumiverse-primary) 6%, var(--lumiverse-bg-deep)), transparent);
 }
 
 .tabListWrap::after {
   bottom: 0;
-  background: linear-gradient(to top, var(--lumiverse-bg-deep), transparent);
+  background: linear-gradient(to top, color-mix(in srgb, var(--lumiverse-primary) 6%, var(--lumiverse-bg-deep)), transparent);
 }
 
 .tabListScrollUp::before {
@@ -337,8 +337,8 @@
 }
 
 .closeBtn {
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   display: flex;
   align-items: center;
   justify-content: center;

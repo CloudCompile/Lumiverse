@@ -4,9 +4,11 @@
   flex-direction: column;
   gap: 12px;
   padding: 14px;
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 10px;
+  margin-top: -2px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 3%, var(--lumiverse-fill-subtle));
+  border: 1px solid var(--lumiverse-primary-020);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
 }
 
 .sectionHeading {
@@ -46,6 +48,49 @@
   font-size: 11px;
   font-weight: 500;
   color: var(--lumiverse-text-muted);
+}
+
+.fieldLabelRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tokenCountBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: none;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text-dim);
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.tokenCountBtn:hover:not(:disabled) {
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text-muted);
+}
+
+.tokenCountBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tokenCountValue {
+  color: var(--lumiverse-primary-text, var(--lumiverse-primary));
+  font-variant-numeric: tabular-nums;
+}
+
+.tokenCountSpin {
+  animation: tokenSpin 0.6s linear infinite;
+}
+
+@keyframes tokenSpin {
+  to { transform: rotate(360deg); }
 }
 
 .entryInput {

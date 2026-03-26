@@ -29,6 +29,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const lastScrollHeightRef = useRef(0)
   const streamingContent = useStore((s) => s.streamingContent)
   const streamingReasoning = useStore((s) => s.streamingReasoning)
+  const streamingReasoningDuration = useStore((s) => s.streamingReasoningDuration)
   const streamingError = useStore((s) => s.streamingError)
   const regeneratingMessageId = useStore((s) => s.regeneratingMessageId)
   const autoParse = useStore((s) => s.reasoningSettings.autoParse)
@@ -238,6 +239,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
               {streamingReasoning && (
                 <ReasoningBlock
                   reasoning={streamingReasoning}
+                  reasoningDuration={streamingReasoningDuration ?? undefined}
                   isStreaming
                   variant="bubble"
                   align={isImpersonateStream ? 'right' : undefined}

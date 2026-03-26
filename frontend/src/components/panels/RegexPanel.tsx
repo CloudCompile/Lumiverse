@@ -1,8 +1,10 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
-import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle } from 'lucide-react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X } from 'lucide-react'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
+import { useFolders } from '@/hooks/useFolders'
+import FolderDropdown from '@/components/shared/FolderDropdown'
 import type { RegexScript, RegexScope } from '@/types/regex'
 import styles from './RegexPanel.module.css'
 import clsx from 'clsx'
@@ -51,10 +53,39 @@ export default function RegexPanel() {
 
   const [scopeFilter, setScopeFilter] = useState<ScopeFilterValue>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+  const [showCreatePopover, setShowCreatePopover] = useState(false)
+  const [creatingFolderName, setCreatingFolderName] = useState('')
+  const [creatingFolderMode, setCreatingFolderMode] = useState(false)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
+
+  const { folders, createFolder } = useFolders('regexScriptFolders', regexScripts)
 
   useEffect(() => {
     loadRegexScripts()
   }, [loadRegexScripts])
+
+  // Close create popover on click outside
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setShowCreatePopover(false)
+        setCreatingFolderMode(false)
+        setCreatingFolderName('')
+      }
+    }
+    if (showCreatePopover) {
+      document.addEventListener('mousedown', handleClick)
+      return () => document.removeEventListener('mousedown', handleClick)
+    }
+  }, [showCreatePopover])
+
+  useEffect(() => {
+    if (creatingFolderMode && folderInputRef.current) {
+      folderInputRef.current.focus()
+    }
+  }, [creatingFolderMode])
 
   const filteredScripts = regexScripts.filter((s) => {
     if (scopeFilter === 'all') return true
@@ -63,18 +94,60 @@ export default function RegexPanel() {
     return true
   })
 
-  const handleAdd = useCallback(async () => {
+  const hasAnyFolders = folders.length > 0 || filteredScripts.some((s) => s.folder)
+
+  const groupedScripts = useMemo(() => {
+    if (!hasAnyFolders) return null
+    const groups: Array<{ folder: string; scripts: RegexScript[] }> = []
+    const folderMap = new Map<string, RegexScript[]>()
+    for (const s of filteredScripts) {
+      const key = s.folder || ''
+      if (!folderMap.has(key)) {
+        folderMap.set(key, [])
+        groups.push({ folder: key, scripts: folderMap.get(key)! })
+      }
+      folderMap.get(key)!.push(s)
+    }
+    // Sort: uncategorized first, then alphabetically
+    groups.sort((a, b) => {
+      if (!a.folder) return -1
+      if (!b.folder) return 1
+      return a.folder.localeCompare(b.folder)
+    })
+    return groups
+  }, [filteredScripts, hasAnyFolders])
+
+  const toggleFolder = useCallback((folder: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      return next
+    })
+  }, [])
+
+  const handleAdd = useCallback(async (folder?: string) => {
     try {
       const script = await addRegexScript({
         name: 'New Script',
         find_regex: '',
         flags: 'gi',
+        folder: folder || '',
       })
       setExpandedId(script.id)
     } catch (err: any) {
       toast.error(err.body?.error || err.message)
     }
   }, [addRegexScript])
+
+  const handleCreateFolder = useCallback(() => {
+    const trimmed = creatingFolderName.trim()
+    if (!trimmed) return
+    createFolder(trimmed)
+    setCreatingFolderMode(false)
+    setCreatingFolderName('')
+    setShowCreatePopover(false)
+  }, [creatingFolderName, createFolder])
 
   const handleDelete = useCallback(async (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -142,9 +215,71 @@ export default function RegexPanel() {
           <button className={styles.iconBtn} onClick={handleExport} title="Export">
             <Download size={14} />
           </button>
-          <button className={styles.iconBtn} onClick={handleAdd} title="Add Script">
-            <Plus size={14} />
-          </button>
+          <div className={styles.createPopoverWrapper} ref={popoverRef}>
+            <button
+              className={styles.iconBtn}
+              onClick={() => setShowCreatePopover(!showCreatePopover)}
+              title="Add"
+            >
+              <Plus size={14} />
+            </button>
+            {showCreatePopover && (
+              <div className={styles.createPopover}>
+                {creatingFolderMode ? (
+                  <div className={styles.createPopoverInput}>
+                    <input
+                      ref={folderInputRef}
+                      value={creatingFolderName}
+                      onChange={(e) => setCreatingFolderName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleCreateFolder()
+                        if (e.key === 'Escape') {
+                          setCreatingFolderMode(false)
+                          setCreatingFolderName('')
+                        }
+                      }}
+                      placeholder="Folder name..."
+                      className={styles.createPopoverField}
+                    />
+                    <button
+                      className={styles.createPopoverBtn}
+                      onClick={handleCreateFolder}
+                      disabled={!creatingFolderName.trim()}
+                    >
+                      <Check size={12} />
+                    </button>
+                    <button
+                      className={styles.createPopoverBtn}
+                      onClick={() => {
+                        setCreatingFolderMode(false)
+                        setCreatingFolderName('')
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      className={styles.createPopoverOption}
+                      onClick={() => {
+                        handleAdd()
+                        setShowCreatePopover(false)
+                      }}
+                    >
+                      <Plus size={12} /> New Script
+                    </button>
+                    <button
+                      className={clsx(styles.createPopoverOption, styles.createPopoverFolder)}
+                      onClick={() => setCreatingFolderMode(true)}
+                    >
+                      <FolderPlus size={12} /> New Folder
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -166,6 +301,45 @@ export default function RegexPanel() {
             <p>No regex scripts yet.</p>
             <p>Click + to create one.</p>
           </div>
+        ) : groupedScripts ? (
+          groupedScripts.map((group) => {
+            const folderKey = group.folder || '__uncategorized'
+            const isCollapsed = collapsedFolders.has(folderKey)
+            return (
+              <div key={folderKey}>
+                <button
+                  className={styles.folderHeader}
+                  onClick={() => toggleFolder(folderKey)}
+                >
+                  <ChevronRight
+                    size={12}
+                    className={clsx(styles.folderChevron, !isCollapsed && styles.folderChevronOpen)}
+                  />
+                  <span className={styles.folderName}>
+                    {group.folder || 'Uncategorized'}
+                  </span>
+                  <span className={styles.folderCount}>{group.scripts.length}</span>
+                </button>
+                {!isCollapsed &&
+                  group.scripts.map((script) => (
+                    <ScriptRow
+                      key={script.id}
+                      script={script}
+                      expanded={expandedId === script.id}
+                      onToggleExpand={() => setExpandedId(expandedId === script.id ? null : script.id)}
+                      onDelete={(e) => handleDelete(script.id, e)}
+                      onToggle={(disabled, e) => handleToggle(script.id, disabled, e)}
+                      onUpdate={(updates) => updateRegexScript(script.id, updates)}
+                      onOpenModal={() => openModal('regexEditor', { scriptId: script.id })}
+                      targetBadge={targetBadge(script.target)}
+                      scopeIcon={scopeIcon(script.scope)}
+                      folders={folders}
+                      onCreateFolder={createFolder}
+                    />
+                  ))}
+              </div>
+            )
+          })
         ) : (
           filteredScripts.map((script) => (
             <ScriptRow
@@ -176,11 +350,11 @@ export default function RegexPanel() {
               onDelete={(e) => handleDelete(script.id, e)}
               onToggle={(disabled, e) => handleToggle(script.id, disabled, e)}
               onUpdate={(updates) => updateRegexScript(script.id, updates)}
-              onOpenModal={() => {
-                openModal('regexEditor', { scriptId: script.id })
-              }}
+              onOpenModal={() => openModal('regexEditor', { scriptId: script.id })}
               targetBadge={targetBadge(script.target)}
               scopeIcon={scopeIcon(script.scope)}
+              folders={folders}
+              onCreateFolder={createFolder}
             />
           ))
         )}
@@ -199,6 +373,8 @@ function ScriptRow({
   onOpenModal,
   targetBadge,
   scopeIcon,
+  folders,
+  onCreateFolder,
 }: {
   script: RegexScript
   expanded: boolean
@@ -209,6 +385,8 @@ function ScriptRow({
   onOpenModal: () => void
   targetBadge: React.ReactNode
   scopeIcon: React.ReactNode
+  folders: string[]
+  onCreateFolder: (name: string) => void
 }) {
   const replaceRef = useRef<HTMLTextAreaElement>(null)
 
@@ -240,6 +418,15 @@ function ScriptRow({
               className={styles.fieldInput}
               value={script.name}
               onChange={(e) => onUpdate({ name: e.target.value })}
+            />
+          </div>
+          <div className={styles.field}>
+            <label className={styles.fieldLabel}>Folder</label>
+            <FolderDropdown
+              folders={folders}
+              selectedFolder={script.folder || ''}
+              onSelect={(f) => onUpdate({ folder: f })}
+              onCreateFolder={onCreateFolder}
             />
           </div>
           <div className={styles.field}>

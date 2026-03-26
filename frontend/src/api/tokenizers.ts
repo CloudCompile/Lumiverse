@@ -51,6 +51,9 @@ export const tokenizersApi = {
   test(tokenizerId: string, text: string) {
     return post<TokenizerTestResult>('/tokenizers/test', { tokenizer_id: tokenizerId, text })
   },
+  countForModel(modelId: string, text: string) {
+    return post<{ token_count: number | null; char_count: number }>('/tokenizers/count', { model_id: modelId, text })
+  },
 
   // Patterns
   listPatterns() {

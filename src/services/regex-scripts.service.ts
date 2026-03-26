@@ -27,6 +27,7 @@ function rowToRegexScript(row: any): RegexScript {
     ...row,
     placement: JSON.parse(row.placement),
     trim_strings: JSON.parse(row.trim_strings),
+    folder: row.folder || "",
     metadata: JSON.parse(row.metadata),
     run_on_edit: !!row.run_on_edit,
     disabled: !!row.disabled,
@@ -146,8 +147,8 @@ export function createRegexScript(userId: string, input: CreateRegexScriptInput)
 
   getDb()
     .query(
-      `INSERT INTO regex_scripts (id, user_id, name, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO regex_scripts (id, user_id, name, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -168,6 +169,7 @@ export function createRegexScript(userId: string, input: CreateRegexScriptInput)
       input.disabled ? 1 : 0,
       input.sort_order ?? 0,
       input.description ?? "",
+      input.folder ?? "",
       JSON.stringify(input.metadata ?? {}),
       now,
       now
@@ -212,6 +214,7 @@ export function updateRegexScript(userId: string, id: string, input: UpdateRegex
   if (input.disabled !== undefined) { fields.push("disabled = ?"); values.push(input.disabled ? 1 : 0); }
   if (input.sort_order !== undefined) { fields.push("sort_order = ?"); values.push(input.sort_order); }
   if (input.description !== undefined) { fields.push("description = ?"); values.push(input.description); }
+  if (input.folder !== undefined) { fields.push("folder = ?"); values.push(input.folder); }
   if (input.metadata !== undefined) { fields.push("metadata = ?"); values.push(JSON.stringify(input.metadata)); }
 
   if (fields.length === 0) return existing;
@@ -248,8 +251,8 @@ export function duplicateRegexScript(userId: string, id: string): RegexScript | 
 
   getDb()
     .query(
-      `INSERT INTO regex_scripts (id, user_id, name, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO regex_scripts (id, user_id, name, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       newId,
@@ -270,6 +273,7 @@ export function duplicateRegexScript(userId: string, id: string): RegexScript | 
       existing.disabled ? 1 : 0,
       existing.sort_order,
       existing.description,
+      existing.folder,
       JSON.stringify(existing.metadata),
       now,
       now

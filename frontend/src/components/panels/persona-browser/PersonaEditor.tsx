@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { getPersonaAvatarLargeUrl } from '@/lib/avatarUrls'
@@ -9,7 +9,9 @@ import useImageCropFlow from '@/hooks/useImageCropFlow'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import FolderDropdown from '@/components/shared/FolderDropdown'
 import NumberStepper from '@/components/shared/NumberStepper'
+import { useFolders } from '@/hooks/useFolders'
 import type { Persona, WorldBook } from '@/types/api'
 import styles from './PersonaEditor.module.css'
 import clsx from 'clsx'
@@ -75,16 +77,10 @@ export default function PersonaEditor({
   const nameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const titleTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const descTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
-  const folderTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const fileRef = useRef<HTMLInputElement>(null)
   const lastSyncedId = useRef<string | null>(null)
 
-  // Collect unique folder names for datalist suggestions
-  const existingFolders = useMemo(() => {
-    const set = new Set<string>()
-    allPersonas.forEach((p) => { if (p.folder) set.add(p.folder) })
-    return Array.from(set).sort((a, b) => a.localeCompare(b))
-  }, [allPersonas])
+  const { folders: existingFolders, createFolder } = useFolders('personaFolders', allPersonas)
 
   // Sync from prop changes — only when switching to a different persona,
   // not when our own save updates the store (which would overwrite in-progress edits)
@@ -174,14 +170,10 @@ export default function PersonaEditor({
     [persona, onUpdate]
   )
 
-  // Debounced folder save
   const handleFolderChange = useCallback(
     (value: string) => {
       setFolder(value)
-      clearTimeout(folderTimer.current)
-      folderTimer.current = setTimeout(() => {
-        onUpdate(persona.id, { folder: value })
-      }, 400)
+      onUpdate(persona.id, { folder: value })
     },
     [persona.id, onUpdate]
   )
@@ -355,19 +347,12 @@ export default function PersonaEditor({
 
       {/* Folder */}
       <div className={styles.folderRow}>
-        <input
-          type="text"
-          className={styles.folderInput}
-          value={folder}
-          onChange={(e) => handleFolderChange(e.target.value)}
-          placeholder="Folder"
-          list="persona-folders"
+        <FolderDropdown
+          folders={existingFolders}
+          selectedFolder={folder}
+          onSelect={handleFolderChange}
+          onCreateFolder={createFolder}
         />
-        <datalist id="persona-folders">
-          {existingFolders.map((f) => (
-            <option key={f} value={f} />
-          ))}
-        </datalist>
       </div>
 
       {/* Locks section */}

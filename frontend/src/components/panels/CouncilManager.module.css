@@ -377,8 +377,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
+  width: var(--lumiverse-btn-icon-xs);
+  height: var(--lumiverse-btn-icon-xs);
   border-radius: 50%;
   border: none;
   background: transparent;
@@ -576,8 +576,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--lumiverse-btn-icon);
+  height: var(--lumiverse-btn-icon);
   border-radius: 6px;
   border: none;
   background: transparent;

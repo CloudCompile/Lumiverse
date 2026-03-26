@@ -9,6 +9,7 @@ import StreamingIndicator from './StreamingIndicator'
 import BubbleActions from './BubbleActions'
 import LazyImage from '@/components/shared/LazyImage'
 import { useStore } from '@/store'
+import { useCallback } from 'react'
 import type { Message } from '@/types/api'
 import styles from './BubbleMessage.module.css'
 import clsx from 'clsx'
@@ -54,6 +55,10 @@ export default function BubbleMessage({ message, chatId, depth = 0 }: BubbleMess
     handleToggleHidden,
     handleFork,
   } = useMessageCard(message, chatId)
+  const openModal = useStore((s) => s.openModal)
+  const handlePromptBreakdown = useCallback(() => {
+    openModal('promptItemizer', { messageId: message.id })
+  }, [openModal, message.id])
   const userLeft = isUser && bubbleUserAlign === 'left'
 
   return (
@@ -190,6 +195,7 @@ export default function BubbleMessage({ message, chatId, depth = 0 }: BubbleMess
           onDelete={handleDelete}
           onToggleHidden={handleToggleHidden}
           onFork={handleFork}
+          onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
           isHidden={isHidden}
           content={message.content}
           className={styles.actionsPill}

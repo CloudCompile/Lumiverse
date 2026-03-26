@@ -128,9 +128,9 @@ function appendDominantTag(content: string): string {
   return content;
 }
 
-/** Generate leet-speak handle from a name: capitalize, remove vowels, add x prefix. */
+/** Generate leet-speak handle from a name: capitalize, remove vowels, replace spaces with underscores, add x prefix. */
 function leetHandle(name: string): string {
-  const stripped = name.replace(/[aeiou]/gi, "").toUpperCase();
+  const stripped = name.replace(/\s+/g, "_").replace(/[aeiou]/gi, "").toUpperCase();
   return `x${stripped || name.charAt(0).toUpperCase()}x`;
 }
 

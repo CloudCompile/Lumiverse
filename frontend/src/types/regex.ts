@@ -22,6 +22,7 @@ export interface RegexScript {
   disabled: boolean
   sort_order: number
   description: string
+  folder: string
   metadata: Record<string, any>
   created_at: number
   updated_at: number
@@ -44,6 +45,7 @@ export interface CreateRegexScriptInput {
   disabled?: boolean
   sort_order?: number
   description?: string
+  folder?: string
   metadata?: Record<string, any>
 }
 

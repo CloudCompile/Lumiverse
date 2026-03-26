@@ -52,6 +52,7 @@ export default function CommandPalette() {
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const isComposing = useRef(false)
+  const scrollOnChange = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -136,8 +137,10 @@ export default function CommandPalette() {
     setActiveIndex((i) => (orderedFlat.length === 0 ? 0 : Math.min(i, orderedFlat.length - 1)))
   }, [orderedFlat.length])
 
-  // Scroll active item into view on keyboard navigation
+  // Scroll active item into view on keyboard navigation only
   useEffect(() => {
+    if (!scrollOnChange.current) return
+    scrollOnChange.current = false
     listRef.current
       ?.querySelector<HTMLElement>(`[data-idx="${activeIndex}"]`)
       ?.scrollIntoView({ block: 'nearest' })
@@ -154,10 +157,12 @@ export default function CommandPalette() {
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
+        scrollOnChange.current = true
         setActiveIndex((i) => Math.min(i + 1, orderedFlat.length - 1))
         break
       case 'ArrowUp':
         e.preventDefault()
+        scrollOnChange.current = true
         setActiveIndex((i) => Math.max(i - 1, 0))
         break
       case 'Enter':
@@ -171,6 +176,7 @@ export default function CommandPalette() {
         break
       case 'Tab':
         e.preventDefault()
+        scrollOnChange.current = true
         if (e.shiftKey) {
           setActiveIndex((i) => Math.max(i - 1, 0))
         } else {
