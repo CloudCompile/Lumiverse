@@ -36,7 +36,7 @@ interface PersonaEditorProps {
   onUpdate: (id: string, input: Record<string, any>) => Promise<any>
   onDelete: (id: string) => Promise<void>
   onDuplicate: (id: string) => Promise<any>
-  onUploadAvatar: (id: string, file: File) => Promise<any>
+  onUploadAvatar: (id: string, croppedFile: File, originalFile?: File) => Promise<any>
   onToggleDefault: (id: string) => Promise<void>
   onSetLorebook: (id: string, worldBookId: string | null) => Promise<void>
   onSwitchTo: (id: string) => void
@@ -185,10 +185,10 @@ export default function PersonaEditor({
     [persona.id, onSetLorebook]
   )
 
-  // Avatar crop flow
+  // Avatar crop flow — upload both cropped (for avatar display) and original (for full viewing)
   const handleCropComplete = useCallback(
-    async (croppedFile: File, _originalFile: File) => {
-      await onUploadAvatar(persona.id, croppedFile)
+    async (croppedFile: File, originalFile: File) => {
+      await onUploadAvatar(persona.id, croppedFile, originalFile)
       setAvatarKey((k) => k + 1)
     },
     [persona.id, onUploadAvatar]

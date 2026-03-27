@@ -1,5 +1,3 @@
-// Types copied from ~/Projects/Lumiverse-Backend/src/types/
-
 // ---- Character ----
 export interface Character {
   id: string;

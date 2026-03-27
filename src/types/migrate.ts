@@ -14,6 +14,7 @@ export interface BulkMessageInput {
 export interface ChatImportRequest {
   character_name: string;
   character_id?: string;
+  persona_map?: Record<string, string>;  // persona name → persona_id; auto-sets extra.persona_id on user messages
   chats: Array<{
     name?: string;
     metadata?: Record<string, any>;

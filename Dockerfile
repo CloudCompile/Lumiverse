@@ -35,9 +35,9 @@ RUN bun install --production --frozen-lockfile 2>/dev/null || bun install --prod
 # ---------------------------------------------------------------------------
 FROM oven/bun:1-slim
 
-LABEL org.opencontainers.image.title="Lumiverse Backend"
+LABEL org.opencontainers.image.title="Lumiverse"
 LABEL org.opencontainers.image.description="AI chat application server"
-LABEL org.opencontainers.image.source="https://github.com/your-org/lumiverse-backend"
+LABEL org.opencontainers.image.source="https://github.com/prolix-oc/Lumiverse"
 
 WORKDIR /app
 

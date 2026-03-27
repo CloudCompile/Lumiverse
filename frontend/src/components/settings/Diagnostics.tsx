@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Copy, Check, RefreshCw, Server, Monitor, Puzzle, Bell, Send } from 'lucide-react'
+import { Copy, Check, RefreshCw, Server, Monitor, Puzzle, Bell, Send, Wrench, Users } from 'lucide-react'
 import { useStore } from '@/store'
 import { systemApi, type SystemInfo } from '@/api/system'
 import { pushApi } from '@/api/push'
+import { chatsApi } from '@/api/chats'
 import { BASE_URL } from '@/api/client'
 import styles from './Diagnostics.module.css'
 import clsx from 'clsx'
@@ -248,6 +249,9 @@ export default function Diagnostics() {
       {/* PWA Capabilities Section */}
       <PwaCapabilitiesSection />
 
+      {/* Data Maintenance Section */}
+      <DataMaintenanceSection />
+
       {/* Extensions Section */}
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
@@ -269,6 +273,64 @@ export default function Diagnostics() {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function DataMaintenanceSection() {
+  const addToast = useStore((s) => s.addToast)
+  const [reattributing, setReattributing] = useState(false)
+  const [reattributeResult, setReattributeResult] = useState<string | null>(null)
+
+  const handleReattributeAll = useCallback(async () => {
+    setReattributing(true)
+    setReattributeResult(null)
+    try {
+      const result = await chatsApi.reattributeAll()
+      if (result.messages_updated === 0) {
+        setReattributeResult('No unattributed messages found')
+      } else {
+        setReattributeResult(`${result.messages_updated} messages across ${result.chats_updated} chats`)
+      }
+      addToast({
+        type: result.messages_updated > 0 ? 'success' : 'info',
+        message: result.messages_updated > 0
+          ? `Reattributed ${result.messages_updated} messages across ${result.chats_updated} chats`
+          : 'All user messages are already attributed to personas',
+      })
+    } catch (err: any) {
+      addToast({ type: 'error', message: err.message || 'Reattribution failed' })
+    } finally {
+      setReattributing(false)
+    }
+  }, [addToast])
+
+  return (
+    <div className={styles.section}>
+      <div className={styles.sectionHeader}>
+        <Wrench size={14} />
+        <span>Data Maintenance</span>
+      </div>
+      <div className={styles.grid}>
+        <div className={styles.maintenanceRow}>
+          <div className={styles.maintenanceDesc}>
+            <Users size={12} style={{ display: 'inline', verticalAlign: '-2px', marginRight: 4 }} />
+            Match user messages to persona avatars by name. Useful for chats imported from SillyTavern.
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {reattributeResult && <span className={styles.maintenanceResult}>{reattributeResult}</span>}
+            <button
+              type="button"
+              className={styles.copyBtn}
+              onClick={handleReattributeAll}
+              disabled={reattributing}
+            >
+              <Users size={12} />
+              {reattributing ? 'Working...' : 'Reattribute'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )

@@ -669,14 +669,15 @@ async function importWorldBooks(
 async function importPersonas(
   stDataDir: string,
   worldBookNameToId: Map<string, string>
-): Promise<{ imported: number; failed: number; avatarsUploaded: number }> {
+): Promise<{ imported: number; failed: number; avatarsUploaded: number; nameToId: Map<string, string> }> {
   const settingsPath = join(stDataDir, "settings.json");
   let imported = 0;
   let failed = 0;
   let avatarsUploaded = 0;
+  const nameToId = new Map<string, string>();
 
   if (!existsSync(settingsPath)) {
-    return { imported, failed, avatarsUploaded };
+    return { imported, failed, avatarsUploaded, nameToId };
   }
 
   let personaNames: Record<string, string>;
@@ -687,12 +688,12 @@ async function importPersonas(
     personaNames = pu.personas || {};
     personaDescriptions = pu.persona_descriptions || {};
   } catch {
-    return { imported, failed, avatarsUploaded };
+    return { imported, failed, avatarsUploaded, nameToId };
   }
 
   const allKeys = new Set([...Object.keys(personaDescriptions), ...Object.keys(personaNames)]);
   if (allKeys.size === 0) {
-    return { imported, failed, avatarsUploaded };
+    return { imported, failed, avatarsUploaded, nameToId };
   }
 
   const entries = Array.from(allKeys);
@@ -722,6 +723,11 @@ async function importPersonas(
         const r = result.results[i];
         if (r.success) {
           imported++;
+
+          // Build name → persona_id map for chat attribution
+          if (r.persona_id && r.name) {
+            nameToId.set(r.name, r.persona_id);
+          }
 
           // Try to upload avatar
           const avatarKey = entries[i];
@@ -754,12 +760,13 @@ async function importPersonas(
   }
 
   clearProgress();
-  return { imported, failed, avatarsUploaded };
+  return { imported, failed, avatarsUploaded, nameToId };
 }
 
 async function importChats(
   stDataDir: string,
-  filenameToId: Map<string, string>
+  filenameToId: Map<string, string>,
+  personaNameToId: Map<string, string> = new Map()
 ): Promise<{ imported: number; failed: number; totalMessages: number; skippedChars: number }> {
   const chatsDir = join(stDataDir, "chats");
   let imported = 0;
@@ -835,13 +842,15 @@ async function importChats(
           continue;
         }
 
-        // Line 0 is chat metadata in ST format — extract chat name
+        // Line 0 is chat metadata in ST format — extract chat name and user_name (persona)
         let chatName = basename(chatFile, ".jsonl");
         let chatCreatedAt: number | undefined;
+        let chatUserName: string | undefined;
         try {
           const meta = JSON.parse(lines[0]);
           if (meta.chat_metadata || meta.user_name !== undefined) {
             chatName = meta.chat_metadata?.name || chatName;
+            chatUserName = meta.user_name;
             if (meta.create_date) {
               const ts = parseDateString(meta.create_date);
               if (ts) chatCreatedAt = ts;
@@ -876,14 +885,26 @@ async function importChats(
             const content = msg.mes || msg.content || "";
             if (!content && !msg.name) continue;
 
+            const isUser = !!msg.is_user;
+            const msgName = msg.name || (isUser ? "User" : charDirName);
+            let extra = msg.extra || undefined;
+
+            // Attribute user messages to imported personas by matching name
+            if (isUser && personaNameToId.size > 0) {
+              const personaId = personaNameToId.get(msgName) || (chatUserName ? personaNameToId.get(chatUserName) : undefined);
+              if (personaId) {
+                extra = { ...(extra || {}), persona_id: personaId };
+              }
+            }
+
             messages.push({
-              is_user: !!msg.is_user,
-              name: msg.name || (msg.is_user ? "User" : charDirName),
+              is_user: isUser,
+              name: msgName,
               content,
               send_date: parseMessageDate(msg),
               swipes: Array.isArray(msg.swipes) ? msg.swipes : undefined,
               swipe_id: typeof msg.swipe_id === "number" ? msg.swipe_id : undefined,
-              extra: msg.extra || undefined,
+              extra,
             });
           } catch {
             // Skip unparseable lines
@@ -941,7 +962,8 @@ async function importChats(
 
 async function importGroupChats(
   stDataDir: string,
-  filenameToId: Map<string, string>
+  filenameToId: Map<string, string>,
+  personaNameToId: Map<string, string> = new Map()
 ): Promise<{ imported: number; failed: number; totalMessages: number; skippedGroups: number }> {
   const groupsDir = join(stDataDir, "groups");
   const groupChatsDir = join(stDataDir, "group chats");
@@ -1026,9 +1048,11 @@ async function importGroupChats(
         }
 
         let chatCreatedAt: number | undefined;
+        let chatUserName: string | undefined;
         try {
           const meta = JSON.parse(lines[0]);
           if (meta.chat_metadata || meta.user_name !== undefined) {
+            chatUserName = meta.user_name;
             if (meta.create_date) {
               const ts = parseDateString(meta.create_date);
               if (ts) chatCreatedAt = ts;
@@ -1060,14 +1084,26 @@ async function importGroupChats(
             const content = msg.mes || msg.content || "";
             if (!content && !msg.name) continue;
 
+            const isUser = !!msg.is_user;
+            const msgName = msg.name || (isUser ? "User" : "Unknown");
+            let extra = msg.extra || undefined;
+
+            // Attribute user messages to imported personas by matching name
+            if (isUser && personaNameToId.size > 0) {
+              const personaId = personaNameToId.get(msgName) || (chatUserName ? personaNameToId.get(chatUserName) : undefined);
+              if (personaId) {
+                extra = { ...(extra || {}), persona_id: personaId };
+              }
+            }
+
             messages.push({
-              is_user: !!msg.is_user,
-              name: msg.name || (msg.is_user ? "User" : "Unknown"),
+              is_user: isUser,
+              name: msgName,
               content,
               send_date: parseMessageDate(msg),
               swipes: Array.isArray(msg.swipes) ? msg.swipes : undefined,
               swipe_id: typeof msg.swipe_id === "number" ? msg.swipe_id : undefined,
-              extra: msg.extra || undefined,
+              extra,
             });
           } catch {
             // Skip unparseable lines
@@ -1401,7 +1437,7 @@ async function main() {
 
   let charResult = { imported: 0, skipped: 0, failed: 0, filenameToId, failedFiles: [] as Array<{ filename: string; reason: string }> };
   let wbResult = { imported: 0, failed: 0, totalEntries: 0, nameToId: new Map<string, string>() };
-  let personaResult = { imported: 0, failed: 0, avatarsUploaded: 0 };
+  let personaResult = { imported: 0, failed: 0, avatarsUploaded: 0, nameToId: new Map<string, string>() };
   let chatResult = { imported: 0, failed: 0, totalMessages: 0, skippedChars: 0 };
   let groupChatResult = { imported: 0, failed: 0, totalMessages: 0, skippedGroups: 0 };
 
@@ -1442,7 +1478,7 @@ async function main() {
   // 4. Chats
   if (doChats && counts.totalChatFiles > 0) {
     console.log(`\n  ${theme.bold}Chat History${theme.reset}`);
-    chatResult = await importChats(effectiveDataDir, filenameToId);
+    chatResult = await importChats(effectiveDataDir, filenameToId, personaResult.nameToId);
     console.log(`  ${theme.success}Done:${theme.reset} ${chatResult.imported} chats (${chatResult.totalMessages} messages), ${chatResult.failed} failed`);
     if (chatResult.skippedChars > 0) {
       console.log(`  ${theme.warning}${chatResult.skippedChars} character(s) not found — their chats were skipped${theme.reset}`);
@@ -1452,7 +1488,7 @@ async function main() {
   // 5. Group Chats
   if (doGroupChats && counts.groupChats > 0) {
     console.log(`\n  ${theme.bold}Group Chats${theme.reset}`);
-    groupChatResult = await importGroupChats(effectiveDataDir, filenameToId);
+    groupChatResult = await importGroupChats(effectiveDataDir, filenameToId, personaResult.nameToId);
     console.log(`  ${theme.success}Done:${theme.reset} ${groupChatResult.imported} chats (${groupChatResult.totalMessages} messages), ${groupChatResult.failed} failed`);
     if (groupChatResult.skippedGroups > 0) {
       console.log(`  ${theme.warning}${groupChatResult.skippedGroups} group(s) skipped — no members found${theme.reset}`);

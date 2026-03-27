@@ -397,6 +397,49 @@ export function reattributeUserMessages(userId: string, chatId: string, personaI
   return rows.length;
 }
 
+export function bulkReattributeByPersonaName(userId: string, personaMap: Map<string, { id: string; name: string }>): { chats_updated: number; messages_updated: number } {
+  const db = getDb();
+
+  // Find all user messages across all user's chats that lack a persona_id
+  const rows = db
+    .query(
+      `SELECT m.id, m.chat_id, m.name, m.extra
+       FROM messages m
+       JOIN chats c ON m.chat_id = c.id
+       WHERE c.user_id = ? AND m.is_user = 1`
+    )
+    .all(userId) as Array<{ id: string; chat_id: string; name: string; extra: string }>;
+
+  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
+  let messagesUpdated = 0;
+  const updatedChatIds = new Set<string>();
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      let extra: Record<string, any> = {};
+      try {
+        extra = row.extra ? JSON.parse(row.extra) : {};
+      } catch {
+        extra = {};
+      }
+
+      // Skip if already attributed
+      if (extra.persona_id) continue;
+
+      const match = personaMap.get(row.name);
+      if (!match) continue;
+
+      extra.persona_id = match.id;
+      update.run(match.name, JSON.stringify(extra), row.id);
+      messagesUpdated++;
+      updatedChatIds.add(row.chat_id);
+    }
+  });
+  tx();
+
+  return { chats_updated: updatedChatIds.size, messages_updated: messagesUpdated };
+}
+
 export function getLastAssistantMessage(userId: string, chatId: string): Message | null {
   const row = getDb()
     .query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? AND m.is_user = 0 ORDER BY m.index_in_chat DESC LIMIT 1")

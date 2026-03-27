@@ -39,6 +39,18 @@ app.post("/chats", async (c) => {
     summary: { total: body.chats.length, imported: 0, failed: 0 },
   };
 
+  // Apply persona_map: inject persona_id into user message extras before insert
+  const personaMap = body.persona_map;
+  if (personaMap && Object.keys(personaMap).length > 0) {
+    for (const chatInput of body.chats) {
+      for (const msg of chatInput.messages || []) {
+        if (msg.is_user && msg.name && personaMap[msg.name] && !msg.extra?.persona_id) {
+          msg.extra = { ...(msg.extra || {}), persona_id: personaMap[msg.name] };
+        }
+      }
+    }
+  }
+
   for (const chatInput of body.chats) {
     const chatName = chatInput.name || `Imported Chat`;
     try {

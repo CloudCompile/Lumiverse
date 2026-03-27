@@ -331,6 +331,13 @@ interface STPresetData {
   name?: string
   prompts?: STPrompt[]
   prompt_order?: Record<string, { order?: Array<{ identifier: string; enabled?: boolean }> }>
+  // Root-level behavior prompts (ST stores these outside the prompts array)
+  continue_nudge_prompt?: string
+  impersonation_prompt?: string
+  group_nudge_prompt?: string
+  new_chat_prompt?: string
+  new_group_chat_prompt?: string
+  send_if_empty?: string
 }
 
 /**
@@ -467,7 +474,15 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
     isDefault: false,
     samplerOverrides: { ...DEFAULT_SAMPLER_OVERRIDES },
     customBody: { ...DEFAULT_CUSTOM_BODY },
-    promptBehavior: { ...DEFAULT_PROMPT_BEHAVIOR },
+    promptBehavior: {
+      ...DEFAULT_PROMPT_BEHAVIOR,
+      ...(stPresetData.continue_nudge_prompt != null && { continueNudge: stPresetData.continue_nudge_prompt }),
+      ...(stPresetData.impersonation_prompt != null && { impersonationPrompt: stPresetData.impersonation_prompt }),
+      ...(stPresetData.group_nudge_prompt != null && { groupNudge: stPresetData.group_nudge_prompt }),
+      ...(stPresetData.new_chat_prompt != null && { newChatPrompt: stPresetData.new_chat_prompt }),
+      ...(stPresetData.new_group_chat_prompt != null && { newGroupChatPrompt: stPresetData.new_group_chat_prompt }),
+      ...(stPresetData.send_if_empty != null && { sendIfEmpty: stPresetData.send_if_empty }),
+    },
     completionSettings: { ...DEFAULT_COMPLETION_SETTINGS },
     advancedSettings: { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: {},

@@ -93,9 +93,15 @@ select option:checked {
   to { opacity: 1; }
 }
 
-/* Panel content entrance — applied by <PanelFadeIn> wrapper */
+/* Panel content entrance — applied by <PanelFadeIn> wrapper.
+   display/height/min-height ensure this wrapper doesn't break flex
+   layouts when placed inside overflow:hidden containers like panelContentFull. */
 .lumiverse-panel-enter {
   animation: lumiverseFadeIn 180ms ease both;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

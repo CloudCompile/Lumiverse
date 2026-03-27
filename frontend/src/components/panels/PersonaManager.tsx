@@ -41,10 +41,10 @@ export default function PersonaManager() {
   }, [])
 
   const handleCreate = useCallback(
-    async (name: string, avatarFile?: File) => {
+    async (name: string, avatarFile?: File, originalFile?: File) => {
       const persona = await browser.createPersona({ name })
       if (avatarFile) {
-        await browser.uploadAvatar(persona.id, avatarFile)
+        await browser.uploadAvatar(persona.id, avatarFile, originalFile)
       }
       setCreating(false)
       browser.setSelectedPersonaId(persona.id)

@@ -5,19 +5,21 @@ import ImageCropModal from '@/components/shared/ImageCropModal'
 import styles from './CreatePersonaForm.module.css'
 
 interface CreatePersonaFormProps {
-  onCreate: (name: string, avatarFile?: File) => Promise<void>
+  onCreate: (name: string, avatarFile?: File, originalFile?: File) => Promise<void>
   onCancel: () => void
 }
 
 export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaFormProps) {
   const [name, setName] = useState('')
   const [avatarFile, setAvatarFile] = useState<File | null>(null)
+  const [originalFile, setOriginalFile] = useState<File | null>(null)
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const handleCropComplete = useCallback((croppedFile: File, _originalFile: File) => {
+  const handleCropComplete = useCallback((croppedFile: File, origFile: File) => {
     setAvatarFile(croppedFile)
+    setOriginalFile(origFile)
     const url = URL.createObjectURL(croppedFile)
     setAvatarPreview(url)
   }, [])
@@ -37,11 +39,11 @@ export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaF
     if (!name.trim() || creating) return
     setCreating(true)
     try {
-      await onCreate(name.trim(), avatarFile || undefined)
+      await onCreate(name.trim(), avatarFile || undefined, originalFile || undefined)
     } finally {
       setCreating(false)
     }
-  }, [name, avatarFile, creating, onCreate])
+  }, [name, avatarFile, originalFile, creating, onCreate])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

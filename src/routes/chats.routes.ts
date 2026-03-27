@@ -166,6 +166,23 @@ app.post("/:id/branch", async (c) => {
   return c.json(branch, 201);
 });
 
+app.post("/reattribute-all", async (c) => {
+  const userId = c.get("userId");
+  const personas = personasSvc.listPersonas(userId, { limit: 10000, offset: 0 });
+
+  const nameMap = new Map<string, { id: string; name: string }>();
+  for (const p of personas.data) {
+    nameMap.set(p.name, { id: p.id, name: p.name });
+  }
+
+  if (nameMap.size === 0) {
+    return c.json({ success: true, chats_updated: 0, messages_updated: 0, message: "No personas found" });
+  }
+
+  const result = svc.bulkReattributeByPersonaName(userId, nameMap);
+  return c.json({ success: true, ...result });
+});
+
 app.post("/:id/reattribute-user-messages", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("id");

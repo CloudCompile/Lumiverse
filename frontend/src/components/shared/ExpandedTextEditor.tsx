@@ -94,6 +94,10 @@ function highlightSyntax(text: string): ReactNode[] {
           i = ci + 2
           continue
         }
+        // Unclosed nested macro — emit remainder as plain text to avoid infinite loop
+        nodes.push(...highlightPlain(str.slice(i)))
+        i = str.length
+        continue
       }
       // Plain text within args
       const start = i
@@ -133,6 +137,10 @@ function highlightSyntax(text: string): ReactNode[] {
         i = ci + 2
         continue
       }
+      // Unclosed macro — emit remainder as plain text to avoid infinite loop
+      result.push(...highlightPlain(text.slice(i)))
+      i = text.length
+      continue
     }
     const start = i
     while (i < text.length && !(i < text.length - 1 && text[i] === '{' && text[i + 1] === '{')) i++
@@ -260,19 +268,11 @@ export default function ExpandedTextEditor({
     })
   }, [value, onChange])
 
-  // Debounce syntax highlighting — it's purely visual and expensive to run
-  // synchronously on every keystroke (especially during rapid deletion).
-  const [highlighted, setHighlighted] = useState<ReactNode[] | null>(null)
-  useEffect(() => {
-    if (resolvedMacros.length === 0) {
-      setHighlighted(null)
-      return
-    }
-    const timer = setTimeout(() => {
-      setHighlighted(highlightSyntax(value))
-    }, 150)
-    return () => clearTimeout(timer)
-  }, [value, resolvedMacros.length])
+  const hasMacros = resolvedMacros.length > 0
+  const highlightNodes = useMemo(
+    () => hasMacros ? highlightSyntax(value) : null,
+    [value, hasMacros],
+  )
 
   const editorContent = (
     <div className={inline ? s.inlineDialog : s.dialog} onClick={e => e.stopPropagation()}>
@@ -322,10 +322,10 @@ export default function ExpandedTextEditor({
           </div>
         )}
         <div className={s.editorArea}>
-          {highlighted ? (
+          {hasMacros ? (
             <div className={s.highlightContainer}>
               <div ref={highlightRef} className={s.highlightBackdrop} aria-hidden="true">
-                <pre className={s.highlightPre}>{highlighted}{'\n'}</pre>
+                <pre className={s.highlightPre}>{highlightNodes}{'\n'}</pre>
               </div>
               <textarea
                 ref={textareaRef}

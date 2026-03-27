@@ -40,7 +40,16 @@ app.put("/:id", async (c) => {
 
 app.delete("/:id", (c) => {
   const userId = c.get("userId");
-  const deleted = svc.deletePersona(userId, c.req.param("id"));
+  const persona = svc.getPersona(userId, c.req.param("id"));
+  if (!persona) return c.json({ error: "Not found" }, 404);
+
+  // Clean up images
+  if (persona.image_id) images.deleteImage(userId, persona.image_id);
+  if (persona.avatar_path) files.deleteAvatar(persona.avatar_path);
+  const origImageId = persona.metadata?.original_image_id;
+  if (origImageId) images.deleteImage(userId, origImageId);
+
+  const deleted = svc.deletePersona(userId, persona.id);
   if (!deleted) return c.json({ error: "Not found" }, 404);
   return c.json({ success: true });
 });
@@ -97,6 +106,8 @@ app.post("/:id/avatar", async (c) => {
   // Clean up old image if present
   if (persona.image_id) images.deleteImage(userId, persona.image_id);
   if (persona.avatar_path) files.deleteAvatar(persona.avatar_path);
+  const oldOriginalImageId = persona.metadata?.original_image_id;
+  if (oldOriginalImageId) images.deleteImage(userId, oldOriginalImageId);
 
   const image = await images.uploadImage(userId, file);
   svc.setPersonaImage(userId, persona.id, image.id);

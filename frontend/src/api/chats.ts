@@ -65,6 +65,12 @@ export const chatsApi = {
     )
   },
 
+  reattributeAll() {
+    return post<{ success: true; chats_updated: number; messages_updated: number; message?: string }>(
+      '/chats/reattribute-all'
+    )
+  },
+
   branch(chatId: string, messageId: string) {
     return post<Chat>(`/chats/${chatId}/branch`, { message_id: messageId })
   },
