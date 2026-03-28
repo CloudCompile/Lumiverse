@@ -51,3 +51,5 @@ Thumbs.db
 !README.md
 scripts/release.sh
 scripts/release-main.sh
+scripts/release-rc.sh
+scripts/push-staging.sh
