@@ -258,6 +258,19 @@ let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
 const OPTIMIZE_DEBOUNCE_MS = 30_000; // 30 seconds after last write
 const worldBookVectorVersionChecked = new Set<string>();
 
+// Periodically clear the version-check cache so it doesn't grow unbounded.
+// Re-checking is cheap (single DB read per user), so hourly clearing is fine.
+let _versionCheckCleanupTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+  worldBookVectorVersionChecked.clear();
+}, 3600_000);
+
+export function stopVersionCheckCleanup(): void {
+  if (_versionCheckCleanupTimer) {
+    clearInterval(_versionCheckCleanupTimer);
+    _versionCheckCleanupTimer = null;
+  }
+}
+
 function providerDefaultModel(provider: EmbeddingProvider): string {
   if (provider === "nanogpt") return "text-embedding-3-small";
   if (provider === "openrouter") return "text-embedding-3-small";

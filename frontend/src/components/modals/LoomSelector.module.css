@@ -1,25 +1,5 @@
-.backdrop {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: var(--lumiverse-modal-backdrop, rgba(0, 0, 0, 0.6));
-}
-
 .modal {
-  display: flex;
-  flex-direction: column;
-  width: min(560px, 94vw);
-  max-height: 85vh;
-  border-radius: var(--lumiverse-radius-xl);
-  background: var(--lumiverse-gradient-modal);
-  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px var(--lumiverse-primary-015);
-  overflow: hidden;
 }
 
 /* ── Header ── */
@@ -80,25 +60,6 @@
 
 .clearBtn:hover {
   background: var(--lumiverse-danger-020, rgba(239, 68, 68, 0.15));
-}
-
-.closeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--lumiverse-radius);
-  border: none;
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
 }
 
 /* ── Controls bar ── */

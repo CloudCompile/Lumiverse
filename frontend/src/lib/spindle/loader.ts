@@ -86,6 +86,7 @@ async function doLoadFrontendExtension(
       // If we can't fetch permissions, default to empty (most restrictive)
     }
     const mountedPoints = new Set<string>()
+    let openModalCount = 0
 
     const attachMountRoots = () => {
       for (const [point, root] of mountRoots) {
@@ -205,6 +206,121 @@ async function doLoadFrontendExtension(
               extensionId,
               position: options.position,
               items: options.items,
+            })
+          })
+        },
+        showModal(options) {
+          if (openModalCount >= 2) throw new Error('Maximum of 2 stacked modals per extension')
+          openModalCount++
+
+          const modalId = generateUUID()
+          const root = document.createElement('div')
+          root.setAttribute('data-spindle-modal', modalId)
+          const dismissHandlers = new Set<() => void>()
+          let dismissed = false
+
+          // Create host elements
+          const backdrop = document.createElement('div')
+          Object.assign(backdrop.style, {
+            position: 'fixed', inset: '0', zIndex: '10003',
+            background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          })
+
+          const container = document.createElement('div')
+          const w = Math.min(options?.width || 420, window.innerWidth - 40)
+          const mh = Math.min(options?.maxHeight || 520, window.innerHeight - 40)
+          Object.assign(container.style, {
+            width: `${w}px`, maxHeight: `${mh}px`,
+            background: 'var(--lumiverse-bg)', borderRadius: '12px',
+            border: '1px solid var(--lumiverse-border)',
+            display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          })
+
+          const header = document.createElement('div')
+          Object.assign(header.style, {
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 16px', borderBottom: '1px solid var(--lumiverse-border)',
+          })
+          const titleEl = document.createElement('h3')
+          Object.assign(titleEl.style, { margin: '0', fontSize: '15px', fontWeight: '600', color: 'var(--lumiverse-text)' })
+          titleEl.textContent = options?.title || ''
+          header.appendChild(titleEl)
+
+          if (!options?.persistent) {
+            const closeBtn = document.createElement('button')
+            Object.assign(closeBtn.style, {
+              background: 'none', border: 'none', color: 'var(--lumiverse-text-dim)',
+              cursor: 'pointer', padding: '4px', borderRadius: '4px', lineHeight: '0',
+            })
+            closeBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+            closeBtn.onclick = () => handle.dismiss()
+            header.appendChild(closeBtn)
+          }
+
+          const body = document.createElement('div')
+          Object.assign(body.style, { padding: '16px', overflowY: 'auto', flex: '1' })
+          body.appendChild(root)
+
+          container.appendChild(header)
+          container.appendChild(body)
+          backdrop.appendChild(container)
+
+          if (!options?.persistent) {
+            backdrop.addEventListener('click', (e) => {
+              if (e.target === backdrop) handle.dismiss()
+            })
+          }
+
+          document.body.appendChild(backdrop)
+
+          const handle = {
+            root,
+            modalId,
+            dismiss() {
+              if (dismissed) return
+              dismissed = true
+              openModalCount--
+              backdrop.remove()
+              for (const h of dismissHandlers) { try { h() } catch {} }
+              dismissHandlers.clear()
+            },
+            setTitle(title: string) {
+              titleEl.textContent = title
+            },
+            onDismiss(handler: () => void) {
+              dismissHandlers.add(handler)
+              return () => { dismissHandlers.delete(handler) }
+            },
+          }
+
+          return handle
+        },
+        async showConfirm(options) {
+          if (openModalCount >= 2) throw new Error('Maximum of 2 stacked modals per extension')
+          openModalCount++
+
+          const requestId = generateUUID()
+
+          return new Promise<{ confirmed: boolean }>((resolve) => {
+            const handler = ((e: CustomEvent) => {
+              if (e.detail?.requestId !== requestId) return
+              window.removeEventListener('spindle:confirm-resolved', handler)
+              openModalCount--
+              resolve({ confirmed: !!e.detail.confirmed })
+            }) as EventListener
+
+            window.addEventListener('spindle:confirm-resolved', handler)
+
+            useStore.getState().openSpindleConfirm({
+              requestId,
+              extensionId,
+              extensionName: manifest.name,
+              title: options.title,
+              message: options.message,
+              variant: options.variant || 'info',
+              confirmLabel: options.confirmLabel || 'Confirm',
+              cancelLabel: options.cancelLabel || 'Cancel',
             })
           })
         },

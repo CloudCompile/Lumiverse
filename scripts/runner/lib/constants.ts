@@ -11,4 +11,4 @@ export const CONFIRMATION_TIMEOUT_MS = 10_000;
 export const SELF_RESTART_DEBOUNCE_MS = 500;
 export const STARTUP_DETECT_TIMEOUT_MS = 2000;
 export const STOP_FORCE_KILL_MS = 5000;
-export const LOG_BATCH_INTERVAL_MS = 16; // ~60fps batch window
+export const LOG_BATCH_INTERVAL_MS = 100; // ~10fps batch window (plenty for a log viewer)

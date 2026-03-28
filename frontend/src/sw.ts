@@ -7,6 +7,12 @@ import { BackgroundSyncPlugin } from 'workbox-background-sync'
 
 declare let self: ServiceWorkerGlobalScope
 
+// ── Immediately activate new service workers ──────────────────────────
+// Skip the waiting phase so updates take effect without requiring all
+// tabs to close. Combined with clients.claim() on activate, this ensures
+// a rebuild is picked up on the next navigation or periodic check.
+self.addEventListener('install', () => { self.skipWaiting() })
+
 // ── Precaching (injected by vite-plugin-pwa at build time) ──────────
 precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
@@ -147,12 +153,6 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil(focusOrOpen)
 })
 
-// ── Message handler (skip waiting, navigation) ──────────────────────
-self.addEventListener('message', (event) => {
-  if (event.data?.type === 'SKIP_WAITING') {
-    self.skipWaiting()
-  }
-})
 
 // Take control of clients immediately on activation
 self.addEventListener('activate', (event) => {

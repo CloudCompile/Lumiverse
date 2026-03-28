@@ -48,27 +48,8 @@
   border-bottom: none;
 }
 
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 500;
-  background: var(--lumiverse-primary-010);
-  color: var(--lumiverse-primary);
-}
-
-.builtInBadge {
-  composes: badge;
-  background: rgba(139, 92, 246, 0.1);
-  color: rgb(139, 92, 246);
-}
-
-.typeBadge {
-  composes: badge;
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text-muted);
+.builtInBadgeSpacing {
+  margin-left: 6px;
 }
 
 .actions {

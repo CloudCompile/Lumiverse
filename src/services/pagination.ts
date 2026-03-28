@@ -2,6 +2,21 @@ import { getDb } from "../db/connection";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { DEFAULT_LIMIT, MAX_LIMIT } from "../types/pagination";
 
+const stmtCache = new Map<string, ReturnType<ReturnType<typeof getDb>["query"]>>();
+
+function cachedQuery(sql: string) {
+  let stmt = stmtCache.get(sql);
+  if (!stmt) {
+    stmt = getDb().query(sql);
+    stmtCache.set(sql, stmt);
+  }
+  return stmt;
+}
+
+export function clearStmtCache(): void {
+  stmtCache.clear();
+}
+
 export function parsePagination(
   rawLimit?: string,
   rawOffset?: string,
@@ -29,11 +44,8 @@ export function paginatedQuery<TRow, TEntity>(
   pagination: PaginationParams,
   rowMapper: (row: TRow) => TEntity
 ): PaginatedResult<TEntity> {
-  const db = getDb();
-
   // Fetch one extra row to detect if there are more results (avoids COUNT query when possible)
-  const rows = db
-    .query(`${dataSql} LIMIT ? OFFSET ?`)
+  const rows = cachedQuery(`${dataSql} LIMIT ? OFFSET ?`)
     .all(...params, pagination.limit + 1, pagination.offset) as TRow[];
 
   const hasMore = rows.length > pagination.limit;
@@ -46,7 +58,7 @@ export function paginatedQuery<TRow, TEntity>(
     // First page and all results fit — total is just the row count
     total = rows.length;
   } else {
-    const countRow = db.query(countSql).get(...params) as { count: number } | null;
+    const countRow = cachedQuery(countSql).get(...params) as { count: number } | null;
     total = countRow?.count ?? 0;
   }
 

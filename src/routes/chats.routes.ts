@@ -217,6 +217,28 @@ app.get("/:chatId/messages", (c) => {
   return c.json(svc.listMessages(userId, chatId, pagination));
 });
 
+app.post("/:chatId/messages/bulk-hide", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const body = await c.req.json();
+
+  if (!Array.isArray(body.message_ids) || body.message_ids.length === 0) {
+    return c.json({ error: "message_ids must be a non-empty array" }, 400);
+  }
+  if (typeof body.hidden !== "boolean") {
+    return c.json({ error: "hidden must be a boolean" }, 400);
+  }
+
+  try {
+    const messages = svc.bulkSetHidden(userId, chatId, body.message_ids, body.hidden);
+    return c.json({ success: true, updated: messages.length, messages });
+  } catch (e: any) {
+    if (e.message === "Chat not found") return c.json({ error: e.message }, 404);
+    if (e.message.includes("Maximum")) return c.json({ error: e.message }, 400);
+    throw e;
+  }
+});
+
 app.post("/:chatId/messages", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");

@@ -30,12 +30,6 @@
   justify-content: center;
   color: var(--lumiverse-primary, #9370db);
   opacity: 0.6;
-  animation: lightbox-spin 1s linear infinite;
-}
-
-@keyframes lightbox-spin {
-  from { transform: translate(-50%, -50%) rotate(0deg); }
-  to { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 .error {

@@ -50,6 +50,12 @@ export enum EventType {
   SPINDLE_TEXT_EDITOR_OPEN = 'SPINDLE_TEXT_EDITOR_OPEN',
   SPINDLE_TEXT_EDITOR_RESULT = 'SPINDLE_TEXT_EDITOR_RESULT',
 
+  // Spindle modal
+  SPINDLE_MODAL_OPEN = 'SPINDLE_MODAL_OPEN',
+  SPINDLE_MODAL_RESULT = 'SPINDLE_MODAL_RESULT',
+  SPINDLE_CONFIRM_OPEN = 'SPINDLE_CONFIRM_OPEN',
+  SPINDLE_CONFIRM_RESULT = 'SPINDLE_CONFIRM_RESULT',
+
   // Tool invocation (Spindle extension tools)
   TOOL_INVOCATION = 'TOOL_INVOCATION',
 
@@ -71,6 +77,12 @@ export enum EventType {
   LUMIHUB_INSTALL_COMPLETED = 'LUMIHUB_INSTALL_COMPLETED',
   LUMIHUB_INSTALL_FAILED = 'LUMIHUB_INSTALL_FAILED',
   LUMIHUB_CONNECTION_CHANGED = 'LUMIHUB_CONNECTION_CHANGED',
+
+  // SillyTavern Migration
+  MIGRATION_PROGRESS = 'MIGRATION_PROGRESS',
+  MIGRATION_LOG = 'MIGRATION_LOG',
+  MIGRATION_COMPLETED = 'MIGRATION_COMPLETED',
+  MIGRATION_FAILED = 'MIGRATION_FAILED',
 }
 
 export interface WSEvent<T = any> {
@@ -171,4 +183,30 @@ export interface SpindleToastPayload {
   message: string
   title?: string
   duration?: number
+}
+
+// ---- Migration ----
+export interface MigrationProgressPayload {
+  migrationId: string
+  phase: 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats'
+  label: string
+  current: number
+  total: number
+}
+
+export interface MigrationLogPayload {
+  migrationId: string
+  level: 'info' | 'warn' | 'error'
+  message: string
+}
+
+export interface MigrationCompletedPayload {
+  migrationId: string
+  durationMs: number
+  results: Record<string, any>
+}
+
+export interface MigrationFailedPayload {
+  migrationId: string
+  error: string
 }

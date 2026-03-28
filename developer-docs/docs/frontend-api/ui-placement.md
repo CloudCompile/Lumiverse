@@ -280,6 +280,167 @@ element.addEventListener('touchend', (e) => {
     - **Consistent UX** — users get the same look and feel across all extensions
     - **No CSS to maintain** — no need to ship your own menu styles
 
+## Modal (free — no permission needed)
+
+Open a system-themed modal overlay. Lumiverse renders the chrome — backdrop, header with title and close button, animations, Escape key handling — and the extension fully owns the body content via the returned handle's `root` element.
+
+Modals automatically inherit the user's theme, accent color, glass mode, and dark/light preference. No CSS is required from the extension for the modal chrome itself.
+
+```ts
+const modal = ctx.ui.showModal({
+  title: 'Nudge History',
+})
+
+// Build content into the modal body
+const list = document.createElement('ul')
+list.innerHTML = '<li>First nudge</li><li>Second nudge</li>'
+modal.root.appendChild(list)
+
+// Update title dynamically
+modal.setTitle('Nudge History (2 items)')
+
+// Listen for dismissal
+modal.onDismiss(() => {
+  console.log('Modal was closed')
+})
+
+// Close programmatically
+modal.dismiss()
+```
+
+### SpindleModalOptions
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `title` | `string` | *required* | Title displayed in the modal header |
+| `width` | `number` | `420` | Width in pixels. Clamped to viewport. |
+| `maxHeight` | `number` | `520` | Maximum height in pixels. Clamped to viewport. |
+| `persistent` | `boolean` | `false` | When `true`, clicking the backdrop does not dismiss the modal. The user must use the close button or the extension must call `dismiss()`. |
+
+### SpindleModalHandle
+
+| Method / Property | Returns | Description |
+|---|---|---|
+| `root` | `HTMLElement` | The body container element. The extension fully owns this element's contents. |
+| `modalId` | `string` | Unique modal ID assigned by the host |
+| `dismiss()` | `void` | Programmatically close the modal |
+| `setTitle(title)` | `void` | Update the header title |
+| `onDismiss(handler)` | `() => void` | Register a callback invoked when the modal is dismissed (by the user, by `dismiss()`, or by extension cleanup). Returns an unsubscribe function. |
+
+### Stack Limit
+
+Extensions may have at most **2 stacked modals** open simultaneously — for example, one primary modal and one nested text editor or confirmation prompt. Attempting to open a third modal throws an error.
+
+This limit is enforced per extension. Different extensions can each have their own modals open independently.
+
+### Backend-Initiated Modals
+
+Backend extensions can also open modals via `spindle.modal.open()`. Since the backend can't inject DOM, it provides structured content items that the host renders into the modal body. See [Modal](../backend-api/modal.md) in the Backend API docs.
+
+### Example: History Viewer
+
+```ts
+// Fetch data from backend, then present in a modal
+ctx.onBackendMessage((payload: any) => {
+  if (payload.type === 'history_loaded') {
+    const modal = ctx.ui.showModal({ title: 'Recent Activity' })
+
+    if (payload.entries.length === 0) {
+      modal.root.innerHTML = '<p style="text-align:center;color:var(--lumiverse-text-dim)">No activity yet.</p>'
+      return
+    }
+
+    for (const entry of payload.entries) {
+      const card = document.createElement('div')
+      card.style.cssText = `
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        background: var(--lumiverse-fill-subtle);
+        border: 1px solid var(--lumiverse-border);
+        border-radius: var(--lumiverse-radius);
+      `
+      card.innerHTML = `
+        <div style="font-size:12.5px;color:var(--lumiverse-text)">${entry.text}</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--lumiverse-text-dim)">${entry.time}</div>
+      `
+      modal.root.appendChild(card)
+    }
+  }
+})
+```
+
+!!! tip "When to use a modal vs. a drawer tab"
+    - **Modal** — transient content the user views and dismisses: history, previews, confirmations, detail views. The user's attention is focused on the modal content.
+    - **Drawer tab** — persistent UI the user returns to repeatedly: configuration panels, dashboards, settings. The tab stays available in the sidebar.
+
+## Confirmation Modal (free — no permission needed)
+
+Show a system-themed confirmation dialog and wait for the user's response. The host renders a modal with a message, a variant-colored confirm button, and a cancel button. Useful for gating destructive actions, confirming settings changes, or requiring explicit user consent.
+
+```ts
+const { confirmed } = await ctx.ui.showConfirm({
+  title: 'Delete History',
+  message: 'This will permanently erase all nudge history for this character. This action cannot be undone.',
+  variant: 'danger',
+  confirmLabel: 'Delete',
+})
+
+if (confirmed) {
+  ctx.sendToBackend({ type: 'delete_history', characterId })
+}
+```
+
+The method returns a Promise that resolves when the user clicks confirm, clicks cancel, or dismisses the modal. Counts toward the **2 stacked modals** limit per extension.
+
+### Variants
+
+The `variant` option controls the visual style of the confirm button to signal intent:
+
+| Variant | Button Color | Use For |
+|---|---|---|
+| `'info'` | Neutral / blue (default) | General confirmations, informational prompts |
+| `'warning'` | Yellow / amber | Actions with side effects the user should be aware of |
+| `'danger'` | Red | Destructive or irreversible actions (delete, clear, reset) |
+| `'success'` | Green | Positive confirmations (enable, activate, approve) |
+
+### SpindleConfirmOptions
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `title` | `string` | *required* | Title displayed in the modal header |
+| `message` | `string` | *required* | Body text explaining what the user is confirming |
+| `variant` | `'info' \| 'warning' \| 'danger' \| 'success'` | `'info'` | Visual style for the confirm button |
+| `confirmLabel` | `string` | `"Confirm"` | Label for the primary action button |
+| `cancelLabel` | `string` | `"Cancel"` | Label for the secondary dismiss button |
+
+### SpindleConfirmResult
+
+| Field | Type | Description |
+|---|---|---|
+| `confirmed` | `boolean` | `true` if the user clicked confirm, `false` if they cancelled or dismissed |
+
+### Backend-Initiated Confirmations
+
+Backend extensions can also show confirmations via `spindle.modal.confirm()`. See [Modal](../backend-api/modal.md#confirmation) in the Backend API docs.
+
+### Example: Guarding a Destructive Action
+
+```ts
+const resetBtn = document.createElement('button')
+resetBtn.textContent = 'Reset All Settings'
+resetBtn.addEventListener('click', async () => {
+  const { confirmed } = await ctx.ui.showConfirm({
+    title: 'Reset Settings',
+    message: 'All per-character configurations will be reset to defaults. Global defaults will not be affected.',
+    variant: 'warning',
+    confirmLabel: 'Reset',
+  })
+  if (confirmed) {
+    ctx.sendToBackend({ type: 'reset_all_configs' })
+  }
+})
+```
+
 ## Capacity Limits
 
 | Placement | Per Extension | Global |
@@ -289,6 +450,7 @@ element.addEventListener('touchend', (e) => {
 | Dock Panel | 1 per edge | 2 per edge |
 | App Mount | 1 | 4 |
 | Input Bar Action | 4 | 12 |
+| Modal | 2 stacked | — |
 
 Exceeding limits throws an error. All placements are automatically cleaned up when an extension is disabled or removed.
 

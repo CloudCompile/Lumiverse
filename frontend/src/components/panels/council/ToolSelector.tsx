@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import type { CouncilToolDefinition, CouncilToolCategory } from 'lumiverse-spindle-types'
+import { Toggle } from '@/components/shared/Toggle'
 import styles from '../CouncilManager.module.css'
 
 interface ToolSelectorProps {
@@ -71,14 +72,14 @@ export default function ToolSelector({ tools, selected, onChange }: ToolSelector
           <div key={cat} className={styles.toolCategory}>
             <div className={styles.toolCategoryLabel}>{CATEGORY_LABELS[cat]}</div>
             {catTools.map((tool) => (
-              <label key={tool.name} className={styles.toolCheckbox} title={tool.description}>
-                <input
-                  type="checkbox"
+              <div key={tool.name} title={tool.description}>
+                <Toggle.Checkbox
                   checked={selected.includes(tool.name)}
                   onChange={() => toggle(tool.name)}
+                  label={tool.displayName}
+                  className={styles.toolCheckbox}
                 />
-                <span className={styles.toolCheckboxLabel}>{tool.displayName}</span>
-              </label>
+              </div>
             ))}
           </div>
         )
@@ -94,14 +95,14 @@ export default function ToolSelector({ tools, selected, onChange }: ToolSelector
               <span className={styles.toolExtBadge}>Extension</span>
             </div>
             {extTools.map((tool) => (
-              <label key={tool.name} className={styles.toolCheckbox} title={tool.description}>
-                <input
-                  type="checkbox"
+              <div key={tool.name} title={tool.description}>
+                <Toggle.Checkbox
                   checked={selected.includes(tool.name)}
                   onChange={() => toggle(tool.name)}
+                  label={tool.displayName}
+                  className={styles.toolCheckbox}
                 />
-                <span className={styles.toolCheckboxLabel}>{tool.displayName}</span>
-              </label>
+              </div>
             ))}
           </div>
         )

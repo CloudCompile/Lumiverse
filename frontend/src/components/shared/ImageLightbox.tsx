@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { Loader2 } from 'lucide-react'
+import { Spinner } from '@/components/shared/Spinner'
 import styles from './ImageLightbox.module.css'
 
 interface ImageLightboxProps {
@@ -58,7 +58,7 @@ export default function ImageLightbox({ src, onClose }: ImageLightboxProps) {
         >
           {isLoading && (
             <div className={styles.spinner}>
-              <Loader2 size={32} strokeWidth={1.5} />
+              <Spinner size={32} />
             </div>
           )}
           {hasError ? (

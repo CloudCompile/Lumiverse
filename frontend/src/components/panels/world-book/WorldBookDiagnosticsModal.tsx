@@ -160,6 +160,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
     const sources: string[] = []
     if (diagnostics.attachment_sources.character) sources.push('Character')
     if (diagnostics.attachment_sources.persona) sources.push('Persona')
+    if (diagnostics.attachment_sources.chat) sources.push('Chat')
     if (diagnostics.attachment_sources.global) sources.push('Global')
     return sources
   }, [diagnostics])

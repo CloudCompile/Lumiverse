@@ -32,6 +32,10 @@
   -webkit-backdrop-filter: blur(var(--lcs-glass-soft-blur, 6px));
 }
 
+:global([data-select-mode]) .btn {
+  bottom: calc(var(--lcs-input-safe-zone, 100px) + 42px);
+}
+
 .btn:hover {
   background: var(--lumiverse-bg);
   color: var(--lumiverse-text);

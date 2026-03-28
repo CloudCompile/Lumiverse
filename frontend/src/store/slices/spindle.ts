@@ -11,6 +11,8 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   spindlePrivileged: false,
   pendingPermissionRequest: null,
   pendingTextEditor: null,
+  pendingModal: null,
+  pendingConfirm: null,
   pendingContextMenu: null,
 
   loadExtensions: async () => {
@@ -149,6 +151,37 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
       text,
       cancelled,
     })
+  },
+
+  openSpindleModal: (request) => {
+    set({ pendingModal: request })
+  },
+
+  closeSpindleModal: (requestId: string, dismissedBy: 'user' | 'extension' | 'cleanup') => {
+    set({ pendingModal: null })
+    wsClient.send({
+      type: 'SPINDLE_MODAL_RESULT',
+      requestId,
+      dismissedBy,
+    })
+  },
+
+  openSpindleConfirm: (request) => {
+    set({ pendingConfirm: request })
+  },
+
+  closeSpindleConfirm: (requestId: string, confirmed: boolean) => {
+    set({ pendingConfirm: null })
+    wsClient.send({
+      type: 'SPINDLE_CONFIRM_RESULT',
+      requestId,
+      confirmed,
+    })
+    window.dispatchEvent(
+      new CustomEvent('spindle:confirm-resolved', {
+        detail: { requestId, confirmed },
+      })
+    )
   },
 
   openContextMenu: (request: PendingContextMenuRequest) => {

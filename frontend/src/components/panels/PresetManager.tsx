@@ -1,8 +1,9 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { Brain, Zap } from 'lucide-react'
 import { useStore } from '@/store'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
-import type { ReasoningSettings } from '@/types/store'
+import { Toggle } from '@/components/shared/Toggle'
+import type { ReasoningSettings, ReasoningEffort } from '@/types/store'
 import styles from './PresetManager.module.css'
 import clsx from 'clsx'
 
@@ -12,12 +13,82 @@ const REASONING_PRESETS: { label: string; prefix: string; suffix: string }[] = [
   { label: 'o1', prefix: '<reasoning>\n', suffix: '\n</reasoning>' },
 ]
 
-const EFFORT_OPTIONS = ['auto', 'low', 'medium', 'high', 'max'] as const
+// ── Provider-specific reasoning effort configurations ──
+
+interface EffortOption { value: ReasoningEffort; label: string }
+
+/** Providers where reasoning is toggle-only (enabled/disabled) with no effort granularity. */
+const TOGGLE_ONLY_PROVIDERS = new Set(['moonshot', 'zai'])
+
+const OPENROUTER_EFFORTS: EffortOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'none', label: 'None (disabled)' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+]
+
+const GOOGLE_EFFORTS: EffortOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+]
+
+const ANTHROPIC_EFFORTS: EffortOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'max', label: 'Max' },
+]
+
+const NANOGPT_EFFORTS: EffortOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'none', label: 'None (disabled)' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+]
+
+const GENERIC_EFFORTS: EffortOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'max', label: 'Max' },
+]
+
+function getEffortOptions(provider: string | undefined): EffortOption[] {
+  switch (provider) {
+    case 'openrouter': return OPENROUTER_EFFORTS
+    case 'google':
+    case 'google_vertex': return GOOGLE_EFFORTS
+    case 'anthropic': return ANTHROPIC_EFFORTS
+    case 'nanogpt': return NANOGPT_EFFORTS
+    default: return GENERIC_EFFORTS
+  }
+}
 
 export default function PresetManager() {
   const reasoningSettings = useStore((s) => s.reasoningSettings)
   const promptBias = useStore((s) => s.promptBias)
   const setSetting = useStore((s) => s.setSetting)
+
+  // Derive provider from active connection profile
+  const activeProfileId = useStore((s) => s.activeProfileId)
+  const profiles = useStore((s) => s.profiles)
+  const activeProvider = useMemo(() => {
+    if (!activeProfileId) return undefined
+    return profiles.find((p) => p.id === activeProfileId)?.provider
+  }, [activeProfileId, profiles])
+
+  const isToggleOnly = activeProvider ? TOGGLE_ONLY_PROVIDERS.has(activeProvider) : false
+  const effortOptions = getEffortOptions(activeProvider)
 
   const updateReasoning = useCallback(
     (partial: Partial<ReasoningSettings>) => {
@@ -29,6 +100,9 @@ export default function PresetManager() {
   const activePreset = REASONING_PRESETS.find(
     (p) => p.prefix === reasoningSettings.prefix && p.suffix === reasoningSettings.suffix
   )
+
+  // If the current effort value isn't valid for this provider, show it but let the user pick a new one
+  const currentEffortValid = effortOptions.some((o) => o.value === reasoningSettings.reasoningEffort)
 
   return (
     <div className={styles.panel}>
@@ -76,10 +150,9 @@ export default function PresetManager() {
             <div className={styles.toggleLabel}>Auto-parse thoughts</div>
             <div className={styles.toggleDesc}>Strip thinking tags from displayed output</div>
           </div>
-          <button
-            type="button"
-            className={clsx(styles.toggle, reasoningSettings.autoParse && styles.toggleOn)}
-            onClick={() => updateReasoning({ autoParse: !reasoningSettings.autoParse })}
+          <Toggle.Switch
+            checked={reasoningSettings.autoParse}
+            onChange={(v) => updateReasoning({ autoParse: v })}
           />
         </div>
 
@@ -87,25 +160,33 @@ export default function PresetManager() {
         <div className={styles.toggleRow}>
           <div>
             <div className={styles.toggleLabel}>API Reasoning</div>
-            <div className={styles.toggleDesc}>For o1, DeepSeek R1, Claude extended/adaptive thinking</div>
+            <div className={styles.toggleDesc}>Request native reasoning from the provider, if available</div>
           </div>
-          <button
-            type="button"
-            className={clsx(styles.toggle, reasoningSettings.apiReasoning && styles.toggleOn)}
-            onClick={() => updateReasoning({ apiReasoning: !reasoningSettings.apiReasoning })}
+          <Toggle.Switch
+            checked={reasoningSettings.apiReasoning}
+            onChange={(v) => updateReasoning({ apiReasoning: v })}
           />
         </div>
 
         {/* Reasoning effort */}
         <div className={styles.fieldGroup}>
-          <span className={styles.label}>Reasoning Effort</span>
+          <span className={styles.label}>
+            Reasoning Effort
+            {isToggleOnly && <span className={styles.toggleOnlyHint}> (toggle-only for {activeProvider})</span>}
+          </span>
           <select
-            className={styles.select}
+            className={clsx(styles.select, isToggleOnly && styles.selectDisabled)}
             value={reasoningSettings.reasoningEffort}
-            onChange={(e) => updateReasoning({ reasoningEffort: e.target.value as ReasoningSettings['reasoningEffort'] })}
+            onChange={(e) => updateReasoning({ reasoningEffort: e.target.value as ReasoningEffort })}
+            disabled={isToggleOnly}
           >
-            {EFFORT_OPTIONS.map((opt) => (
-              <option key={opt} value={opt}>{opt}{opt === 'max' ? ' (Opus 4.6 only)' : ''}</option>
+            {!currentEffortValid && (
+              <option value={reasoningSettings.reasoningEffort}>
+                {reasoningSettings.reasoningEffort} (unsupported by {activeProvider ?? 'provider'})
+              </option>
+            )}
+            {effortOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
         </div>

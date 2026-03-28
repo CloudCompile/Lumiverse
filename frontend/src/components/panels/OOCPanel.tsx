@@ -1,4 +1,5 @@
 import { useStore } from '@/store'
+import { Toggle } from '@/components/shared/Toggle'
 import { FormField, Select } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import type { OOCStyleType } from '@/types/store'
@@ -22,14 +23,11 @@ export default function OOCPanel() {
   return (
     <div className={styles.panel}>
       {/* Enable toggle */}
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={oocEnabled}
-          onChange={(e) => setSetting('oocEnabled', e.target.checked)}
-        />
-        <span>Enable OOC comments</span>
-      </label>
+      <Toggle.Checkbox
+        checked={oocEnabled}
+        onChange={(checked) => setSetting('oocEnabled', checked)}
+        label="Enable OOC comments"
+      />
 
       {oocEnabled && (
         <>
@@ -44,14 +42,11 @@ export default function OOCPanel() {
 
           {/* IRC-specific: L33tspeak handles */}
           {lumiaOOCStyle === 'irc' && (
-            <label className={styles.toggle}>
-              <input
-                type="checkbox"
-                checked={ircUseLeetHandles}
-                onChange={(e) => setSetting('ircUseLeetHandles', e.target.checked)}
-              />
-              <span>L33tspeak Handles</span>
-            </label>
+            <Toggle.Checkbox
+              checked={ircUseLeetHandles}
+              onChange={(checked) => setSetting('ircUseLeetHandles', checked)}
+              label="L33tspeak Handles"
+            />
           )}
 
           {/* Interval */}

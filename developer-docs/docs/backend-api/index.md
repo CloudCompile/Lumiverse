@@ -35,5 +35,6 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [Logging](logging.md) | Free | Server console logging |
 | [Toast Notifications](toast.md) | Free | Show success/warning/error/info toasts in the frontend |
 | [Text Editor](text-editor.md) | Free | Open the full-screen text editor modal with macro highlighting |
+| [Modal](modal.md) | Free | Open a system-themed modal overlay with structured content |
 | [Push Notifications](push-notifications.md) | `push_notification` | Send OS-level push notifications to user devices |
 | [Frontend Communication](frontend-communication.md) | Free | Message passing to/from frontend |

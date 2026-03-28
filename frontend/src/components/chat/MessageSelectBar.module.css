@@ -1,0 +1,98 @@
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--lumiverse-primary-010);
+  border: 1px solid var(--lumiverse-primary);
+  border-radius: 10px;
+  position: absolute;
+  bottom: 110px;
+  left: 12px;
+  right: 12px;
+  backdrop-filter: blur(12px);
+  z-index: 21;
+}
+
+.left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.selectToggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--lumiverse-primary);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.count {
+  font-size: 12px;
+  color: var(--lumiverse-text);
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.actionBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.actionBtn:hover {
+  background: var(--lumiverse-fill-hover);
+}
+
+.actionBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.hideBtn {
+  background: rgba(255, 160, 80, 0.1);
+  border-color: rgba(255, 160, 80, 0.2);
+  color: rgb(255, 160, 80);
+}
+
+.hideBtn:hover {
+  background: rgba(255, 160, 80, 0.2);
+}
+
+.unhideBtn {
+  background: rgba(80, 180, 255, 0.1);
+  border-color: rgba(80, 180, 255, 0.2);
+  color: rgb(80, 180, 255);
+}
+
+.unhideBtn:hover {
+  background: rgba(80, 180, 255, 0.2);
+}
+
+.cancelBtn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--lumiverse-text-dim);
+}
+
+.cancelBtn:hover {
+  color: var(--lumiverse-text);
+}

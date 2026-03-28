@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { X } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
 import { chatsApi } from '@/api/chats'
 import styles from './AuthorsNotePanel.module.css'
 
@@ -107,9 +107,7 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
         <span className={styles.title}>
           Author's Note {enabled ? '· Active' : ''}
         </span>
-        <button className={styles.closeBtn} onClick={onClose} title="Close" type="button">
-          <X size={12} />
-        </button>
+        <CloseButton onClick={onClose} size="sm" iconSize={12} className={styles.closeBtn} />
       </div>
 
       <div className={styles.body}>

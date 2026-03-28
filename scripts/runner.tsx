@@ -43,13 +43,19 @@ function enterAltScreen(): void {
   process.stdout.write("\x1b[?25l");
 }
 
+let _terminalRestored = false;
+
 function restoreTerminal(): void {
-  // Reset scroll region (in case it was set)
-  process.stdout.write("\x1b[r");
-  // Show cursor
-  process.stdout.write("\x1b[?25h");
-  // Leave alt screen — restores the previous buffer
-  process.stdout.write("\x1b[?1049l");
+  if (_terminalRestored) return;
+  _terminalRestored = true;
+
+  // Single write with all VT restoration sequences to minimize fragmentation
+  // over SSH (each write() can become a separate SSH data message).
+  //   \x1b[r        — Reset scroll region
+  //   \x1b[?25h     — Show cursor
+  //   \x1b[?1049l   — Leave alternate screen buffer (restores main buffer)
+  process.stdout.write("\x1b[r\x1b[?25h\x1b[?1049l");
+
   // Ensure raw mode is off so the shell gets normal input back
   if (process.stdin.isTTY && process.stdin.isRaw) {
     try {
@@ -69,6 +75,13 @@ const app = render(
   {
     patchConsole: false,
     exitOnCtrlC: false,
+    // Line-by-line diffing: only rewrite lines whose content changed.
+    // Default (false) erases the entire output area and redraws from scratch,
+    // which causes visible flicker over SSH and on Windows terminals.
+    incrementalRendering: true,
+    // 15 FPS is more than enough for a server dashboard (log batches arrive
+    // at ~10/s, uptime ticks at 1/s). Halves render pressure vs the default 30.
+    maxFps: 15,
   }
 );
 
@@ -76,8 +89,12 @@ const app = render(
 // then restore the terminal and exit cleanly.
 app.waitUntilExit().then(() => {
   restoreTerminal();
-  console.log("\nLumiverse stopped. Goodbye!");
-  process.exit(0);
+  // Brief delay before exit so the VT restore sequences are transmitted
+  // through the SSH channel / pty before the process (and connection) closes.
+  setTimeout(() => {
+    console.log("\nLumiverse stopped. Goodbye!");
+    process.exit(0);
+  }, 50);
 });
 
 // ─── Signal handlers ─────────────────────────────────────────────────────────
@@ -88,7 +105,8 @@ function handleSignal(): void {
   killServerProcess();
   app.unmount();
   restoreTerminal();
-  process.exit(0);
+  // Brief delay for VT sequences to flush through SSH/pty before exit
+  setTimeout(() => process.exit(0), 50);
 }
 
 process.on("SIGTERM", handleSignal);
@@ -99,12 +117,12 @@ process.on("uncaughtException", (err) => {
   killServerProcess();
   restoreTerminal();
   console.error("Runner crashed (uncaught):", err);
-  process.exit(1);
+  setTimeout(() => process.exit(1), 50);
 });
 
 process.on("unhandledRejection", (reason) => {
   killServerProcess();
   restoreTerminal();
   console.error("Runner crashed (unhandled rejection):", reason);
-  process.exit(1);
+  setTimeout(() => process.exit(1), 50);
 });

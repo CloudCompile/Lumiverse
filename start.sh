@@ -456,12 +456,18 @@ install_deps() {
     # blocks certain syscalls that bun install needs, causing "Bad system call"
     # (SIGSYS) errors. _proot_bun handles both linker and syscall issues.
     (cd "$dir" && _proot_bun install --backend=copyfile)
+    # Rollup's native binary for Android ARM64 isn't auto-resolved by Bun on
+    # Termux — add it explicitly so Vite/Rollup can build the frontend.
+    (cd "$dir" && _proot_bun add @rollup/rollup-android-arm64 --backend=copyfile 2>/dev/null || true)
   elif [[ "$IS_PROOT" == true ]]; then
     # Inside proot-distro: proot already intercepts syscalls, just need copyfile backend
     if [[ -d "$HOME/.bun/install/cache" ]]; then
       rm -rf "$HOME/.bun/install/cache"
     fi
     (cd "$dir" && bun install --backend=copyfile)
+    # Rollup's native binary for Android ARM64 isn't auto-resolved by Bun in
+    # proot — add it explicitly so Vite/Rollup can build the frontend.
+    (cd "$dir" && bun add @rollup/rollup-android-arm64 --backend=copyfile 2>/dev/null || true)
   else
     (cd "$dir" && bun install)
   fi

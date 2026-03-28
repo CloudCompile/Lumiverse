@@ -38,6 +38,7 @@
   background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
   border-radius: 10px;
+  overflow: visible;
 }
 
 .formActions {
@@ -47,37 +48,19 @@
   margin-top: 4px;
 }
 
-.cancelBtn, .saveBtn {
-  padding: 6px 14px;
-  border-radius: 6px;
+.fileUploadRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fileUploadName {
   font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  border: none;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.cancelBtn {
-  background: transparent;
   color: var(--lumiverse-text-muted);
-}
-
-.cancelBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-}
-
-.saveBtn {
-  background: var(--lumiverse-primary);
-  color: var(--lumiverse-primary-contrast, #fff);
-}
-
-.saveBtn:hover {
-  opacity: 0.9;
-}
-
-.saveBtn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
 }
 
 .list {

@@ -422,6 +422,14 @@ export function useWebSocket() {
         store.getState().openTextEditor(payload)
       }),
 
+      wsClient.on(EventType.SPINDLE_MODAL_OPEN, (payload: any) => {
+        store.getState().openSpindleModal(payload)
+      }),
+
+      wsClient.on(EventType.SPINDLE_CONFIRM_OPEN, (payload: any) => {
+        store.getState().openSpindleConfirm(payload)
+      }),
+
       wsClient.on(EventType.SPINDLE_TOAST, (payload: { extensionId: string; extensionName: string; type: 'success' | 'warning' | 'error' | 'info'; message: string; title?: string; duration?: number }) => {
         const toastFn = toast[payload.type]
         if (!toastFn) return
@@ -486,6 +494,19 @@ export function useWebSocket() {
       }),
       wsClient.on(EventType.LUMIHUB_INSTALL_FAILED, (payload: { characterName: string; error: string }) => {
         toast.error(`Failed to install "${payload.characterName}": ${payload.error}`, { title: 'LumiHub' })
+      }),
+      // SillyTavern Migration
+      wsClient.on(EventType.MIGRATION_PROGRESS, (payload: any) => {
+        store.getState().setMigrationProgress(payload)
+      }),
+      wsClient.on(EventType.MIGRATION_LOG, (payload: any) => {
+        store.getState().addMigrationLog(payload)
+      }),
+      wsClient.on(EventType.MIGRATION_COMPLETED, (payload: any) => {
+        store.getState().setMigrationCompleted(payload)
+      }),
+      wsClient.on(EventType.MIGRATION_FAILED, (payload: any) => {
+        store.getState().setMigrationFailed(payload)
       }),
     ]
 

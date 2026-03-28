@@ -46,51 +46,6 @@
   line-height: 1.4;
 }
 
-.toggleSwitch {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-
-.toggleSwitch input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.toggleTrack {
-  position: absolute;
-  inset: 0;
-  border-radius: 10px;
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid var(--lumiverse-border);
-  transition: background var(--lumiverse-transition-fast), border-color var(--lumiverse-transition-fast);
-}
-
-.toggleTrackOn {
-  background: var(--lumiverse-primary);
-  border-color: var(--lumiverse-primary);
-}
-
-.toggleThumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform var(--lumiverse-transition-fast);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-}
-
-.toggleTrackOn .toggleThumb {
-  transform: translateX(16px);
-}
-
 /* ── Collapsible content ── */
 .collapsible {
   display: grid;
@@ -213,24 +168,7 @@
   color: var(--lumiverse-primary-text);
 }
 
-.quirksEditBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px;
-  border-radius: var(--lumiverse-radius);
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.quirksEditBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  border-color: var(--lumiverse-border);
-  color: var(--lumiverse-text);
-}
+/* .quirksEditBtn — migrated to shared Button component */
 
 .quirksEdit {
   margin-top: 8px;
@@ -263,36 +201,7 @@
   gap: 6px;
 }
 
-.quirksBtn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: var(--lumiverse-radius);
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid var(--lumiverse-border);
-  color: var(--lumiverse-text-muted);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.quirksBtn:hover {
-  background: var(--lumiverse-fill);
-  color: var(--lumiverse-text);
-  border-color: var(--lumiverse-border-hover);
-}
-
-.quirksBtnPrimary {
-  background: var(--lumiverse-primary-010);
-  border-color: var(--lumiverse-primary-020);
-  color: var(--lumiverse-primary-text);
-}
-
-.quirksBtnPrimary:hover {
-  background: var(--lumiverse-primary-020);
-}
+/* .quirksBtn, .quirksBtnPrimary — migrated to shared Button component */
 
 .quirksPreview {
   margin-top: 6px;

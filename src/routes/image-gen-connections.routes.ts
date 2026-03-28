@@ -96,4 +96,12 @@ app.delete("/:id/api-key", async (c) => {
   return c.json({ success: true });
 });
 
+/** Duplicate image gen connection */
+app.post("/:id/duplicate", async (c) => {
+  const userId = c.get("userId");
+  const conn = await svc.duplicateConnection(userId, c.req.param("id"));
+  if (!conn) return c.json({ error: "Not found" }, 404);
+  return c.json(conn, 201);
+});
+
 export { app as imageGenConnectionsRoutes };

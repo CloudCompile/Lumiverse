@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { RefreshCw, Loader } from 'lucide-react'
-import { FormField, TextInput, Select } from '@/components/shared/FormComponents'
+import { FormField, TextInput, Select, Button } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
 import { imageGenConnectionsApi } from '@/api/image-gen-connections'
 import type {
   ImageGenProviderInfo,
@@ -127,17 +128,14 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
       </FormField>
 
       <FormField label="">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
-          <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} />
-          Set as default image gen connection
-        </label>
+        <Toggle.Checkbox checked={isDefault} onChange={setIsDefault} label="Set as default image gen connection" />
       </FormField>
 
       <div className={styles.formActions}>
-        <button type="button" className={styles.cancelBtn} onClick={onCancel}>Cancel</button>
-        <button type="button" className={styles.saveBtn} onClick={handleSubmit} disabled={!name.trim()}>
+        <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!name.trim()}>
           {profile ? 'Save' : 'Create'}
-        </button>
+        </Button>
       </div>
     </div>
   )

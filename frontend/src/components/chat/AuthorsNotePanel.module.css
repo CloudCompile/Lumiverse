@@ -41,20 +41,7 @@
 .closeBtn {
   width: 22px;
   height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
   border-radius: 5px;
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1));
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
 }
 
 /* ── Body ── */

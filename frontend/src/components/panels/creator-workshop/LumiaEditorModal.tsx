@@ -1,9 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { createPortal } from 'react-dom'
-import { X } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { packsApi } from '@/api/packs'
-import { FormField, TextInput, TextArea, Select, ImageInput } from '@/components/shared/FormComponents'
+import { FormField, TextInput, TextArea, Select, ImageInput, Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { LumiaItem, CreateLumiaItemInput } from '@/types/api'
 import styles from './LumiaEditorModal.module.css'
@@ -98,60 +98,56 @@ export default function LumiaEditorModal() {
     }
   }
 
-  return createPortal(
+  return (
     <>
-      <div className={styles.overlay} onClick={(e) => e.target === e.currentTarget && handleClose()}>
-        <div className={styles.modal}>
-          <div className={styles.header}>
-            <h3 className={styles.title}>{editingItem ? 'Edit Lumia' : 'Create Lumia'}</h3>
-            <button type="button" className={styles.closeBtn} onClick={handleClose}>
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className={styles.body}>
-            <FormField label="Name" required>
-              <TextInput value={name} onChange={setName} placeholder="Character name" autoFocus />
-            </FormField>
-
-            <FormField label="Avatar URL">
-              <ImageInput value={avatarUrl} onChange={setAvatarUrl} placeholder="https://..." />
-            </FormField>
-
-            <div className={styles.row}>
-              <div className={styles.rowHalf}>
-                <FormField label="Author">
-                  <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
-                </FormField>
-              </div>
-              <div className={styles.rowHalf}>
-                <FormField label="Gender Identity">
-                  <Select value={genderIdentity} onChange={setGenderIdentity} options={GENDER_OPTIONS} />
-                </FormField>
-              </div>
-            </div>
-
-            <FormField label="Definition" hint="Physical description, appearance, backstory">
-              <TextArea value={definition} onChange={setDefinition} placeholder="Describe the character's physical traits, appearance, and background..." rows={4} />
-            </FormField>
-
-            <FormField label="Personality" hint="Core personality traits and temperament">
-              <TextArea value={personality} onChange={setPersonality} placeholder="Describe the character's personality..." rows={3} />
-            </FormField>
-
-            <FormField label="Behavior" hint="How the character acts and speaks">
-              <TextArea value={behavior} onChange={setBehavior} placeholder="Describe the character's behavior patterns and speech style..." rows={3} />
-            </FormField>
-          </div>
-
-          <div className={styles.footer}>
-            <button type="button" className={styles.btnCancel} onClick={handleClose}>Cancel</button>
-            <button type="button" className={styles.btnSave} onClick={handleSave} disabled={!name.trim() || saving}>
-              {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
-            </button>
-          </div>
+      <ModalShell isOpen onClose={handleClose} maxWidth={640} maxHeight="90vh" closeOnEscape={false} className={styles.modal}>
+        <div className={styles.header}>
+          <h3 className={styles.title}>{editingItem ? 'Edit Lumia' : 'Create Lumia'}</h3>
+          <CloseButton onClick={handleClose} />
         </div>
-      </div>
+
+        <div className={styles.body}>
+          <FormField label="Name" required>
+            <TextInput value={name} onChange={setName} placeholder="Character name" autoFocus />
+          </FormField>
+
+          <FormField label="Avatar URL">
+            <ImageInput value={avatarUrl} onChange={setAvatarUrl} placeholder="https://..." />
+          </FormField>
+
+          <div className={styles.row}>
+            <div className={styles.rowHalf}>
+              <FormField label="Author">
+                <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
+              </FormField>
+            </div>
+            <div className={styles.rowHalf}>
+              <FormField label="Gender Identity">
+                <Select value={genderIdentity} onChange={setGenderIdentity} options={GENDER_OPTIONS} />
+              </FormField>
+            </div>
+          </div>
+
+          <FormField label="Definition" hint="Physical description, appearance, backstory">
+            <TextArea value={definition} onChange={setDefinition} placeholder="Describe the character's physical traits, appearance, and background..." rows={4} />
+          </FormField>
+
+          <FormField label="Personality" hint="Core personality traits and temperament">
+            <TextArea value={personality} onChange={setPersonality} placeholder="Describe the character's personality..." rows={3} />
+          </FormField>
+
+          <FormField label="Behavior" hint="How the character acts and speaks">
+            <TextArea value={behavior} onChange={setBehavior} placeholder="Describe the character's behavior patterns and speech style..." rows={3} />
+          </FormField>
+        </div>
+
+        <div className={styles.footer}>
+          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="primary" onClick={handleSave} disabled={!name.trim() || saving}>
+            {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+          </Button>
+        </div>
+      </ModalShell>
 
       {showDiscard && (
         <ConfirmationModal
@@ -169,7 +165,6 @@ export default function LumiaEditorModal() {
           zIndex={10003}
         />
       )}
-    </>,
-    document.body
+    </>
   )
 }

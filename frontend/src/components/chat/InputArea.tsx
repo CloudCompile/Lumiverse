@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, Puzzle } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, Puzzle } from 'lucide-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
@@ -545,6 +545,11 @@ export default function InputArea({ chatId }: InputAreaProps) {
   }, [isStreaming, activeGenerationId, stopStreaming])
 
   const handleNewChat = useCallback(async () => {
+    // For group chats, open group creator pre-populated with current members
+    if (isGroupChat && groupCharacterIds.length > 0) {
+      openModal('groupChatCreator', { initialCharacterIds: [...groupCharacterIds] })
+      return
+    }
     if (!activeCharacterId) return
     try {
       const character = await charactersApi.get(activeCharacterId)
@@ -570,7 +575,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } catch (err) {
       console.error('[InputArea] Failed to start new chat:', err)
     }
-  }, [activeCharacterId, navigate, openModal])
+  }, [activeCharacterId, isGroupChat, groupCharacterIds, navigate, openModal])
 
   const handleDryRun = useCallback(async () => {
     if (dryRunning || isStreaming) return
@@ -845,6 +850,41 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   <span>Manage Chats</span>
                 </span>
               </button>
+              {isGroupChat && (
+                <button
+                  type="button"
+                  className={styles.popRowBtn}
+                  onClick={async () => {
+                    setOpenPopover(null)
+                    try {
+                      const chat = await chatsApi.get(chatId, { messages: false })
+                      openModal('groupSettings', { chatId, chatName: chat.name || '', metadata: chat.metadata || {} })
+                    } catch (err) {
+                      console.error('[InputArea] Failed to load group settings:', err)
+                    }
+                  }}
+                >
+                  <span className={styles.personaMain}>
+                    <Settings2 size={14} />
+                    <span>Group Settings</span>
+                  </span>
+                </button>
+              )}
+              {!isGroupChat && activeCharacterId && (
+                <button
+                  type="button"
+                  className={styles.popRowBtn}
+                  onClick={() => {
+                    setOpenPopover(null)
+                    openModal('groupChatCreator', { initialCharacterIds: [activeCharacterId] })
+                  }}
+                >
+                  <span className={styles.personaMain}>
+                    <UserPlus size={14} />
+                    <span>Convert to Group Chat</span>
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
                 className={styles.popRowBtn}

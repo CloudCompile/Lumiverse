@@ -51,15 +51,3 @@
   font-variant-numeric: tabular-nums;
 }
 
-.toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--lumiverse-text);
-  cursor: pointer;
-}
-
-.toggle input {
-  accent-color: var(--lumiverse-primary);
-}

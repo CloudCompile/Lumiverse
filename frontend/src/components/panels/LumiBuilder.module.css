@@ -322,26 +322,6 @@
   color: var(--lumiverse-success, #4ade80);
 }
 
-/* ── Checkbox groups ── */
-
-.inlineCheck {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  cursor: pointer;
-  color: var(--lumiverse-text-muted);
-}
-
-.inlineCheck input[type="checkbox"] {
-  cursor: pointer;
-}
-
-.checkboxGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
 
 /* ── Buttons ── */
 
@@ -385,27 +365,6 @@
   border-color: var(--lumiverse-primary);
 }
 
-.iconBtn {
-  padding: 6px;
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.iconBtn:hover {
-  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.05));
-  color: var(--lumiverse-text-muted);
-}
-
-.iconBtn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
 
 .emptyState {
   display: flex;

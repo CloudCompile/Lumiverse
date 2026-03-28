@@ -44,7 +44,7 @@ export function validateOAuthState(
 }
 
 // Periodically sweep expired state entries
-setInterval(() => {
+let _sweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of stateMap) {
     if (now > entry.expiresAt) {
@@ -52,3 +52,10 @@ setInterval(() => {
     }
   }
 }, SWEEP_INTERVAL_MS);
+
+export function stopOAuthStateSweep(): void {
+  if (_sweepTimer) {
+    clearInterval(_sweepTimer);
+    _sweepTimer = null;
+  }
+}

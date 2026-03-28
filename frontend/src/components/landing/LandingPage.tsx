@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { useNavigate } from 'react-router'
 import { motion, AnimatePresence } from 'motion/react'
-import { MessageSquarePlus, Loader2, MessageSquare, Trash2 } from 'lucide-react'
+import { MessageSquarePlus, MessageSquare, Trash2, Users } from 'lucide-react'
+import { Spinner } from '@/components/shared/Spinner'
 import { chatsApi } from '@/api/chats'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
@@ -77,6 +78,8 @@ function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
   const cardRef = useRef<HTMLDivElement>(null)
   const rectRef = useRef<DOMRect | null>(null)
 
+  const isGroup = item.is_group && item.group_character_ids && item.group_character_ids.length > 0
+
   const liveCharacter = item.character_id
     ? characters.find((entry) => entry.id === item.character_id) ?? null
     : null
@@ -126,6 +129,20 @@ function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
     rectRef.current = null
   }, [])
 
+  const displayName = isGroup
+    ? (item.group_name || item.latest_chat_name || 'Group Chat')
+    : item.character_name
+
+  // Determine mosaic grid class based on member count
+  const mosaicIds = isGroup ? item.group_character_ids!.slice(0, 4) : []
+  const mosaicClass = isGroup
+    ? mosaicIds.length === 2
+      ? styles.groupMosaic2
+      : mosaicIds.length === 3
+        ? styles.groupMosaic3
+        : styles.groupMosaic4
+    : undefined
+
   return (
     <div
       ref={tiltRef}
@@ -136,7 +153,7 @@ function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
     >
       <div
         ref={cardRef}
-        className={styles.card}
+        className={clsx(styles.card, isGroup && styles.groupCard)}
       >
         {onDelete && (
           <button
@@ -152,27 +169,57 @@ function ChatCard({ item, onClick, onDelete }: ChatCardProps) {
           </button>
         )}
         <button type="button" className={styles.cardBtn} onClick={onClick}>
-          <div className={styles.cardImage}>
-            <LazyImage
-              src={avatarUrl}
-              alt={item.character_name}
-              fallback={
-                <div className={styles.cardAvatarFallback}>
-                  {item.character_name?.[0]?.toUpperCase() || '?'}
-                </div>
-              }
-            />
-            <div className={styles.cardImageOverlay} />
-          </div>
+          {isGroup ? (
+            <div className={styles.cardImage}>
+              <div className={clsx(styles.groupMosaic, mosaicClass)}>
+                {mosaicIds.map((id) => {
+                  const char = characters.find((c) => c.id === id)
+                  const url = getCharacterAvatarLargeUrlById(id, char?.image_id ?? null)
+                  return (
+                    <div key={id} className={styles.mosaicCell}>
+                      <LazyImage
+                        src={url}
+                        alt=""
+                        fallback={
+                          <div className={styles.mosaicFallback}>
+                            <Users size={16} strokeWidth={1.5} />
+                          </div>
+                        }
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+              <div className={styles.groupOverlay} />
+            </div>
+          ) : (
+            <div className={styles.cardImage}>
+              <LazyImage
+                src={avatarUrl}
+                alt={item.character_name}
+                fallback={
+                  <div className={styles.cardAvatarFallback}>
+                    {item.character_name?.[0]?.toUpperCase() || '?'}
+                  </div>
+                }
+              />
+              <div className={styles.cardImageOverlay} />
+            </div>
+          )}
           <div className={styles.cardContent}>
-            <h3 className={styles.cardName}>{item.character_name}</h3>
+            <h3 className={styles.cardName}>{displayName}</h3>
             <div className={styles.cardMeta}>
-              {item.chat_count > 1 && (
+              {isGroup ? (
+                <span className={styles.groupBadge}>
+                  <Users size={10} strokeWidth={2} />
+                  {item.group_character_ids!.length}
+                </span>
+              ) : item.chat_count > 1 ? (
                 <span className={styles.chatCountBadge}>
                   <MessageSquare size={10} strokeWidth={2} />
                   {item.chat_count}
                 </span>
-              )}
+              ) : null}
               <span className={styles.cardTime}>{formatRelativeTime(item.updated_at)}</span>
             </div>
           </div>
@@ -259,8 +306,8 @@ export default function LandingPage() {
 
   const handleChatClick = useCallback(
     (item: GroupedRecentChat) => {
-      // If the character only has 1 chat, just jump straight in
-      if (item.chat_count === 1) {
+      // Group chats are always individual entries — navigate directly
+      if (item.is_group || item.chat_count === 1) {
         navigate(`/chat/${item.latest_chat_id}`)
         return
       }
@@ -276,9 +323,12 @@ export default function LandingPage() {
 
   const handleDeleteChat = useCallback(
     (item: GroupedRecentChat) => {
+      const label = item.is_group
+        ? `group chat "${item.group_name || item.latest_chat_name || 'Untitled'}"`
+        : `chat with ${item.character_name}`
       openModal('confirm', {
         title: 'Delete Chat',
-        message: `This will permanently delete your chat with ${item.character_name}. This action cannot be undone.`,
+        message: `This will permanently delete your ${label}. This action cannot be undone.`,
         variant: 'danger',
         confirmText: 'Delete',
         onConfirm: async () => {
@@ -380,10 +430,10 @@ export default function LandingPage() {
               <motion.div key="chats" className={styles.gridCards} variants={containerVariants} initial="hidden" animate="visible" exit="exit">
                 {items.map((item) => (
                   <ChatCard
-                    key={item.character_id}
+                    key={item.is_group ? item.latest_chat_id : item.character_id}
                     item={item}
                     onClick={() => handleChatClick(item)}
-                    onDelete={item.chat_count === 1 ? () => handleDeleteChat(item) : undefined}
+                    onDelete={item.is_group || item.chat_count === 1 ? () => handleDeleteChat(item) : undefined}
                   />
                 ))}
               </motion.div>
@@ -395,7 +445,7 @@ export default function LandingPage() {
             <div ref={sentinelRef} className={styles.loadMoreSentinel}>
               {loadingMore && (
                 <div className={styles.loadingMore}>
-                  <Loader2 size={16} className={styles.spin} />
+                  <Spinner size={16} />
                   <span>Loading more chats...</span>
                 </div>
               )}

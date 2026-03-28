@@ -297,33 +297,6 @@
    BUTTONS
    ============================================================================ */
 
-.iconBtn {
-  padding: 6px;
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.iconBtn:hover {
-  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.06));
-  color: var(--lumiverse-text-muted);
-}
-
-.iconBtnDanger {
-  color: var(--lumiverse-text-dim);
-}
-
-.iconBtnDanger:hover {
-  color: var(--lumiverse-danger, #ef4444);
-  background: var(--lumiverse-danger-015);
-}
 
 .dragHandle {
   padding: 8px 4px;
@@ -828,31 +801,6 @@
   flex: 1;
 }
 
-/* ============================================================================
-   CHECKBOX TOGGLE
-   ============================================================================ */
-
-.checkboxLabel {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  cursor: pointer;
-  color: var(--lumiverse-text-muted);
-  transition: color var(--lumiverse-transition-fast);
-}
-
-.checkboxLabel:hover {
-  color: var(--lumiverse-text);
-}
-
-.checkbox {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--lumiverse-primary);
-  cursor: pointer;
-}
 
 /* ============================================================================
    CUSTOM BODY

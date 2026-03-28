@@ -7,6 +7,10 @@ import { motion, AnimatePresence } from 'motion/react'
 import clsx from 'clsx'
 import { useSummary } from '@/hooks/useSummary'
 import NumberStepper from '@/components/shared/NumberStepper'
+import { Toggle } from '@/components/shared/Toggle'
+import { Badge } from '@/components/shared/Badge'
+import { Button } from '@/components/shared/FormComponents'
+import { Spinner } from '@/components/shared/Spinner'
 import type { SummaryMode, SummaryApiSource } from '@/lib/summary/types'
 import styles from './SummaryEditor.module.css'
 
@@ -31,9 +35,9 @@ function Section({ icon, title, children, defaultOpen = false, status }: Section
         <span className={styles.sectionIcon}>{icon}</span>
         <span className={styles.sectionTitle}>{title}</span>
         {status !== undefined && (
-          <span className={clsx(styles.sectionBadge, status ? styles.badgeActive : styles.badgeOff)}>
+          <Badge color={status ? 'primary' : 'neutral'} size="pill">
             {status ? 'Active' : 'Off'}
-          </span>
+          </Badge>
         )}
       </button>
       {open && <div className={styles.sectionBody}>{children}</div>}
@@ -137,42 +141,34 @@ function SummaryTextEditor() {
 
       {/* Actions */}
       <div className={styles.actions}>
-        <button
-          type="button"
-          className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
+        <Button
+          size="icon" variant="primary"
           onClick={handleGenerate}
           disabled={!hasChat || isLoading}
           title={isLoading ? 'Generating...' : 'Generate'}
-        >
-          {isLoading ? <span className={styles.spinner} /> : <Play size={14} />}
-        </button>
-        <button
-          type="button"
-          className={styles.actionBtn}
+          icon={isLoading ? <Spinner size={14} fast /> : <Play size={14} />}
+        />
+        <Button
+          size="icon" variant="ghost"
           onClick={loadSummary}
           disabled={!hasChat}
           title="Refresh"
-        >
-          <RefreshCw size={14} />
-        </button>
-        <button
-          type="button"
-          className={clsx(styles.actionBtn, styles.actionBtnDanger)}
+          icon={<RefreshCw size={14} />}
+        />
+        <Button
+          size="icon" variant="danger-ghost"
           onClick={handleClear}
           disabled={!hasChat || !originalText}
           title="Clear"
-        >
-          <Trash2 size={14} />
-        </button>
-        <button
-          type="button"
-          className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
+          icon={<Trash2 size={14} />}
+        />
+        <Button
+          size="icon" variant="primary"
           onClick={handleSave}
           disabled={!hasChat || !hasChanges}
           title={isSaving ? 'Saved!' : 'Save'}
-        >
-          {isSaving ? <Check size={14} /> : <Save size={14} />}
-        </button>
+          icon={isSaving ? <Check size={14} /> : <Save size={14} />}
+        />
       </div>
 
       {/* Unsaved changes */}
@@ -308,13 +304,10 @@ function SummarizationConfig() {
       {/* Message Limit — trim chat history to N most recent messages during generation */}
       <Section icon={<Scissors size={16} />} title="Message Limit" status={summarization.messageLimitEnabled}>
         <div className={styles.toggleRow}>
-          <div
-            className={clsx(styles.toggle, summarization.messageLimitEnabled && styles.toggleOn)}
-            onClick={() => setSummarization({ messageLimitEnabled: !summarization.messageLimitEnabled })}
-            role="switch"
-            aria-checked={summarization.messageLimitEnabled}
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSummarization({ messageLimitEnabled: !summarization.messageLimitEnabled }) } }}
+          <Toggle.Switch
+            checked={summarization.messageLimitEnabled}
+            onChange={(v) => setSummarization({ messageLimitEnabled: v })}
+            size="sm"
           />
           <span className={styles.toggleLabel}>Limit messages in context</span>
         </div>

@@ -184,7 +184,7 @@ function listCharacterSummariesDiscover(
              COUNT(*)        AS chat_count,
              MAX(updated_at) AS last_chat_at
       FROM chats
-      WHERE user_id = ?
+      WHERE user_id = ? AND COALESCE(json_extract(metadata, '$.group'), 0) != 1
       GROUP BY character_id
     ) cs ON cs.character_id = c.id
     WHERE ${whereStr}
@@ -257,6 +257,18 @@ function rowToCharacter(row: any): Character {
   };
 }
 
+/** Lightweight listing of all characters for manifest building (name, creator, extensions, created_at). */
+export function listCharactersForManifest(userId: string): Array<{ name: string; creator: string; extensions: Record<string, any>; created_at: number }> {
+  const db = getDb();
+  const rows = db.query("SELECT name, creator, extensions, created_at FROM characters WHERE user_id = ?").all(userId) as any[];
+  return rows.map((row) => ({
+    name: row.name,
+    creator: row.creator,
+    extensions: JSON.parse(row.extensions),
+    created_at: row.created_at,
+  }));
+}
+
 export function listCharacters(userId: string, pagination: PaginationParams): PaginatedResult<Character> {
   return paginatedQuery(
     "SELECT * FROM characters WHERE user_id = ? ORDER BY updated_at DESC",
@@ -298,7 +310,7 @@ export function listCharactersDiscover(
              COUNT(*)        AS chat_count,
              MAX(updated_at) AS last_chat_at
       FROM chats
-      WHERE user_id = ?
+      WHERE user_id = ? AND COALESCE(json_extract(metadata, '$.group'), 0) != 1
       GROUP BY character_id
     ) cs ON cs.character_id = c.id
     WHERE c.user_id = ?

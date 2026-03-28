@@ -3,12 +3,13 @@ import { motion, AnimatePresence } from 'motion/react'
 import {
   User, Drama, Wand2, Link2, Package, Zap,
   Users, PenTool, Sparkles, FileText, Brain, ScrollText,
-  MessageCircle, Image, Palette, Settings, X, Library, Puzzle,
+  MessageCircle, Image, Palette, Settings, Library, Puzzle,
   GitFork, Globe, MessageSquareReply, GitBranch, Wallpaper, Replace
 } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
+import { CloseButton } from '@/components/shared/CloseButton'
 import CharacterProfile from './CharacterProfile'
 import CharacterBrowser from './CharacterBrowser'
 import PersonaManager from './PersonaManager'
@@ -108,6 +109,7 @@ export default function ViewportDrawer() {
   const openSettings = useStore((s) => s.openSettings)
   const drawerSettings = useStore((s) => s.drawerSettings)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const isGroupChat = useStore((s) => s.isGroupChat)
 
   const isMobile = useIsMobile()
   const sidebarRef = useRef<HTMLDivElement>(null)
@@ -272,10 +274,10 @@ export default function ViewportDrawer() {
 
           <div className={styles.panel}>
             <div className={styles.panelHeader}>
-              <h2 className={styles.panelTitle}>{activeTabConfig?.label || 'Panel'}</h2>
-              <button type="button" className={styles.closeBtn} onClick={closeDrawer}>
-                <X size={16} />
-              </button>
+              <h2 className={styles.panelTitle}>
+                {activeTab === 'profile' && isGroupChat ? 'Group' : (activeTabConfig?.label || 'Panel')}
+              </h2>
+              <CloseButton onClick={closeDrawer} />
             </div>
             <div className={clsx(styles.panelContent, (activeTab === 'loom' || activeTab === 'lumi' || activeTab === 'browser') && styles.panelContentFull)}>
               <ErrorBoundary label={activeTabConfig?.label}>

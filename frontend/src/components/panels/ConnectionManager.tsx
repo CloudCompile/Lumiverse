@@ -6,7 +6,6 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ConnectionForm from './connection-manager/ConnectionForm'
 import ConnectionItem from './connection-manager/ConnectionItem'
 import type { ConnectionProfile, CreateConnectionProfileInput } from '@/types/api'
-import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import styles from './ConnectionManager.module.css'
 
 const FALLBACK_PROVIDERS = [
@@ -89,6 +88,15 @@ export default function ConnectionManager() {
     }
   }, [profiles, updateProfile])
 
+  const handleDuplicate = useCallback(async (id: string) => {
+    try {
+      const duplicated = await connectionsApi.duplicate(id)
+      addProfile(duplicated)
+    } catch (err) {
+      console.error('[ConnectionManager] Failed to duplicate:', err)
+    }
+  }, [addProfile])
+
   const handleDelete = useCallback(async () => {
     if (!deleteTarget) return
     try {
@@ -105,52 +113,51 @@ export default function ConnectionManager() {
   }
 
   return (
-    <PanelFadeIn>
-      <div className={styles.manager}>
-        {!creating && (
-          <button type="button" className={styles.createBtn} onClick={() => setCreating(true)}>
-            <Plus size={14} />
-            <span>New Connection</span>
-          </button>
-        )}
+    <div className={styles.manager}>
+      {!creating && (
+        <button type="button" className={styles.createBtn} onClick={() => setCreating(true)}>
+          <Plus size={14} />
+          <span>New Connection</span>
+        </button>
+      )}
 
-        {creating && (
-          <ConnectionForm
+      {creating && (
+        <ConnectionForm
+          providers={providers}
+          onSave={handleCreate}
+          onCancel={() => setCreating(false)}
+        />
+      )}
+
+      <div className={styles.list}>
+        {profiles.map((profile) => (
+          <ConnectionItem
+            key={profile.id}
+            profile={profile}
+            isActive={activeProfileId === profile.id}
             providers={providers}
-            onSave={handleCreate}
-            onCancel={() => setCreating(false)}
+            onSelect={() => setActiveProfile(activeProfileId === profile.id ? null : profile.id)}
+            onUpdate={handleUpdate}
+            onDuplicate={() => handleDuplicate(profile.id)}
+            onDelete={() => setDeleteTarget(profile)}
           />
-        )}
-
-        <div className={styles.list}>
-          {profiles.map((profile) => (
-            <ConnectionItem
-              key={profile.id}
-              profile={profile}
-              isActive={activeProfileId === profile.id}
-              providers={providers}
-              onSelect={() => setActiveProfile(activeProfileId === profile.id ? null : profile.id)}
-              onUpdate={handleUpdate}
-              onDelete={() => setDeleteTarget(profile)}
-            />
-          ))}
-          {profiles.length === 0 && !creating && (
-            <div className={styles.empty}>No connections configured. Add one to start chatting.</div>
-          )}
-        </div>
-
-        {deleteTarget && (
-          <ConfirmationModal
-            title="Delete Connection"
-            message={`Delete "${deleteTarget.name}"? This cannot be undone.`}
-            isOpen={true}
-            variant="danger"
-            confirmText="Delete"
-            onConfirm={handleDelete}
-            onCancel={() => setDeleteTarget(null)}
-          />
+        ))}
+        {profiles.length === 0 && !creating && (
+          <div className={styles.empty}>No connections configured. Add one to start chatting.</div>
         )}
       </div>
-    </PanelFadeIn>
+
+      {deleteTarget && (
+        <ConfirmationModal
+          title="Delete Connection"
+          message={`Delete "${deleteTarget.name}"? This cannot be undone.`}
+          isOpen={true}
+          variant="danger"
+          confirmText="Delete"
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+    </div>
   )
 }

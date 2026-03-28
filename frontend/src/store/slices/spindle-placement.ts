@@ -4,7 +4,7 @@ import type { SpindleDockEdge } from 'lumiverse-spindle-types'
 
 // ── Capacity limits ──
 
-export const PLACEMENT_LIMITS = {
+const PLACEMENT_LIMITS = {
   drawerTabs: { perExtension: 4, global: 8 },
   floatWidgets: { perExtension: 2, global: 8 },
   dockPanels: { perExtensionPerEdge: 1, globalPerEdge: 2 },

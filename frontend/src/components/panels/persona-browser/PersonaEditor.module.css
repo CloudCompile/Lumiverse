@@ -233,47 +233,6 @@
   border-top: 1px solid var(--lumiverse-border);
 }
 
-.primaryBtn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 14px;
-  border-radius: 8px;
-  background: var(--lumiverse-primary);
-  border: none;
-  color: var(--lumiverse-primary-contrast, #fff);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: opacity var(--lumiverse-transition-fast);
-}
-
-.primaryBtn:hover {
-  opacity: 0.9;
-}
-
-.chatApplyBtn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid var(--lumiverse-border);
-  color: var(--lumiverse-text);
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.chatApplyBtn:hover:not(:disabled) {
-  border-color: var(--lumiverse-primary);
-}
-
-.chatApplyBtn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
 
 .bindingRow {
   display: flex;
@@ -318,30 +277,6 @@
 
 .bindingLabelActive {
   color: var(--lumiverse-primary);
-}
-
-.actionBtn {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.actionBtn:hover {
-  background: var(--lumiverse-fill-hover);
-  color: var(--lumiverse-text);
-}
-
-.deleteBtn:hover {
-  color: var(--lumiverse-error);
-  border-color: var(--lumiverse-error);
 }
 
 .addonsBtn {

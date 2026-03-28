@@ -30,6 +30,10 @@ export const imageGenConnectionsApi = {
     return del<void>(`/image-gen-connections/${id}`)
   },
 
+  duplicate(id: string) {
+    return post<ImageGenConnectionProfile>(`/image-gen-connections/${id}/duplicate`)
+  },
+
   test(id: string) {
     return post<ImageGenConnectionTestResult>(`/image-gen-connections/${id}/test`)
   },

@@ -78,6 +78,16 @@ function shouldResetVectorIndex(input: UpdateWorldBookEntryInput): boolean {
 
 // --- World Book CRUD ---
 
+/** Lightweight listing of all world books for manifest building. */
+export function listWorldBooksForManifest(userId: string): Array<{ name: string; metadata: Record<string, any>; created_at: number }> {
+  const rows = getDb().query("SELECT name, metadata, created_at FROM world_books WHERE user_id = ?").all(userId) as any[];
+  return rows.map((row) => ({
+    name: row.name,
+    metadata: JSON.parse(row.metadata),
+    created_at: row.created_at,
+  }));
+}
+
 export function listWorldBooks(userId: string, pagination: PaginationParams): PaginatedResult<WorldBook> {
   return paginatedQuery(
     "SELECT * FROM world_books WHERE user_id = ? ORDER BY updated_at DESC",
@@ -801,6 +811,66 @@ export function importCharacterBook(
       delay: raw.delay ?? 0,
       vectorized: raw.vectorized ?? false,
       extensions: { ...raw.extensions, ...extras },
+    });
+    entryCount++;
+  }
+
+  return { worldBook, entryCount };
+}
+
+/**
+ * Import a world book from the Lumiverse export format (used in lumiverse_modules.json).
+ * Entries are already in the internal schema, so field mapping is simpler than importCharacterBook.
+ */
+export function importLumiverseWorldBook(
+  userId: string,
+  characterId: string,
+  data: Record<string, any>,
+): { worldBook: WorldBook; entryCount: number } {
+  const bookName = data.name || "Imported Lorebook";
+  const description = data.description || `Imported from CharX at ${new Date().toLocaleString()}`;
+  const worldBook = createWorldBook(userId, {
+    name: bookName,
+    description,
+    metadata: { ...(data.metadata || {}), source: "charx_import", source_character_id: characterId },
+  });
+
+  const entries = data.entries || [];
+  let entryCount = 0;
+
+  for (const raw of entries) {
+    createEntry(userId, worldBook.id, {
+      key: Array.isArray(raw.key) ? raw.key : [],
+      keysecondary: Array.isArray(raw.keysecondary) ? raw.keysecondary : [],
+      content: raw.content || "",
+      comment: raw.comment || "",
+      disabled: raw.disabled ?? false,
+      order_value: raw.order_value ?? 0,
+      position: raw.position ?? 0,
+      depth: raw.depth ?? 4,
+      role: raw.role || undefined,
+      selective: raw.selective ?? false,
+      constant: raw.constant ?? false,
+      case_sensitive: raw.case_sensitive ?? false,
+      match_whole_words: raw.match_whole_words ?? false,
+      group_name: raw.group_name || "",
+      group_override: raw.group_override ?? false,
+      group_weight: raw.group_weight ?? 100,
+      probability: raw.probability ?? 100,
+      scan_depth: raw.scan_depth ?? undefined,
+      automation_id: raw.automation_id || undefined,
+      selective_logic: raw.selective_logic ?? 0,
+      use_probability: raw.use_probability ?? true,
+      use_regex: raw.use_regex ?? false,
+      prevent_recursion: raw.prevent_recursion ?? false,
+      exclude_recursion: raw.exclude_recursion ?? false,
+      delay_until_recursion: raw.delay_until_recursion ?? false,
+      priority: raw.priority ?? 10,
+      sticky: raw.sticky ?? 0,
+      cooldown: raw.cooldown ?? 0,
+      delay: raw.delay ?? 0,
+      vectorized: raw.vectorized ?? false,
+      extensions: raw.extensions || {},
     });
     entryCount++;
   }

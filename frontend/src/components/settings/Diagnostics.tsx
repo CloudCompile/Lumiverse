@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Copy, Check, RefreshCw, Server, Monitor, Puzzle, Bell, Send, Wrench, Users } from 'lucide-react'
+import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
 import { systemApi, type SystemInfo } from '@/api/system'
 import { pushApi } from '@/api/push'
@@ -183,7 +184,7 @@ export default function Diagnostics() {
             disabled={loading}
             title="Refresh"
           >
-            <RefreshCw size={14} className={loading ? styles.spin : undefined} />
+            <RefreshCw size={14} className={loading ? spinClass : undefined} />
           </button>
           <button
             type="button"

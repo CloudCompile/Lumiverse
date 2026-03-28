@@ -82,6 +82,7 @@ export interface WorldBookDiagnostics {
     character: boolean;
     persona: boolean;
     global: boolean;
+    chat: boolean;
   };
   embeddings: {
     enabled: boolean;

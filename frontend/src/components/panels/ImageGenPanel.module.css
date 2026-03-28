@@ -5,36 +5,10 @@
 }
 
 .toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
   padding: 10px 12px;
   background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
   border-radius: 10px;
-  cursor: pointer;
-}
-
-.toggle input {
-  margin-top: 2px;
-  accent-color: var(--lumiverse-primary);
-}
-
-.toggleTextWrap {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.toggleLabel {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--lumiverse-text);
-}
-
-.toggleHint {
-  font-size: 12px;
-  color: var(--lumiverse-text-muted);
 }
 
 .slider {
@@ -77,40 +51,6 @@
   gap: 8px;
 }
 
-.primaryBtn,
-.secondaryBtn,
-.dangerBtn,
-.iconBtn {
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 8px;
-  background: var(--lumiverse-bg-elevated);
-  color: var(--lumiverse-text);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 8px 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-
-.primaryBtn {
-  background: var(--lumiverse-bg-elevated, rgba(35, 30, 48, 0.9));
-  background: color-mix(in srgb, var(--lumiverse-primary) 20%, var(--lumiverse-bg-elevated));
-  border-color: var(--lumiverse-primary-050, rgba(147, 112, 219, 0.5));
-  border-color: color-mix(in srgb, var(--lumiverse-primary) 50%, transparent);
-}
-
-.secondaryBtn {
-  background: var(--lumiverse-fill-subtle);
-}
-
-.dangerBtn {
-  color: #ffb7b7;
-  border-color: rgba(255, 102, 102, 0.35);
-  background: rgba(255, 77, 77, 0.12);
-}
-
 .inlineRow {
   display: flex;
   align-items: center;
@@ -119,17 +59,6 @@
 
 .inlineGrow {
   flex: 1;
-}
-
-.iconBtn {
-  width: 34px;
-  height: 34px;
-  justify-content: center;
-  padding: 0;
-}
-
-.spin {
-  animation: spin 1s linear infinite;
 }
 
 .error {
@@ -180,11 +109,3 @@
   cursor: pointer;
 }
 
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Trash2, FlaskConical } from 'lucide-react'
 import { tokenizersApi } from '@/api/tokenizers'
+import { Badge } from '@/components/shared/Badge'
 import type { TokenizerConfig, TokenizerModelPattern, TokenizerTestResult, PatternTestResult } from '@/api/tokenizers'
 import styles from './TokenizerManager.module.css'
 
@@ -83,9 +84,9 @@ function ConfigsSection({ configs, onRefresh }: { configs: TokenizerConfig[]; on
               <tr key={c.id}>
                 <td>
                   {c.name}
-                  {c.is_built_in && <span className={styles.builtInBadge} style={{ marginLeft: 6 }}>built-in</span>}
+                  {c.is_built_in && <Badge color="primary" size="sm" className={styles.builtInBadgeSpacing}>built-in</Badge>}
                 </td>
-                <td><span className={styles.typeBadge}>{c.type}</span></td>
+                <td><Badge color="neutral" size="sm">{c.type}</Badge></td>
                 <td><span className={styles.configJson} title={JSON.stringify(c.config)}>{JSON.stringify(c.config)}</span></td>
                 <td>
                   <div className={styles.actions}>
@@ -190,7 +191,7 @@ function PatternsSection({ patterns, configs, onRefresh }: { patterns: Tokenizer
               <tr key={p.id}>
                 <td style={{ fontFamily: 'monospace', fontSize: 11 }}>
                   {p.pattern}
-                  {p.is_built_in && <span className={styles.builtInBadge} style={{ marginLeft: 6 }}>built-in</span>}
+                  {p.is_built_in && <Badge color="primary" size="sm" className={styles.builtInBadgeSpacing}>built-in</Badge>}
                 </td>
                 <td>{configMap[p.tokenizer_id] || p.tokenizer_id}</td>
                 <td>{p.priority}</td>

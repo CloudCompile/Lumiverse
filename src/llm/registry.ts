@@ -18,6 +18,7 @@ import { FireworksProvider } from "./providers/fireworks";
 import { PollinationsProvider } from "./providers/pollinations";
 import { SiliconFlowProvider } from "./providers/siliconflow";
 import { CustomProvider } from "./providers/custom";
+import { GoogleVertexProvider } from "./providers/google-vertex";
 
 const providers = new Map<string, LlmProvider>();
 
@@ -41,6 +42,7 @@ export function getProviderList(): LlmProvider[] {
 registerProvider(new OpenAIProvider());
 registerProvider(new AnthropicProvider());
 registerProvider(new GoogleProvider());
+registerProvider(new GoogleVertexProvider());
 registerProvider(new OpenRouterProvider());
 registerProvider(new DeepSeekProvider());
 registerProvider(new ChutesProvider());

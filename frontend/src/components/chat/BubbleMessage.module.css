@@ -126,6 +126,19 @@
   font-size: calc(9px * var(--lumiverse-font-scale, 1));
 }
 
+/* Selection mode */
+.selectMode {
+  cursor: pointer;
+  user-select: none;
+}
+
+.selected {
+  outline: 2px solid var(--lumiverse-primary);
+  outline-offset: -1px;
+  opacity: 1 !important;
+  filter: none !important;
+}
+
 /* Streaming state — GPU optimization */
 .streaming {
   will-change: opacity, transform;

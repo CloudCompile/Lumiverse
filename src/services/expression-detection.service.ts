@@ -1,8 +1,15 @@
-import type { LlmMessage } from "../llm/types";
-import { rawGenerate } from "./generate.service";
+import type { LlmMessage, GenerationResponse } from "../llm/types";
 import * as connectionsSvc from "./connections.service";
 import * as settingsSvc from "./settings.service";
 import { getSidecarSettings } from "./sidecar-settings.service";
+
+type RawGenerateFn = (userId: string, input: {
+  provider: string;
+  model: string;
+  messages: LlmMessage[];
+  connection_id: string;
+  parameters?: Record<string, unknown>;
+}) => Promise<GenerationResponse>;
 
 interface DetectExpressionInput {
   userId: string;
@@ -17,7 +24,7 @@ interface DetectExpressionInput {
  * Lightweight sidecar call to detect the appropriate character expression
  * from the most recent messages. Returns the matched label or null.
  */
-export async function detectExpression(input: DetectExpressionInput): Promise<string | null> {
+export async function detectExpression(input: DetectExpressionInput, generateFn: RawGenerateFn): Promise<string | null> {
   const { userId, labels, recentMessages } = input;
   if (labels.length === 0) return null;
 
@@ -51,7 +58,7 @@ Respond with ONLY one of the listed expression labels, exactly as written. Nothi
     { role: "user", content: "Based on the conversation above, which expression label best matches the character's current emotional state? Respond with only the label." },
   ];
 
-  const response = await rawGenerate(userId, {
+  const response = await generateFn(userId, {
     provider: conn.provider,
     model: model || conn.model || "",
     messages,

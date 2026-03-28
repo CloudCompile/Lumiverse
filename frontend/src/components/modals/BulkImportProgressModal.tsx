@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
-import { X, CheckCircle2, XCircle, SkipForward } from 'lucide-react'
+import { CheckCircle2, XCircle, SkipForward } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
 import { charactersApi } from '@/api/characters'
 import type { Character, BulkImportResultItem } from '@/types/api'
 import styles from './BulkImportProgressModal.module.css'
@@ -117,151 +119,129 @@ export default function BulkImportProgressModal({
   const skippedCount = results.filter((r) => r.skipped).length
   const errorCount = results.filter((r) => !r.success).length
 
-  return createPortal(
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          className={styles.overlay}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
-        >
-          <motion.div
-            className={styles.modal}
-            initial={{ opacity: 0, scale: 0.95, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 10 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-          >
-            <div className={styles.header}>
-              <span className={styles.title}>
-                {done ? 'Import Complete' : started ? 'Importing Characters...' : 'Bulk Import'}
-              </span>
-              {done && (
-                <button type="button" className={styles.closeBtn} onClick={onClose}>
-                  <X size={16} />
-                </button>
-              )}
-            </div>
+  return (
+    <ModalShell isOpen={isOpen} onClose={onClose} maxWidth={520} closeOnBackdrop={done} closeOnEscape={done}>
+      <div className={styles.header}>
+        <span className={styles.title}>
+          {done ? 'Import Complete' : started ? 'Importing Characters...' : 'Bulk Import'}
+        </span>
+        {done && (
+          <CloseButton onClick={onClose} />
+        )}
+      </div>
 
-            <div className={styles.body}>
-              {!started && (
-                <label className={styles.dedupToggle}>
-                  <input
-                    type="checkbox"
-                    checked={skipDuplicates}
-                    onChange={(e) => setSkipDuplicates(e.target.checked)}
-                  />
-                  Skip characters that already exist (by name)
-                </label>
-              )}
+      <div className={styles.body}>
+        {!started && (
+          <div className={styles.dedupToggle}>
+            <Toggle.Checkbox
+              checked={skipDuplicates}
+              onChange={setSkipDuplicates}
+              label="Skip characters that already exist (by name)"
+            />
+          </div>
+        )}
 
-              <div className={styles.progressSection}>
-                <div className={styles.progressLabel}>
-                  <span>{started ? (done ? 'Done' : 'Processing...') : `${total} files selected`}</span>
-                  <span className={styles.progressCount}>
-                    {processed}/{total}
+        <div className={styles.progressSection}>
+          <div className={styles.progressLabel}>
+            <span>{started ? (done ? 'Done' : 'Processing...') : `${total} files selected`}</span>
+            <span className={styles.progressCount}>
+              {processed}/{total}
+            </span>
+          </div>
+          <div className={styles.progressTrack}>
+            <div className={styles.progressFill} style={{ transform: `scaleX(${pct / 100})` }} />
+          </div>
+          {currentFile && <div className={styles.currentFile}>{currentFile}</div>}
+        </div>
+
+        {results.length > 0 && (
+          <>
+            <div className={styles.resultsList}>
+              {results.map((r, i) => (
+                <div key={i} className={styles.resultItem}>
+                  <span className={styles.resultIcon}>
+                    {r.skipped ? (
+                      <SkipForward size={14} className={styles.resultSkipped} />
+                    ) : r.success ? (
+                      <CheckCircle2 size={14} className={styles.resultSuccess} />
+                    ) : (
+                      <XCircle size={14} className={styles.resultError} />
+                    )}
+                  </span>
+                  <span className={styles.resultName}>
+                    {r.skipped
+                      ? r.filename
+                      : r.success
+                        ? r.character?.name || r.filename
+                        : r.filename}
+                  </span>
+                  <span className={styles.resultDetail}>
+                    {r.skipped
+                      ? 'duplicate'
+                      : r.success
+                        ? r.lorebook
+                          ? `${r.lorebook.entryCount} WI entries`
+                          : ''
+                        : r.error || 'failed'}
                   </span>
                 </div>
-                <div className={styles.progressTrack}>
-                  <div className={styles.progressFill} style={{ transform: `scaleX(${pct / 100})` }} />
-                </div>
-                {currentFile && <div className={styles.currentFile}>{currentFile}</div>}
+              ))}
+              <div ref={resultsEndRef} />
+            </div>
+
+            {done && (
+              <div className={styles.summary}>
+                <span className={styles.summaryItem}>
+                  <span
+                    className={styles.summaryDot}
+                    style={{ background: 'var(--lumiverse-success, #22c55e)' }}
+                  />
+                  {successCount} imported
+                </span>
+                {skippedCount > 0 && (
+                  <span className={styles.summaryItem}>
+                    <span
+                      className={styles.summaryDot}
+                      style={{ background: 'var(--lumiverse-warning, #f59e0b)' }}
+                    />
+                    {skippedCount} skipped
+                  </span>
+                )}
+                {errorCount > 0 && (
+                  <span className={styles.summaryItem}>
+                    <span
+                      className={styles.summaryDot}
+                      style={{ background: 'var(--lumiverse-danger, #ef4444)' }}
+                    />
+                    {errorCount} failed
+                  </span>
+                )}
               </div>
+            )}
+          </>
+        )}
+      </div>
 
-              {results.length > 0 && (
-                <>
-                  <div className={styles.resultsList}>
-                    {results.map((r, i) => (
-                      <div key={i} className={styles.resultItem}>
-                        <span className={styles.resultIcon}>
-                          {r.skipped ? (
-                            <SkipForward size={14} className={styles.resultSkipped} />
-                          ) : r.success ? (
-                            <CheckCircle2 size={14} className={styles.resultSuccess} />
-                          ) : (
-                            <XCircle size={14} className={styles.resultError} />
-                          )}
-                        </span>
-                        <span className={styles.resultName}>
-                          {r.skipped
-                            ? r.filename
-                            : r.success
-                              ? r.character?.name || r.filename
-                              : r.filename}
-                        </span>
-                        <span className={styles.resultDetail}>
-                          {r.skipped
-                            ? 'duplicate'
-                            : r.success
-                              ? r.lorebook
-                                ? `${r.lorebook.entryCount} WI entries`
-                                : ''
-                              : r.error || 'failed'}
-                        </span>
-                      </div>
-                    ))}
-                    <div ref={resultsEndRef} />
-                  </div>
-
-                  {done && (
-                    <div className={styles.summary}>
-                      <span className={styles.summaryItem}>
-                        <span
-                          className={styles.summaryDot}
-                          style={{ background: 'var(--lumiverse-success, #22c55e)' }}
-                        />
-                        {successCount} imported
-                      </span>
-                      {skippedCount > 0 && (
-                        <span className={styles.summaryItem}>
-                          <span
-                            className={styles.summaryDot}
-                            style={{ background: 'var(--lumiverse-warning, #f59e0b)' }}
-                          />
-                          {skippedCount} skipped
-                        </span>
-                      )}
-                      {errorCount > 0 && (
-                        <span className={styles.summaryItem}>
-                          <span
-                            className={styles.summaryDot}
-                            style={{ background: 'var(--lumiverse-danger, #ef4444)' }}
-                          />
-                          {errorCount} failed
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            <div className={styles.footer}>
-              {!started ? (
-                <>
-                  <button type="button" className={styles.cancelBtn} onClick={onClose}>
-                    Cancel
-                  </button>
-                  <button type="button" className={styles.doneBtn} onClick={startImport}>
-                    Start Import
-                  </button>
-                </>
-              ) : done ? (
-                <button type="button" className={styles.doneBtn} onClick={onClose}>
-                  Close
-                </button>
-              ) : (
-                <button type="button" className={styles.cancelBtn} onClick={handleCancel}>
-                  Cancel
-                </button>
-              )}
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body
+      <div className={styles.footer}>
+        {!started ? (
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={startImport}>
+              Start Import
+            </Button>
+          </>
+        ) : done ? (
+          <Button variant="primary" onClick={onClose}>
+            Close
+          </Button>
+        ) : (
+          <Button variant="ghost" onClick={handleCancel}>
+            Cancel
+          </Button>
+        )}
+      </div>
+    </ModalShell>
   )
 }

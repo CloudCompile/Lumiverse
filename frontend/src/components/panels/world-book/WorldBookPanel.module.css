@@ -206,6 +206,173 @@
   font-style: italic;
 }
 
+/* ── Chat-scoped world books ── */
+.chatSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+}
+
+.chatSectionDisabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.chatHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chatIcon {
+  color: var(--lumiverse-info, #42a5f5);
+  flex-shrink: 0;
+}
+
+.chatLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  flex: 1;
+}
+
+.chatPopoverWrapper {
+  position: relative;
+}
+
+.chatAddBtn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.chatAddBtn:hover {
+  border-color: var(--lumiverse-info, #42a5f5);
+  color: var(--lumiverse-info, #42a5f5);
+}
+
+.chatPopover {
+  position: fixed;
+  transform: translateX(-100%);
+  min-width: 200px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--lumiverse-bg);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  box-shadow: var(--lumiverse-shadow-lg);
+  z-index: 9995;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.chatPopoverEmpty {
+  padding: 12px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--lumiverse-text-dim);
+  font-style: italic;
+}
+
+.chatPopoverItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: transparent;
+  border: none;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--lumiverse-transition-fast);
+}
+
+.chatPopoverItem:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+
+.chatPopoverItemActive {
+  color: var(--lumiverse-info, #42a5f5);
+}
+
+.chatPopoverCheck {
+  width: 14px;
+  font-size: 11px;
+  flex-shrink: 0;
+  text-align: center;
+  color: var(--lumiverse-info, #42a5f5);
+}
+
+.chatPopoverName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatPills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chatPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lumiverse-info, #42a5f5) 14%, transparent);
+  color: var(--lumiverse-info, #42a5f5);
+  font-size: 11.5px;
+}
+
+.chatPillName {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatPillRemove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--lumiverse-btn-icon-xs);
+  height: var(--lumiverse-btn-icon-xs);
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  color: var(--lumiverse-info, #42a5f5);
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.chatPillRemove:hover {
+  opacity: 1;
+}
+
+.chatHint {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+  font-style: italic;
+}
+
 /* ── Top bar ── */
 .topBar {
   display: flex;
@@ -268,27 +435,6 @@
   opacity: 1;
   transform: translateY(0);
   transition-delay: 0.3s;
-}
-
-.iconBtn {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid var(--lumiverse-border);
-  color: var(--lumiverse-text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.iconBtn:hover {
-  background: var(--lumiverse-primary);
-  border-color: var(--lumiverse-primary);
-  color: var(--lumiverse-primary-contrast, #fff);
 }
 
 /* ── Book fields toggle ── */
@@ -365,26 +511,6 @@
   border-color: var(--lumiverse-primary);
 }
 
-.deleteBookBtn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: transparent;
-  border: 1px solid var(--lumiverse-border);
-  color: var(--lumiverse-text-dim);
-  font-size: 11px;
-  cursor: pointer;
-  align-self: flex-start;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.deleteBookBtn:hover {
-  border-color: var(--lumiverse-error);
-  color: var(--lumiverse-error);
-}
-
 .bookActionRow {
   display: flex;
   flex-wrap: wrap;
@@ -393,45 +519,6 @@
   padding-top: 2px;
 }
 
-.primaryActionBtn,
-.subtleActionBtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: border-color var(--lumiverse-transition-fast), background var(--lumiverse-transition-fast), opacity var(--lumiverse-transition-fast);
-}
-
-.primaryActionBtn {
-  background: var(--lumiverse-primary);
-  border: 1px solid transparent;
-  color: var(--lumiverse-primary-contrast, #fff);
-}
-
-.primaryActionBtn:hover {
-  opacity: 0.9;
-}
-
-.subtleActionBtn {
-  background: var(--lumiverse-fill-subtle);
-  border: 1px solid var(--lumiverse-border);
-  color: var(--lumiverse-text);
-}
-
-.subtleActionBtn:hover {
-  border-color: var(--lumiverse-primary);
-  background: var(--lumiverse-primary-light);
-}
-
-.primaryActionBtn:disabled,
-.subtleActionBtn:disabled,
-.newEntryBtn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
 
 .vectorSummary {
   display: flex;
@@ -738,24 +825,6 @@
 
 .entrySearchInput::placeholder {
   color: var(--lumiverse-text-dim);
-}
-
-.newEntryBtn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: var(--lumiverse-primary);
-  border: none;
-  color: var(--lumiverse-primary-contrast, #fff);
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: opacity var(--lumiverse-transition-fast);
-}
-
-.newEntryBtn:hover {
-  opacity: 0.85;
 }
 
 .entryList {

@@ -34,23 +34,6 @@
   margin: 0;
 }
 
-.closeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-}
-
 .hint {
   font-size: 12px;
   color: var(--lumiverse-text-dim);
@@ -132,14 +115,6 @@
 .importBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.spinner {
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 @media (max-width: 600px) {

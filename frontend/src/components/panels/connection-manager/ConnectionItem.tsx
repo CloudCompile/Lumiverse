@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Link2, Trash2, Edit3, Zap, Check, Loader, Star, BrainCircuit } from 'lucide-react'
+import { Link2, Trash2, Edit3, Zap, Check, Star, BrainCircuit, Copy } from 'lucide-react'
 import { connectionsApi } from '@/api/connections'
 import type { ConnectionProfile, ProviderInfo, CreateConnectionProfileInput } from '@/types/api'
 import ConnectionForm from './ConnectionForm'
+import { Spinner } from '@/components/shared/Spinner'
+import { Button } from '@/components/shared/FormComponents'
 import styles from './ConnectionItem.module.css'
 import clsx from 'clsx'
 
@@ -10,6 +12,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   openai: '#10a37f',
   anthropic: '#d97757',
   google: '#4285f4',
+  google_vertex: '#34a853',
   openrouter: '#6366f1',
   custom: 'var(--lumiverse-text-dim)',
 }
@@ -20,10 +23,11 @@ interface ConnectionItemProps {
   providers: ProviderInfo[]
   onSelect: () => void
   onUpdate: (profile: ConnectionProfile) => void
+  onDuplicate: () => void
   onDelete: () => void
 }
 
-export default function ConnectionItem({ profile, isActive, providers, onSelect, onUpdate, onDelete }: ConnectionItemProps) {
+export default function ConnectionItem({ profile, isActive, providers, onSelect, onUpdate, onDuplicate, onDelete }: ConnectionItemProps) {
   const [editing, setEditing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -99,21 +103,17 @@ export default function ConnectionItem({ profile, isActive, providers, onSelect,
           {isActive && <Check size={14} className={styles.activeCheck} />}
         </button>
         <div className={styles.itemActions}>
-          <button
-            type="button"
-            className={clsx(styles.actionBtn, testResult && (testResult.success ? styles.testSuccess : styles.testFail))}
+          <Button
+            size="icon-sm" variant="ghost"
+            className={clsx(testResult && (testResult.success ? styles.testSuccess : styles.testFail))}
             onClick={handleTest}
             title="Test connection"
             disabled={testing}
-          >
-            {testing ? <Loader size={13} className={styles.spinner} /> : <Zap size={13} />}
-          </button>
-          <button type="button" className={styles.actionBtn} onClick={() => setEditing(true)} title="Edit">
-            <Edit3 size={13} />
-          </button>
-          <button type="button" className={clsx(styles.actionBtn, styles.deleteBtn)} onClick={onDelete} title="Delete">
-            <Trash2 size={13} />
-          </button>
+            icon={testing ? <Spinner size={13} /> : <Zap size={13} />}
+          />
+          <Button size="icon-sm" variant="ghost" onClick={() => setEditing(true)} title="Edit" icon={<Edit3 size={13} />} />
+          <Button size="icon-sm" variant="ghost" onClick={onDuplicate} title="Duplicate" icon={<Copy size={13} />} />
+          <Button size="icon-sm" variant="danger-ghost" onClick={onDelete} title="Delete" icon={<Trash2 size={13} />} />
         </div>
       </div>
       {testResult && (

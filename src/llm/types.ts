@@ -146,6 +146,8 @@ export interface ActivatedWorldInfoEntry {
   keys: string[];
   source: 'keyword' | 'vector';
   score?: number;
+  bookSource?: 'character' | 'persona' | 'chat' | 'global';
+  bookId?: string;
 }
 
 export interface MemoryStats {

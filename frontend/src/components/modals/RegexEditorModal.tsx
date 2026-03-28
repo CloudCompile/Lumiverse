@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion } from 'motion/react'
-import { X, ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
@@ -160,24 +162,11 @@ export default function RegexEditorModal() {
     setReplaceString(replace)
   }
 
-  return createPortal(
-    <motion.div
-      className={styles.overlay}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      onClick={closeModal}
-    >
-      <motion.div
-        className={styles.modal}
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
-        onClick={(e) => e.stopPropagation()}
-      >
+  return (
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth={720} zIndex={10001} className={styles.modal}>
         <div className={styles.header}>
           <h2 className={styles.title}>Edit Regex Script</h2>
-          <button className={styles.closeBtn} onClick={closeModal}><X size={16} /></button>
+          <CloseButton onClick={closeModal} size="sm" />
         </div>
 
         <div className={styles.body}>
@@ -399,10 +388,12 @@ export default function RegexEditorModal() {
                       ))}
                     </div>
                   </div>
-                  <label className={styles.inlineToggle}>
-                    <input type="checkbox" checked={runOnEdit} onChange={(e) => setRunOnEdit(e.target.checked)} />
-                    <span>Run on edit</span>
-                  </label>
+                  <Toggle.Checkbox
+                    checked={runOnEdit}
+                    onChange={setRunOnEdit}
+                    label="Run on edit"
+                    className={styles.inlineToggle}
+                  />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>
@@ -449,11 +440,9 @@ export default function RegexEditorModal() {
         </div>
 
         <div className={styles.footer}>
-          <button className={styles.btn} onClick={closeModal}>Cancel</button>
-          <button className={styles.btnPrimary} onClick={handleSave}>Save</button>
+          <Button variant="ghost" onClick={closeModal}>Cancel</Button>
+          <Button variant="primary" onClick={handleSave}>Save</Button>
         </div>
-      </motion.div>
-    </motion.div>,
-    document.body,
+    </ModalShell>
   )
 }

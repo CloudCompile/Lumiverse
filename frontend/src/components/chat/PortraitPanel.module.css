@@ -185,12 +185,6 @@
   color: var(--lumiverse-primary, #9370db);
   opacity: 0.5;
   z-index: 2;
-  animation: portrait-spin 1s linear infinite;
-}
-
-@keyframes portrait-spin {
-  from { transform: translate(-50%, -50%) rotate(0deg); }
-  to { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 /* ── Placeholder fallback ── */

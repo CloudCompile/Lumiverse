@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { X, Search, Check } from 'lucide-react'
 import { useNavigate } from 'react-router'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
@@ -24,13 +25,17 @@ interface GreetingOption {
 export default function GroupChatCreatorModal() {
   const navigate = useNavigate()
   const closeModal = useStore((s) => s.closeModal)
+  const modalProps = useStore((s) => s.modalProps) as { initialCharacterIds?: string[] } | null
   const characters = useStore((s) => s.characters)
   const [step, setStep] = useState<Step>('characters')
-  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [selectedIds, setSelectedIds] = useState<string[]>(modalProps?.initialCharacterIds ?? [])
   const [search, setSearch] = useState('')
   const [selectedGreeting, setSelectedGreeting] = useState<{ characterId: string; greetingIndex: number } | null>(null)
   const [groupName, setGroupName] = useState('')
   const [talkativenessOverrides, setTalkativenessOverrides] = useState<Record<string, number>>({})
+  const [scenarioMode, setScenarioMode] = useState<'individual' | 'member' | 'custom'>('individual')
+  const [scenarioMemberId, setScenarioMemberId] = useState<string>('')
+  const [scenarioCustom, setScenarioCustom] = useState('')
   const [creating, setCreating] = useState(false)
   const [charPage, setCharPage] = useState(1)
   const CHARS_PER_PAGE = 50
@@ -136,14 +141,25 @@ export default function GroupChatCreatorModal() {
         greeting_character_id: selectedGreeting?.characterId,
         greeting_index: selectedGreeting?.greetingIndex,
       })
-      // Store talkativeness overrides in chat metadata
+      // Build extra metadata (talkativeness + scenario override)
+      const extraMeta: Record<string, any> = {}
       if (Object.keys(talkativenessOverrides).length > 0) {
+        extraMeta.talkativeness_overrides = talkativenessOverrides
+      }
+      if (scenarioMode !== 'individual') {
+        extraMeta.group_scenario_override = {
+          mode: scenarioMode,
+          ...(scenarioMode === 'member' && scenarioMemberId ? { member_character_id: scenarioMemberId } : {}),
+          ...(scenarioMode === 'custom' ? { content: scenarioCustom } : {}),
+        }
+      }
+      if (Object.keys(extraMeta).length > 0) {
         await chatsApi.update(chat.id, {
           metadata: {
             ...chat.metadata,
             group: true,
             character_ids: selectedIds,
-            talkativeness_overrides: talkativenessOverrides,
+            ...extraMeta,
           },
         })
       }
@@ -154,28 +170,7 @@ export default function GroupChatCreatorModal() {
     } finally {
       setCreating(false)
     }
-  }, [creating, selectedIds, groupName, selectedGreeting, talkativenessOverrides, closeModal, navigate])
-
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeModal()
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
-    }
-  }, [closeModal])
-
-  const mouseDownTargetRef = useRef<EventTarget | null>(null)
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) closeModal()
-    },
-    [closeModal]
-  )
+  }, [creating, selectedIds, groupName, selectedGreeting, talkativenessOverrides, scenarioMode, scenarioMemberId, scenarioCustom, closeModal, navigate])
 
   const canProceed =
     step === 'characters'
@@ -203,27 +198,9 @@ export default function GroupChatCreatorModal() {
         ? 'Choose Opening Greeting'
         : 'Group Settings'
 
-  return createPortal(
-    <AnimatePresence>
-      <motion.div
-        className={styles.backdrop}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.15 }}
-        onMouseDown={(e) => { mouseDownTargetRef.current = e.target }}
-        onClick={handleBackdropClick}
-      >
-        <motion.div
-          className={styles.modal}
-          initial={{ opacity: 0, scale: 0.95, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 10 }}
-          transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-        >
-          <button onClick={closeModal} type="button" className={styles.closeBtn} aria-label="Close">
-            <X size={16} />
-          </button>
+  return (
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 94vw, min(760px, var(--lumiverse-content-max-width, 760px)))" className={styles.modal}>
+          <CloseButton onClick={closeModal} variant="solid" position="absolute" />
 
           <div className={styles.header}>
             <h3 className={styles.title}>{stepTitle}</h3>
@@ -365,6 +342,45 @@ export default function GroupChatCreatorModal() {
                 </div>
 
                 <div className={styles.fieldGroup}>
+                  <label className={styles.fieldLabel}>Group Scenario</label>
+                  <select
+                    className={styles.fieldInput}
+                    value={scenarioMode === 'member' ? `member:${scenarioMemberId}` : scenarioMode}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      if (val === 'individual') {
+                        setScenarioMode('individual')
+                        setScenarioMemberId('')
+                      } else if (val === 'custom') {
+                        setScenarioMode('custom')
+                        setScenarioMemberId('')
+                      } else if (val.startsWith('member:')) {
+                        setScenarioMode('member')
+                        setScenarioMemberId(val.slice(7))
+                      }
+                    }}
+                  >
+                    <option value="individual">Use individual scenarios</option>
+                    {selectedCharacters.map((char) => (
+                      <option key={char.id} value={`member:${char.id}`}>
+                        Use {char.name}'s scenario
+                      </option>
+                    ))}
+                    <option value="custom">Custom scenario</option>
+                  </select>
+                  {scenarioMode === 'custom' && (
+                    <textarea
+                      className={styles.fieldInput}
+                      value={scenarioCustom}
+                      onChange={(e) => setScenarioCustom(e.target.value)}
+                      placeholder="Enter a shared scenario for the group..."
+                      rows={4}
+                      style={{ resize: 'vertical', marginTop: 8 }}
+                    />
+                  )}
+                </div>
+
+                <div className={styles.fieldGroup}>
                   <label className={styles.fieldLabel}>Talkativeness per Character</label>
                   {selectedCharacters.map((char) => (
                     <div key={char.id} className={styles.talkSlider}>
@@ -405,25 +421,20 @@ export default function GroupChatCreatorModal() {
           </div>
 
           <div className={styles.footer}>
-            <button
-              type="button"
-              className={styles.footerBtn}
+            <Button
+              variant="ghost"
               onClick={step === 'characters' ? closeModal : handleBack}
             >
               {step === 'characters' ? 'Cancel' : 'Back'}
-            </button>
-            <button
-              type="button"
-              className={clsx(styles.footerBtn, styles.footerBtnPrimary)}
+            </Button>
+            <Button
+              variant="primary"
               onClick={handleNext}
               disabled={!canProceed || creating}
             >
               {step === 'settings' ? (creating ? 'Creating...' : 'Create Group Chat') : 'Next'}
-            </button>
+            </Button>
           </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>,
-    document.body
+    </ModalShell>
   )
 }

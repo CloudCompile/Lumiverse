@@ -18,6 +18,9 @@ interface BubbleMessageProps {
   message: Message
   chatId: string
   depth?: number
+  isSelectMode?: boolean
+  isSelected?: boolean
+  onToggleSelect?: (e: React.MouseEvent) => void
 }
 
 function formatMetaDate(timestamp: number) {
@@ -28,7 +31,7 @@ function formatMetaDate(timestamp: number) {
   return `${month} ${day}, ${time}`
 }
 
-export default function BubbleMessage({ message, chatId, depth = 0 }: BubbleMessageProps) {
+export default function BubbleMessage({ message, chatId, depth = 0, isSelectMode = false, isSelected = false, onToggleSelect }: BubbleMessageProps) {
   const bubbleUserAlign = useStore((s) => s.bubbleUserAlign)
   const {
     isEditing,
@@ -69,8 +72,11 @@ export default function BubbleMessage({ message, chatId, depth = 0 }: BubbleMess
         userLeft && styles.userLeft,
         isActivelyStreaming && styles.streaming,
         isHidden && styles.hidden,
+        isSelectMode && isSelected && styles.selected,
+        isSelectMode && styles.selectMode,
       )}
       data-message-id={message.id}
+      onClick={isSelectMode ? onToggleSelect : undefined}
     >
       {/* Dissolving avatar background */}
       {avatarUrl && (
@@ -188,8 +194,8 @@ export default function BubbleMessage({ message, chatId, depth = 0 }: BubbleMess
         )}
       </div>
 
-      {/* Actions — inline pill for bubble mode */}
-      {!isEditing && (
+      {/* Actions — inline pill for bubble mode (hidden in select mode) */}
+      {!isEditing && !isSelectMode && (
         <BubbleActions
           onEdit={handleEdit}
           onDelete={handleDelete}

@@ -79,6 +79,8 @@ import NumberStepper from '@/components/shared/NumberStepper'
 import { useStore as __contextMeterStore } from '@/store'
 import { groupBreakdownEntries as __groupBreakdownEntries } from '@/lib/prompt-breakdown'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
+import { Toggle } from '@/components/shared/Toggle'
+import { Button } from '@/components/shared/FormComponents'
 import s from './LoomBuilder.module.css'
 
 // ============================================================================
@@ -140,22 +142,22 @@ function SortableCategoryItem({
       <span {...attributes} {...listeners} className={s.dragHandle} title="Drag to reorder (moves all items in this category)">
         <GripVertical size={14} />
       </span>
-      <button className={s.iconBtn} onClick={onToggleCollapse} title={isCollapsed ? 'Expand category' : 'Collapse category'} type="button">
+      <Button size="icon-sm" variant="ghost" onClick={onToggleCollapse} title={isCollapsed ? 'Expand category' : 'Collapse category'}>
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-      </button>
+      </Button>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }} onClick={onToggleCollapse}>
         <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>{displayName}</span>
         <span className={s.categoryCount}>({childCount})</span>
       </div>
-      <button className={s.iconBtn} onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'} type="button">
+      <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
-      </button>
-      <button className={s.iconBtn} onClick={() => onEdit(block)} title="Rename" type="button">
+      </Button>
+      <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title="Rename">
         <Edit2 size={14} />
-      </button>
-      <button className={clsx(s.iconBtn, s.iconBtnDanger)} onClick={() => onDelete(block.id)} title="Delete category" type="button">
+      </Button>
+      <Button size="icon-sm" variant="danger-ghost" onClick={() => onDelete(block.id)} title="Delete category">
         <Trash2 size={14} />
-      </button>
+      </Button>
     </div>
   )
 }
@@ -212,17 +214,17 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented }: Sort
         </div>
         {preview && !isMarker && <span className={s.blockPreview}>{preview}</span>}
       </div>
-      <button className={s.iconBtn} onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable' : 'Enable'} type="button">
+      <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable' : 'Enable'}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
-      </button>
+      </Button>
       {!block.isLocked && (
         <>
-          <button className={s.iconBtn} onClick={() => onEdit(block)} title="Edit" type="button">
+          <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title="Edit">
             <Edit2 size={14} />
-          </button>
-          <button className={clsx(s.iconBtn, s.iconBtnDanger)} onClick={() => onDelete(block.id)} title="Delete" type="button">
+          </Button>
+          <Button size="icon-sm" variant="danger-ghost" onClick={() => onDelete(block.id)} title="Delete">
             <Trash2 size={14} />
-          </button>
+          </Button>
         </>
       )}
     </div>
@@ -335,14 +337,14 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
     <div className={clsx(s.layout, compact && s.layoutCompact)}>
       {compact && (
         <div className={s.toolbar} style={{ justifyContent: 'space-between' }}>
-          <button className={s.iconBtn} onClick={onBack} title="Back to list" type="button"><ArrowLeft size={18} /></button>
+          <Button size="icon-sm" variant="ghost" onClick={onBack} title="Back to list"><ArrowLeft size={18} /></Button>
           <span style={{ fontSize: '13px', fontWeight: 600 }}>Edit Block</span>
           <button className={clsx(s.btn, s.btnPrimary, s.btnSmall)} onClick={handleSave} type="button"><Check size={12} /> Save</button>
         </div>
       )}
       {!compact && (
         <div className={s.header}>
-          <button className={s.iconBtn} onClick={onBack} title="Back to list" type="button"><ArrowLeft size={18} /></button>
+          <Button size="icon-sm" variant="ghost" onClick={onBack} title="Back to list"><ArrowLeft size={18} /></Button>
           <h3 className={s.title}>Edit Block</h3>
           <div style={{ flex: 1 }} />
           <button className={clsx(s.btn, s.btnPrimary)} onClick={handleSave} type="button"><Check size={14} /> Save</button>
@@ -447,10 +449,7 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', cursor: 'pointer' }}>
-              <input type="checkbox" checked={isLocked} onChange={e => setIsLocked(e.target.checked)} />
-              <Lock size={14} /> Lock block (prevent accidental edits)
-            </label>
+            <Toggle.Checkbox checked={isLocked} onChange={setIsLocked} label={<><Lock size={14} /> Lock block (prevent accidental edits)</>} />
           </div>
 
           <div className={s.formGroup}>
@@ -524,9 +523,9 @@ function PresetSelector({ registry, activePresetId, onSelect, onCreate, onDuplic
       </select>
 
       <div style={{ position: 'relative' }}>
-        <button className={s.iconBtn} onClick={() => setShowMenu(!showMenu)} title="More options" type="button">
+        <Button size="icon-sm" variant="ghost" onClick={() => setShowMenu(!showMenu)} title="More options">
           <MoreVertical size={16} />
-        </button>
+        </Button>
         {showMenu && (
           <div className={s.dropdownMenu} style={{ top: '100%', right: 0, minWidth: '160px' }}>
             <MenuButton icon={<Plus size={14} />} label="New Preset" onClick={() => { setShowCreate(true); setShowMenu(false) }} />
@@ -786,10 +785,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
           <hr className={s.menuDivider} style={{ margin: '8px 0 4px' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 0 4px' }}>
             <span className={s.samplerLabel}>Custom Body</span>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!body.enabled} onChange={handleToggleCustomBody} />
-              Enabled
-            </label>
+            <Toggle.Checkbox checked={!!body.enabled} onChange={handleToggleCustomBody} label="Enabled" />
           </div>
           <div style={body.enabled ? {} : { opacity: 0.35, pointerEvents: 'none' as const }}>
             <textarea
@@ -907,14 +903,8 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
             <span className={s.settingsHint}>Claude only — prefill when impersonating</span>
           </div>
           <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.continuePrefill ?? defaults.continuePrefill)} onChange={e => handleChange('continuePrefill', e.target.checked)} />
-              Continue Prefill
-            </label>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.squashSystemMessages ?? defaults.squashSystemMessages)} onChange={e => handleChange('squashSystemMessages', e.target.checked)} />
-              Squash System Messages
-            </label>
+            <Toggle.Checkbox checked={!!(settings.continuePrefill ?? defaults.continuePrefill)} onChange={v => handleChange('continuePrefill', v)} label="Continue Prefill" />
+            <Toggle.Checkbox checked={!!(settings.squashSystemMessages ?? defaults.squashSystemMessages)} onChange={v => handleChange('squashSystemMessages', v)} label="Squash System Messages" />
           </div>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
@@ -932,26 +922,11 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
           </div>
           <hr className={s.menuDivider} />
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.useSystemPrompt ?? defaults.useSystemPrompt)} onChange={e => handleChange('useSystemPrompt', e.target.checked)} />
-              Use System Prompt
-            </label>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.enableWebSearch ?? defaults.enableWebSearch)} onChange={e => handleChange('enableWebSearch', e.target.checked)} />
-              Enable Web Search
-            </label>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.sendInlineMedia ?? defaults.sendInlineMedia)} onChange={e => handleChange('sendInlineMedia', e.target.checked)} />
-              Send Inline Media
-            </label>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.enableFunctionCalling ?? defaults.enableFunctionCalling)} onChange={e => handleChange('enableFunctionCalling', e.target.checked)} />
-              Enable Function Calling
-            </label>
-            <label className={s.checkboxLabel} title="Request token usage data from the provider and attach it to the message">
-              <input type="checkbox" className={s.checkbox} checked={!!(settings.includeUsage ?? defaults.includeUsage)} onChange={e => handleChange('includeUsage', e.target.checked)} />
-              Include Usage
-            </label>
+            <Toggle.Checkbox checked={!!(settings.useSystemPrompt ?? defaults.useSystemPrompt)} onChange={v => handleChange('useSystemPrompt', v)} label="Use System Prompt" />
+            <Toggle.Checkbox checked={!!(settings.enableWebSearch ?? defaults.enableWebSearch)} onChange={v => handleChange('enableWebSearch', v)} label="Enable Web Search" />
+            <Toggle.Checkbox checked={!!(settings.sendInlineMedia ?? defaults.sendInlineMedia)} onChange={v => handleChange('sendInlineMedia', v)} label="Send Inline Media" />
+            <Toggle.Checkbox checked={!!(settings.enableFunctionCalling ?? defaults.enableFunctionCalling)} onChange={v => handleChange('enableFunctionCalling', v)} label="Enable Function Calling" />
+            <Toggle.Checkbox checked={!!(settings.includeUsage ?? defaults.includeUsage)} onChange={v => handleChange('includeUsage', v)} label="Include Usage" />
           </div>
         </div>
       )}
@@ -1032,11 +1007,7 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
             <span className={s.settingsHint}>Appended to the request stop sequences</span>
           </div>
           <div className={s.settingsField}>
-            <label className={s.checkboxLabel}>
-              <input type="checkbox" className={s.checkbox} checked={collapseMessages} onChange={e => onSave({ collapseMessages: e.target.checked })} />
-              Collapse into single user message
-            </label>
-            <span className={s.settingsHint}>Merges all prompt blocks and chat history into one user message. Use with "Names in Messages: In Content" for turn separation.</span>
+            <Toggle.Checkbox checked={collapseMessages} onChange={v => onSave({ collapseMessages: v })} label="Collapse into single user message" hint="Merges all prompt blocks and chat history into one user message. Use with &quot;Names in Messages: In Content&quot; for turn separation." />
           </div>
         </div>
       )}

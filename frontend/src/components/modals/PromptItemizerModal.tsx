@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
-import { X, ChevronRight, Copy, Check, Code } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { ChevronRight, Copy, Check, Code } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { generateApi } from '@/api/generate'
 import type { BreakdownCacheEntry } from '@/types/store'
@@ -57,25 +58,6 @@ export default function PromptItemizerModal() {
       .finally(() => setLoading(false))
   }, [messageId, breakdownCache, cacheBreakdown])
 
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeModal()
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
-    }
-  }, [closeModal])
-
-  const mouseDownTargetRef = useRef<EventTarget | null>(null)
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => { if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) closeModal() },
-    [closeModal],
-  )
-
   const toggleGroup = (label: string) => {
     setOpenGroups((prev) => {
       const next = new Set(prev)
@@ -96,24 +78,8 @@ export default function PromptItemizerModal() {
   const sidecarGroup = groups.find((g) => g.label === 'Sidecar (Lumi Pipeline)')
   const mainGroups = groups.filter((g) => g.label !== 'Sidecar (Lumi Pipeline)')
 
-  return createPortal(
-    <AnimatePresence>
-      <motion.div
-        className={styles.backdrop}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        onMouseDown={(e) => { mouseDownTargetRef.current = e.target }}
-        onClick={handleBackdropClick}
-      >
-        <motion.div
-          className={styles.modal}
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          transition={{ duration: 0.15 }}
-          onClick={(e) => e.stopPropagation()}
-        >
+  return (
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 94vw, min(900px, var(--lumiverse-content-max-width, 900px)))" zIndex={1000} className={styles.modal}>
           <div className={styles.header}>
             <h2 className={styles.title}>Prompt Breakdown</h2>
             {data && (
@@ -124,9 +90,7 @@ export default function PromptItemizerModal() {
                 )}
               </>
             )}
-            <button type="button" className={styles.closeBtn} onClick={closeModal}>
-              <X size={15} />
-            </button>
+            <CloseButton onClick={closeModal} iconSize={15} />
           </div>
 
           <div className={styles.body}>
@@ -181,19 +145,15 @@ export default function PromptItemizerModal() {
                 </span>
               )}
               <div className={styles.footerSpacer} />
-              <button type="button" className={styles.footerBtn} onClick={() => setShowRaw(!showRaw)}>
-                <Code size={12} /> {showRaw ? 'Visual' : 'Raw'}
-              </button>
-              <button type="button" className={styles.footerBtn} onClick={handleCopy}>
-                {copied ? <Check size={12} /> : <Copy size={12} />}
+              <Button variant="ghost" size="sm" icon={<Code size={12} />} onClick={() => setShowRaw(!showRaw)}>
+                {showRaw ? 'Visual' : 'Raw'}
+              </Button>
+              <Button variant="ghost" size="sm" icon={copied ? <Check size={12} /> : <Copy size={12} />} onClick={handleCopy}>
                 {copied ? 'Copied' : 'Copy'}
-              </button>
+              </Button>
             </div>
           )}
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>,
-    document.body,
+    </ModalShell>
   )
 }
 

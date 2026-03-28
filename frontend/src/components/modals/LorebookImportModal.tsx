@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
-import { X } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
 import { worldBooksApi } from '@/api/world-books'
 import type { LorebookInfo } from './BulkImportProgressModal'
 import styles from './LorebookImportModal.module.css'
@@ -62,84 +63,61 @@ export default function LorebookImportModal({
     }
   }, [lorebooks, selected, noneSelected, onClose])
 
-  return createPortal(
-    <AnimatePresence>
-      {isOpen && lorebooks.length > 0 && (
-        <motion.div
-          className={styles.overlay}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
+  return (
+    <ModalShell isOpen={isOpen && lorebooks.length > 0} onClose={onClose} maxWidth={580}>
+      <div className={styles.header}>
+        <div className={styles.headerLeft}>
+          <span className={styles.title}>Embedded Lorebooks</span>
+          <span className={styles.badge}>{lorebooks.length}</span>
+        </div>
+        <CloseButton onClick={onClose} />
+      </div>
+
+      <div className={styles.body}>
+        <div className={styles.selectAll}>
+          <Toggle.Checkbox
+            checked={allSelected}
+            onChange={toggleAll}
+            label="Select All"
+          />
+        </div>
+
+        <div className={styles.lorebookList}>
+          {lorebooks.map((lb) => (
+            <label key={lb.characterId} className={styles.lorebookItem}>
+              <input
+                type="checkbox"
+                checked={selected.has(lb.characterId)}
+                onChange={() => toggle(lb.characterId)}
+              />
+              <div className={styles.lorebookInfo}>
+                <span className={styles.lorebookName}>{lb.lorebookName}</span>
+                <span className={styles.lorebookMeta}>from {lb.characterName}</span>
+              </div>
+              <span className={styles.entryBadge}>
+                {lb.entryCount} {lb.entryCount === 1 ? 'entry' : 'entries'}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className={styles.footer}>
+        <Button variant="ghost" onClick={onClose}>
+          Skip
+        </Button>
+        <Button
+          variant="primary"
+          disabled={noneSelected || importing}
+          onClick={handleImport}
         >
-          <motion.div
-            className={styles.modal}
-            initial={{ opacity: 0, scale: 0.95, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 10 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-          >
-            <div className={styles.header}>
-              <div className={styles.headerLeft}>
-                <span className={styles.title}>Embedded Lorebooks</span>
-                <span className={styles.badge}>{lorebooks.length}</span>
-              </div>
-              <button type="button" className={styles.closeBtn} onClick={onClose}>
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className={styles.body}>
-              <label className={styles.selectAll}>
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  onChange={toggleAll}
-                />
-                Select All
-              </label>
-
-              <div className={styles.lorebookList}>
-                {lorebooks.map((lb) => (
-                  <label key={lb.characterId} className={styles.lorebookItem}>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(lb.characterId)}
-                      onChange={() => toggle(lb.characterId)}
-                    />
-                    <div className={styles.lorebookInfo}>
-                      <span className={styles.lorebookName}>{lb.lorebookName}</span>
-                      <span className={styles.lorebookMeta}>from {lb.characterName}</span>
-                    </div>
-                    <span className={styles.entryBadge}>
-                      {lb.entryCount} {lb.entryCount === 1 ? 'entry' : 'entries'}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div className={styles.footer}>
-              <button type="button" className={styles.skipBtn} onClick={onClose}>
-                Skip
-              </button>
-              <button
-                type="button"
-                className={styles.importBtn}
-                disabled={noneSelected || importing}
-                onClick={handleImport}
-              >
-                {importing
-                  ? 'Importing...'
-                  : allSelected
-                    ? 'Import All'
-                    : `Import ${selected.size} Selected`}
-              </button>
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body
+          {importing
+            ? 'Importing...'
+            : allSelected
+              ? 'Import All'
+              : `Import ${selected.size} Selected`}
+        </Button>
+      </div>
+    </ModalShell>
   )
 }

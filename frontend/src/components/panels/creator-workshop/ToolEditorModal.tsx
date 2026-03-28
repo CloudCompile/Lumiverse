@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Plus, Trash2, Wrench, Code, Settings } from 'lucide-react'
+import { Plus, Trash2, Wrench, Code, Settings } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { packsApi } from '@/api/packs'
-import { FormField, TextInput, TextArea, Select, EditorSection } from '@/components/shared/FormComponents'
+import { FormField, TextInput, TextArea, Select, EditorSection, Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { LoomTool, CreateLoomToolInput } from '@/types/api'
 import clsx from 'clsx'
@@ -144,93 +145,89 @@ export default function ToolEditorModal() {
 
   const canSave = toolName.trim() && displayName.trim() && prompt.trim()
 
-  return createPortal(
+  return (
     <>
-      <div className={styles.overlay} onClick={(e) => e.target === e.currentTarget && handleClose()}>
-        <div className={styles.modal}>
-          <div className={styles.header}>
-            <h3 className={styles.title}>{editingItem ? 'Edit Tool' : 'Create Tool'}</h3>
-            <button type="button" className={styles.closeBtn} onClick={handleClose}>
-              <X size={16} />
-            </button>
-          </div>
+      <ModalShell isOpen onClose={handleClose} maxWidth={720} maxHeight="90vh" closeOnEscape={false} className={styles.modal}>
+        <div className={styles.header}>
+          <h3 className={styles.title}>{editingItem ? 'Edit Tool' : 'Create Tool'}</h3>
+          <CloseButton onClick={handleClose} />
+        </div>
 
-          <div className={styles.body}>
-            <EditorSection Icon={Wrench} title="Tool Details">
-              <div className={styles.row}>
-                <div className={styles.rowHalf}>
-                  <FormField label="Tool Name" required hint="Internal identifier (snake_case)">
-                    <TextInput value={toolName} onChange={setToolName} placeholder="my_tool" autoFocus />
-                  </FormField>
-                </div>
-                <div className={styles.rowHalf}>
-                  <FormField label="Display Name" required>
-                    <TextInput value={displayName} onChange={setDisplayName} placeholder="My Tool" />
-                  </FormField>
-                </div>
+        <div className={styles.body}>
+          <EditorSection Icon={Wrench} title="Tool Details">
+            <div className={styles.row}>
+              <div className={styles.rowHalf}>
+                <FormField label="Tool Name" required hint="Internal identifier (snake_case)">
+                  <TextInput value={toolName} onChange={setToolName} placeholder="my_tool" autoFocus />
+                </FormField>
               </div>
+              <div className={styles.rowHalf}>
+                <FormField label="Display Name" required>
+                  <TextInput value={displayName} onChange={setDisplayName} placeholder="My Tool" />
+                </FormField>
+              </div>
+            </div>
 
-              <FormField label="Description">
-                <TextInput value={description} onChange={setDescription} placeholder="What this tool does..." />
-              </FormField>
+            <FormField label="Description">
+              <TextInput value={description} onChange={setDescription} placeholder="What this tool does..." />
+            </FormField>
 
-              <FormField label="Author">
-                <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
-              </FormField>
-            </EditorSection>
+            <FormField label="Author">
+              <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
+            </FormField>
+          </EditorSection>
 
-            <EditorSection Icon={Code} title="Tool Prompt">
-              <FormField label="Prompt" required hint="Instructions the AI receives when using this tool">
-                <TextArea value={prompt} onChange={setPrompt} placeholder="You are a tool that..." rows={5} />
-              </FormField>
-            </EditorSection>
+          <EditorSection Icon={Code} title="Tool Prompt">
+            <FormField label="Prompt" required hint="Instructions the AI receives when using this tool">
+              <TextArea value={prompt} onChange={setPrompt} placeholder="You are a tool that..." rows={5} />
+            </FormField>
+          </EditorSection>
 
-            <EditorSection Icon={Settings} title="Input Schema" defaultExpanded={schemaProps.length > 0}>
-              {schemaProps.map((prop, i) => (
-                <div key={i} className={styles.schemaRow}>
-                  <div className={styles.schemaFields}>
-                    <div className={styles.schemaFieldRow}>
-                      <TextInput value={prop.name} onChange={(v) => updateProperty(i, 'name', v)} placeholder="Property name" />
-                      <Select value={prop.type} onChange={(v) => updateProperty(i, 'type', v)} options={TYPE_OPTIONS} />
-                    </div>
-                    <TextInput value={prop.description} onChange={(v) => updateProperty(i, 'description', v)} placeholder="Description" />
+          <EditorSection Icon={Settings} title="Input Schema" defaultExpanded={schemaProps.length > 0}>
+            {schemaProps.map((prop, i) => (
+              <div key={i} className={styles.schemaRow}>
+                <div className={styles.schemaFields}>
+                  <div className={styles.schemaFieldRow}>
+                    <TextInput value={prop.name} onChange={(v) => updateProperty(i, 'name', v)} placeholder="Property name" />
+                    <Select value={prop.type} onChange={(v) => updateProperty(i, 'type', v)} options={TYPE_OPTIONS} />
                   </div>
-                  <button type="button" className={styles.schemaRemoveBtn} onClick={() => removeProperty(i)}>
-                    <Trash2 size={14} />
-                  </button>
+                  <TextInput value={prop.description} onChange={(v) => updateProperty(i, 'description', v)} placeholder="Description" />
                 </div>
-              ))}
-              <button type="button" className={styles.addPropertyBtn} onClick={addProperty}>
-                <Plus size={14} /> Add Property
-              </button>
-            </EditorSection>
-
-            <EditorSection Icon={Settings} title="Result Routing" defaultExpanded={false}>
-              <FormField label="Result Variable" hint="Variable name to store the tool's output">
-                <TextInput value={resultVariable} onChange={setResultVariable} placeholder="result_var" />
-              </FormField>
-
-              <div className={styles.toggleRow}>
-                <span className={styles.toggleLabel}>Store in deliberation</span>
-                <button
-                  type="button"
-                  className={clsx(styles.toggle, storeInDeliberation && styles.toggleActive)}
-                  onClick={() => setStoreInDeliberation(!storeInDeliberation)}
-                >
-                  <span className={styles.toggleKnob} />
+                <button type="button" className={styles.schemaRemoveBtn} onClick={() => removeProperty(i)}>
+                  <Trash2 size={14} />
                 </button>
               </div>
-            </EditorSection>
-          </div>
-
-          <div className={styles.footer}>
-            <button type="button" className={styles.btnCancel} onClick={handleClose}>Cancel</button>
-            <button type="button" className={styles.btnSave} onClick={handleSave} disabled={!canSave || saving}>
-              {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+            ))}
+            <button type="button" className={styles.addPropertyBtn} onClick={addProperty}>
+              <Plus size={14} /> Add Property
             </button>
-          </div>
+          </EditorSection>
+
+          <EditorSection Icon={Settings} title="Result Routing" defaultExpanded={false}>
+            <FormField label="Result Variable" hint="Variable name to store the tool's output">
+              <TextInput value={resultVariable} onChange={setResultVariable} placeholder="result_var" />
+            </FormField>
+
+            <div className={styles.toggleRow}>
+              <span className={styles.toggleLabel}>Store in deliberation</span>
+              <button
+                type="button"
+                className={clsx(styles.toggle, storeInDeliberation && styles.toggleActive)}
+                onClick={() => setStoreInDeliberation(!storeInDeliberation)}
+              >
+                <span className={styles.toggleKnob} />
+              </button>
+            </div>
+          </EditorSection>
         </div>
-      </div>
+
+        <div className={styles.footer}>
+          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="primary" onClick={handleSave} disabled={!canSave || saving}>
+            {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+          </Button>
+        </div>
+      </ModalShell>
 
       {showDiscard && (
         <ConfirmationModal
@@ -248,7 +245,6 @@ export default function ToolEditorModal() {
           zIndex={10003}
         />
       )}
-    </>,
-    document.body
+    </>
   )
 }

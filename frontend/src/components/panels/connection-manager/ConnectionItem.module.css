@@ -90,44 +90,12 @@
   flex-shrink: 0;
 }
 
-.actionBtn {
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.actionBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
-
-.deleteBtn:hover {
-  color: var(--lumiverse-error);
-}
-
 .testSuccess {
   color: var(--lumiverse-success) !important;
 }
 
 .testFail {
   color: var(--lumiverse-error) !important;
-}
-
-.spinner {
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 
 .testMessage {

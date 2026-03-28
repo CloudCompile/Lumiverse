@@ -16,12 +16,19 @@ const pkceStateMap = new Map<string, PKCEState>();
 const PKCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // Sweep expired entries periodically
-setInterval(() => {
+let _pkceSweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of pkceStateMap) {
     if (now > entry.expiresAt) pkceStateMap.delete(key);
   }
 }, 60_000);
+
+export function stopPkceSweep(): void {
+  if (_pkceSweepTimer) {
+    clearInterval(_pkceSweepTimer);
+    _pkceSweepTimer = null;
+  }
+}
 
 // --- Callback route (unauthenticated — placed before requireAuth) ---
 

@@ -71,3 +71,58 @@ if (env.trustAnyOrigin) {
 } else {
   console.log(`[Auth] Trusted origins:\n${env.trustedOrigins.map((o) => `  • ${o}`).join("\n")}`);
 }
+
+// --- Graceful shutdown ---
+let shutdownInProgress = false;
+
+async function gracefulShutdown(signal: string) {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+  console.log(`[Shutdown] Received ${signal}, shutting down...`);
+
+  // 1. Stop accepting new connections
+  server.stop(true);
+
+  // 2. Abort all active LLM generations
+  const { stopAllGenerations, stopGenerationSweep } = await import("./services/generate.service");
+  stopAllGenerations();
+  stopGenerationSweep();
+
+  // 3. Disconnect LumiHub WebSocket client
+  try {
+    const { getLumiHubClient } = await import("./lumihub/client");
+    getLumiHubClient().disconnect();
+  } catch {}
+
+  // 4. Stop all Spindle extension workers
+  const { stopAllExtensions } = await import("./spindle/lifecycle");
+  await stopAllExtensions().catch((err) =>
+    console.error("[Shutdown] Extension stop error:", err)
+  );
+
+  // 5. Clear all interval timers
+  const { stopTicketSweep } = await import("./ws/tickets");
+  const { stopOAuthStateSweep } = await import("./spindle/oauth-state");
+  const { stopPkceSweep } = await import("./routes/lumihub.routes");
+  const { stopQueryCacheCleanup } = await import("./services/vectorization-queue.service");
+  const { stopVersionCheckCleanup } = await import("./services/embeddings.service");
+  stopTicketSweep();
+  stopOAuthStateSweep();
+  stopPkceSweep();
+  stopQueryCacheCleanup();
+  stopVersionCheckCleanup();
+
+  // 6. Release cached prepared statements
+  const { clearStmtCache } = await import("./services/pagination");
+  clearStmtCache();
+
+  // 7. Close database (triggers WAL checkpoint)
+  const { closeDatabase } = await import("./db/connection");
+  closeDatabase();
+
+  console.log("[Shutdown] Cleanup complete.");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

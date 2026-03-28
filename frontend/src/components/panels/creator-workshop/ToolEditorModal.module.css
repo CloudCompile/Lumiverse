@@ -1,25 +1,5 @@
-.overlay {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  background: var(--lumiverse-modal-backdrop);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  padding: 20px;
-}
-
 .modal {
   background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 10px;
-  width: 100%;
-  max-width: clamp(340px, 94vw, min(720px, var(--lumiverse-content-max-width, 720px)));
-  display: flex;
-  flex-direction: column;
-  max-height: 90vh;
-  overflow: hidden;
 }
 
 .header {
@@ -34,25 +14,6 @@
 .title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--lumiverse-text);
-}
-
-.closeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  border: none;
-  background: transparent;
-  color: var(--lumiverse-text-muted);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
   color: var(--lumiverse-text);
 }
 
@@ -197,37 +158,3 @@
   flex-shrink: 0;
 }
 
-.btnCancel {
-  padding: 7px 16px;
-  border-radius: 6px;
-  border: 1px solid var(--lumiverse-border);
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.btnCancel:hover {
-  background: var(--lumiverse-fill-subtle);
-}
-
-.btnSave {
-  padding: 7px 16px;
-  border-radius: 6px;
-  border: none;
-  background: var(--lumiverse-primary);
-  color: var(--lumiverse-primary-contrast, #fff);
-  font-size: 13px;
-  cursor: pointer;
-  transition: opacity var(--lumiverse-transition-fast);
-}
-
-.btnSave:hover {
-  opacity: 0.9;
-}
-
-.btnSave:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}

@@ -68,8 +68,19 @@ export interface ImageGenResult {
   imageUrl?: string;
 }
 
+const SCENE_CACHE_MAX = 200;
 const sceneCache = new Map<string, SceneData>();
 const SCENE_FIELDS: Array<keyof SceneData> = ["environment", "time_of_day", "weather", "mood", "focal_detail"];
+
+function sceneCacheSet(key: string, value: SceneData): void {
+  // Delete first so re-insertion moves key to end (most-recently-used)
+  sceneCache.delete(key);
+  sceneCache.set(key, value);
+  if (sceneCache.size > SCENE_CACHE_MAX) {
+    const oldest = sceneCache.keys().next().value;
+    if (oldest !== undefined) sceneCache.delete(oldest);
+  }
+}
 
 // --- Public API ---
 
@@ -179,7 +190,7 @@ export async function generateSceneBackground(
     }
   }
 
-  sceneCache.set(cacheKey, scene);
+  sceneCacheSet(cacheKey, scene);
   return {
     generated: true,
     scene,

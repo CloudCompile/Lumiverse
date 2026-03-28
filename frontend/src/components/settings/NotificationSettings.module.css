@@ -80,14 +80,8 @@
 /* ── Toggle rows inside sections ─────────────────────────────────── */
 
 .toggleRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   padding: 9px 14px;
   border-top: 1px solid var(--lumiverse-border);
-  font-size: 12px;
-  color: var(--lumiverse-text);
-  cursor: pointer;
   transition: background var(--lumiverse-transition-fast);
 }
 
@@ -95,30 +89,9 @@
   background: var(--lumiverse-fill-subtle);
 }
 
-.toggleRow input[type="checkbox"] {
-  accent-color: var(--lumiverse-primary);
-  cursor: pointer;
-}
-
-.toggleRow input:disabled {
-  opacity: 0.35;
-}
-
 .toggleRowDisabled {
   opacity: 0.45;
   pointer-events: none;
-}
-
-.toggleLabel {
-  flex: 1;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--lumiverse-text);
-}
-
-.toggleHint {
-  font-size: 11px;
-  color: var(--lumiverse-text-dim);
 }
 
 /* ── Device list rows ────────────────────────────────────────────── */

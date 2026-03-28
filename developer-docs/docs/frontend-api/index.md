@@ -33,7 +33,7 @@ export function teardown() {
 |----------|-----------|-------------|
 | [DOM Helper](dom-helper.md) | Free | Inject sanitized HTML and CSS |
 | [Events](events.md) | Free | Subscribe to WebSocket events, emit custom events |
-| [UI Placement](ui-placement.md) | Varies | Drawer tabs, float widgets, dock panels, context menus, input bar actions |
+| [UI Placement](ui-placement.md) | Varies | Drawer tabs, float widgets, dock panels, modals, context menus, input bar actions |
 | [Backend Communication](backend-communication.md) | Free | Send/receive messages to/from backend worker |
 | [Message Tags](message-tags.md) | Free | Intercept custom XML tags in chat messages |
 | [File Uploads](file-uploads.md) | Free | Open file picker and read selected files |

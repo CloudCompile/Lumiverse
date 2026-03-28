@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { ChevronRight, Hash, Loader2 } from 'lucide-react'
+import { ChevronRight, Hash } from 'lucide-react'
+import { Spinner } from '@/components/shared/Spinner'
+import { Toggle } from '@/components/shared/Toggle'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import clsx from 'clsx'
 import type { WorldBookEntry } from '@/types/api'
@@ -180,7 +182,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
               disabled={tokenCounting || !content.trim()}
               title="Estimate token count using current model's tokenizer"
             >
-              {tokenCounting ? <Loader2 size={11} className={styles.tokenCountSpin} /> : <Hash size={11} />}
+              {tokenCounting ? <Spinner size={11} fast /> : <Hash size={11} />}
               {tokenCount != null
                 ? <span className={styles.tokenCountValue}>{tokenCountApprox ? '~' : ''}{tokenCount.toLocaleString()} tokens</span>
                 : 'Count tokens'}
@@ -252,72 +254,46 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
       <span className={styles.sectionHeading}>Activation</span>
       <div className={styles.entryFieldGroup}>
         <div className={styles.toggleRow}>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.selective}
-              onChange={() => onImmediateUpdate(entry.id, { selective: !entry.selective })}
-            />
-            Selective
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.constant}
-              onChange={() => onImmediateUpdate(entry.id, { constant: !entry.constant })}
-            />
-            Constant
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.disabled}
-              onChange={() => onImmediateUpdate(entry.id, { disabled: !entry.disabled })}
-            />
-            Disabled
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.case_sensitive}
-              onChange={() => onImmediateUpdate(entry.id, { case_sensitive: !entry.case_sensitive })}
-            />
-            Case Sensitive
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.match_whole_words}
-              onChange={() =>
-                onImmediateUpdate(entry.id, { match_whole_words: !entry.match_whole_words })
-              }
-            />
-            Match Whole Words
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.use_regex}
-              onChange={() => onImmediateUpdate(entry.id, { use_regex: !entry.use_regex })}
-            />
-            Use Regex
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.use_probability}
-              onChange={() => onImmediateUpdate(entry.id, { use_probability: !entry.use_probability })}
-            />
-            Use Probability
-          </label>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.vectorized}
-              onChange={() => onImmediateUpdate(entry.id, { vectorized: !entry.vectorized })}
-            />
-            Use for semantic activation
-          </label>
+          <Toggle.Checkbox
+            checked={entry.selective}
+            onChange={() => onImmediateUpdate(entry.id, { selective: !entry.selective })}
+            label="Selective"
+          />
+          <Toggle.Checkbox
+            checked={entry.constant}
+            onChange={() => onImmediateUpdate(entry.id, { constant: !entry.constant })}
+            label="Constant"
+          />
+          <Toggle.Checkbox
+            checked={entry.disabled}
+            onChange={() => onImmediateUpdate(entry.id, { disabled: !entry.disabled })}
+            label="Disabled"
+          />
+          <Toggle.Checkbox
+            checked={entry.case_sensitive}
+            onChange={() => onImmediateUpdate(entry.id, { case_sensitive: !entry.case_sensitive })}
+            label="Case Sensitive"
+          />
+          <Toggle.Checkbox
+            checked={entry.match_whole_words}
+            onChange={() => onImmediateUpdate(entry.id, { match_whole_words: !entry.match_whole_words })}
+            label="Match Whole Words"
+          />
+          <Toggle.Checkbox
+            checked={entry.use_regex}
+            onChange={() => onImmediateUpdate(entry.id, { use_regex: !entry.use_regex })}
+            label="Use Regex"
+          />
+          <Toggle.Checkbox
+            checked={entry.use_probability}
+            onChange={() => onImmediateUpdate(entry.id, { use_probability: !entry.use_probability })}
+            label="Use Probability"
+          />
+          <Toggle.Checkbox
+            checked={entry.vectorized}
+            onChange={() => onImmediateUpdate(entry.id, { vectorized: !entry.vectorized })}
+            label="Use for semantic activation"
+          />
         </div>
         <div className={styles.vectorStatusRow}>
           <span className={clsx(styles.vectorStatusBadge, vectorStatusClass)}>
@@ -430,36 +406,21 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
       {recursionOpen && (
         <div className={styles.entryFieldGroup}>
           <div className={styles.toggleRow}>
-            <label className={styles.toggleLabel}>
-              <input
-                type="checkbox"
-                checked={entry.prevent_recursion}
-                onChange={() =>
-                  onImmediateUpdate(entry.id, { prevent_recursion: !entry.prevent_recursion })
-                }
-              />
-              Prevent Recursion
-            </label>
-            <label className={styles.toggleLabel}>
-              <input
-                type="checkbox"
-                checked={entry.exclude_recursion}
-                onChange={() =>
-                  onImmediateUpdate(entry.id, { exclude_recursion: !entry.exclude_recursion })
-                }
-              />
-              Exclude Recursion
-            </label>
-            <label className={styles.toggleLabel}>
-              <input
-                type="checkbox"
-                checked={entry.delay_until_recursion}
-                onChange={() =>
-                  onImmediateUpdate(entry.id, { delay_until_recursion: !entry.delay_until_recursion })
-                }
-              />
-              Delay Until Recursion
-            </label>
+            <Toggle.Checkbox
+              checked={entry.prevent_recursion}
+              onChange={() => onImmediateUpdate(entry.id, { prevent_recursion: !entry.prevent_recursion })}
+              label="Prevent Recursion"
+            />
+            <Toggle.Checkbox
+              checked={entry.exclude_recursion}
+              onChange={() => onImmediateUpdate(entry.id, { exclude_recursion: !entry.exclude_recursion })}
+              label="Exclude Recursion"
+            />
+            <Toggle.Checkbox
+              checked={entry.delay_until_recursion}
+              onChange={() => onImmediateUpdate(entry.id, { delay_until_recursion: !entry.delay_until_recursion })}
+              label="Delay Until Recursion"
+            />
           </div>
         </div>
       )}
@@ -496,16 +457,11 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
               />
             </div>
           </div>
-          <label className={styles.toggleLabel}>
-            <input
-              type="checkbox"
-              checked={entry.group_override}
-              onChange={() =>
-                onImmediateUpdate(entry.id, { group_override: !entry.group_override })
-              }
-            />
-            Group Override
-          </label>
+          <Toggle.Checkbox
+            checked={entry.group_override}
+            onChange={() => onImmediateUpdate(entry.id, { group_override: !entry.group_override })}
+            label="Group Override"
+          />
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { X } from 'lucide-react'
-import { Loader2 } from 'lucide-react'
+import { Spinner } from '@/components/shared/Spinner'
+import { CloseButton } from '@/components/shared/CloseButton'
 import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
@@ -104,14 +104,7 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
       className={clsx(styles.panelOuter, side === 'left' ? styles.panelOuterLeft : styles.panelOuterRight)}
     >
       <div className={styles.panel}>
-        <button
-          onClick={togglePortraitPanel}
-          type="button"
-          className={styles.closeBtn}
-          aria-label="Close portrait panel"
-        >
-          <X size={14} />
-        </button>
+        <CloseButton onClick={togglePortraitPanel} iconSize={14} className={styles.closeBtn} />
 
         <AvatarSwitcherPopover chatId={activeChatId || ''}>
           <div
@@ -145,7 +138,7 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
             {/* Loading spinner during image fetch */}
             {imgLoading && displayedSrc && (
               <div className={styles.avatarSpinner}>
-                <Loader2 size={20} strokeWidth={1.5} />
+                <Spinner size={20} />
               </div>
             )}
           </div>

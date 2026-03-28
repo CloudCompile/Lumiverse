@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useCallback } from 'react'
 import { useParams } from 'react-router'
-import { UserRound } from 'lucide-react'
+import { UserRound, ListChecks } from 'lucide-react'
 import { useStore } from '@/store'
 import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
+import { loadoutsApi } from '@/api/loadouts'
 import { charactersApi } from '@/api/characters'
 import { imagesApi } from '@/api/images'
 import { expressionsApi } from '@/api/expressions'
 import type { WallpaperRef } from '@/types/store'
 import MessageList from './MessageList'
+import MessageSelectBar from './MessageSelectBar'
 import InputArea from './InputArea'
 import ScrollToBottom from './ScrollToBottom'
 import CouncilPill from './CouncilPill'
@@ -34,6 +36,11 @@ export default function ChatView() {
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const messageSelectMode = useStore((s) => s.messageSelectMode)
+  const setMessageSelectMode = useStore((s) => s.setMessageSelectMode)
+  const toggleSelectMode = useCallback(() => {
+    setMessageSelectMode(!messageSelectMode)
+  }, [messageSelectMode, setMessageSelectMode])
 
   const innerStyle = useMemo(() => {
     switch (chatWidthMode) {
@@ -76,6 +83,16 @@ export default function ChatView() {
             }
           }
         }
+
+        // Auto-apply loadout if a binding exists for this chat/character
+        try {
+          const resolved = await loadoutsApi.resolve(chatId)
+          if (resolved.loadout && !cancelled) {
+            const { applyLoadout } = useStore.getState()
+            await applyLoadout(resolved.loadout.id)
+            toast.info(`Applied loadout: ${resolved.loadout.name}`)
+          }
+        } catch { /* no loadout binding — that's fine */ }
 
         // Load per-chat wallpaper from metadata
         const wp = chat.metadata?.wallpaper as import('@/types/store').WallpaperRef | undefined
@@ -262,11 +279,22 @@ export default function ChatView() {
         )}
 
         <div className={styles.chatColumn}>
-          <div className={styles.chatColumnInner} style={innerStyle}>
+          <div className={styles.chatColumnInner} style={innerStyle} data-select-mode={messageSelectMode || undefined}>
+            <div className={styles.chatToolbar}>
+              <button
+                type="button"
+                className={clsx(styles.toolbarBtn, messageSelectMode && styles.toolbarBtnActive)}
+                onClick={toggleSelectMode}
+                title={messageSelectMode ? 'Exit selection mode' : 'Select messages'}
+              >
+                <ListChecks size={14} />
+              </button>
+            </div>
             <MessageList messages={messages} chatId={chatId} isStreaming={isStreaming} />
             <ScrollToBottom />
             <LumiPill />
             <CouncilPill />
+            {messageSelectMode && <MessageSelectBar chatId={chatId} />}
             <InputArea chatId={chatId} />
           </div>
         </div>

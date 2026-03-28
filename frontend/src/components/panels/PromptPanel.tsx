@@ -1,8 +1,10 @@
 import { useState, useCallback, type ReactNode } from 'react'
 import { Layers, Hand, Filter, Info, Edit2, Check, X, User, Wrench, Sparkles, BookOpen, Zap, ChevronRight } from 'lucide-react'
+import LoadoutSelector from './LoadoutSelector'
 import { useStore } from '@/store'
-import { EditorSection } from '@/components/shared/FormComponents'
+import { Button, EditorSection } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
+import { Toggle } from '@/components/shared/Toggle'
 import LumiaSelector from '@/components/modals/LumiaSelector'
 import LoomSelector from '@/components/modals/LoomSelector'
 import type { SovereignHandSettings, ContextFilters } from '@/types/store'
@@ -12,7 +14,7 @@ import styles from './PromptPanel.module.css'
 
 /* ── Local sub-components ── */
 
-function Toggle({
+function ToggleRow({
   id,
   checked,
   onChange,
@@ -33,18 +35,7 @@ function Toggle({
         <span className={styles.toggleText}>{label}</span>
         {hint && <span className={styles.toggleHint}>{hint}</span>}
       </div>
-      <label className={styles.toggleSwitch}>
-        <input
-          type="checkbox"
-          id={id}
-          checked={checked}
-          onChange={(e) => onChange(e.target.checked)}
-          disabled={disabled}
-        />
-        <div className={clsx(styles.toggleTrack, checked && styles.toggleTrackOn)}>
-          <div className={styles.toggleThumb} />
-        </div>
-      </label>
+      <Toggle.Switch checked={checked} onChange={onChange} disabled={disabled} />
     </div>
   )
 }
@@ -94,7 +85,7 @@ function FilterItem({
 }) {
   return (
     <div className={styles.filterItem}>
-      <Toggle id={id} checked={enabled} onChange={onToggle} label={label} hint={hint} />
+      <ToggleRow id={id} checked={enabled} onChange={onToggle} label={label} hint={hint} />
       <Collapsible isOpen={enabled}>
         <div className={styles.filterDepthRow}>
           <span className={styles.filterDepthLabel}>{depthLabel || 'Keep in last N messages'}</span>
@@ -149,7 +140,7 @@ function FilterKeepOnlyToggle({
 }) {
   return (
     <div className={styles.filterModeBlock}>
-      <Toggle id={id} checked={checked} onChange={onChange} label={label} hint={hint} />
+      <ToggleRow id={id} checked={checked} onChange={onChange} label={label} hint={hint} />
     </div>
   )
 }
@@ -245,6 +236,8 @@ export default function PromptPanel() {
 
   return (
     <div className={styles.panel}>
+      <LoadoutSelector />
+
       {/* ── Lumia Selection ── */}
       <EditorSection Icon={User} title="Lumia Selection" defaultExpanded>
         <p className={styles.desc}>
@@ -290,7 +283,7 @@ export default function PromptPanel() {
 
         {/* Chimera Mode */}
         <div className={styles.modeOption}>
-          <Toggle
+          <ToggleRow
             id="chimera-mode"
             checked={chimeraMode}
             onChange={handleChimeraModeChange}
@@ -310,7 +303,7 @@ export default function PromptPanel() {
 
         {/* Council Mode */}
         <div className={styles.modeOption}>
-          <Toggle
+          <ToggleRow
             id="council-mode"
             checked={councilMode}
             onChange={handleCouncilModeChange}
@@ -334,7 +327,7 @@ export default function PromptPanel() {
           <div className={styles.quirksHeader}>
             <div className={styles.quirksHeaderLeft}>
               <span className={styles.quirksLabel}>Behavioral Quirks</span>
-              <Toggle
+              <ToggleRow
                 id="quirks-toggle"
                 checked={lumiaQuirksEnabled}
                 onChange={handleQuirksEnabledChange}
@@ -342,17 +335,16 @@ export default function PromptPanel() {
               />
             </div>
             {!isEditingQuirks && lumiaQuirksEnabled && (
-              <button
-                type="button"
-                className={styles.quirksEditBtn}
+              <Button
+                size="icon-sm"
+                variant="ghost"
                 onClick={() => {
                   setQuirksValue(lumiaQuirks)
                   setIsEditingQuirks(true)
                 }}
                 title="Edit quirks"
-              >
-                <Edit2 size={12} strokeWidth={1.5} />
-              </button>
+                icon={<Edit2 size={12} strokeWidth={1.5} />}
+              />
             )}
           </div>
           <p className={styles.quirksHint}>
@@ -369,16 +361,17 @@ export default function PromptPanel() {
                 rows={3}
               />
               <div className={styles.quirksActions}>
-                <button
-                  type="button"
-                  className={clsx(styles.quirksBtn, styles.quirksBtnPrimary)}
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Check size={12} strokeWidth={2} />}
                   onClick={handleQuirksSave}
                 >
-                  <Check size={12} strokeWidth={2} /> Save
-                </button>
-                <button type="button" className={styles.quirksBtn} onClick={handleQuirksCancel}>
-                  <X size={12} strokeWidth={2} /> Cancel
-                </button>
+                  Save
+                </Button>
+                <Button size="sm" icon={<X size={12} strokeWidth={2} />} onClick={handleQuirksCancel}>
+                  Cancel
+                </Button>
               </div>
             </div>
           ) : (
@@ -427,14 +420,14 @@ export default function PromptPanel() {
         <p className={styles.desc}>
           Enable Sovereign Hand integration to use advanced prompt manipulation features.
         </p>
-        <Toggle
+        <ToggleRow
           id="sovereign-hand"
           checked={sovereignEnabled}
           onChange={(v) => updateSovereignHand({ enabled: v })}
           label="Use Sovereign Hand Features"
           hint="Enables Sovereign Hand macros for advanced prompt control"
         />
-        <Toggle
+        <ToggleRow
           id="sovereign-exclude"
           checked={sovereignHand.excludeLastMessage}
           onChange={(v) => updateSovereignHand({ excludeLastMessage: v })}
@@ -442,7 +435,7 @@ export default function PromptPanel() {
           hint="When enabled, removes the last user message from the outgoing context"
           disabled={!sovereignEnabled}
         />
-        <Toggle
+        <ToggleRow
           id="sovereign-include"
           checked={sovereignHand.includeMessageInPrompt}
           onChange={(v) => updateSovereignHand({ includeMessageInPrompt: v })}

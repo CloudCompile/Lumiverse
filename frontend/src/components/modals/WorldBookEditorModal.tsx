@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion } from 'motion/react'
-import { X, Plus, Trash2, BookOpen, Upload, User, FileUp, Search } from 'lucide-react'
+import { Plus, Trash2, BookOpen, Upload, User, FileUp, Search } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Toggle } from '@/components/shared/Toggle'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { worldBooksApi } from '@/api/world-books'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -276,21 +277,12 @@ export default function WorldBookEditorModal() {
     setPostImportBook(result.world_book)
   }, [])
 
-  return createPortal(
-    <div className={styles.overlay} onClick={closeModal}>
-      <motion.div
-        className={styles.modal}
-        onClick={(e) => e.stopPropagation()}
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
-        transition={{ duration: 0.15 }}
-      >
+  return (
+    <>
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 92vw, min(1160px, var(--lumiverse-content-max-width, 1160px)))" zIndex={10000} className={styles.modal}>
         <div className={styles.header}>
           <h2 className={styles.title}>World Book Editor</h2>
-          <button type="button" className={styles.closeBtn} onClick={closeModal}>
-            <X size={16} />
-          </button>
+          <CloseButton onClick={closeModal} />
         </div>
 
         <div className={styles.body}>
@@ -454,14 +446,13 @@ export default function WorldBookEditorModal() {
                         <span className={styles.entryComment}>
                           {entry.comment || '(unnamed)'}
                         </span>
-                        <input
-                          type="checkbox"
-                          className={styles.entryToggle}
-                          checked={!entry.disabled}
-                          title={entry.disabled ? 'Disabled' : 'Enabled'}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={() => updateEntry(entry.id, { disabled: !entry.disabled })}
-                        />
+                        <span onClick={(e) => e.stopPropagation()}>
+                          <Toggle.Checkbox
+                            checked={!entry.disabled}
+                            onChange={() => updateEntry(entry.id, { disabled: !entry.disabled })}
+                            className={styles.entryToggle}
+                          />
+                        </span>
                         <span
                           className={styles.entryDeleteBtn}
                           role="button"
@@ -528,7 +519,7 @@ export default function WorldBookEditorModal() {
             </div>
           )}
         </div>
-      </motion.div>
+    </ModalShell>
 
       {/* Delete book confirmation */}
       {deleteBookConfirm && (
@@ -576,7 +567,6 @@ export default function WorldBookEditorModal() {
           onClose={() => setPostImportBook(null)}
         />
       )}
-    </div>,
-    document.body
+    </>
   )
 }

@@ -1,23 +1,5 @@
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 10001;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lumiverse-modal-backdrop);
-}
-
 .modal {
-  width: clamp(340px, 92vw, 720px);
   max-height: 88vh;
-  background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 14px;
-  box-shadow: var(--lumiverse-shadow-xl);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
 
 .header {
@@ -32,25 +14,6 @@
 .title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--lumiverse-text);
-}
-
-.closeBtn {
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-surface-hover);
   color: var(--lumiverse-text);
 }
 
@@ -414,18 +377,8 @@
 }
 
 .inlineToggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
   white-space: nowrap;
   padding-bottom: 6px;
-}
-
-.inlineToggle input {
-  accent-color: var(--lumiverse-primary);
 }
 
 /* ── Preset Cards ────────────────────────────── */
@@ -548,28 +501,3 @@
   flex-shrink: 0;
 }
 
-.btn {
-  padding: 7px 14px;
-  font-size: 12px;
-  border-radius: 7px;
-  border: 1px solid var(--lumiverse-border);
-  background: var(--lumiverse-surface);
-  color: var(--lumiverse-text);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.btn:hover {
-  background: var(--lumiverse-surface-hover);
-}
-
-.btnPrimary {
-  composes: btn;
-  background: var(--lumiverse-primary);
-  color: var(--lumiverse-primary-fg, #fff);
-  border-color: var(--lumiverse-primary);
-}
-
-.btnPrimary:hover {
-  opacity: 0.9;
-}
