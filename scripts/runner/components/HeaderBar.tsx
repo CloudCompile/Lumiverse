@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text, useStdout } from "ink";
+import { useUptimeTicker } from "../hooks/useUptimeTicker.js";
 import type { ServerState } from "../hooks/useServerProcess.js";
 import type { UpdateState } from "../hooks/useGitOps.js";
 
@@ -92,6 +93,10 @@ export function HeaderBar({
 }: HeaderBarProps): React.ReactElement {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
+
+  // Drive uptime display re-renders here (not in App) so the 1s tick
+  // only re-renders the header bar, not the entire component tree.
+  useUptimeTicker(serverState === "running" || serverState === "starting");
 
   const uptime = startedAt ? formatUptime(Date.now() - startedAt) : "—";
   const pidStr = pid ? String(pid) : "—";

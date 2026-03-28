@@ -129,19 +129,6 @@
   padding-top: 4px;
 }
 
-.checkbox {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--lumiverse-text);
-  cursor: pointer;
-}
-
-.checkbox input[type="checkbox"] {
-  accent-color: var(--lumiverse-primary);
-}
-
 /* ── Member Card (expandable) ─────────────────────── */
 
 .memberCard {
@@ -481,36 +468,9 @@
   gap: 8px;
 }
 
-.addBtn,
-.addBtnSecondary {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+.addBtn {
   flex: 1;
-  padding: 10px;
-  border-radius: 8px;
-  border: 1px dashed var(--lumiverse-border);
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.addBtn:hover,
-.addBtn:active {
-  border-color: var(--lumiverse-primary);
-  color: var(--lumiverse-primary);
-  background: color-mix(in srgb, var(--lumiverse-primary) 5%, transparent);
-}
-
-.addBtnSecondary:hover,
-.addBtnSecondary:active {
-  border-color: var(--lumiverse-text-muted);
-  color: var(--lumiverse-text);
-  background: var(--lumiverse-fill-hover);
+  border-style: dashed;
 }
 
 /* ── Add Dropdown ────────────────────────────────── */
@@ -738,26 +698,13 @@
 }
 
 .toolCheckbox {
-  display: flex;
-  align-items: center;
-  gap: 7px;
   padding: 3px 2px;
   border-radius: 4px;
-  cursor: pointer;
   transition: background var(--lumiverse-transition-fast);
 }
 
 .toolCheckbox:hover {
   background: var(--lumiverse-fill-hover);
-}
-
-.toolCheckbox input[type="checkbox"] {
-  accent-color: var(--lumiverse-primary);
-}
-
-.toolCheckboxLabel {
-  font-size: 12px;
-  color: var(--lumiverse-text);
 }
 
 /* ── Loading / Empty ──────────────────────────────── */

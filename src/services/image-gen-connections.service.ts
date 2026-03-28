@@ -144,6 +144,47 @@ export async function updateConnection(
   return updated;
 }
 
+export async function duplicateConnection(userId: string, id: string): Promise<ImageGenConnectionProfile | null> {
+  const existing = getConnection(userId, id);
+  if (!existing) return null;
+
+  const newId = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+
+  let hasApiKey = 0;
+  if (existing.has_api_key) {
+    try {
+      const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(id));
+      if (apiKey) {
+        await secretsSvc.putSecret(userId, imageGenConnectionSecretKey(newId), apiKey);
+        hasApiKey = 1;
+      }
+    } catch {
+      // If key read fails, duplicate without the key
+    }
+  }
+
+  getDb()
+    .query(
+      `INSERT INTO image_gen_connections
+        (id, user_id, name, provider, api_url, model, is_default, has_api_key, default_parameters, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      newId, userId, `${existing.name} (Copy)`, existing.provider,
+      existing.api_url, existing.model,
+      0, // never default
+      hasApiKey,
+      JSON.stringify(existing.default_parameters),
+      JSON.stringify(existing.metadata),
+      now, now
+    );
+
+  const profile = getConnection(userId, newId)!;
+  eventBus.emit(EventType.IMAGE_GEN_CONNECTION_CHANGED, { id: newId, profile }, userId);
+  return profile;
+}
+
 export async function deleteConnection(userId: string, id: string): Promise<boolean> {
   const deleted =
     getDb()

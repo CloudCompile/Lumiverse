@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import clsx from 'clsx'
+import { Badge } from '@/components/shared/Badge'
 import styles from './CollapsibleSection.module.css'
 
 interface CollapsibleSectionProps {
@@ -31,7 +32,7 @@ export default function CollapsibleSection({
       >
         {icon && <span className={styles.icon}>{icon}</span>}
         <span className={styles.title}>{title}</span>
-        {badge !== undefined && <span className={styles.badge}>{badge}</span>}
+        {badge !== undefined && <Badge color="primary" size="pill">{badge}</Badge>}
         <span className={styles.chevron}>
           {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>

@@ -1095,6 +1095,51 @@ const spindleApi: SpindleAPI = {
     },
   },
 
+  modal: {
+    async open(options: {
+      title: string;
+      items: any[];
+      width?: number;
+      maxHeight?: number;
+      persistent?: boolean;
+      userId?: string;
+    }): Promise<{ dismissedBy: "user" | "extension" | "cleanup" }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "modal_open",
+        requestId,
+        title: options.title,
+        items: options.items,
+        width: options.width,
+        maxHeight: options.maxHeight,
+        persistent: options.persistent,
+        userId: options.userId,
+      } as any);
+      return result as { dismissedBy: "user" | "extension" | "cleanup" };
+    },
+    async confirm(options: {
+      title: string;
+      message: string;
+      variant?: "info" | "warning" | "danger" | "success";
+      confirmLabel?: string;
+      cancelLabel?: string;
+      userId?: string;
+    }): Promise<{ confirmed: boolean }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "confirm_open",
+        requestId,
+        title: options.title,
+        message: options.message,
+        variant: options.variant,
+        confirmLabel: options.confirmLabel,
+        cancelLabel: options.cancelLabel,
+        userId: options.userId,
+      } as any);
+      return result as { confirmed: boolean };
+    },
+  },
+
   get manifest() {
     return manifest;
   },
@@ -1321,6 +1366,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       for (const p of msg.allGranted) grantedPermissions.add(p);
 
       const detail: PermissionChangedDetail = {
+        extensionId: manifest.identifier,
         permission: msg.permission,
         granted: msg.granted,
         allGranted: msg.allGranted,

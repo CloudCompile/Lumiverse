@@ -36,7 +36,7 @@ export function consumeTicket(ticket: string): string | null {
 }
 
 // Periodically sweep expired tickets to prevent memory leaks
-setInterval(() => {
+let _sweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of tickets) {
     if (now > entry.expires) {
@@ -44,3 +44,10 @@ setInterval(() => {
     }
   }
 }, SWEEP_INTERVAL_MS);
+
+export function stopTicketSweep(): void {
+  if (_sweepTimer) {
+    clearInterval(_sweepTimer);
+    _sweepTimer = null;
+  }
+}

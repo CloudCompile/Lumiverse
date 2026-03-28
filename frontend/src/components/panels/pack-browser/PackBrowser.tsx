@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Plus, Upload, Search } from 'lucide-react'
+import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
 import { packsApi } from '@/api/packs'
 import type { Pack, PackWithItems } from '@/types/api'
@@ -160,22 +161,18 @@ export default function PackBrowser() {
             value={packSearchQuery}
             onChange={(e) => setPackSearchQuery(e.target.value)}
           />
-          <button
-            type="button"
-            className={styles.iconBtn}
+          <Button
+            size="icon"
             onClick={() => setShowImport(true)}
             title="Import pack"
-          >
-            <Upload size={14} />
-          </button>
-          <button
-            type="button"
-            className={styles.iconBtn}
+            icon={<Upload size={14} />}
+          />
+          <Button
+            size="icon"
             onClick={() => { setEditingPack(null); setShowPackEditor(true) }}
             title="New pack"
-          >
-            <Plus size={14} />
-          </button>
+            icon={<Plus size={14} />}
+          />
         </div>
         <div className={styles.filterTabs}>
           {FILTER_TABS.map((tab) => (

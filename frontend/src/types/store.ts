@@ -36,6 +36,15 @@ export interface ChatSlice {
   setRegeneratingMessageId: (messageId: string | null) => void
   /** Mark a generation ID as ended (prevents zombie resurrection from late HTTP responses) */
   markGenerationEnded: (generationId: string) => void
+
+  // Message selection mode for bulk operations
+  messageSelectMode: boolean
+  selectedMessageIds: string[]
+  setMessageSelectMode: (enabled: boolean) => void
+  toggleMessageSelect: (id: string) => void
+  selectAllMessages: () => void
+  clearMessageSelection: () => void
+  selectMessageRange: (fromId: string, toId: string) => void
 }
 
 // ---- Characters Slice ----
@@ -201,12 +210,27 @@ export interface RegenFeedbackSettings {
 }
 
 // ---- Reasoning Settings ----
+
+/**
+ * All possible reasoning effort values across providers.
+ *
+ * Provider-specific values:
+ * - OpenRouter: none, minimal, low, medium, high, xhigh
+ * - Google:     minimal, low, medium, high
+ * - Anthropic:  low, medium, high, max
+ * - NanoGPT:    none, minimal, low, medium, high
+ * - Moonshot:   (toggle-only — no effort dropdown)
+ * - Z.AI:       (toggle-only — no effort dropdown)
+ * - Others:     auto, low, medium, high, max (generic)
+ */
+export type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+
 export interface ReasoningSettings {
   prefix: string
   suffix: string
   autoParse: boolean
   apiReasoning: boolean
-  reasoningEffort: 'auto' | 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort: ReasoningEffort
   /** How many recent reasoning blocks to keep in assembled prompt history.
    *  0 = strip all, -1 = keep all (unlimited), N = keep last N. */
   keepInHistory: number
@@ -465,6 +489,35 @@ export interface PendingTextEditorRequest {
   placeholder: string
 }
 
+export interface PendingModalRequest {
+  requestId: string
+  extensionId: string
+  extensionName: string
+  title: string
+  items: SpindleModalItem[]
+  width?: number
+  maxHeight?: number
+  persistent: boolean
+}
+
+export type SpindleModalItem =
+  | { type: 'text'; content: string; muted?: boolean }
+  | { type: 'divider' }
+  | { type: 'key_value'; label: string; value: string }
+  | { type: 'heading'; content: string }
+  | { type: 'card'; items: SpindleModalItem[] }
+
+export interface PendingConfirmRequest {
+  requestId: string
+  extensionId: string
+  extensionName: string
+  title: string
+  message: string
+  variant: 'info' | 'warning' | 'danger' | 'success'
+  confirmLabel: string
+  cancelLabel: string
+}
+
 export interface PendingContextMenuRequest {
   requestId: string
   extensionId: string
@@ -506,6 +559,8 @@ export interface SpindleSlice {
   spindlePrivileged: boolean
   pendingPermissionRequest: PendingPermissionRequest | null
   pendingTextEditor: PendingTextEditorRequest | null
+  pendingModal: PendingModalRequest | null
+  pendingConfirm: PendingConfirmRequest | null
   pendingContextMenu: PendingContextMenuRequest | null
   loadExtensions: () => Promise<void>
   installExtension: (githubUrl: string, branch?: string | null) => Promise<void>
@@ -521,6 +576,10 @@ export interface SpindleSlice {
   resolvePermissionRequest: (id: string, approved: boolean) => Promise<void>
   openTextEditor: (request: PendingTextEditorRequest) => void
   closeTextEditor: (requestId: string, text: string, cancelled: boolean) => void
+  openSpindleModal: (request: PendingModalRequest) => void
+  closeSpindleModal: (requestId: string, dismissedBy: 'user' | 'extension' | 'cleanup') => void
+  openSpindleConfirm: (request: PendingConfirmRequest) => void
+  closeSpindleConfirm: (requestId: string, confirmed: boolean) => void
   openContextMenu: (request: PendingContextMenuRequest) => void
   closeContextMenu: (requestId: string, selectedKey: string | null) => void
   setExtensionThemeOverride: (override: ExtensionThemeOverride) => void
@@ -741,6 +800,36 @@ export interface ImageGenConnectionsSlice {
   setImageGenProviders: (providers: ImageGenProviderInfo[]) => void
 }
 
+// ---- Loadouts Slice ----
+export interface LoadoutsSlice {
+  loadouts: import('@/api/loadouts').Loadout[]
+  activeLoadoutId: string | null
+  loadoutsLoading: boolean
+  loadLoadouts: () => Promise<void>
+  createLoadout: (name: string) => Promise<import('@/api/loadouts').Loadout | null>
+  updateLoadout: (id: string, updates: { name?: string; recapture?: boolean }) => Promise<void>
+  deleteLoadout: (id: string) => Promise<void>
+  applyLoadout: (id: string) => Promise<void>
+  setActiveLoadoutId: (id: string | null) => void
+}
+
+// ---- Migration Slice ----
+export interface MigrationSlice {
+  migrationId: string | null
+  migrationPhase: string | null
+  migrationProgress: { current: number; total: number; label: string } | null
+  migrationLogs: { level: string; message: string; timestamp: number }[]
+  migrationResult: import('@/types/ws-events').MigrationCompletedPayload | null
+  migrationError: string | null
+
+  setMigrationStarted: (id: string) => void
+  setMigrationProgress: (payload: import('@/types/ws-events').MigrationProgressPayload) => void
+  addMigrationLog: (payload: import('@/types/ws-events').MigrationLogPayload) => void
+  setMigrationCompleted: (payload: import('@/types/ws-events').MigrationCompletedPayload) => void
+  setMigrationFailed: (payload: import('@/types/ws-events').MigrationFailedPayload) => void
+  resetMigration: () => void
+}
+
 // ---- Combined Store ----
 export type AppStore = ChatSlice &
   CharactersSlice &
@@ -762,4 +851,6 @@ export type AppStore = ChatSlice &
   PromptBreakdownSlice &
   RegexSlice &
   ExpressionSlice &
-  ImageGenConnectionsSlice
+  ImageGenConnectionsSlice &
+  LoadoutsSlice &
+  MigrationSlice

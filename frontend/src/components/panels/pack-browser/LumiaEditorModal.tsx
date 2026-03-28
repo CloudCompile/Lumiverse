@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { motion } from 'motion/react'
 import { X } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { Button } from '@/components/shared/FormComponents'
 import { packsApi } from '@/api/packs'
 import type { LumiaItem } from '@/types/api'
 import styles from './PackBrowser.module.css'
@@ -49,113 +49,99 @@ export default function LumiaEditorModal({ packId, initialData, onSave, onClose 
     }
   }
 
-  return createPortal(
-    <div className={styles.overlay} onClick={onClose}>
-      <motion.div
-        className={styles.modal}
-        onClick={(e) => e.stopPropagation()}
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
-        transition={{ duration: 0.15 }}
-      >
-        <div className={styles.modalHeader}>
-          <h2 className={styles.modalTitle}>{isEditing ? 'Edit Character' : 'New Character'}</h2>
-          <button type="button" className={styles.modalCloseBtn} onClick={onClose}>
-            <X size={16} />
-          </button>
+  return (
+    <ModalShell isOpen onClose={onClose} maxWidth={480} maxHeight="90vh" zIndex={10001} className={styles.modal}>
+      <div className={styles.modalHeader}>
+        <h2 className={styles.modalTitle}>{isEditing ? 'Edit Character' : 'New Character'}</h2>
+        <Button size="icon" variant="ghost" onClick={onClose} icon={<X size={16} />} />
+      </div>
+      <div className={styles.modalBody}>
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Name *</label>
+          <input
+            type="text"
+            className={styles.fieldInput}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Character name"
+            autoFocus
+          />
         </div>
-        <div className={styles.modalBody}>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Name *</label>
-            <input
-              type="text"
-              className={styles.fieldInput}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Character name"
-              autoFocus
-            />
-          </div>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Gender Identity</label>
-            <select
-              className={styles.fieldSelect}
-              value={genderIdentity}
-              onChange={(e) => setGenderIdentity(Number(e.target.value) as 0 | 1 | 2)}
-            >
-              <option value={0}>Unspecified</option>
-              <option value={1}>Feminine</option>
-              <option value={2}>Masculine</option>
-            </select>
-          </div>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Author</label>
-            <input
-              type="text"
-              className={styles.fieldInput}
-              value={authorName}
-              onChange={(e) => setAuthorName(e.target.value)}
-              placeholder="Author name"
-            />
-          </div>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Avatar URL</label>
-            <input
-              type="text"
-              className={styles.fieldInput}
-              value={avatarUrl}
-              onChange={(e) => setAvatarUrl(e.target.value)}
-              placeholder="https://..."
-            />
-          </div>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Definition</label>
-            <textarea
-              className={styles.fieldTextarea}
-              value={definition}
-              onChange={(e) => setDefinition(e.target.value)}
-              placeholder="Character definition / description..."
-              rows={4}
-            />
-            <div className={styles.charCount}>{definition.length} chars</div>
-          </div>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Personality</label>
-            <textarea
-              className={styles.fieldTextarea}
-              value={personality}
-              onChange={(e) => setPersonality(e.target.value)}
-              placeholder="Personality traits..."
-              rows={3}
-            />
-          </div>
-          <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Behavior</label>
-            <textarea
-              className={styles.fieldTextarea}
-              value={behavior}
-              onChange={(e) => setBehavior(e.target.value)}
-              placeholder="Behavior instructions..."
-              rows={3}
-            />
-          </div>
-        </div>
-        <div className={styles.modalFooter}>
-          <button type="button" className={styles.btnCancel} onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className={styles.btnSave}
-            disabled={!name.trim() || saving}
-            onClick={handleSave}
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Gender Identity</label>
+          <select
+            className={styles.fieldSelect}
+            value={genderIdentity}
+            onChange={(e) => setGenderIdentity(Number(e.target.value) as 0 | 1 | 2)}
           >
-            {saving ? 'Saving...' : isEditing ? 'Save' : 'Create'}
-          </button>
+            <option value={0}>Unspecified</option>
+            <option value={1}>Feminine</option>
+            <option value={2}>Masculine</option>
+          </select>
         </div>
-      </motion.div>
-    </div>,
-    document.body
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Author</label>
+          <input
+            type="text"
+            className={styles.fieldInput}
+            value={authorName}
+            onChange={(e) => setAuthorName(e.target.value)}
+            placeholder="Author name"
+          />
+        </div>
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Avatar URL</label>
+          <input
+            type="text"
+            className={styles.fieldInput}
+            value={avatarUrl}
+            onChange={(e) => setAvatarUrl(e.target.value)}
+            placeholder="https://..."
+          />
+        </div>
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Definition</label>
+          <textarea
+            className={styles.fieldTextarea}
+            value={definition}
+            onChange={(e) => setDefinition(e.target.value)}
+            placeholder="Character definition / description..."
+            rows={4}
+          />
+          <div className={styles.charCount}>{definition.length} chars</div>
+        </div>
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Personality</label>
+          <textarea
+            className={styles.fieldTextarea}
+            value={personality}
+            onChange={(e) => setPersonality(e.target.value)}
+            placeholder="Personality traits..."
+            rows={3}
+          />
+        </div>
+        <div className={styles.fieldGroup}>
+          <label className={styles.fieldLabel}>Behavior</label>
+          <textarea
+            className={styles.fieldTextarea}
+            value={behavior}
+            onChange={(e) => setBehavior(e.target.value)}
+            placeholder="Behavior instructions..."
+            rows={3}
+          />
+        </div>
+      </div>
+      <div className={styles.modalFooter}>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button
+          variant="primary"
+          disabled={!name.trim() || saving}
+          loading={saving}
+          onClick={handleSave}
+        >
+          {saving ? 'Saving...' : isEditing ? 'Save' : 'Create'}
+        </Button>
+      </div>
+    </ModalShell>
   )
 }

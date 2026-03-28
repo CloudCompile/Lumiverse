@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download, Loader2, Code2 } from 'lucide-react'
+import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, BookOpen, ImagePlus, Download, Code2, ChevronDown } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Spinner } from '@/components/shared/Spinner'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
@@ -19,8 +21,10 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { Character, CharacterGalleryItem } from '@/types/api'
 import type { RegexScript } from '@/types/regex'
 import { toast } from '@/lib/toast'
+import { Button } from '@/components/shared/FormComponents'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
+import { getCharacterWorldBookIds, setCharacterWorldBookIds } from '@/utils/character-world-books'
 import ExpressionEditorTab from './ExpressionEditorTab'
 import AlternateFieldEditor from './AlternateFieldEditor'
 import AlternateAvatarManager from './AlternateAvatarManager'
@@ -423,20 +427,22 @@ export default function CharacterEditorPage() {
 
   const clearActivatedWorldInfo = useStore((s) => s.clearActivatedWorldInfo)
 
-  const handleAttachedWorldBookChange = useCallback(
+  const attachedWorldBookIds = useMemo(
+    () => getCharacterWorldBookIds(character?.extensions),
+    [character?.extensions]
+  )
+
+  const handleToggleWorldBook = useCallback(
     async (worldBookId: string) => {
       if (!editingCharacterId || !character) return
-      const nextExtensions = {
-        ...(character.extensions || {}),
-      } as Record<string, any>
+      const currentIds = getCharacterWorldBookIds(character.extensions)
+      const nextIds = currentIds.includes(worldBookId)
+        ? currentIds.filter((id) => id !== worldBookId)
+        : [...currentIds, worldBookId]
 
-      if (worldBookId) nextExtensions.world_book_id = worldBookId
-      else {
-        delete nextExtensions.world_book_id
-        // Immediately clear the feedback panel so entries don't visually linger
-        clearActivatedWorldInfo()
-      }
+      if (nextIds.length === 0) clearActivatedWorldInfo()
 
+      const nextExtensions = setCharacterWorldBookIds({ ...(character.extensions || {}) }, nextIds)
       setExtensionsJson(JSON.stringify(nextExtensions, null, 2))
       setJsonError(null)
       showSaving()
@@ -444,6 +450,52 @@ export default function CharacterEditorPage() {
     },
     [editingCharacterId, character, browser.updateCharacter, showSaving, clearActivatedWorldInfo]
   )
+
+  const handleRemoveWorldBook = useCallback(
+    async (worldBookId: string) => {
+      if (!editingCharacterId || !character) return
+      const currentIds = getCharacterWorldBookIds(character.extensions)
+      const nextIds = currentIds.filter((id) => id !== worldBookId)
+      if (nextIds.length === 0) clearActivatedWorldInfo()
+      const nextExtensions = setCharacterWorldBookIds({ ...(character.extensions || {}) }, nextIds)
+      setExtensionsJson(JSON.stringify(nextExtensions, null, 2))
+      setJsonError(null)
+      showSaving()
+      await browser.updateCharacter(editingCharacterId, { extensions: nextExtensions })
+    },
+    [editingCharacterId, character, browser.updateCharacter, showSaving, clearActivatedWorldInfo]
+  )
+
+  // World book popover state
+  const [wbPopoverOpen, setWbPopoverOpen] = useState(false)
+  const wbAddBtnRef = useRef<HTMLButtonElement>(null)
+  const wbPopoverRef = useRef<HTMLDivElement>(null)
+  const [wbPopoverPos, setWbPopoverPos] = useState<{ top: number; left: number } | null>(null)
+
+  useEffect(() => {
+    if (!wbPopoverOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (
+        wbPopoverRef.current && !wbPopoverRef.current.contains(e.target as Node) &&
+        wbAddBtnRef.current && !wbAddBtnRef.current.contains(e.target as Node)
+      ) {
+        setWbPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [wbPopoverOpen])
+
+  const openWbPopover = useCallback(() => {
+    setWbPopoverOpen((prev) => {
+      const next = !prev
+      if (next && wbAddBtnRef.current) {
+        const rect = wbAddBtnRef.current.getBoundingClientRect()
+        setWbPopoverPos({ top: rect.bottom + 4, left: rect.right })
+      }
+      return next
+    })
+  }, [])
 
   // Avatar
   const handleCropComplete = useCallback(
@@ -610,9 +662,7 @@ export default function CharacterEditorPage() {
             {!character ? (
               <div className={styles.header}>
                 <span className={styles.creatorText}>Character not found</span>
-                <button type="button" className={styles.closeBtn} onClick={close}>
-                  <X size={16} />
-                </button>
+                <CloseButton onClick={close} variant="solid" />
               </div>
             ) : (
               <>
@@ -666,21 +716,21 @@ export default function CharacterEditorPage() {
                   {saving && <span className={styles.savingIndicator}>Saving...</span>}
 
                   <div className={styles.headerActions}>
-                    <button type="button" className={styles.actionBtn} onClick={handleOpenChat} title="Open Chat">
+                    <Button size="icon" variant="ghost" onClick={handleOpenChat} title="Open Chat">
                       <MessageSquare size={14} />
-                    </button>
+                    </Button>
                     <div className={styles.exportWrapper} ref={exportMenuRef}>
-                      <button
-                        type="button"
-                        className={styles.actionBtn}
+                      <Button
+                        size="icon"
+                        variant="ghost"
                         onClick={() => !exporting && setShowExportMenu((v) => !v)}
                         title="Export"
                         disabled={exporting}
                       >
                         {exporting
-                          ? <Loader2 size={14} className={styles.exportSpinner} />
+                          ? <Spinner size={14} fast />
                           : <Download size={14} />}
-                      </button>
+                      </Button>
                       {showExportMenu && (
                         <div className={styles.exportDropdown}>
                           <button onClick={() => handleExport('json')}>Export as JSON (CCSv3)</button>
@@ -689,22 +739,20 @@ export default function CharacterEditorPage() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className={styles.actionBtn} onClick={handleDuplicate} title="Duplicate">
+                    <Button size="icon" variant="ghost" onClick={handleDuplicate} title="Duplicate">
                       <Copy size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      className={clsx(styles.actionBtn, styles.deleteBtn)}
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="danger-ghost"
                       onClick={() => setShowDeleteConfirm(true)}
                       title="Delete"
                     >
                       <Trash2 size={14} />
-                    </button>
+                    </Button>
                   </div>
 
-                  <button type="button" className={styles.closeBtn} onClick={close} aria-label="Close">
-                    <X size={16} />
-                  </button>
+                  <CloseButton onClick={close} variant="solid" />
                 </div>
 
                 {/* Tab bar */}
@@ -966,20 +1014,72 @@ export default function CharacterEditorPage() {
                   {activeTab === 'advanced' && (
                     <>
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>Attached World Book</span>
-                        <span className={styles.fieldHelper}>Used by prompt assembly for world info activation.</span>
-                        <select
-                          className={styles.fieldInput}
-                          value={(character.extensions?.world_book_id as string) || ''}
-                          onChange={(e) => handleAttachedWorldBookChange(e.target.value)}
-                        >
-                          <option value="">No world book</option>
-                          {worldBooks.map((wb) => (
-                            <option key={wb.id} value={wb.id}>
-                              {wb.name}
-                            </option>
-                          ))}
-                        </select>
+                        <span className={styles.fieldLabel}>Attached World Books</span>
+                        <span className={styles.fieldHelper}>Used by prompt assembly for world info activation. Attach multiple for richer lore.</span>
+                        <div className={styles.charWbHeader}>
+                          <button
+                            ref={wbAddBtnRef}
+                            type="button"
+                            className={styles.charWbAddBtn}
+                            onClick={openWbPopover}
+                          >
+                            <Plus size={11} />
+                            <span>Add</span>
+                            <ChevronDown
+                              size={10}
+                              className={clsx(styles.chevron, wbPopoverOpen && styles.chevronOpen)}
+                            />
+                          </button>
+                          {wbPopoverOpen && wbPopoverPos && createPortal(
+                            <div
+                              ref={wbPopoverRef}
+                              className={styles.charWbPopover}
+                              style={{ top: wbPopoverPos.top, left: wbPopoverPos.left }}
+                            >
+                              {worldBooks.length === 0 ? (
+                                <div className={styles.charWbPopoverEmpty}>No world books available</div>
+                              ) : (
+                                worldBooks.map((wb) => {
+                                  const isActive = attachedWorldBookIds.includes(wb.id)
+                                  return (
+                                    <button
+                                      key={wb.id}
+                                      type="button"
+                                      className={clsx(styles.charWbPopoverItem, isActive && styles.charWbPopoverItemActive)}
+                                      onClick={() => handleToggleWorldBook(wb.id)}
+                                    >
+                                      <span className={styles.charWbPopoverCheck}>{isActive ? '\u2713' : ''}</span>
+                                      <span className={styles.charWbPopoverName}>{wb.name}</span>
+                                    </button>
+                                  )
+                                })
+                              )}
+                            </div>,
+                            document.body
+                          )}
+                        </div>
+                        {attachedWorldBookIds.length > 0 ? (
+                          <div className={styles.charWbPills}>
+                            {attachedWorldBookIds.map((id) => {
+                              const wb = worldBooks.find((b) => b.id === id)
+                              return (
+                                <span key={id} className={styles.charWbPill}>
+                                  <span className={styles.charWbPillName}>{wb?.name || 'Unknown'}</span>
+                                  <button
+                                    type="button"
+                                    className={styles.charWbPillRemove}
+                                    onClick={() => handleRemoveWorldBook(id)}
+                                    title="Remove world book"
+                                  >
+                                    <X size={10} />
+                                  </button>
+                                </span>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <span className={styles.charWbHint}>No world books attached</span>
+                        )}
                       </div>
 
                       {character.extensions?.character_book?.entries?.length > 0 && (
@@ -1003,10 +1103,11 @@ export default function CharacterEditorPage() {
                                 setLorebookImporting(true)
                                 try {
                                   const res = await worldBooksApi.importCharacterBook(editingCharacterId)
-                                  const nextExtensions = {
-                                    ...(character.extensions || {}),
-                                    world_book_id: res.world_book.id,
-                                  }
+                                  const currentIds = getCharacterWorldBookIds(character.extensions)
+                                  const nextExtensions = setCharacterWorldBookIds(
+                                    { ...(character.extensions || {}) },
+                                    [...currentIds, res.world_book.id],
+                                  )
                                   await browser.updateCharacter(editingCharacterId, { extensions: nextExtensions })
                                   setExtensionsJson(JSON.stringify(nextExtensions, null, 2))
                                   setLorebookResult(`Imported ${res.entry_count} entries into "${res.world_book.name}" and attached it`)

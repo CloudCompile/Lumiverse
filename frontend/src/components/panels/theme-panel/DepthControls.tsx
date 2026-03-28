@@ -1,3 +1,4 @@
+import { Toggle } from '@/components/shared/Toggle'
 import styles from './DepthControls.module.css'
 
 interface DepthControlsProps {
@@ -50,14 +51,11 @@ export default function DepthControls({
       </label>
 
       {/* Glass toggle */}
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={enableGlass}
-          onChange={(e) => onGlassToggle(e.target.checked)}
-        />
-        <span>Glass effects</span>
-      </label>
+      <Toggle.Checkbox
+        checked={enableGlass}
+        onChange={onGlassToggle}
+        label="Glass effects"
+      />
     </div>
   )
 }

@@ -1,27 +1,5 @@
-.backdrop {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: var(--lumiverse-modal-backdrop, rgba(0, 0, 0, 0.6));
-  z-index: 10002;
-}
-
 .modal {
-  position: relative;
-  width: 100%;
-  max-width: clamp(340px, 94vw, min(1100px, var(--lumiverse-content-max-width, 1100px)));
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--lumiverse-gradient-modal);
-  border-radius: 16px;
-  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px var(--lumiverse-primary-015);
-  overflow: hidden;
 }
 
 /* ── Header ── */
@@ -41,38 +19,8 @@
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
 }
 
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  border-radius: 6px;
-  background: var(--lumiverse-primary-015);
-  color: var(--lumiverse-primary, #9370db);
-  border: 1px solid var(--lumiverse-primary-020);
-  white-space: nowrap;
-}
-
 .closeBtn {
   margin-left: auto;
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lumiverse-bg-dark, rgba(0, 0, 0, 0.3));
-  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
-  border-radius: 8px;
-  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.4));
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-bg-darker, rgba(0, 0, 0, 0.5));
-  color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
 }
 
 /* ── Scrollable body ── */
@@ -123,29 +71,9 @@
 }
 
 .roleBadge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  font-size: 10px;
-  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  border-radius: 4px;
-}
-
-.roleSystem {
-  background: var(--lumiverse-warning-015);
-  color: var(--lumiverse-warning);
-}
-
-.roleUser {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
-}
-
-.roleAssistant {
-  background: var(--lumiverse-primary-015);
-  color: var(--lumiverse-primary);
+  font-weight: 600;
 }
 
 .messageContent {

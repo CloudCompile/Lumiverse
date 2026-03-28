@@ -1,7 +1,7 @@
 import type { Pack } from '@/types/api'
 import LazyImage from '@/components/shared/LazyImage'
+import { Badge } from '@/components/shared/Badge'
 import styles from './PackBrowser.module.css'
-import clsx from 'clsx'
 
 interface Props {
   pack: Pack
@@ -24,10 +24,10 @@ export default function PackCard({ pack, onClick }: Props) {
         <div className={styles.cardName}>{pack.name}</div>
         {pack.author && <div className={styles.cardAuthor}>by {pack.author}</div>}
         <div className={styles.cardBadges}>
-          <span className={clsx(styles.badge, pack.is_custom ? styles.badgeCustom : styles.badgeDownloaded)}>
+          <Badge color={pack.is_custom ? 'primary' : 'success'} size="sm">
             {pack.is_custom ? 'Custom' : 'Downloaded'}
-          </span>
-          <span className={styles.badge}>v{pack.version}</span>
+          </Badge>
+          <Badge size="sm">v{pack.version}</Badge>
         </div>
       </div>
     </div>

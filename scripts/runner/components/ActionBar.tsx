@@ -34,7 +34,7 @@ function Sep(): React.ReactElement {
   return <Text color="gray">{"  │  "}</Text>;
 }
 
-export function ActionBar({
+export const ActionBar = React.memo(function ActionBar({
   updateState,
   trustAnyOrigin,
   branchSwitchInProgress,
@@ -108,4 +108,4 @@ export function ActionBar({
       )}
     </Box>
   );
-}
+});

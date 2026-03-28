@@ -1,10 +1,13 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X } from 'lucide-react'
+import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
 import { useFolders } from '@/hooks/useFolders'
 import FolderDropdown from '@/components/shared/FolderDropdown'
+import { Toggle } from '@/components/shared/Toggle'
+import { Badge } from '@/components/shared/Badge'
 import type { RegexScript, RegexScope } from '@/types/regex'
 import styles from './RegexPanel.module.css'
 import clsx from 'clsx'
@@ -189,9 +192,9 @@ export default function RegexPanel() {
 
   const targetBadge = (target: string) => {
     switch (target) {
-      case 'prompt': return <span className={clsx(styles.badge, styles.badgePrompt)}>P</span>
-      case 'response': return <span className={clsx(styles.badge, styles.badgeResponse)}>R</span>
-      case 'display': return <span className={clsx(styles.badge, styles.badgeDisplay)}>D</span>
+      case 'prompt': return <Badge color="warning" size="sm">P</Badge>
+      case 'response': return <Badge color="success" size="sm">R</Badge>
+      case 'display': return <Badge color="info" size="sm">D</Badge>
       default: return null
     }
   }
@@ -209,20 +212,21 @@ export default function RegexPanel() {
       <div className={styles.topBar}>
         <span className={styles.topBarTitle}>Regex Scripts</span>
         <div className={styles.topBarActions}>
-          <button className={styles.iconBtn} onClick={handleImport} title="Import">
+          <Button size="icon-sm" variant="ghost" onClick={handleImport} title="Import">
             <Upload size={14} />
-          </button>
-          <button className={styles.iconBtn} onClick={handleExport} title="Export">
+          </Button>
+          <Button size="icon-sm" variant="ghost" onClick={handleExport} title="Export">
             <Download size={14} />
-          </button>
+          </Button>
           <div className={styles.createPopoverWrapper} ref={popoverRef}>
-            <button
-              className={styles.iconBtn}
+            <Button
+              size="icon-sm"
+              variant="ghost"
               onClick={() => setShowCreatePopover(!showCreatePopover)}
               title="Add"
             >
               <Plus size={14} />
-            </button>
+            </Button>
             {showCreatePopover && (
               <div className={styles.createPopover}>
                 {creatingFolderMode ? (
@@ -396,18 +400,20 @@ function ScriptRow({
         className={clsx(styles.scriptRow, expanded && styles.scriptRowExpanded)}
         onClick={onToggleExpand}
       >
-        <span className={styles.badge}>{scopeIcon}</span>
+        <Badge size="sm">{scopeIcon}</Badge>
         <span className={clsx(styles.scriptName, script.disabled && styles.scriptNameDisabled)}>
           {script.name}
         </span>
         {targetBadge}
-        <div
-          className={clsx(styles.toggle, !script.disabled && styles.toggleOn)}
-          onClick={(e) => onToggle(!script.disabled, e)}
-        />
-        <button className={styles.deleteBtn} onClick={onDelete} title="Delete">
+        <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center' }}>
+          <Toggle.Switch
+            checked={!script.disabled}
+            onChange={(v) => onToggle(!v, { stopPropagation: () => {} } as React.MouseEvent)}
+          />
+        </div>
+        <Button size="icon-sm" variant="danger-ghost" className={styles.deleteBtn} onClick={onDelete} title="Delete">
           <Trash2 size={13} />
-        </button>
+        </Button>
       </div>
 
       {expanded && (

@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion } from 'motion/react'
-import { X } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
@@ -65,95 +65,80 @@ export default function RegexImportModal() {
     }
   }, [pasteContent, doImport])
 
-  return createPortal(
-    <motion.div
-      className={styles.overlay}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      onClick={closeModal}
-    >
-      <motion.div
-        className={styles.modal}
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className={styles.header}>
-          <h2 className={styles.title}>Import Regex Scripts</h2>
-          <button className={styles.closeBtn} onClick={closeModal}><X size={16} /></button>
+  return (
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth={520} maxHeight="80vh">
+      <div className={styles.header}>
+        <h2 className={styles.title}>Import Regex Scripts</h2>
+        <CloseButton onClick={closeModal} />
+      </div>
+
+      <div className={styles.body}>
+        <div className={styles.tabs}>
+          <button className={clsx(styles.tab, tab === 'file' && styles.tabActive)} onClick={() => setTab('file')}>
+            File Upload
+          </button>
+          <button className={clsx(styles.tab, tab === 'paste' && styles.tabActive)} onClick={() => setTab('paste')}>
+            Paste JSON
+          </button>
         </div>
 
-        <div className={styles.body}>
-          <div className={styles.tabs}>
-            <button className={clsx(styles.tab, tab === 'file' && styles.tabActive)} onClick={() => setTab('file')}>
-              File Upload
-            </button>
-            <button className={clsx(styles.tab, tab === 'paste' && styles.tabActive)} onClick={() => setTab('paste')}>
-              Paste JSON
-            </button>
+        {tab === 'file' && (
+          <div
+            className={clsx(styles.dropZone, dragging && styles.dropZoneActive)}
+            onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <p>Drop a JSON file here or click to browse</p>
+            <p>Supports Lumiverse and SillyTavern formats</p>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) handleFile(file)
+              }}
+            />
           </div>
+        )}
 
-          {tab === 'file' && (
-            <div
-              className={clsx(styles.dropZone, dragging && styles.dropZoneActive)}
-              onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
+        {tab === 'paste' && (
+          <>
+            <textarea
+              className={styles.pasteArea}
+              value={pasteContent}
+              onChange={(e) => setPasteContent(e.target.value)}
+              placeholder='Paste JSON here...'
+              rows={8}
+            />
+            <Button
+              variant="primary"
+              onClick={handlePasteImport}
+              disabled={importing || !pasteContent.trim()}
             >
-              <p>Drop a JSON file here or click to browse</p>
-              <p>Supports Lumiverse and SillyTavern formats</p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json"
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (file) handleFile(file)
-                }}
-              />
-            </div>
-          )}
+              {importing ? 'Importing...' : 'Import'}
+            </Button>
+          </>
+        )}
 
-          {tab === 'paste' && (
-            <>
-              <textarea
-                className={styles.pasteArea}
-                value={pasteContent}
-                onChange={(e) => setPasteContent(e.target.value)}
-                placeholder='Paste JSON here...'
-                rows={8}
-              />
-              <button
-                className={styles.btnPrimary}
-                onClick={handlePasteImport}
-                disabled={importing || !pasteContent.trim()}
-              >
-                {importing ? 'Importing...' : 'Import'}
-              </button>
-            </>
-          )}
+        {result && (
+          <div className={styles.result}>
+            <p>Imported: {result.imported} | Skipped: {result.skipped}</p>
+            {result.errors.length > 0 && (
+              <div className={styles.resultError}>
+                {result.errors.map((e, i) => <p key={i}>{e}</p>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
-          {result && (
-            <div className={styles.result}>
-              <p>Imported: {result.imported} | Skipped: {result.skipped}</p>
-              {result.errors.length > 0 && (
-                <div className={styles.resultError}>
-                  {result.errors.map((e, i) => <p key={i}>{e}</p>)}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className={styles.footer}>
-          <button className={styles.btn} onClick={closeModal}>Close</button>
-        </div>
-      </motion.div>
-    </motion.div>,
-    document.body,
+      <div className={styles.footer}>
+        <Button variant="ghost" onClick={closeModal}>Close</Button>
+      </div>
+    </ModalShell>
   )
 }

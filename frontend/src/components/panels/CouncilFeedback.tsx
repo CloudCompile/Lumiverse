@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { CheckCircle2, XCircle, Clock, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
+import { CheckCircle2, XCircle, Clock, ChevronDown, ChevronRight } from 'lucide-react'
 import { useStore } from '@/store'
 import type { CouncilToolResult } from 'lumiverse-spindle-types'
+import { Spinner } from '@/components/shared/Spinner'
 import styles from './CouncilFeedback.module.css'
 
 export default function CouncilFeedback() {
@@ -25,7 +26,7 @@ export default function CouncilFeedback() {
       <div className={styles.statusBar}>
         {councilExecuting ? (
           <div className={styles.statusRunning}>
-            <Loader2 size={14} className={styles.spinner} />
+            <Spinner size={14} />
             <span>Council executing...</span>
           </div>
         ) : hasResults ? (

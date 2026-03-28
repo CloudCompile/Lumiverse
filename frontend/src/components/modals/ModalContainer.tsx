@@ -19,6 +19,7 @@ import RegexEditorModal from './RegexEditorModal'
 import RegexImportModal from './RegexImportModal'
 import RegenFeedbackModal from './RegenFeedbackModal'
 import PersonaAddonsModal from './PersonaAddonsModal'
+import GroupSettingsModal from './GroupSettingsModal'
 
 export default function ModalContainer() {
   const settingsModalOpen = useStore((s) => s.settingsModalOpen)
@@ -96,6 +97,7 @@ export default function ModalContainer() {
       {activeModal === 'regexEditor' && <RegexEditorModal />}
       {activeModal === 'regexImport' && <RegexImportModal />}
       {activeModal === 'personaAddons' && <PersonaAddonsModal />}
+      {activeModal === 'groupSettings' && <GroupSettingsModal />}
 
       {activeModal === 'regenFeedback' && (
         <RegenFeedbackModal

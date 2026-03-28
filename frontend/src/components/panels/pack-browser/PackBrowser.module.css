@@ -46,25 +46,7 @@
   color: var(--lumiverse-text-hint);
 }
 
-.iconBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  border: 1px solid var(--lumiverse-border);
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
-}
-
-.iconBtn:hover {
-  background: var(--lumiverse-fill-hover);
-  color: var(--lumiverse-text);
-}
+/* .iconBtn — migrated to shared Button component */
 
 .filterTabs {
   display: flex;
@@ -201,27 +183,6 @@
   margin-top: 4px;
 }
 
-.badge {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--lumiverse-fill);
-  color: var(--lumiverse-text-dim);
-  border: 1px solid var(--lumiverse-border);
-}
-
-.badgeCustom {
-  background: rgba(139, 92, 246, 0.1);
-  color: rgb(139, 92, 246);
-  border-color: rgba(139, 92, 246, 0.3);
-}
-
-.badgeDownloaded {
-  background: rgba(16, 185, 129, 0.1);
-  color: rgb(16, 185, 129);
-  border-color: rgba(16, 185, 129, 0.3);
-}
-
 /* Detail View */
 .detail {
   display: flex;
@@ -240,25 +201,7 @@
   flex-shrink: 0;
 }
 
-.backBtn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: 5px;
-  border: 1px solid var(--lumiverse-border);
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  font-size: 11px;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.backBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
+/* .backBtn — migrated to shared Button component */
 
 .detailMeta {
   flex: 1;
@@ -465,29 +408,7 @@
   flex-shrink: 0;
 }
 
-.itemActionBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon-sm);
-  height: var(--lumiverse-btn-icon-sm);
-  border-radius: 4px;
-  border: none;
-  background: transparent;
-  color: var(--lumiverse-text-muted);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.itemActionBtn:hover {
-  background: var(--lumiverse-fill);
-  color: var(--lumiverse-text);
-}
-
-.itemActionBtnDanger:hover {
-  background: var(--lumiverse-danger-015);
-  color: var(--lumiverse-error, #ef4444);
-}
+/* .itemActionBtn, .itemActionBtnDanger — migrated to shared Button component */
 
 .itemActionBtnActive {
   background: rgba(139, 92, 246, 0.1);
@@ -601,24 +522,7 @@
   color: var(--lumiverse-text);
 }
 
-.modalCloseBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  border: none;
-  background: transparent;
-  color: var(--lumiverse-text-muted);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.modalCloseBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
+/* .modalCloseBtn — migrated to shared Button component */
 
 .modalBody {
   padding: 16px;
@@ -704,41 +608,7 @@
   text-align: right;
 }
 
-/* Button variants */
-.btnCancel {
-  padding: 7px 16px;
-  border-radius: 6px;
-  border: 1px solid var(--lumiverse-border);
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.btnCancel:hover {
-  background: var(--lumiverse-fill-subtle);
-}
-
-.btnSave {
-  padding: 7px 16px;
-  border-radius: 6px;
-  border: none;
-  background: var(--lumiverse-primary);
-  color: var(--lumiverse-primary-contrast, #fff);
-  font-size: 13px;
-  cursor: pointer;
-  transition: opacity var(--lumiverse-transition-fast);
-}
-
-.btnSave:hover {
-  opacity: 0.9;
-}
-
-.btnSave:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* .btnCancel, .btnSave — migrated to shared Button component */
 
 /* Tabs in import modal */
 .tabs {
@@ -977,28 +847,7 @@
   color: var(--lumiverse-text-muted);
 }
 
-.lucidRetryBtn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
-  font-size: 12px;
-  font-weight: 500;
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.lucidRetryBtn:hover {
-  background: var(--lumiverse-fill);
-}
-
-.lucidSpinner {
-  animation: lv-spin 1s linear infinite;
-}
+/* .lucidRetryBtn — migrated to shared Button component */
 
 /* Lucid Cards footer */
 .lucidFooter {
@@ -1037,11 +886,7 @@
   color: var(--lumiverse-text-muted);
 }
 
-.lucidImportBtn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
+/* .lucidImportBtn — migrated to shared Button component */
 
 /* Drop zone */
 .dropZone {

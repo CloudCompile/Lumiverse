@@ -14,7 +14,6 @@ import { useGitOps } from "./hooks/useGitOps.js";
 import { useConfirmation } from "./hooks/useConfirmation.js";
 import { useEnvConfig } from "./hooks/useEnvConfig.js";
 import { useSelfWatcher } from "./hooks/useSelfWatcher.js";
-import { useUptimeTicker } from "./hooks/useUptimeTicker.js";
 import { openBrowser } from "./lib/browser.js";
 import { PROJECT_ROOT } from "./lib/constants.js";
 
@@ -27,6 +26,17 @@ export function App({ isDev, leaveAltScreen }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
+  const rows = stdout?.rows ?? 24;
+
+  // Use rows - 1 to avoid Ink's fullscreen detection (outputHeight >= stdout.rows),
+  // which bypasses incrementalRendering and does a full clearTerminal + redraw on
+  // every frame — causing visible flicker, especially over SSH. See Ink issue #450.
+  //
+  // Exception: in Tmux, incremental rendering's cursor-repositioning sequences
+  // don't work reliably, causing the header bar to duplicate. Use exact rows
+  // there so Ink falls back to full-screen clear-and-redraw mode.
+  const isTmux = !!process.env["TMUX"];
+  const termHeight = isTmux ? rows : rows - 1;
 
   // --- Hooks ---
   const logBuffer = useLogBuffer();
@@ -45,11 +55,6 @@ export function App({ isDev, leaveAltScreen }: AppProps): React.ReactElement {
       "system"
     );
   });
-
-  // Tick for uptime display
-  useUptimeTicker(
-    server.state === "running" || server.state === "starting"
-  );
 
   // Self-watcher for runner source changes
   useSelfWatcher(logBuffer.addLog, server.stop, leaveAltScreen);
@@ -309,8 +314,7 @@ export function App({ isDev, leaveAltScreen }: AppProps): React.ReactElement {
   // --- Keyboard handler ---
   // All keybindings handled through Ink's useInput — no supplementary
   // stdin listener needed. Ink 6 natively parses pageUp/pageDown/home/end.
-  const rows = stdout?.rows ?? 24;
-  const pageSize = Math.max(1, rows - 4);
+  const pageSize = Math.max(1, termHeight - 4);
 
   useInput(async (input, key) => {
     // Ctrl+C or q/Q → Quit
@@ -383,7 +387,7 @@ export function App({ isDev, leaveAltScreen }: AppProps): React.ReactElement {
 
   // --- Render ---
   return (
-    <Box flexDirection="column" width={cols} height="100%">
+    <Box flexDirection="column" width={cols} height={termHeight}>
       <HeaderBar
         serverState={server.state}
         port={envConfig.port}

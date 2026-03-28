@@ -5,13 +5,16 @@
  */
 import type { LumiHubWSMessage, InstallCharacterPayload, InstallWorldbookPayload } from "./types";
 import { installCharacter, installWorldbook } from "./installer";
+import { buildInstallManifest } from "./manifest";
 import { updateLastConnected } from "../services/lumihub-link.service";
+import { getFirstUserId } from "../auth/seed";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const INITIAL_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 60_000;
+const MANIFEST_SYNC_DEBOUNCE_MS = 5_000;
 
 class LumiHubWSClient {
   private ws: WebSocket | null = null;
@@ -22,6 +25,8 @@ class LumiHubWSClient {
   private intentionalClose = false;
   private wsUrl: string = "";
   private linkToken: string = "";
+  private manifestSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private eventListenersRegistered = false;
 
   /** Open a WebSocket connection to LumiHub. */
   connect(wsUrl: string, linkToken: string): void {
@@ -103,11 +108,15 @@ class LumiHubWSClient {
           type: "instance_info",
           id: crypto.randomUUID(),
           payload: {
-            capabilities: ["character_import", "chub_import", "worldbook_import"],
+            capabilities: ["character_import", "chub_import", "worldbook_import", "manifest_sync"],
             version: "1.0.0",
           },
           timestamp: Date.now(),
         });
+        // Send initial install manifest
+        this.syncManifest();
+        // Register event listeners for character mutations (once)
+        this.registerManifestListeners();
         break;
 
       case "install_character":
@@ -178,6 +187,43 @@ class LumiHubWSClient {
         error: result.error,
       });
     }
+  }
+
+  /** Build and send the install manifest to LumiHub. */
+  private syncManifest(): void {
+    try {
+      const userId = getFirstUserId();
+      if (!userId) return;
+      const entries = buildInstallManifest(userId);
+      this.send({
+        type: "manifest_sync",
+        id: crypto.randomUUID(),
+        payload: { entries },
+        timestamp: Date.now(),
+      });
+      console.log(`[LumiHub WS] Sent manifest sync (${entries.length} entries)`);
+    } catch (err) {
+      console.warn("[LumiHub WS] Failed to build/send manifest:", err);
+    }
+  }
+
+  /** Debounced manifest re-sync (collapses rapid character mutations). */
+  private debouncedManifestSync(): void {
+    if (this.manifestSyncTimer) clearTimeout(this.manifestSyncTimer);
+    this.manifestSyncTimer = setTimeout(() => {
+      this.manifestSyncTimer = null;
+      if (this.connected) this.syncManifest();
+    }, MANIFEST_SYNC_DEBOUNCE_MS);
+  }
+
+  /** Register event listeners for character mutations to trigger manifest re-sync. */
+  private registerManifestListeners(): void {
+    if (this.eventListenersRegistered) return;
+    this.eventListenersRegistered = true;
+    const trigger = () => this.debouncedManifestSync();
+    eventBus.on(EventType.CHARACTER_EDITED, trigger);
+    eventBus.on(EventType.CHARACTER_DELETED, trigger);
+    eventBus.on(EventType.LUMIHUB_INSTALL_COMPLETED, trigger);
   }
 
   private send(msg: Partial<LumiHubWSMessage>): void {

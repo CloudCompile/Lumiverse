@@ -1,24 +1,5 @@
-.overlay {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  z-index: 10000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--lumiverse-modal-backdrop);
-}
-
 .modal {
-  width: clamp(340px, 92vw, min(1160px, var(--lumiverse-content-max-width, 1160px)));
   max-height: 85vh;
-  background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 16px;
-  box-shadow: var(--lumiverse-shadow-xl);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
 
 .header {
@@ -36,24 +17,6 @@
   color: var(--lumiverse-text);
 }
 
-.closeBtn {
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
 
 /* ── Two-panel layout ── */
 .body {
@@ -572,8 +535,6 @@
 }
 
 .entryToggle {
-  accent-color: var(--lumiverse-primary);
-  cursor: pointer;
   flex-shrink: 0;
 }
 

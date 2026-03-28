@@ -34,14 +34,6 @@
   text-align: left;
 }
 
-.badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--lumiverse-primary-light);
-  color: var(--lumiverse-primary-text);
-}
-
 .chevron {
   color: var(--lumiverse-text-dim);
   display: flex;

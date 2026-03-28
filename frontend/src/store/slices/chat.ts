@@ -85,6 +85,8 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         activeGenerationId: null,
         regeneratingMessageId: null,
         streamingGenerationType: null,
+        messageSelectMode: false,
+        selectedMessageIds: [],
       })
       // Clear expression state so stale expressions from the previous character don't linger
       ;(get() as any).setActiveExpression?.(null, null, null)
@@ -265,5 +267,38 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         if (first) endedGenerationIds.delete(first)
       }
     },
+
+    // Message selection mode for bulk operations
+    messageSelectMode: false,
+    selectedMessageIds: [],
+
+    setMessageSelectMode: (enabled) => set({ messageSelectMode: enabled, selectedMessageIds: [] }),
+
+    toggleMessageSelect: (id) => set((state) => {
+      const ids = state.selectedMessageIds
+      const idx = ids.indexOf(id)
+      if (idx >= 0) {
+        return { selectedMessageIds: ids.filter((_, i) => i !== idx) }
+      }
+      return { selectedMessageIds: [...ids, id] }
+    }),
+
+    selectAllMessages: () => set((state) => ({
+      selectedMessageIds: state.messages.map((m) => m.id),
+    })),
+
+    clearMessageSelection: () => set({ selectedMessageIds: [] }),
+
+    selectMessageRange: (fromId, toId) => set((state) => {
+      const fromIdx = state.messages.findIndex((m) => m.id === fromId)
+      const toIdx = state.messages.findIndex((m) => m.id === toId)
+      if (fromIdx < 0 || toIdx < 0) return state
+      const start = Math.min(fromIdx, toIdx)
+      const end = Math.max(fromIdx, toIdx)
+      const rangeIds = state.messages.slice(start, end + 1).map((m) => m.id)
+      // Merge with existing selection (union)
+      const merged = new Set([...state.selectedMessageIds, ...rangeIds])
+      return { selectedMessageIds: [...merged] }
+    }),
   }
 }

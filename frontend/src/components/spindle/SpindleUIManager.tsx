@@ -1,10 +1,15 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
+import { motion } from 'motion/react'
+import { X } from 'lucide-react'
 import { useStore } from '@/store'
 import SpindleFloatWidget from './SpindleFloatWidget'
 import SpindleDockPanel from './SpindleDockPanel'
 import SpindleAppMount from './SpindleAppMount'
 import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
+import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ContextMenu, { type ContextMenuEntry } from '@/components/shared/ContextMenu'
+import type { SpindleModalItem } from '@/types/store'
 
 function SpindleTextEditor() {
   const reqId = useStore((s) => s.pendingTextEditor?.requestId ?? null)
@@ -74,8 +79,129 @@ export default function SpindleUIManager() {
         ))}
 
       <SpindleTextEditor />
+      <SpindleModal />
+      <SpindleConfirm />
       <SpindleContextMenu />
     </>
+  )
+}
+
+function ModalItemRenderer({ item }: { item: SpindleModalItem }) {
+  switch (item.type) {
+    case 'text':
+      return (
+        <p style={{ margin: 0, fontSize: 13, color: item.muted ? 'var(--lumiverse-text-dim)' : 'var(--lumiverse-text)', whiteSpace: 'pre-wrap' }}>
+          {item.content}
+        </p>
+      )
+    case 'divider':
+      return <hr style={{ border: 'none', borderTop: '1px solid var(--lumiverse-border)', margin: '8px 0' }} />
+    case 'key_value':
+      return (
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 12 }}>
+          <span style={{ color: 'var(--lumiverse-text-dim)' }}>{item.label}</span>
+          <span style={{ color: 'var(--lumiverse-text)', fontWeight: 500, textAlign: 'right' }}>{item.value}</span>
+        </div>
+      )
+    case 'heading':
+      return <h4 style={{ margin: '4px 0 0', fontSize: 14, fontWeight: 600, color: 'var(--lumiverse-text)' }}>{item.content}</h4>
+    case 'card':
+      return (
+        <div style={{ padding: 12, borderRadius: 8, border: '1px solid var(--lumiverse-border)', background: 'var(--lumiverse-fill-subtle)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {item.items.map((child, i) => <ModalItemRenderer key={i} item={child} />)}
+        </div>
+      )
+    default:
+      return null
+  }
+}
+
+function SpindleModal() {
+  const req = useStore((s) => s.pendingModal)
+  const closeModal = useStore((s) => s.closeSpindleModal)
+
+  if (!req) return null
+
+  const handleBackdrop = (e: React.MouseEvent) => {
+    if (e.target === e.currentTarget && !req.persistent) {
+      closeModal(req.requestId, 'user')
+    }
+  }
+
+  return createPortal(
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.15 }}
+      onClick={handleBackdrop}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 10003,
+        background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.15 }}
+        style={{
+          width: Math.min(req.width || 420, window.innerWidth - 40),
+          maxHeight: Math.min(req.maxHeight || 520, window.innerHeight - 40),
+          background: 'var(--lumiverse-bg)', borderRadius: 12,
+          border: '1px solid var(--lumiverse-border)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--lumiverse-border)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--lumiverse-text)' }}>{req.title}</h3>
+            <span style={{ fontSize: 11, color: 'var(--lumiverse-text-muted)' }}>{req.extensionName}</span>
+          </div>
+          {!req.persistent && (
+            <button
+              type="button"
+              onClick={() => closeModal(req.requestId, 'user')}
+              style={{ background: 'none', border: 'none', color: 'var(--lumiverse-text-dim)', cursor: 'pointer', padding: 4, borderRadius: 4 }}
+            >
+              <X size={16} />
+            </button>
+          )}
+        </div>
+        <div style={{ padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {req.items.map((item, i) => <ModalItemRenderer key={i} item={item} />)}
+        </div>
+      </motion.div>
+    </motion.div>,
+    document.body
+  )
+}
+
+function SpindleConfirm() {
+  const req = useStore((s) => s.pendingConfirm)
+  const closeConfirm = useStore((s) => s.closeSpindleConfirm)
+
+  if (!req) return null
+
+  const variantMap: Record<string, 'danger' | 'warning' | 'safe'> = {
+    danger: 'danger',
+    warning: 'warning',
+    info: 'safe',
+    success: 'safe',
+  }
+
+  return (
+    <ConfirmationModal
+      isOpen={true}
+      title={`${req.extensionName}: ${req.title}`}
+      message={req.message}
+      variant={variantMap[req.variant] || 'safe'}
+      confirmText={req.confirmLabel}
+      cancelText={req.cancelLabel}
+      onConfirm={() => closeConfirm(req.requestId, true)}
+      onCancel={() => closeConfirm(req.requestId, false)}
+      zIndex={10004}
+    />
   )
 }
 

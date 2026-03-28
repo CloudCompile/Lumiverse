@@ -163,3 +163,312 @@
   color: var(--lumiverse-text-muted);
   text-align: center;
 }
+
+/* ─── Group Chat Profile ─────────────────────────────────────────── */
+
+.groupProfile {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Contained mosaic — normal flow, rounded, no absolute/negative-margin tricks */
+.groupMosaic {
+  display: grid;
+  gap: 2px;
+  border-radius: 14px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+}
+
+.groupMosaic2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+.groupMosaic3 {
+  grid-template-columns: 1.4fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.groupMosaic3 .groupMosaicCell:first-child {
+  grid-row: 1 / -1;
+}
+
+.groupMosaic4 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.groupMosaicCell {
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+.groupMosaicFallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--lumiverse-primary-010);
+  color: var(--lumiverse-primary-muted);
+}
+
+/* Group info block */
+.groupInfo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 0 4px;
+}
+
+.groupName {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--lumiverse-text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.groupMemberCount {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--lumiverse-text-dim);
+  letter-spacing: 0.03em;
+}
+
+.groupSettingsBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: 8px;
+  background: var(--lumiverse-primary-010);
+  border: 1px solid var(--lumiverse-primary-020);
+  color: var(--lumiverse-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 2px;
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.groupSettingsBtn:hover {
+  background: var(--lumiverse-primary-020);
+  border-color: var(--lumiverse-primary-050);
+  color: var(--lumiverse-text);
+}
+
+/* Section divider */
+.groupDivider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 0 8px;
+}
+
+.groupDivider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--lumiverse-primary-015);
+}
+
+.groupSectionLabel {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--lumiverse-text-dim);
+  flex-shrink: 0;
+}
+
+/* Member list */
+.groupMembers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memberCard {
+  border-radius: 10px;
+  background: var(--lumiverse-primary-005, color-mix(in srgb, var(--lumiverse-primary) 3%, var(--lumiverse-bg)));
+  border: 1px solid var(--lumiverse-primary-010);
+  overflow: hidden;
+  transition: border-color var(--lumiverse-transition-fast), background var(--lumiverse-transition-fast);
+}
+
+.memberCard:hover {
+  border-color: var(--lumiverse-primary-030);
+  background: var(--lumiverse-primary-010);
+}
+
+.memberCardExpanded {
+  border-color: var(--lumiverse-primary-030);
+  background: var(--lumiverse-primary-010);
+}
+
+.memberHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.memberAvatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid var(--lumiverse-primary-015);
+}
+
+.memberAvatarFallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lumiverse-primary-muted);
+  background: var(--lumiverse-primary-010);
+}
+
+.memberInfo {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memberName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberCreator {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+}
+
+.memberChevron {
+  color: var(--lumiverse-text-dim);
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.memberChevronOpen {
+  transform: rotate(90deg);
+}
+
+/* Expanded member detail */
+.memberExpanded {
+  padding: 2px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--lumiverse-primary-015);
+  margin: 0 4px;
+}
+
+.memberTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding-top: 6px;
+}
+
+.memberTag {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--lumiverse-primary-010);
+  color: var(--lumiverse-text-dim);
+  border: 1px solid var(--lumiverse-primary-015);
+}
+
+/* Inline field blocks for expanded member (no nested collapsible sections) */
+.memberField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 3%, transparent);
+  border: 1px solid var(--lumiverse-primary-010);
+}
+
+.memberFieldHeader {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--lumiverse-text-dim);
+}
+
+.memberFieldContent {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--lumiverse-text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memberFieldToggle {
+  display: inline;
+  background: none;
+  border: none;
+  color: var(--lumiverse-primary-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 4px;
+}
+
+.memberFieldToggle:hover {
+  color: var(--lumiverse-primary);
+}
+
+.memberEditBtn {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 5px;
+  padding: 5px 14px;
+  border-radius: 7px;
+  background: var(--lumiverse-primary-010);
+  border: 1px solid var(--lumiverse-primary-020);
+  color: var(--lumiverse-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 2px;
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.memberEditBtn:hover {
+  background: var(--lumiverse-primary-020);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-primary-050);
+}

@@ -150,29 +150,34 @@ export function Select({ value, onChange, options, className, ...props }: Select
 
 /* ── Buttons ── */
 
-type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost'
+type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'danger-ghost'
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant
-  size?: 'sm' | 'md'
+  size?: 'sm' | 'md' | 'icon' | 'icon-sm'
   icon?: ReactNode
+  loading?: boolean
 }
 
-export function Button({ variant = 'secondary', size = 'md', icon, children, className, ...props }: ButtonProps) {
+export function Button({ variant = 'secondary', size = 'md', icon, loading, children, className, disabled, ...props }: ButtonProps) {
   return (
     <button
       type="button"
+      disabled={disabled || loading}
       className={clsx(
         styles.btn,
         variant === 'primary' && styles.btnPrimary,
         variant === 'danger' && styles.btnDanger,
         variant === 'ghost' && styles.btnGhost,
+        variant === 'danger-ghost' && styles.btnDangerGhost,
         size === 'sm' && styles.btnSm,
+        size === 'icon' && styles.btnIcon,
+        size === 'icon-sm' && styles.btnIconSm,
         className,
       )}
       {...props}
     >
-      {icon}
+      {loading ? <span className={styles.btnSpinner} /> : icon}
       {children}
     </button>
   )

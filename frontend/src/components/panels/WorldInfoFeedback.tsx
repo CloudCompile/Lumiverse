@@ -1,18 +1,51 @@
-import { useState } from 'react'
-import { BookOpen, Search, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { BookOpen, Search, ChevronDown, ChevronRight, AlertTriangle, User, Globe, MessageSquare, Sparkles } from 'lucide-react'
 import { useStore } from '@/store'
 import type { ActivatedWorldInfoEntry } from '@/types/api'
 import styles from './WorldInfoFeedback.module.css'
+
+const SCOPE_ORDER: Array<ActivatedWorldInfoEntry['bookSource']> = ['character', 'persona', 'chat', 'global']
+const SCOPE_LABELS: Record<string, string> = {
+  character: 'Character',
+  persona: 'Persona',
+  chat: 'This Chat',
+  global: 'Global',
+}
+const SCOPE_ICONS: Record<string, typeof BookOpen> = {
+  character: Sparkles,
+  persona: User,
+  chat: MessageSquare,
+  global: Globe,
+}
 
 export default function WorldInfoFeedback() {
   const activatedWorldInfo = useStore((s) => s.activatedWorldInfo)
   const worldInfoStats = useStore((s) => s.worldInfoStats)
   const hasEntries = activatedWorldInfo.length > 0
 
-  const keywordEntries = activatedWorldInfo.filter((e) => e.source === 'keyword')
-  const vectorEntries = activatedWorldInfo.filter((e) => e.source === 'vector')
+  const keywordCount = activatedWorldInfo.filter((e) => e.source === 'keyword').length
+  const vectorCount = activatedWorldInfo.filter((e) => e.source === 'vector').length
 
   const hasEvictions = worldInfoStats && (worldInfoStats.evictedByBudget > 0 || worldInfoStats.evictedByMinPriority > 0)
+
+  const groupedByScope = useMemo(() => {
+    const groups: Array<{ scope: string; label: string; entries: ActivatedWorldInfoEntry[] }> = []
+
+    for (const scope of SCOPE_ORDER) {
+      const entries = activatedWorldInfo.filter((e) => e.bookSource === scope)
+      if (entries.length > 0) {
+        groups.push({ scope: scope!, label: SCOPE_LABELS[scope!], entries })
+      }
+    }
+
+    // Entries without bookSource (backward compat) go into an "Other" group
+    const untagged = activatedWorldInfo.filter((e) => !e.bookSource)
+    if (untagged.length > 0) {
+      groups.push({ scope: 'other', label: 'Other', entries: untagged })
+    }
+
+    return groups
+  }, [activatedWorldInfo])
 
   return (
     <div className={styles.container}>
@@ -22,7 +55,7 @@ export default function WorldInfoFeedback() {
             <BookOpen size={14} />
             <span>{worldInfoStats?.totalActivated ?? activatedWorldInfo.length} entries activated</span>
             <span className={styles.entryCount}>
-              {worldInfoStats?.keywordActivated ?? keywordEntries.length} keyword, {worldInfoStats?.vectorActivated ?? vectorEntries.length} vector
+              {worldInfoStats?.keywordActivated ?? keywordCount} keyword, {worldInfoStats?.vectorActivated ?? vectorCount} vector
             </span>
           </div>
         ) : (
@@ -73,29 +106,21 @@ export default function WorldInfoFeedback() {
         </div>
       )}
 
-      {keywordEntries.length > 0 && (
-        <div className={styles.sourceGroup}>
-          <div className={styles.sourceHeader}>
-            <span className={styles.sourceName}>Keyword Matches</span>
-            <span className={styles.sourceCount}>{keywordEntries.length}</span>
+      {groupedByScope.map((group) => {
+        const ScopeIcon = SCOPE_ICONS[group.scope] ?? BookOpen
+        return (
+          <div key={group.scope} className={styles.sourceGroup}>
+            <div className={styles.sourceHeader}>
+              <ScopeIcon size={12} className={styles.scopeIcon} />
+              <span className={styles.sourceName}>{group.label}</span>
+              <span className={styles.sourceCount}>{group.entries.length}</span>
+            </div>
+            {group.entries.map((entry) => (
+              <EntryCard key={entry.id} entry={entry} />
+            ))}
           </div>
-          {keywordEntries.map((entry) => (
-            <EntryCard key={entry.id} entry={entry} />
-          ))}
-        </div>
-      )}
-
-      {vectorEntries.length > 0 && (
-        <div className={styles.sourceGroup}>
-          <div className={styles.sourceHeader}>
-            <span className={styles.sourceName}>Vector Matches</span>
-            <span className={styles.sourceCount}>{vectorEntries.length}</span>
-          </div>
-          {vectorEntries.map((entry) => (
-            <EntryCard key={entry.id} entry={entry} />
-          ))}
-        </div>
-      )}
+        )
+      })}
 
       {!hasEntries && !worldInfoStats && (
         <div className={styles.emptyState}>
@@ -120,6 +145,7 @@ function EntryCard({ entry }: { entry: ActivatedWorldInfoEntry }) {
           )}
         </span>
         <span className={styles.entryComment}>{entry.comment || '(unnamed)'}</span>
+        <span className={styles.methodBadge}>{entry.source}</span>
         {entry.source === 'vector' && entry.score != null && (
           <span className={styles.entryScore}>dist: {entry.score.toFixed(3)}</span>
         )}

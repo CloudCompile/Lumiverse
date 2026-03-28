@@ -45,12 +45,18 @@
 .sourceHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--lumiverse-border);
 }
 
+.scopeIcon {
+  flex-shrink: 0;
+  color: var(--lumiverse-text-dim);
+}
+
 .sourceName {
+  flex: 1;
   font-size: 13px;
   font-weight: 600;
   color: var(--lumiverse-text);
@@ -105,6 +111,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.methodBadge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  color: var(--lumiverse-text-dim);
+  background: var(--lumiverse-fill);
+  border: 1px solid var(--lumiverse-border);
 }
 
 .entryScore {

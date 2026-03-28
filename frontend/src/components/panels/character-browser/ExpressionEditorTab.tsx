@@ -7,6 +7,7 @@ import { settingsApi } from '@/api/settings'
 import { useStore } from '@/store'
 import ExpressionSlotCard from './ExpressionSlotCard'
 import ImageLightbox from '@/components/shared/ImageLightbox'
+import { Toggle } from '@/components/shared/Toggle'
 import type { ExpressionConfig, ExpressionSlot } from '@/types/expressions'
 import type { CharacterGalleryItem } from '@/types/api'
 import styles from './ExpressionEditorTab.module.css'
@@ -224,13 +225,11 @@ export default function ExpressionEditorTab({ characterId }: Props) {
       </div>
 
       <div className={styles.enableRow}>
-        <input
-          type="checkbox"
-          id="expr-enabled"
+        <Toggle.Checkbox
           checked={config?.enabled ?? false}
           onChange={handleToggleEnabled}
+          label="Enable expression display"
         />
-        <label htmlFor="expr-enabled">Enable expression display</label>
       </div>
 
       {hasSlots && (

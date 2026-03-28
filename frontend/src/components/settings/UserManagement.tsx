@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { KeyRound, Ban, Trash2, ShieldCheck } from 'lucide-react'
 import { useStore } from '@/store'
 import type { AuthUser } from '@/types/store'
+import { Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import styles from './UserManagement.module.css'
 
@@ -152,14 +153,14 @@ export default function UserManagement() {
       <section className={styles.section}>
         <div className={styles.header}>
           <h3 className={styles.title}>Your Account</h3>
-          <button
-            type="button"
-            className={styles.addBtn}
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<KeyRound size={13} />}
             onClick={() => { setShowPasswordForm(!showPasswordForm); clearMessages() }}
           >
-            <KeyRound size={13} />
             {showPasswordForm ? 'Cancel' : 'Change Password'}
-          </button>
+          </Button>
         </div>
 
         {showPasswordForm && (
@@ -187,13 +188,15 @@ export default function UserManagement() {
                 value={confirmPw}
                 onChange={(e) => setConfirmPw(e.target.value)}
               />
-              <button
+              <Button
                 type="submit"
-                className={styles.createBtn}
+                variant="primary"
+                size="sm"
                 disabled={changingPw || !currentPw || !newPw || !confirmPw}
+                loading={changingPw}
               >
                 {changingPw ? 'Saving...' : 'Save'}
-              </button>
+              </Button>
             </div>
           </form>
         )}
@@ -204,13 +207,13 @@ export default function UserManagement() {
         <section className={styles.section}>
           <div className={styles.header}>
             <h3 className={styles.title}>User Management</h3>
-            <button
-              type="button"
-              className={styles.addBtn}
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => { setShowForm(!showForm); clearMessages() }}
             >
               {showForm ? 'Cancel' : 'Add User'}
-            </button>
+            </Button>
           </div>
 
           {showForm && (
@@ -239,13 +242,15 @@ export default function UserManagement() {
                   <option value="user">User</option>
                   <option value="admin">Admin</option>
                 </select>
-                <button
+                <Button
                   type="submit"
-                  className={styles.createBtn}
+                  variant="primary"
+                  size="sm"
                   disabled={creating || !username || !password}
+                  loading={creating}
                 >
                   {creating ? 'Creating...' : 'Create'}
-                </button>
+                </Button>
               </div>
             </form>
           )}
@@ -265,21 +270,22 @@ export default function UserManagement() {
                   onChange={(e) => setResetPw(e.target.value)}
                   autoFocus
                 />
-                <button
-                  type="button"
-                  className={styles.createBtn}
+                <Button
+                  variant="primary"
+                  size="sm"
                   disabled={resetting || !resetPw}
+                  loading={resetting}
                   onClick={handleResetPassword}
                 >
                   {resetting ? 'Resetting...' : 'Reset'}
-                </button>
-                <button
-                  type="button"
-                  className={styles.addBtn}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => { setResetTarget(null); setResetPw('') }}
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -304,32 +310,30 @@ export default function UserManagement() {
                     </span>
                     {!isSelf && (
                       <>
-                        <button
-                          type="button"
-                          className={styles.actionBtn}
+                        <Button
+                          size="icon"
+                          variant="ghost"
                           title="Reset password"
                           onClick={() => { setResetTarget(u); setResetPw(''); clearMessages() }}
-                        >
-                          <KeyRound size={13} />
-                        </button>
-                        <button
-                          type="button"
+                          icon={<KeyRound size={13} />}
+                        />
+                        <Button
+                          size="icon"
+                          variant="ghost"
                           className={isBanned ? styles.actionBtnSuccess : styles.actionBtnWarn}
                           title={isBanned ? 'Enable login' : 'Disable login'}
                           disabled={actionLoading === u.id}
                           onClick={() => handleBan(u)}
-                        >
-                          {isBanned ? <ShieldCheck size={13} /> : <Ban size={13} />}
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.actionBtnDanger}
+                          icon={isBanned ? <ShieldCheck size={13} /> : <Ban size={13} />}
+                        />
+                        <Button
+                          size="icon"
+                          variant="danger-ghost"
                           title="Delete user"
                           disabled={actionLoading === u.id}
                           onClick={() => { setConfirmDelete(u); clearMessages() }}
-                        >
-                          <Trash2 size={13} />
-                        </button>
+                          icon={<Trash2 size={13} />}
+                        />
                       </>
                     )}
                   </div>

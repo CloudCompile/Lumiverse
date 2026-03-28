@@ -1,24 +1,6 @@
-.backdrop {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: var(--lumiverse-modal-backdrop, rgba(0, 0, 0, 0.6));
-  z-index: 10003;
-}
-
 .modal {
-  position: relative;
-  width: 100%;
-  max-width: 420px;
-  background: var(--lumiverse-gradient-modal);
-  border-radius: 16px;
-  border: 1px solid var(--lumiverse-warning-020);
+  border-color: var(--lumiverse-warning-020);
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px rgba(245, 158, 11, 0.12);
-  overflow: hidden;
 }
 
 .content {

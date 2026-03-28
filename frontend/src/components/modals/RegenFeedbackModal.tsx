@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
 import { MessageSquareText } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
 import styles from './RegenFeedbackModal.module.css'
 import clsx from 'clsx'
 
@@ -20,25 +19,9 @@ export default function RegenFeedbackModal({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel()
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.body.style.overflow = 'hidden'
     // Auto-focus textarea
     requestAnimationFrame(() => textareaRef.current?.focus())
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
-    }
-  }, [onCancel])
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onCancel()
-    },
-    [onCancel]
-  )
+  }, [])
 
   const handleSubmit = useCallback(() => {
     const trimmed = text.trim()
@@ -55,24 +38,8 @@ export default function RegenFeedbackModal({
     [handleSubmit]
   )
 
-  return createPortal(
-    <AnimatePresence>
-      <motion.div
-        className={styles.backdrop}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.15 }}
-        onClick={handleBackdropClick}
-      >
-        <motion.div
-          className={styles.modal}
-          initial={{ opacity: 0, scale: 0.95, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 10 }}
-          transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-          onClick={(e) => e.stopPropagation()}
-        >
+  return (
+    <ModalShell isOpen={true} onClose={onCancel} maxWidth="clamp(320px, 90vw, min(520px, var(--lumiverse-content-max-width, 520px)))" className={styles.modal}>
           <div className={styles.header}>
             <MessageSquareText size={16} />
             <h3 className={styles.title}>Regeneration Feedback</h3>
@@ -118,9 +85,6 @@ export default function RegenFeedbackModal({
               </button>
             </div>
           </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>,
-    document.body
+    </ModalShell>
   )
 }

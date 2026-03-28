@@ -13,6 +13,7 @@ import {
 } from "../services/prompt-assembly.service";
 import { activateWorldInfo, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
+import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
 
 const MAX_IMPORT_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MB
 
@@ -115,22 +116,24 @@ app.post("/:id/diagnostics", async (c) => {
 
   const persona = personasSvc.resolvePersonaOrDefault(userId);
   const globalWorldBooks = (settingsSvc.getSetting(userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
+  const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
   const messages = chatsSvc.getMessages(userId, chat.id);
   const vectorSummary = svc.getWorldBookVectorSummary(userId, bookId)!;
   const bookEntries = svc.listEntries(userId, bookId);
   const attachmentSources = {
-    character: character.extensions?.world_book_id === bookId,
+    character: getCharacterWorldBookIds(character.extensions).includes(bookId),
     persona: persona?.attached_world_book_id === bookId,
     global: globalWorldBooks.includes(bookId),
+    chat: chatWorldBookIds.includes(bookId),
   };
-  const isAttached = attachmentSources.character || attachmentSources.persona || attachmentSources.global;
+  const isAttached = attachmentSources.character || attachmentSources.persona || attachmentSources.global || attachmentSources.chat;
 
   const embeddings = await embeddingsSvc.getEmbeddingConfig(userId);
   const queryPreview = await getWorldInfoVectorQueryPreview(userId, messages);
   const blockerMessages: string[] = [];
 
   if (!isAttached) {
-    blockerMessages.push("This world book is not attached to the current character, active persona, or global world books.");
+    blockerMessages.push("This world book is not attached to the current character, active persona, global world books, or this chat's world books.");
   }
 
   const worldInfoSettings = (settingsSvc.getSetting(userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
@@ -353,12 +356,12 @@ app.post("/import-character-book", async (c) => {
   }
 
   const result = svc.importCharacterBook(userId, characterId, character.name, characterBook);
-  await charSvc.updateCharacter(userId, characterId, {
-    extensions: {
-      ...(character.extensions || {}),
-      world_book_id: result.worldBook.id,
-    },
-  });
+  const currentIds = getCharacterWorldBookIds(character.extensions);
+  const nextExtensions = setCharacterWorldBookIds(
+    { ...(character.extensions || {}) },
+    [...currentIds, result.worldBook.id],
+  );
+  await charSvc.updateCharacter(userId, characterId, { extensions: nextExtensions });
   return c.json({ world_book: result.worldBook, entry_count: result.entryCount }, 201);
 });
 

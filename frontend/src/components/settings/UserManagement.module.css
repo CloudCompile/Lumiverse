@@ -24,25 +24,7 @@
   margin: 0;
 }
 
-.addBtn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--lumiverse-border);
-  background: transparent;
-  color: var(--lumiverse-text-dim);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.addBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
+/* .addBtn — migrated to shared Button component */
 
 .error {
   padding: 8px 12px;
@@ -110,26 +92,7 @@
   outline: none;
 }
 
-.createBtn {
-  padding: 8px 16px;
-  border-radius: 6px;
-  border: none;
-  background: var(--lumiverse-primary);
-  color: var(--lumiverse-primary-contrast, #fff);
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.createBtn:hover {
-  opacity: 0.9;
-}
-
-.createBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* .createBtn — migrated to shared Button component */
 
 .userList {
   display: flex;
@@ -222,62 +185,19 @@
   color: var(--lumiverse-text-muted);
 }
 
-/* Action buttons */
-.actionBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  border: 1px solid var(--lumiverse-border);
-  background: transparent;
-  color: var(--lumiverse-text-muted);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
+/* .actionBtn, .actionBtnDanger — migrated to shared Button component */
 
-.actionBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
-
-.actionBtnWarn {
-  composes: actionBtn;
-}
-
+/* Color overrides for warn/success hover states (applied via className on shared Button) */
 .actionBtnWarn:hover {
-  background: rgba(234, 179, 8, 0.1);
-  color: rgb(234, 179, 8);
-  border-color: rgba(234, 179, 8, 0.3);
-}
-
-.actionBtnSuccess {
-  composes: actionBtn;
+  background: rgba(234, 179, 8, 0.1) !important;
+  color: rgb(234, 179, 8) !important;
+  border-color: rgba(234, 179, 8, 0.3) !important;
 }
 
 .actionBtnSuccess:hover {
-  background: rgba(16, 185, 129, 0.1);
-  color: rgb(16, 185, 129);
-  border-color: rgba(16, 185, 129, 0.3);
-}
-
-.actionBtnDanger {
-  composes: actionBtn;
-}
-
-.actionBtnDanger:hover {
-  background: var(--lumiverse-danger-015);
-  color: var(--lumiverse-error, #ef4444);
-  border-color: var(--lumiverse-danger-020);
-}
-
-.actionBtn:disabled,
-.actionBtnWarn:disabled,
-.actionBtnSuccess:disabled,
-.actionBtnDanger:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+  background: rgba(16, 185, 129, 0.1) !important;
+  color: rgb(16, 185, 129) !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
 }
 
 @media (max-width: 600px) {

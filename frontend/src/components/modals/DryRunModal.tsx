@@ -1,16 +1,17 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
-import { X, ChevronRight } from 'lucide-react'
+import { useState } from 'react'
+import { ChevronRight } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Badge } from '@/components/shared/Badge'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import type { DryRunResponse } from '@/api/generate'
 import styles from './DryRunModal.module.css'
 import clsx from 'clsx'
 
-const ROLE_CLASS: Record<string, string> = {
-  system: styles.roleSystem,
-  user: styles.roleUser,
-  assistant: styles.roleAssistant,
+const ROLE_COLOR: Record<string, 'warning' | 'info' | 'primary'> = {
+  system: 'warning',
+  user: 'info',
+  assistant: 'primary',
 }
 
 export default function DryRunModal() {
@@ -22,27 +23,6 @@ export default function DryRunModal() {
   const [wiStatsOpen, setWiStatsOpen] = useState(false)
   const [memStatsOpen, setMemStatsOpen] = useState(false)
 
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeModal()
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
-    }
-  }, [closeModal])
-
-  const mouseDownTargetRef = useRef<EventTarget | null>(null)
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) closeModal()
-    },
-    [closeModal],
-  )
-
   const { messages, breakdown, parameters, assistantPrefill, model, provider, tokenCount, worldInfoStats, memoryStats } = modalProps
 
   // Build a token count lookup from tokenCount.breakdown (matched by name)
@@ -53,38 +33,15 @@ export default function DryRunModal() {
     }
   }
 
-  return createPortal(
-    <AnimatePresence>
-      <motion.div
-        className={styles.backdrop}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.15 }}
-        onMouseDown={(e) => { mouseDownTargetRef.current = e.target }}
-        onClick={handleBackdropClick}
-      >
-        <motion.div
-          className={styles.modal}
-          initial={{ opacity: 0, scale: 0.95, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 10 }}
-          transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-        >
+  return (
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 94vw, min(1100px, var(--lumiverse-content-max-width, 1100px)))" className={styles.modal}>
           {/* Header */}
           <div className={styles.header}>
             <h3 className={styles.headerTitle}>Prompt Dry Run</h3>
-            <span className={styles.badge}>
+            <Badge color="primary">
               {provider} / {model}
-            </span>
-            <button
-              type="button"
-              className={styles.closeBtn}
-              onClick={closeModal}
-              aria-label="Close"
-            >
-              <X size={16} />
-            </button>
+            </Badge>
+            <CloseButton onClick={closeModal} variant="solid" className={styles.closeBtn} />
           </div>
 
           {/* Scrollable body */}
@@ -97,9 +54,9 @@ export default function DryRunModal() {
               {messages.map((msg, i) => (
                 <div key={i} className={styles.messageCard}>
                   <div className={styles.messageHeader}>
-                    <span className={clsx(styles.roleBadge, ROLE_CLASS[msg.role])}>
+                    <Badge color={ROLE_COLOR[msg.role] ?? 'neutral'} size="sm" className={styles.roleBadge}>
                       {msg.role}
-                    </span>
+                    </Badge>
                     <span className={styles.messageIndex}>#{i + 1}</span>
                   </div>
                   <div className={styles.messageContent}>{msg.content}</div>
@@ -334,9 +291,6 @@ export default function DryRunModal() {
               </div>
             )}
           </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>,
-    document.body,
+    </ModalShell>
   )
 }

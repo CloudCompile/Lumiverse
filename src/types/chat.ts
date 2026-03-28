@@ -48,6 +48,8 @@ export interface GroupedRecentChat {
   updated_at: number;
   chat_count: number;
   is_group: boolean;
+  group_character_ids?: string[];
+  group_name?: string;
 }
 
 export interface ChatSummary {

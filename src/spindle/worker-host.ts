@@ -808,6 +808,13 @@ export class WorkerHost {
       case "text_editor_open":
         this.handleTextEditorOpen(msg.requestId, msg.title, msg.value, msg.placeholder, msg.userId);
         break;
+      // ─── Modal (free tier — no permission needed) ─────────────────────
+      case "modal_open":
+        this.handleModalOpen(msg.requestId, msg.title, msg.items, msg.width, msg.maxHeight, msg.persistent, msg.userId);
+        break;
+      case "confirm_open":
+        this.handleConfirmOpen(msg.requestId, msg.title, msg.message, msg.variant, msg.confirmLabel, msg.cancelLabel, msg.userId);
+        break;
       // ─── Macro Resolution (free tier — no permission needed) ────────────
       case "macros_resolve":
         this.handleMacrosResolve(msg.requestId, msg.template, msg.chatId, msg.characterId, msg.userId);
@@ -4238,6 +4245,96 @@ export class WorkerHost {
           title: title ?? "Edit Text",
           value: value ?? "",
           placeholder: placeholder ?? "",
+        },
+        resolvedUserId,
+      );
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Modal (free tier) ──────────────────────────────────────────────
+
+  private handleModalOpen(
+    requestId: string,
+    title: string,
+    items: any[],
+    width?: number,
+    maxHeight?: number,
+    persistent?: boolean,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+
+      const modalRequestId = `spindle-modal:${this.extensionId}:${requestId}`;
+
+      const unsub = eventBus.on(EventType.SPINDLE_MODAL_RESULT, (msg) => {
+        if (msg.payload?.requestId !== modalRequestId) return;
+        unsub();
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: { dismissedBy: msg.payload.dismissedBy ?? "user" },
+        });
+      });
+
+      eventBus.emit(
+        EventType.SPINDLE_MODAL_OPEN,
+        {
+          requestId: modalRequestId,
+          extensionId: this.extensionId,
+          extensionName: this.manifest.name,
+          title,
+          items,
+          width,
+          maxHeight,
+          persistent: persistent ?? false,
+        },
+        resolvedUserId,
+      );
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleConfirmOpen(
+    requestId: string,
+    title: string,
+    message: string,
+    variant?: string,
+    confirmLabel?: string,
+    cancelLabel?: string,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+
+      const confirmRequestId = `spindle-confirm:${this.extensionId}:${requestId}`;
+
+      const unsub = eventBus.on(EventType.SPINDLE_CONFIRM_RESULT, (msg) => {
+        if (msg.payload?.requestId !== confirmRequestId) return;
+        unsub();
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: { confirmed: !!msg.payload.confirmed },
+        });
+      });
+
+      eventBus.emit(
+        EventType.SPINDLE_CONFIRM_OPEN,
+        {
+          requestId: confirmRequestId,
+          extensionId: this.extensionId,
+          extensionName: this.manifest.name,
+          title,
+          message,
+          variant: variant ?? "info",
+          confirmLabel: confirmLabel ?? "Confirm",
+          cancelLabel: cancelLabel ?? "Cancel",
         },
         resolvedUserId,
       );

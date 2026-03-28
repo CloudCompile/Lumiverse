@@ -9,6 +9,7 @@ import useImageCropFlow from '@/hooks/useImageCropFlow'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { Button } from '@/components/shared/FormComponents'
 import FolderDropdown from '@/components/shared/FolderDropdown'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { useFolders } from '@/hooks/useFolders'
@@ -380,18 +381,16 @@ export default function PersonaEditor({
               </option>
             ))}
           </select>
-          <button
-            type="button"
-            className={styles.actionBtn}
+          <Button
+            size="icon-sm" variant="ghost"
             onClick={() =>
               openModal('worldBookEditor', {
                 bookId: persona.attached_world_book_id || undefined,
               })
             }
             title="Edit world books"
-          >
-            <Pencil size={12} />
-          </button>
+            icon={<Pencil size={12} />}
+          />
         </div>
       </div>
 
@@ -431,40 +430,34 @@ export default function PersonaEditor({
 
       {/* Action buttons */}
       <div className={styles.actions}>
-        <button
-          type="button"
-          className={styles.primaryBtn}
+        <Button
+          variant="primary" size="sm"
+          icon={<Play size={13} />}
           onClick={() => onSwitchTo(persona.id)}
         >
-          <Play size={13} />
-          <span>{isActive ? 'Deactivate' : 'Switch To'}</span>
-        </button>
-        <button
-          type="button"
-          className={styles.chatApplyBtn}
+          {isActive ? 'Deactivate' : 'Switch To'}
+        </Button>
+        <Button
+          variant="secondary" size="sm"
+          icon={<MessagesSquare size={13} />}
           onClick={() => setShowReattributeConfirm(true)}
           disabled={!activeChatId || reattributing}
           title={activeChatId ? 'Re-attribute all user messages in this chat to this persona' : 'Open a chat first'}
         >
-          <MessagesSquare size={13} />
-          <span>{reattributing ? 'Applying...' : 'Apply to Chat'}</span>
-        </button>
-        <button
-          type="button"
-          className={styles.actionBtn}
+          {reattributing ? 'Applying...' : 'Apply to Chat'}
+        </Button>
+        <Button
+          size="icon-sm" variant="ghost"
           onClick={() => onDuplicate(persona.id)}
           title="Duplicate"
-        >
-          <Copy size={13} />
-        </button>
-        <button
-          type="button"
-          className={clsx(styles.actionBtn, styles.deleteBtn)}
+          icon={<Copy size={13} />}
+        />
+        <Button
+          size="icon-sm" variant="danger-ghost"
           onClick={() => setShowDeleteConfirm(true)}
           title="Delete"
-        >
-          <Trash2 size={13} />
-        </button>
+          icon={<Trash2 size={13} />}
+        />
       </div>
 
       <ImageCropModal {...cropModalProps} />

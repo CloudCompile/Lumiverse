@@ -14,30 +14,3 @@
   opacity: 1;
 }
 
-.btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.btn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
-
-.deleteBtn {
-  composes: btn;
-}
-
-.deleteBtn:hover {
-  color: var(--lumiverse-danger);
-  background: var(--lumiverse-danger-015);
-}

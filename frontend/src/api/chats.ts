@@ -116,4 +116,11 @@ export const messagesApi = {
   deleteSwipe(chatId: string, messageId: string, swipeIdx: number) {
     return del<Message>(`/chats/${chatId}/messages/${messageId}/swipe/${swipeIdx}`)
   },
+
+  bulkHide(chatId: string, messageIds: string[], hidden: boolean) {
+    return post<{ success: true; updated: number; messages: Message[] }>(
+      `/chats/${chatId}/messages/bulk-hide`,
+      { message_ids: messageIds, hidden }
+    )
+  },
 }

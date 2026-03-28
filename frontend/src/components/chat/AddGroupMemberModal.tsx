@@ -1,13 +1,15 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Search, UserPlus, Loader2 } from 'lucide-react'
+import { Search, UserPlus } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
 import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import type { CharacterSummary } from '@/types/api'
 import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
+import { Spinner } from '@/components/shared/Spinner'
 import Pagination from '@/components/shared/Pagination'
 import styles from './AddGroupMemberModal.module.css'
 
@@ -131,9 +133,7 @@ export default function AddGroupMemberModal() {
           exit={{ opacity: 0, scale: 0.95, y: 10 }}
           transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
         >
-          <button onClick={closeModal} type="button" className={styles.closeBtn} aria-label="Close">
-            <X size={16} />
-          </button>
+          <CloseButton onClick={closeModal} variant="solid" position="absolute" />
 
           <div className={styles.header}>
             <UserPlus size={18} className={styles.headerIcon} />
@@ -158,7 +158,7 @@ export default function AddGroupMemberModal() {
 
             {loading ? (
               <div className={styles.emptyState}>
-                <Loader2 size={20} className={styles.spinner} />
+                <Spinner size={20} fast />
               </div>
             ) : (
               <div className={styles.charGrid}>
@@ -190,7 +190,7 @@ export default function AddGroupMemberModal() {
                         )}
                         {isAdding && (
                           <span className={styles.addingOverlay}>
-                            <Loader2 size={18} className={styles.spinner} />
+                            <Spinner size={18} fast />
                           </span>
                         )}
                       </div>

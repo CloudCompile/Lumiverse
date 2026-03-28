@@ -35,6 +35,7 @@ import * as packsSvc from "./packs.service";
 import * as embeddingsSvc from "./embeddings.service";
 import * as imagesSvc from "./images.service";
 import * as presetProfilesSvc from "./preset-profiles.service";
+import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import { getCouncilSettings } from "./council/council-settings.service";
 import { getDb } from "../db/connection";
 import { readFileSync } from "fs";
@@ -91,6 +92,34 @@ function resolveCharacterWithAlternateFields(character: Character, chat: Chat): 
   }
 
   return hasOverride ? { ...character, ...overrides } : character;
+}
+
+// ---------------------------------------------------------------------------
+// Group scenario override — replace scenario with a group-level value
+// ---------------------------------------------------------------------------
+
+interface GroupScenarioOverride {
+  mode: "individual" | "member" | "custom";
+  member_character_id?: string;
+  content?: string;
+}
+
+function resolveGroupScenarioOverride(character: Character, chat: Chat, userId: string): Character {
+  const override = chat.metadata?.group_scenario_override as GroupScenarioOverride | undefined;
+  if (!override || override.mode === "individual") return character;
+
+  if (override.mode === "member" && override.member_character_id) {
+    const memberChar = charactersSvc.getCharacter(userId, override.member_character_id);
+    if (memberChar) {
+      return { ...character, scenario: memberChar.scenario || "" };
+    }
+  }
+
+  if (override.mode === "custom" && override.content !== undefined) {
+    return { ...character, scenario: override.content };
+  }
+
+  return character;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +290,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // ---- World Info activation ----
   const globalWorldBooks = (settingsSvc.getSetting(ctx.userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
-  const wiSources = collectWorldInfoSources(ctx.userId, character, persona, globalWorldBooks);
+  const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
+  const wiSources = collectWorldInfoSources(ctx.userId, character, persona, globalWorldBooks, chatWorldBookIds);
   const wiEntries = wiSources.entries;
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
   const worldInfoSettings = (settingsSvc.getSetting(ctx.userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
@@ -289,6 +319,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     wiResult.activatedEntries,
     vectorActivated,
     worldInfoSettings,
+    wiSources.bookSourceMap,
   );
   const wiCache = mergedWorldInfo.cache;
   wiResult.activatedEntries = mergedWorldInfo.activatedEntries;
@@ -321,8 +352,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     ? resolveGroupCharacterNames(chat, (cid) =>
         mutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(ctx.userId, cid)?.name)
     : undefined;
-  // Resolve alternate field overrides from per-chat bindings
-  const effectiveCharacter = resolveCharacterWithAlternateFields(character, chat);
+  // Resolve alternate field overrides from per-chat bindings, then group scenario override
+  const effectiveCharacter = resolveGroupScenarioOverride(
+    resolveCharacterWithAlternateFields(character, chat),
+    chat,
+    ctx.userId,
+  );
 
   const macroEnv: MacroEnv = buildEnv({
     character: effectiveCharacter,
@@ -1034,11 +1069,13 @@ export function populateLumiaLoomContext(
 // Helpers
 // ---------------------------------------------------------------------------
 
+export type BookSource = 'character' | 'persona' | 'chat' | 'global';
+
 /**
  * Collect all WorldBookEntry[] from character extensions + persona attached book.
  */
-function collectWorldInfoEntries(userId: string, character: Character, persona: Persona | null, globalWorldBookIds?: string[]): import("../types/world-book").WorldBookEntry[] {
-  return collectWorldInfoSources(userId, character, persona, globalWorldBookIds).entries;
+function collectWorldInfoEntries(userId: string, character: Character, persona: Persona | null, globalWorldBookIds?: string[], chatWorldBookIds?: string[]): import("../types/world-book").WorldBookEntry[] {
+  return collectWorldInfoSources(userId, character, persona, globalWorldBookIds, chatWorldBookIds).entries;
 }
 
 export function collectWorldInfoSources(
@@ -1046,30 +1083,49 @@ export function collectWorldInfoSources(
   character: Character,
   persona: Persona | null,
   globalWorldBookIds?: string[],
-): { entries: import("../types/world-book").WorldBookEntry[]; worldBookIds: string[] } {
+  chatWorldBookIds?: string[],
+): { entries: import("../types/world-book").WorldBookEntry[]; worldBookIds: string[]; bookSourceMap: Map<string, BookSource> } {
   const entries: import("../types/world-book").WorldBookEntry[] = [];
   const worldBookIds: string[] = [];
+  const bookSourceMap = new Map<string, BookSource>();
+  const seen = new Set<string>();
 
-  // Character's attached world book (stored in extensions)
-  const charBookId = character.extensions?.world_book_id as string | undefined;
-  if (charBookId) {
+  // Character's attached world books (stored in extensions)
+  const charBookIds = getCharacterWorldBookIds(character.extensions);
+  for (const charBookId of charBookIds) {
+    if (seen.has(charBookId)) continue;
+    seen.add(charBookId);
     worldBookIds.push(charBookId);
+    bookSourceMap.set(charBookId, 'character');
     entries.push(...worldBooksSvc.listEntries(userId, charBookId));
   }
 
   // Persona's attached world book
-  if (persona?.attached_world_book_id) {
+  if (persona?.attached_world_book_id && !seen.has(persona.attached_world_book_id)) {
+    seen.add(persona.attached_world_book_id);
     worldBookIds.push(persona.attached_world_book_id);
+    bookSourceMap.set(persona.attached_world_book_id, 'persona');
     entries.push(...worldBooksSvc.listEntries(userId, persona.attached_world_book_id));
+  }
+
+  // Chat-scoped world books (active for this chat only)
+  if (chatWorldBookIds?.length) {
+    for (const cId of chatWorldBookIds) {
+      if (seen.has(cId)) continue;
+      seen.add(cId);
+      worldBookIds.push(cId);
+      bookSourceMap.set(cId, 'chat');
+      entries.push(...worldBooksSvc.listEntries(userId, cId));
+    }
   }
 
   // Global world books (user-wide, always active regardless of character/persona)
   if (globalWorldBookIds?.length) {
-    const seen = new Set(worldBookIds);
     for (const gId of globalWorldBookIds) {
-      if (seen.has(gId)) continue; // avoid duplicating a book already attached via character/persona
+      if (seen.has(gId)) continue;
       seen.add(gId);
       worldBookIds.push(gId);
+      bookSourceMap.set(gId, 'global');
       entries.push(...worldBooksSvc.listEntries(userId, gId));
     }
   }
@@ -1077,6 +1133,7 @@ export function collectWorldInfoSources(
   return {
     entries,
     worldBookIds: Array.from(new Set(worldBookIds)),
+    bookSourceMap,
   };
 }
 
@@ -1992,6 +2049,7 @@ export function mergeActivatedWorldInfoEntries(
   keywordEntries: WorldBookEntryModel[],
   vectorEntries: VectorActivatedEntry[],
   settingsInput?: Partial<WorldInfoSettings>,
+  bookSourceMap?: Map<string, BookSource>,
 ): MergedWorldInfoEntriesResult {
   const settings: WorldInfoSettings = { ...DEFAULT_WORLD_INFO_SETTINGS, ...settingsInput };
   const mergedEntries: WorldBookEntryModel[] = [];
@@ -2059,6 +2117,8 @@ export function mergeActivatedWorldInfoEntries(
       keys: entry.key || [],
       source: source?.source ?? "keyword",
       score: source?.score,
+      bookId: entry.world_book_id,
+      bookSource: bookSourceMap?.get(entry.world_book_id),
     };
   });
 
@@ -2282,7 +2342,8 @@ export async function getActivatedWorldInfoForChat(
   const persona = personasSvc.resolvePersonaOrDefault(userId);
 
   const globalWorldBookIds = (settingsSvc.getSetting(userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
-  const wiSources = collectWorldInfoSources(userId, character, persona, globalWorldBookIds);
+  const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
+  const wiSources = collectWorldInfoSources(userId, character, persona, globalWorldBookIds, chatWorldBookIds);
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
   const worldInfoSettings = (settingsSvc.getSetting(userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
 
@@ -2301,6 +2362,7 @@ export async function getActivatedWorldInfoForChat(
     wiResult.activatedEntries,
     vectorActivated,
     worldInfoSettings,
+    wiSources.bookSourceMap,
   ).activatedWorldInfo;
 }
 
@@ -2965,9 +3027,11 @@ function buildParameters(
 
   // API-level reasoning: inject provider-specific params when enabled.
   // Placed before custom body so custom body can override with more specific config.
+  // For toggle-only providers (Moonshot, Z.AI), always inject when apiReasoning is on.
   if (reasoningSettings?.apiReasoning && providerName) {
     const effort = reasoningSettings.reasoningEffort || "auto";
-    if (effort !== "auto") {
+    const isToggleOnly = providerName === "moonshot" || providerName === "zai";
+    if (effort !== "auto" || isToggleOnly) {
       injectReasoningParams(params, providerName, effort, modelName || undefined);
     }
   }
@@ -2990,6 +3054,15 @@ function buildParameters(
  * Inject provider-specific reasoning/thinking parameters based on the
  * user's reasoning effort setting. Does NOT override if the parameter
  * is already set (e.g. by a prior custom body or explicit override).
+ *
+ * Provider mapping:
+ * - Anthropic:   thinking + output_config (adaptive 4.6) or thinking.budget_tokens (legacy)
+ * - Google:      thinkingConfig.thinkingLevel (3.x) or thinkingBudget (2.5)
+ * - OpenRouter:  reasoning: { effort } with values: none/minimal/low/medium/high/xhigh
+ * - NanoGPT:     reasoning_effort (OpenAI-compat) with values: none/minimal/low/medium/high
+ * - Moonshot:    thinking: { type: "enabled" } — toggle-only, effort ignored
+ * - Z.AI:        thinking: { type: "enabled" } — toggle-only, effort ignored
+ * - Others:      reasoning: { effort } (generic OpenAI-compatible passthrough)
  */
 export function injectReasoningParams(params: Record<string, any>, providerName: string, effort: string, model?: string): void {
   if (providerName === "anthropic") {
@@ -2999,27 +3072,46 @@ export function injectReasoningParams(params: Record<string, any>, providerName:
       if (isAdaptiveModel) {
         // Adaptive thinking: Claude decides when/how much to think
         params.thinking = { type: "adaptive" };
-        // Map effort to output_config.effort — "max" is gated to Opus 4.6 only
-        const isOpus46 = model && /claude-opus-4-6/i.test(model);
-        let mappedEffort = effort;
-        if (effort === "max" && !isOpus46) mappedEffort = "high";
+        // Map effort to output_config.effort — all 4 levels supported on both Opus and Sonnet 4.6
+        const validEfforts = new Set(["low", "medium", "high", "max"]);
+        const mappedEffort = validEfforts.has(effort) ? effort : "high";
         params.output_config = { effort: mappedEffort };
       } else {
         // Legacy extended thinking for older Claude models
-        const budgetMap: Record<string, number> = { low: 2048, medium: 8192, high: 16384 };
+        const budgetMap: Record<string, number> = { low: 2048, medium: 8192, high: 16384, max: 32768 };
         const budget = budgetMap[effort] || 8192;
         params.thinking = { type: "enabled", budget_tokens: budget };
       }
     }
-  } else if (providerName === "google") {
-    // Google Gemini: thinkingConfig with thinkingLevel (3.x) or thinkingBudget (2.5.x)
-    // Use thinkingLevel as it covers both model generations.
+  } else if (providerName === "google" || providerName === "google_vertex") {
+    // Google Gemini / Vertex AI: thinkingConfig with thinkingLevel
+    // Valid levels: minimal, low, medium, high
     if (!params.thinkingConfig) {
-      const levelMap: Record<string, string> = { low: "low", medium: "medium", high: "high" };
-      params.thinkingConfig = { thinkingLevel: levelMap[effort] || "medium" };
+      const validLevels = new Set(["minimal", "low", "medium", "high"]);
+      params.thinkingConfig = { thinkingLevel: validLevels.has(effort) ? effort : "medium" };
+    }
+  } else if (providerName === "openrouter") {
+    // OpenRouter: unified reasoning object with effort levels
+    // Valid: none, minimal, low, medium, high, xhigh
+    if (!params.reasoning) {
+      const validEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+      params.reasoning = { effort: validEfforts.has(effort) ? effort : "high" };
+    }
+  } else if (providerName === "nanogpt") {
+    // NanoGPT: OpenAI-compatible reasoning_effort parameter
+    // Valid: none, minimal, low, medium, high
+    if (!params.reasoning_effort) {
+      const validEfforts = new Set(["none", "minimal", "low", "medium", "high"]);
+      params.reasoning_effort = validEfforts.has(effort) ? effort : "high";
+    }
+  } else if (providerName === "moonshot" || providerName === "zai") {
+    // Toggle-only providers: thinking is enabled/disabled, no effort granularity.
+    // The "Request Reasoning" toggle controls this — effort is ignored.
+    if (!params.thinking) {
+      params.thinking = { type: "enabled" };
     }
   } else {
-    // OpenAI-compatible providers (OpenAI, OpenRouter, NanoGPT, Moonshot, Z.AI, etc.)
+    // Generic OpenAI-compatible providers (OpenAI, DeepSeek, xAI, etc.)
     // reasoning: { effort } is the standard format for reasoning-capable models.
     if (!params.reasoning) {
       params.reasoning = { effort };
@@ -3121,8 +3213,10 @@ async function legacyAssembly(
       ? resolveGroupCharacterNames(chatObj, (cid) =>
           legacyMutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(userId, cid)?.name)
       : undefined;
-    // Resolve alternate field overrides from per-chat bindings (legacy path)
-    const legacyEffectiveChar = resolveCharacterWithAlternateFields(character as Character, chatObj);
+    // Resolve alternate field overrides and group scenario override (legacy path)
+    const legacyEffectiveChar = userId
+      ? resolveGroupScenarioOverride(resolveCharacterWithAlternateFields(character as Character, chatObj), chatObj, userId)
+      : resolveCharacterWithAlternateFields(character as Character, chatObj);
 
     macroEnv = buildEnv({
       character: legacyEffectiveChar,
@@ -3157,8 +3251,11 @@ async function legacyAssembly(
     return text;
   };
 
-  // Build a system prompt from the character card (use effective character for alternate fields)
-  const legacyChar = character && chat ? resolveCharacterWithAlternateFields(character as Character, chat as Chat) : character;
+  // Build a system prompt from the character card (use effective character for alternate fields + group scenario)
+  let legacyChar = character && chat ? resolveCharacterWithAlternateFields(character as Character, chat as Chat) : character;
+  if (legacyChar && chat && userId) {
+    legacyChar = resolveGroupScenarioOverride(legacyChar as Character, chat as Chat, userId);
+  }
   const systemParts: string[] = [];
   if (legacyChar?.description) systemParts.push(legacyChar.description);
   if (legacyChar?.personality) systemParts.push(`Personality: ${legacyChar.personality}`);

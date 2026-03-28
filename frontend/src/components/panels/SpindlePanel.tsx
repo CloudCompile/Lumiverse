@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { RefreshCw, RotateCw, Trash2, Github, Plus, ChevronDown, Download, FolderOpen, SlidersHorizontal, GitBranch, Loader2 } from 'lucide-react'
+import { RefreshCw, RotateCw, Trash2, Github, Plus, ChevronDown, Download, FolderOpen, SlidersHorizontal, GitBranch } from 'lucide-react'
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import type { ExtensionInfo, SpindlePermission } from 'lumiverse-spindle-types'
 import SpindleUIControlPanel from '@/components/spindle/SpindleUIControlPanel'
+import { Spinner } from '@/components/shared/Spinner'
+import { Button } from '@/components/shared/FormComponents'
 import styles from './SpindlePanel.module.css'
 import clsx from 'clsx'
 
@@ -385,7 +387,7 @@ export default function SpindlePanel() {
               {/* Operation status indicator */}
               {extensionOperationStatus?.extensionId === ext.id && extensionOperationStatus.operation.endsWith('ing') && (
                 <div className={styles.operationStatus}>
-                  <Loader2 size={12} className={styles.spinner} />
+                  <Spinner size={12} fast />
                   {OPERATION_LABELS[extensionOperationStatus.operation] ?? extensionOperationStatus.operation}
                 </div>
               )}
@@ -421,7 +423,7 @@ export default function SpindlePanel() {
                           }
                           disabled={!canManage || isToggling}
                         >
-                          {isToggling && <Loader2 size={10} className={styles.spinner} />}
+                          {isToggling && <Spinner size={10} fast />}
                           {pretty}
                         </button>
                       )
@@ -432,29 +434,27 @@ export default function SpindlePanel() {
 
               {/* Actions row */}
               <div className={styles.extensionActions}>
-                <button
-                  className={styles.actionBtn}
+                <Button
+                  size="icon" variant="ghost"
                   onClick={() => handleUpdate(ext)}
                   disabled={loadingAction === ext.id || !canManage}
                   title={canManage ? 'Update' : 'Managed by operator'}
-                >
-                  {loadingAction === ext.id && extensionOperationStatus?.operation === 'updating'
-                    ? <Loader2 size={14} className={styles.spinner} />
+                  icon={loadingAction === ext.id && extensionOperationStatus?.operation === 'updating'
+                    ? <Spinner size={14} fast />
                     : <RefreshCw size={14} />}
-                </button>
-                <button
-                  className={styles.actionBtn}
+                />
+                <Button
+                  size="icon" variant="ghost"
                   onClick={() => handleRestart(ext)}
                   disabled={loadingAction === ext.id || !ext.enabled}
                   title={ext.enabled ? 'Restart extension' : 'Extension is not enabled'}
-                >
-                  {loadingAction === ext.id && extensionOperationStatus?.operation === 'restarting'
-                    ? <Loader2 size={14} className={styles.spinner} />
+                  icon={loadingAction === ext.id && extensionOperationStatus?.operation === 'restarting'
+                    ? <Spinner size={14} fast />
                     : <RotateCw size={14} />}
-                </button>
+                />
                 {ext.github && (
                   <a
-                    className={styles.actionBtn}
+                    className={styles.githubLink}
                     href={ext.github}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -464,31 +464,29 @@ export default function SpindlePanel() {
                   </a>
                 )}
                 {canManage && (
-                  <button
-                    className={clsx(styles.actionBtn, branchMenuExtId === ext.id && styles.actionBtnActive)}
+                  <Button
+                    size="icon" variant="ghost"
+                    className={clsx(branchMenuExtId === ext.id && styles.actionBtnActive)}
                     onClick={() => handleOpenBranchMenu(ext)}
                     disabled={loadingAction === ext.id}
                     title="Switch branch"
-                  >
-                    <GitBranch size={14} />
-                  </button>
+                    icon={<GitBranch size={14} />}
+                  />
                 )}
-                <button
-                  className={styles.actionBtn}
+                <Button
+                  size="icon" variant="ghost"
                   onClick={() => openSettings('extensions')}
                   disabled={!ext.has_frontend}
                   title={ext.has_frontend ? 'Open extension settings' : 'No frontend settings available'}
-                >
-                  <SlidersHorizontal size={14} />
-                </button>
-                <button
-                  className={styles.dangerBtn}
+                  icon={<SlidersHorizontal size={14} />}
+                />
+                <Button
+                  size="icon" variant="danger-ghost"
                   onClick={() => handleRemove(ext)}
                   disabled={loadingAction === ext.id || !canManage}
                   title={canManage ? 'Remove' : 'Managed by operator'}
-                >
-                  <Trash2 size={14} />
-                </button>
+                  icon={<Trash2 size={14} />}
+                />
               </div>
 
               {/* Branch switch dropdown */}

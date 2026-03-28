@@ -36,7 +36,11 @@ export function useLogBuffer(maxLines: number = MAX_LOG_LINES): LogBufferApi {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [scrollOffset, setScrollOffset] = useState(0);
 
-  // Batching: accumulate log entries, flush on a 16ms timer
+  // Track log count in a ref so scroll callbacks stay stable
+  const logCountRef = useRef(0);
+  logCountRef.current = logs.length;
+
+  // Batching: accumulate log entries, flush on a timer
   const pendingRef = useRef<LogEntry[]>([]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -82,10 +86,10 @@ export function useLogBuffer(maxLines: number = MAX_LOG_LINES): LogBufferApi {
   const scrollUp = useCallback(
     (amount: number = 1) => {
       setScrollOffset((prev) =>
-        Math.min(prev + amount, Math.max(0, logs.length - 1))
+        Math.min(prev + amount, Math.max(0, logCountRef.current - 1))
       );
     },
-    [logs.length]
+    []
   );
 
   const scrollDown = useCallback((amount: number = 1) => {
@@ -95,10 +99,10 @@ export function useLogBuffer(maxLines: number = MAX_LOG_LINES): LogBufferApi {
   const pageUp = useCallback(
     (pageSize: number) => {
       setScrollOffset((prev) =>
-        Math.min(prev + pageSize, Math.max(0, logs.length - 1))
+        Math.min(prev + pageSize, Math.max(0, logCountRef.current - 1))
       );
     },
-    [logs.length]
+    []
   );
 
   const pageDown = useCallback((pageSize: number) => {
@@ -106,8 +110,8 @@ export function useLogBuffer(maxLines: number = MAX_LOG_LINES): LogBufferApi {
   }, []);
 
   const scrollToTop = useCallback(() => {
-    setScrollOffset(Math.max(0, logs.length - 1));
-  }, [logs.length]);
+    setScrollOffset(Math.max(0, logCountRef.current - 1));
+  }, []);
 
   const scrollToEnd = useCallback(() => {
     setScrollOffset(0);

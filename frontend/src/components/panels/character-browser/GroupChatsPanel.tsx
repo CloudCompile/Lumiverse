@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router'
-import { Users, Trash2, MessageSquarePlus, Loader2 } from 'lucide-react'
+import { Users, Trash2, MessageSquarePlus } from 'lucide-react'
 import { chatsApi } from '@/api/chats'
 import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { useStore } from '@/store'
@@ -8,6 +8,7 @@ import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { RecentChat } from '@/types/api'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
+import { Spinner } from '@/components/shared/Spinner'
 import type { CharacterViewMode } from '@/types/store'
 import styles from './GroupChatsPanel.module.css'
 import clsx from 'clsx'
@@ -104,7 +105,7 @@ export default function GroupChatsPanel({ viewMode }: GroupChatsPanelProps) {
   if (loading) {
     return (
       <div className={styles.empty}>
-        <Loader2 size={20} className={styles.spin} />
+        <Spinner size={20} />
         <span>Loading group chats...</span>
       </div>
     )

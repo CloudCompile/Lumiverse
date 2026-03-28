@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { RefreshCw, Loader } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { TextInput } from '@/components/shared/FormComponents'
+import { Spinner } from '@/components/shared/Spinner'
 import styles from './ModelCombobox.module.css'
 
 interface ModelComboboxProps {
@@ -43,7 +44,7 @@ export default function ModelCombobox({ value, onChange, models, loading, onRefr
         />
         {onRefresh && (
           <button type="button" className={styles.refreshBtn} onClick={onRefresh} disabled={loading || disabled} title={disabled ? 'Save connection to fetch models' : 'Refresh models'}>
-            {loading ? <Loader size={14} className={styles.spinner} /> : <RefreshCw size={14} />}
+            {loading ? <Spinner size={14} /> : <RefreshCw size={14} />}
           </button>
         )}
       </div>

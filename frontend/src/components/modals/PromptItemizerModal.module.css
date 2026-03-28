@@ -1,24 +1,5 @@
-.backdrop {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  background: var(--lumiverse-modal-backdrop);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
 .modal {
-  width: clamp(340px, 94vw, min(900px, var(--lumiverse-content-max-width, 900px)));
   max-height: min(760px, 88vh);
-  display: flex;
-  flex-direction: column;
-  background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 12px;
-  box-shadow: var(--lumiverse-shadow-xl);
-  overflow: hidden;
 }
 
 .header {
@@ -47,25 +28,6 @@
   font-weight: 500;
   background: var(--lumiverse-fill-subtle);
   color: var(--lumiverse-text-muted);
-}
-
-.closeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  color: var(--lumiverse-text-dim);
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
 }
 
 .body {
@@ -262,25 +224,7 @@
   flex: 1;
 }
 
-.footerBtn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--lumiverse-text-muted);
-  font-size: 11px;
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.footerBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
-}
+/* .footerBtn — migrated to shared Button component */
 
 /* Sidecar divider */
 .sidecarDivider {

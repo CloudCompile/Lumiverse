@@ -18,9 +18,12 @@ interface MinimalMessageProps {
   message: Message
   chatId: string
   depth?: number
+  isSelectMode?: boolean
+  isSelected?: boolean
+  onToggleSelect?: (e: React.MouseEvent) => void
 }
 
-export default function MinimalMessage({ message, chatId, depth = 0 }: MinimalMessageProps) {
+export default function MinimalMessage({ message, chatId, depth = 0, isSelectMode = false, isSelected = false, onToggleSelect }: MinimalMessageProps) {
   const {
     isEditing,
     editContent,
@@ -57,8 +60,11 @@ export default function MinimalMessage({ message, chatId, depth = 0 }: MinimalMe
         isUser ? styles.user : styles.character,
         isActivelyStreaming && styles.streaming,
         isHidden && styles.hidden,
+        isSelectMode && isSelected && styles.selected,
+        isSelectMode && styles.selectMode,
       )}
       data-message-id={message.id}
+      onClick={isSelectMode ? onToggleSelect : undefined}
     >
       {/* Avatar */}
       <div className={styles.avatar}>
@@ -135,8 +141,8 @@ export default function MinimalMessage({ message, chatId, depth = 0 }: MinimalMe
         )}
       </div>
 
-      {/* Actions */}
-      {!isEditing && (
+      {/* Actions (hidden in select mode) */}
+      {!isEditing && !isSelectMode && (
         <div className={styles.actionsWrap}>
           <MessageActions
             onEdit={handleEdit}

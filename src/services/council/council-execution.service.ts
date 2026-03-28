@@ -17,6 +17,7 @@ import * as connectionsSvc from "../connections.service";
 import * as worldBooksSvc from "../world-books.service";
 import * as settingsSvc from "../settings.service";
 import { activateWorldInfo } from "../world-info-activation.service";
+import { getCharacterWorldBookIds } from "../../utils/character-world-books";
 import { getCouncilSettings, getAvailableTools } from "./council-settings.service";
 import { BUILTIN_TOOLS_MAP } from "./builtin-tools";
 import { toolRegistry } from "../../spindle/tool-registry";
@@ -429,7 +430,7 @@ function buildContextMessages(input: ExecuteInput, settings: CouncilSettings): L
     } else {
       // Fallback: independently activate WI (for callers without enrichment)
       if (!character) character = charactersSvc.getCharacter(input.userId, chat.character_id);
-      const { entries: wiEntries } = collectWorldInfoForCouncil(input.userId, character, persona);
+      const { entries: wiEntries } = collectWorldInfoForCouncil(input.userId, character, persona, input.chatId);
       if (wiEntries.length > 0) {
         const allMsgs = chatsSvc.getMessages(input.userId, input.chatId);
         const wiResult = activateWorldInfo({
@@ -537,23 +538,36 @@ function formatDeliberation(
   return lines.join("\n");
 }
 
-/** Collect world book entries from character + persona + global world books for council WI injection. */
+/** Collect world book entries from character + persona + chat + global world books for council WI injection. */
 export function collectWorldInfoForCouncil(
   userId: string,
   character: ReturnType<typeof charactersSvc.getCharacter>,
   persona: ReturnType<typeof personasSvc.resolvePersonaOrDefault>,
+  chatId?: string,
 ): { entries: import("../../types/world-book").WorldBookEntry[]; worldBookIds: string[] } {
   const entries: import("../../types/world-book").WorldBookEntry[] = [];
   const seen = new Set<string>();
 
-  const charBookId = character?.extensions?.world_book_id as string | undefined;
-  if (charBookId) {
+  const charBookIds = getCharacterWorldBookIds(character?.extensions);
+  for (const charBookId of charBookIds) {
+    if (seen.has(charBookId)) continue;
     seen.add(charBookId);
     entries.push(...worldBooksSvc.listEntries(userId, charBookId));
   }
   if (persona?.attached_world_book_id && !seen.has(persona.attached_world_book_id)) {
     seen.add(persona.attached_world_book_id);
     entries.push(...worldBooksSvc.listEntries(userId, persona.attached_world_book_id));
+  }
+
+  // Chat-scoped world books (active for this chat only)
+  if (chatId) {
+    const chat = chatsSvc.getChat(userId, chatId);
+    const chatBookIds = (chat?.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
+    for (const cId of chatBookIds) {
+      if (seen.has(cId)) continue;
+      seen.add(cId);
+      entries.push(...worldBooksSvc.listEntries(userId, cId));
+    }
   }
 
   // Global world books (user-wide, always active)

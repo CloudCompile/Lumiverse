@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion } from 'motion/react'
-import { X, Puzzle, Plus, Check, Trash2 } from 'lucide-react'
+import { Puzzle, Plus, Check, Trash2 } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
 import { personasApi } from '@/api/personas'
 import { toast } from '@/lib/toast'
@@ -22,7 +23,6 @@ export default function PersonaAddonsModal() {
   const [metadata, setMetadata] = useState<Record<string, any>>({})
   const [loading, setLoading] = useState(true)
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
-  const mouseDownTargetRef = useRef<EventTarget | null>(null)
 
   // Load persona data
   useEffect(() => {
@@ -91,99 +91,78 @@ export default function PersonaAddonsModal() {
 
   if (!personaId) return null
 
-  return createPortal(
-    <motion.div
-      className={styles.overlay}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.15 }}
-      onMouseDown={(e) => { mouseDownTargetRef.current = e.target }}
-      onClick={(e) => { if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) closeModal() }}
-    >
-      <motion.div
-        className={styles.modal}
-        initial={{ opacity: 0, scale: 0.96, y: 10 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 10 }}
-        transition={{ duration: 0.18 }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className={styles.header}>
-          <div className={styles.headerLeft}>
-            <Puzzle size={16} className={styles.headerIcon} />
-            <span className={styles.title}>
-              {personaName ? `${personaName} — Add-Ons` : 'Persona Add-Ons'}
-            </span>
-          </div>
-          <button type="button" className={styles.closeBtn} onClick={closeModal}>
-            <X size={14} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className={styles.body}>
-          {loading && <div className={styles.empty}>Loading...</div>}
-          {!loading && addons.length === 0 && (
-            <div className={styles.empty}>
-              No add-ons yet. Add-ons inject extra content into your persona description
-              when enabled — useful for clothing, equipment, transformations, or other
-              on-the-fly customization.
-            </div>
-          )}
-          {addons.map((addon) => (
-            <div key={addon.id} className={clsx(styles.addonCard, !addon.enabled && styles.addonCardDisabled)}>
-              <div className={styles.addonTopRow}>
-                <button
-                  type="button"
-                  className={clsx(styles.addonToggle, addon.enabled && styles.addonToggleActive)}
-                  onClick={() => handleToggle(addon.id)}
-                  title={addon.enabled ? 'Disable add-on' : 'Enable add-on'}
-                >
-                  <Check size={13} />
-                </button>
-                <input
-                  type="text"
-                  className={styles.addonLabelInput}
-                  value={addon.label}
-                  onChange={(e) => handleLabelChange(addon.id, e.target.value)}
-                  placeholder="Add-on name..."
-                />
-                <button
-                  type="button"
-                  className={styles.addonDeleteBtn}
-                  onClick={() => handleDelete(addon.id)}
-                  title="Delete add-on"
-                >
-                  <Trash2 size={13} />
-                </button>
-              </div>
-              <ExpandableTextarea
-                className={styles.addonContent}
-                value={addon.content}
-                onChange={(v) => handleContentChange(addon.id, v)}
-                title={addon.label || 'Add-On Content'}
-                placeholder="Add-on content (appended to persona description when enabled)..."
-                rows={2}
-              />
-            </div>
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className={styles.footer}>
-          <button type="button" className={styles.addBtn} onClick={handleAdd}>
-            <Plus size={13} />
-            <span>Add Add-On</span>
-          </button>
-          <span className={styles.addonCount}>
-            {addons.length} add-on{addons.length !== 1 ? 's' : ''}
-            {addons.filter((a) => a.enabled).length > 0 && ` (${addons.filter((a) => a.enabled).length} active)`}
+  return (
+    <ModalShell isOpen={true} onClose={closeModal} maxWidth={560} className={styles.modal}>
+      {/* Header */}
+      <div className={styles.header}>
+        <div className={styles.headerLeft}>
+          <Puzzle size={16} className={styles.headerIcon} />
+          <span className={styles.title}>
+            {personaName ? `${personaName} — Add-Ons` : 'Persona Add-Ons'}
           </span>
         </div>
-      </motion.div>
-    </motion.div>,
-    document.body
+        <CloseButton onClick={closeModal} size="sm" />
+      </div>
+
+      {/* Body */}
+      <div className={styles.body}>
+        {loading && <div className={styles.empty}>Loading...</div>}
+        {!loading && addons.length === 0 && (
+          <div className={styles.empty}>
+            No add-ons yet. Add-ons inject extra content into your persona description
+            when enabled — useful for clothing, equipment, transformations, or other
+            on-the-fly customization.
+          </div>
+        )}
+        {addons.map((addon) => (
+          <div key={addon.id} className={clsx(styles.addonCard, !addon.enabled && styles.addonCardDisabled)}>
+            <div className={styles.addonTopRow}>
+              <button
+                type="button"
+                className={clsx(styles.addonToggle, addon.enabled && styles.addonToggleActive)}
+                onClick={() => handleToggle(addon.id)}
+                title={addon.enabled ? 'Disable add-on' : 'Enable add-on'}
+              >
+                <Check size={13} />
+              </button>
+              <input
+                type="text"
+                className={styles.addonLabelInput}
+                value={addon.label}
+                onChange={(e) => handleLabelChange(addon.id, e.target.value)}
+                placeholder="Add-on name..."
+              />
+              <button
+                type="button"
+                className={styles.addonDeleteBtn}
+                onClick={() => handleDelete(addon.id)}
+                title="Delete add-on"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+            <ExpandableTextarea
+              className={styles.addonContent}
+              value={addon.content}
+              onChange={(v) => handleContentChange(addon.id, v)}
+              title={addon.label || 'Add-On Content'}
+              placeholder="Add-on content (appended to persona description when enabled)..."
+              rows={2}
+            />
+          </div>
+        ))}
+      </div>
+
+      {/* Footer */}
+      <div className={styles.footer}>
+        <Button variant="primary" icon={<Plus size={13} />} onClick={handleAdd}>
+          Add Add-On
+        </Button>
+        <span className={styles.addonCount}>
+          {addons.length} add-on{addons.length !== 1 ? 's' : ''}
+          {addons.filter((a) => a.enabled).length > 0 && ` (${addons.filter((a) => a.enabled).length} active)`}
+        </span>
+      </div>
+    </ModalShell>
   )
 }

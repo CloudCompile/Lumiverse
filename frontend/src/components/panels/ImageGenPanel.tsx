@@ -3,7 +3,8 @@ import { Image as ImageIcon, Sparkles, Settings2, Trash2, Plus, X } from 'lucide
 import { useStore } from '@/store'
 import { imageGenApi, type SceneData } from '@/api/image-gen'
 import { imageGenConnectionsApi } from '@/api/image-gen-connections'
-import { FormField, Select, TextInput, EditorSection, TextArea } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
+import { Button, FormField, Select, TextInput, EditorSection, TextArea } from '@/components/shared/FormComponents'
 import ImageLightbox from '@/components/shared/ImageLightbox'
 import type { ImageGenProviderInfo, ImageGenParameterSchema } from '@/types/api'
 import styles from './ImageGenPanel.module.css'
@@ -12,13 +13,13 @@ type RefImage = { data: string; mimeType?: string }
 
 function ToggleRow({ checked, onChange, label, hint }: { checked: boolean; onChange: (checked: boolean) => void; label: string; hint?: string }) {
   return (
-    <label className={styles.toggle}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span className={styles.toggleTextWrap}>
-        <span className={styles.toggleLabel}>{label}</span>
-        {hint && <span className={styles.toggleHint}>{hint}</span>}
-      </span>
-    </label>
+    <Toggle.Checkbox
+      checked={checked}
+      onChange={onChange}
+      label={label}
+      hint={hint}
+      className={styles.toggle}
+    />
   )
 }
 
@@ -371,9 +372,7 @@ export default function ImageGenPanel() {
                       ))}
                     </div>
                     {currentRefs.length < 14 && (
-                      <button type="button" className={styles.secondaryBtn} onClick={onPickRefs}>
-                        <Plus size={14} />Add Reference
-                      </button>
+                      <Button variant="secondary" size="sm" icon={<Plus size={14} />} onClick={onPickRefs}>Add Reference</Button>
                     )}
                   </FormField>
                 </EditorSection>
@@ -414,9 +413,9 @@ export default function ImageGenPanel() {
           {lastScene && <div className={styles.sceneInfo}><div><strong>Scene:</strong> {lastScene.environment}</div><div><strong>Time:</strong> {lastScene.time_of_day}</div><div><strong>Mood:</strong> {lastScene.mood}</div></div>}
 
           <div className={styles.actions}>
-            <button type="button" className={styles.primaryBtn} onClick={() => handleGenerate(false)} disabled={sceneGenerating || !activeChatId || !activeImageGenConnectionId}><ImageIcon size={14} /><span>{sceneGenerating ? 'Generating...' : 'Generate Now'}</span></button>
-            <button type="button" className={styles.secondaryBtn} onClick={() => handleGenerate(true)} disabled={sceneGenerating || !activeChatId || !activeImageGenConnectionId}><Sparkles size={14} /><span>Force Generate</span></button>
-            {sceneBackground && <button type="button" className={styles.dangerBtn} onClick={() => setSceneBackground(null)}><Trash2 size={14} /><span>Clear</span></button>}
+            <Button variant="primary" size="sm" icon={<ImageIcon size={14} />} onClick={() => handleGenerate(false)} disabled={sceneGenerating || !activeChatId || !activeImageGenConnectionId}>{sceneGenerating ? 'Generating...' : 'Generate Now'}</Button>
+            <Button variant="secondary" size="sm" icon={<Sparkles size={14} />} onClick={() => handleGenerate(true)} disabled={sceneGenerating || !activeChatId || !activeImageGenConnectionId}>Force Generate</Button>
+            {sceneBackground && <Button variant="danger" size="sm" icon={<Trash2 size={14} />} onClick={() => setSceneBackground(null)}>Clear</Button>}
           </div>
 
           {!activeImageGenConnectionId && (

@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
 import {
-  X, Search, MessageSquare, Pencil, Download, Upload, Trash2,
-  ArrowRight, Check, SortAsc, FileText, Clock, Loader2, Plus,
+  Search, MessageSquare, Pencil, Download, Upload, Trash2,
+  ArrowRight, Check, SortAsc, FileText, Clock, Plus,
 } from 'lucide-react'
 import { useNavigate } from 'react-router'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { Spinner } from '@/components/shared/Spinner'
+import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
 import { get } from '@/api/client'
@@ -86,7 +88,7 @@ export default function ManageChatsModal() {
     }
   }, [renamingId])
 
-  // Escape to close
+  // Custom escape handler — cancel rename first, then close modal
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -98,21 +100,10 @@ export default function ManageChatsModal() {
       }
     }
     document.addEventListener('keydown', handleEscape)
-    document.body.style.overflow = 'hidden'
     return () => {
       document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
     }
   }, [closeModal, renamingId])
-
-  const mouseDownTargetRef = useRef<EventTarget | null>(null)
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) closeModal()
-    },
-    [closeModal]
-  )
 
   // Filter + sort
   const filteredChats = useMemo(() => {
@@ -250,27 +241,10 @@ export default function ManageChatsModal() {
     [characterId, fetchChats]
   )
 
-  return createPortal(
-    <AnimatePresence>
-      <motion.div
-        className={styles.backdrop}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.15 }}
-        onMouseDown={(e) => { mouseDownTargetRef.current = e.target }}
-        onClick={handleBackdropClick}
-      >
-        <motion.div
-          className={styles.modal}
-          initial={{ opacity: 0, scale: 0.95, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 10 }}
-          transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-        >
-          <button onClick={closeModal} type="button" className={styles.closeBtn} aria-label="Close">
-            <X size={16} />
-          </button>
+  return (
+    <>
+    <ModalShell isOpen={true} onClose={closeModal} closeOnEscape={false} maxWidth="clamp(340px, 94vw, min(560px, var(--lumiverse-content-max-width, 560px)))" className={styles.modal}>
+          <CloseButton onClick={closeModal} variant="solid" position="absolute" />
 
           <div className={styles.header}>
             <div className={styles.headerLeft}>
@@ -292,20 +266,18 @@ export default function ManageChatsModal() {
                 placeholder="Search chats..."
               />
             </div>
-            <button type="button" className={styles.sortBtn} onClick={cycleSortMode}>
-              <SortAsc size={13} />
+            <Button size="sm" icon={<SortAsc size={13} />} onClick={cycleSortMode}>
               {sortLabel}
-            </button>
-            <button
-              type="button"
-              className={styles.sortBtn}
+            </Button>
+            <Button
+              size="sm"
+              icon={importing ? <Spinner size={13} /> : <Upload size={13} />}
               onClick={handleImportClick}
               disabled={importing}
               title="Import chat from exported JSON"
             >
-              {importing ? <Loader2 size={13} /> : <Upload size={13} />}
               Import
-            </button>
+            </Button>
             <input
               ref={fileInputRef}
               type="file"
@@ -318,7 +290,7 @@ export default function ManageChatsModal() {
           <div className={styles.body}>
             {loading && (
               <div className={styles.loading}>
-                <Loader2 size={16} />
+                <Spinner size={16} />
                 Loading chats...
               </div>
             )}
@@ -372,51 +344,48 @@ export default function ManageChatsModal() {
 
                     <div className={styles.cardActions}>
                       {!isActive && (
-                        <button
-                          type="button"
-                          className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className={styles.actionBtnPrimary}
                           onClick={() => handleSwitch(chat.id)}
                           title="Switch to this chat"
-                        >
-                          <ArrowRight size={14} />
-                        </button>
+                          icon={<ArrowRight size={14} />}
+                        />
                       )}
                       {renamingId === chat.id ? (
-                        <button
-                          type="button"
-                          className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className={styles.actionBtnPrimary}
                           onClick={() => handleConfirmRename(chat.id)}
                           title="Confirm rename"
-                        >
-                          <Check size={14} />
-                        </button>
+                          icon={<Check size={14} />}
+                        />
                       ) : (
-                        <button
-                          type="button"
-                          className={styles.actionBtn}
+                        <Button
+                          size="icon"
+                          variant="ghost"
                           onClick={() => handleStartRename(chat)}
                           title="Rename chat"
-                        >
-                          <Pencil size={14} />
-                        </button>
+                          icon={<Pencil size={14} />}
+                        />
                       )}
-                      <button
-                        type="button"
-                        className={styles.actionBtn}
+                      <Button
+                        size="icon"
+                        variant="ghost"
                         onClick={() => handleExport(chat.id, displayName)}
                         title="Export chat"
-                      >
-                        <Download size={14} />
-                      </button>
+                        icon={<Download size={14} />}
+                      />
                       {!isActive && (
-                        <button
-                          type="button"
-                          className={clsx(styles.actionBtn, styles.actionBtnDanger)}
+                        <Button
+                          size="icon"
+                          variant="danger-ghost"
                           onClick={() => setDeleteTarget(chat)}
                           title="Delete chat"
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                          icon={<Trash2 size={14} />}
+                        />
                       )}
                     </div>
                   </div>
@@ -428,8 +397,7 @@ export default function ManageChatsModal() {
               New Chat
             </button>
           </div>
-        </motion.div>
-      </motion.div>
+    </ModalShell>
 
       <ConfirmationModal
         isOpen={deleteTarget !== null}
@@ -441,7 +409,6 @@ export default function ManageChatsModal() {
         confirmText="Delete"
         cancelText="Cancel"
       />
-    </AnimatePresence>,
-    document.body
+    </>
   )
 }

@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { ChevronLeft, ChevronDown, ChevronRight, Plus, Pencil, Trash2, Settings, Eye, EyeOff } from 'lucide-react'
 import { packsApi } from '@/api/packs'
 import LazyImage from '@/components/shared/LazyImage'
+import { Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import LumiaEditorModal from './LumiaEditorModal'
 import LoomItemEditorModal from './LoomItemEditorModal'
@@ -71,28 +72,19 @@ function LumiaRow({
         </div>
         <span className={styles.genderBadge}>{GENDER_LABELS[item.gender_identity] ?? 'Any'}</span>
         {hasContent && (
-          <button
-            type="button"
-            className={clsx(styles.itemActionBtn, previewOpen && styles.itemActionBtnActive)}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            className={previewOpen ? styles.itemActionBtnActive : undefined}
             onClick={() => setPreviewOpen((o) => !o)}
             title={previewOpen ? 'Hide preview' : 'Preview content'}
-          >
-            {previewOpen ? <EyeOff size={11} /> : <Eye size={11} />}
-          </button>
+            icon={previewOpen ? <EyeOff size={11} /> : <Eye size={11} />}
+          />
         )}
         {isCustom && (
           <div className={styles.itemActions}>
-            <button type="button" className={styles.itemActionBtn} onClick={onEdit} title="Edit">
-              <Pencil size={11} />
-            </button>
-            <button
-              type="button"
-              className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)}
-              onClick={onDelete}
-              title="Delete"
-            >
-              <Trash2 size={11} />
-            </button>
+            <Button size="icon-sm" variant="ghost" onClick={onEdit} title="Edit" icon={<Pencil size={11} />} />
+            <Button size="icon-sm" variant="danger-ghost" onClick={onDelete} title="Delete" icon={<Trash2 size={11} />} />
           </div>
         )}
       </div>
@@ -152,28 +144,24 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
   return (
     <div className={styles.detail}>
       <div className={styles.detailHeader}>
-        <button type="button" className={styles.backBtn} onClick={onBack}>
-          <ChevronLeft size={13} />
+        <Button size="sm" variant="ghost" onClick={onBack} icon={<ChevronLeft size={13} />}>
           Back
-        </button>
+        </Button>
         <div className={styles.detailMeta}>
           <div className={styles.detailName}>{pack.name}</div>
           {pack.author && <div className={styles.detailAuthor}>by {pack.author}</div>}
         </div>
         <div className={styles.detailActions}>
           {pack.is_custom && (
-            <button type="button" className={styles.iconBtn} onClick={onEdit} title="Edit pack">
-              <Settings size={14} />
-            </button>
+            <Button size="icon" variant="ghost" onClick={onEdit} title="Edit pack" icon={<Settings size={14} />} />
           )}
-          <button
-            type="button"
-            className={styles.iconBtn}
+          <Button
+            size="icon"
+            variant="danger-ghost"
             onClick={() => setDeletePackConfirm(true)}
             title="Delete pack"
-          >
-            <Trash2 size={14} />
-          </button>
+            icon={<Trash2 size={14} />}
+          />
         </div>
       </div>
 
@@ -238,22 +226,20 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
                   <span className={styles.categoryBadge}>{CATEGORY_LABELS[item.category] || item.category}</span>
                   {pack.is_custom && (
                     <div className={styles.itemActions}>
-                      <button
-                        type="button"
-                        className={styles.itemActionBtn}
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
                         onClick={() => { setEditingLoomItem(item); setShowLoomEditor(true) }}
                         title="Edit"
-                      >
-                        <Pencil size={11} />
-                      </button>
-                      <button
-                        type="button"
-                        className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)}
+                        icon={<Pencil size={11} />}
+                      />
+                      <Button
+                        size="icon-sm"
+                        variant="danger-ghost"
                         onClick={() => setDeleteConfirm({ type: 'loom', id: item.id })}
                         title="Delete"
-                      >
-                        <Trash2 size={11} />
-                      </button>
+                        icon={<Trash2 size={11} />}
+                      />
                     </div>
                   )}
                 </div>

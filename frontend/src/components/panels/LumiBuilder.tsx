@@ -27,6 +27,8 @@ import { useStore } from '@/store'
 import type { LumiPipeline, LumiModule, BlockGroupConfig } from '@/types/api'
 import clsx from 'clsx'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
+import { Toggle } from '@/components/shared/Toggle'
+import { Button } from '@/components/shared/FormComponents'
 import styles from './LumiBuilder.module.css'
 
 /* ── Sub-components ── */
@@ -94,9 +96,9 @@ function PipelineGroup({
           value={pipeline.name}
           onChange={(e) => onRename(e.target.value)}
         />
-        <button className={styles.iconBtn} onClick={onRemove} title="Remove pipeline">
+        <Button size="icon-sm" variant="danger-ghost" onClick={onRemove} title="Remove pipeline">
           <Trash2 size={14} />
-        </button>
+        </Button>
       </div>
       {expanded && (
         <div className={styles.pipelineModules}>
@@ -117,9 +119,9 @@ function PipelineGroup({
                 <span className={styles.moduleKeyTag} title={`Use {{pipe(${mod.key.slice(0, 8)}...)}} in prompt blocks`}>
                   {mod.key.slice(0, 8)}
                 </span>
-                <button className={styles.iconBtn} onClick={() => onRemoveModule(mod.key)}>
+                <Button size="icon-sm" variant="danger-ghost" onClick={() => onRemoveModule(mod.key)}>
                   <Trash2 size={14} />
-                </button>
+                </Button>
               </div>
               <textarea
                 className={styles.modulePrompt}
@@ -190,13 +192,14 @@ function BlockItem({
   return (
     <div className={clsx(styles.blockItem, !block.enabled && styles.blockDisabled)}>
       <div className={styles.blockHeader}>
-        <button
-          className={styles.iconBtn}
+        <Button
+          size="icon-sm"
+          variant="ghost"
           onClick={handleToggle}
           title={block.enabled ? 'Disable' : 'Enable'}
         >
           {block.enabled ? <ToggleRight size={14} className={styles.toggleOn} /> : <ToggleLeft size={14} />}
-        </button>
+        </Button>
         <button
           className={styles.pipelineExpand}
           onClick={() => setExpandedId(isExpanded ? null : block.id)}
@@ -217,16 +220,16 @@ function BlockItem({
         )}
         {block.isLocked && <Lock size={12} className={styles.lockIcon} />}
         <div className={styles.blockActions}>
-          <button className={styles.iconBtn} onClick={() => onMove(block.id, 'up')} disabled={idx === 0}>
+          <Button size="icon-sm" variant="ghost" onClick={() => onMove(block.id, 'up')} disabled={idx === 0}>
             <ChevronUp size={14} />
-          </button>
-          <button className={styles.iconBtn} onClick={() => onMove(block.id, 'down')} disabled={idx === totalCount - 1}>
+          </Button>
+          <Button size="icon-sm" variant="ghost" onClick={() => onMove(block.id, 'down')} disabled={idx === totalCount - 1}>
             <ChevronDown size={14} />
-          </button>
+          </Button>
           {!block.isLocked && (
-            <button className={styles.iconBtn} onClick={() => onRemove(block.id)}>
+            <Button size="icon-sm" variant="danger-ghost" onClick={() => onRemove(block.id)}>
               <Trash2 size={14} />
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -305,14 +308,11 @@ function BlockItem({
             />
           </div>
           <div className={styles.blockRow}>
-            <label className={styles.inlineCheck}>
-              <input
-                type="checkbox"
-                checked={block.isLocked}
-                onChange={(e) => onUpdate(block.id, { isLocked: e.target.checked })}
-              />
-              <span>Locked</span>
-            </label>
+            <Toggle.Checkbox
+              checked={block.isLocked}
+              onChange={(v) => onUpdate(block.id, { isLocked: v })}
+              label="Locked"
+            />
             <div className={styles.field} style={{ flex: 1 }}>
               <label className={styles.label}>Marker</label>
               <input
@@ -445,15 +445,15 @@ function GroupedPromptBlockEditor({
               </span>
               <span className={styles.blockDepth}>{enabledCount}/{groupBlocks.length}</span>
               <div className={styles.blockActions}>
-                <button className={styles.iconBtn} onClick={() => onUpdateGroupConfig(group.name, { mode: group.mode === 'radio' ? 'checkbox' : 'radio' })} title="Toggle mode">
+                <Button size="icon-sm" variant="ghost" onClick={() => onUpdateGroupConfig(group.name, { mode: group.mode === 'radio' ? 'checkbox' : 'radio' })} title="Toggle mode">
                   {group.mode === 'radio' ? <CheckSquare size={14} /> : <Radio size={14} />}
-                </button>
-                <button className={styles.iconBtn} onClick={() => handleStartRename(group.name)} title="Rename">
+                </Button>
+                <Button size="icon-sm" variant="ghost" onClick={() => handleStartRename(group.name)} title="Rename">
                   <Edit3 size={14} />
-                </button>
-                <button className={styles.iconBtn} onClick={() => onDeleteGroup(group.name)} title="Delete group">
+                </Button>
+                <Button size="icon-sm" variant="danger-ghost" onClick={() => onDeleteGroup(group.name)} title="Delete group">
                   <Trash2 size={14} />
-                </button>
+                </Button>
               </div>
             </div>
             {!isCollapsed && (
@@ -781,14 +781,14 @@ export default function LumiBuilder({ compact = true }: { compact?: boolean }) {
           </select>
         </div>
 
-        <button className={styles.iconBtn} onClick={() => setShowCreate(true)} title="New Preset">
+        <Button size="icon-sm" variant="ghost" onClick={() => setShowCreate(true)} title="New Preset">
           <Plus size={18} />
-        </button>
+        </Button>
 
         <div style={{ position: 'relative' }} ref={menuRef}>
-          <button className={styles.iconBtn} onClick={() => setShowMenu(!showMenu)}>
+          <Button size="icon-sm" variant="ghost" onClick={() => setShowMenu(!showMenu)}>
             <MoreVertical size={18} />
-          </button>
+          </Button>
           {showMenu && (
             <div className={styles.dropdownMenu}>
               <button className={styles.menuButton} onClick={handleDuplicate}>

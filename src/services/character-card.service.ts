@@ -386,6 +386,7 @@ export interface LumiverseModules {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  world_books?: Record<string, any>[];
   regex_scripts?: BundledRegexScript[];
 }
 

@@ -14,13 +14,13 @@ interface LogViewProps {
  * Bordered log container with scrollable content.
  * Border consumes 2 rows (top + bottom), accounted for in height calc.
  */
-export function LogView({
+export const LogView = React.memo(function LogView({
   logs,
   scrollOffset,
   chromeRows = 2,
 }: LogViewProps): React.ReactElement {
   const { stdout } = useStdout();
-  const rows = stdout?.rows ?? 24;
+  const rows = (stdout?.rows ?? 24) - 1; // -1 to match App's termHeight (avoids Ink fullscreen path)
   const cols = stdout?.columns ?? 80;
 
   // 2 for the border top/bottom
@@ -64,4 +64,4 @@ export function LogView({
       {elements}
     </Box>
   );
-}
+});

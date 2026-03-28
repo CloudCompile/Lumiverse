@@ -207,7 +207,7 @@ function closeUnterminatedReasoningTags(userId: string, content: string): string
 }
 
 // Track active generations for stop support
-const activeGenerations = new Map<string, { controller: AbortController; userId: string; chatId: string }>();
+const activeGenerations = new Map<string, { controller: AbortController; userId: string; chatId: string; startedAt: number }>();
 
 // Per-chat generation lock: prevents concurrent generations (including council) in the same chat.
 // Keyed by `${userId}:${chatId}` → generationId. Registered BEFORE council execution so that
@@ -245,7 +245,7 @@ async function resolveProviderAndKey(
     throw new Error(`No API key found for connection "${connection.name}". Add one via the connection settings.`);
   }
 
-  return { provider, apiKey: apiKey || "", apiUrl: connection.api_url || "" };
+  return { provider, apiKey: apiKey || "", apiUrl: connectionsSvc.resolveEffectiveApiUrl(connection) };
 }
 
 /**
@@ -470,7 +470,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
 
   // Register this generation early (before council) so it can be tracked and aborted
   const abortController = new AbortController();
-  activeGenerations.set(generationId, { controller: abortController, userId: input.userId, chatId: input.chat_id });
+  activeGenerations.set(generationId, { controller: abortController, userId: input.userId, chatId: input.chat_id, startedAt: Date.now() });
   activeChatGenerations.set(chatKey, generationId);
 
   // Helper: bail out cleanly if aborted during the setup phase
@@ -615,7 +615,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         : null;
       const councilMessages = chatsSvc.getMessages(input.userId, input.chat_id)
         .filter(m => m.id !== excludeMessageId && m.id !== stagedMessageId);
-      const { entries: wiEntries, worldBookIds: wiBookIds } = collectWorldInfoForCouncil(input.userId, fullCharacter, resolvedPersona);
+      const { entries: wiEntries, worldBookIds: wiBookIds } = collectWorldInfoForCouncil(input.userId, fullCharacter, resolvedPersona, input.chat_id);
       let councilWiActivated = wiEntries.length > 0
         ? activateWorldInfo({
             entries: wiEntries,
@@ -1321,7 +1321,7 @@ async function fireExpressionDetection(
     characterId,
     labels,
     recentMessages,
-  });
+  }, rawGenerate);
 
   if (detectedLabel && expressionConfig.mappings[detectedLabel]) {
     emitExpressionChanged(userId, chatId, chat, characterId, detectedLabel, expressionConfig.mappings[detectedLabel]);
@@ -1389,6 +1389,25 @@ export function stopAllGenerations(): void {
   }
   activeGenerations.clear();
   activeChatGenerations.clear();
+}
+
+// Periodically abort generations that have been running too long (provider hung, broken stream)
+const GENERATION_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
+let _generationSweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of activeGenerations) {
+    if (now - entry.startedAt > GENERATION_MAX_AGE_MS) {
+      console.warn(`[generate] Aborting stale generation ${id} (age: ${Math.round((now - entry.startedAt) / 1000)}s)`);
+      entry.controller.abort();
+    }
+  }
+}, 60_000);
+
+export function stopGenerationSweep(): void {
+  if (_generationSweepTimer) {
+    clearInterval(_generationSweepTimer);
+    _generationSweepTimer = null;
+  }
 }
 
 // --- Extension generation (stateless, synchronous, no WS events) ---

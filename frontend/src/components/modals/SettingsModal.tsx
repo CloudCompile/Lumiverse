@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
-import { X, Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity, Globe, Bell } from 'lucide-react'
+import { Settings, Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity, Globe, Bell, Import } from 'lucide-react'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
+import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import { embeddingsApi } from '@/api/embeddings'
@@ -11,6 +15,7 @@ import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/st
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
 import ModeSelector from '@/components/panels/theme-panel/ModeSelector'
 import UserManagement from '@/components/settings/UserManagement'
+import MigrationSettings from '@/components/settings/MigrationSettings'
 import TokenizerManager from '@/components/settings/TokenizerManager'
 import Diagnostics from '@/components/settings/Diagnostics'
 import NotificationSettings from '@/components/settings/NotificationSettings'
@@ -46,7 +51,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
   const isAdmin = user?.role === 'owner' || user?.role === 'admin'
   const VIEWS = isAdmin
-    ? [...BASE_VIEWS, { id: 'tokenizers' as const, icon: Hash, label: 'Tokenizers' }, { id: 'users' as const, icon: Users, label: 'Users' }]
+    ? [...BASE_VIEWS, { id: 'tokenizers' as const, icon: Hash, label: 'Tokenizers' }, { id: 'users' as const, icon: Users, label: 'Users' }, { id: 'migration' as const, icon: Import, label: 'Migration' }]
     : [...BASE_VIEWS]
 
   return createPortal(
@@ -61,9 +66,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       >
         <div className={styles.header}>
           <h2 className={styles.title}>Settings</h2>
-          <button type="button" className={styles.closeBtn} onClick={onClose}>
-            <X size={16} />
-          </button>
+          <CloseButton onClick={onClose} />
         </div>
 
         <div className={styles.body}>
@@ -136,6 +139,8 @@ function SettingsView({ view }: { view: string }) {
       return <NotificationSettings />
     case 'diagnostics':
       return <Diagnostics />
+    case 'migration':
+      return <MigrationSettings />
     default:
       return <div className={styles.placeholder}>Select a settings category</div>
   }
@@ -153,14 +158,11 @@ function GeneralSettings() {
     <div className={styles.settingsSection}>
       <h3 className={styles.sectionTitle}>General</h3>
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={enableLandingPage}
-          onChange={(e) => setSetting('enableLandingPage', e.target.checked)}
-        />
-        <span>Enable landing page</span>
-      </label>
+      <Toggle.Checkbox
+        checked={enableLandingPage}
+        onChange={(checked) => setSetting('enableLandingPage', checked)}
+        label="Enable landing page"
+      />
     </div>
   )
 }
@@ -563,35 +565,21 @@ function ChatSettings() {
 
       <h3 className={styles.sectionTitle} style={{ marginTop: 12 }}>Input</h3>
 
-      <div>
-        <label className={styles.toggle}>
-          <input
-            type="checkbox"
-            checked={enterToSend}
-            onChange={(e) => setSetting('chatSheldEnterToSend', e.target.checked)}
-          />
-          <span>Press Enter to send</span>
-        </label>
-        <p className={styles.toggleHint}>
-          {enterToSend
-            ? 'Use Shift+Enter for new line'
-            : `Use ${isMac ? 'Cmd' : 'Ctrl'}+Enter to send`}
-        </p>
-      </div>
+      <Toggle.Checkbox
+        checked={enterToSend}
+        onChange={(checked) => setSetting('chatSheldEnterToSend', checked)}
+        label="Press Enter to send"
+        hint={enterToSend
+          ? 'Use Shift+Enter for new line'
+          : `Use ${isMac ? 'Cmd' : 'Ctrl'}+Enter to send`}
+      />
 
-      <div>
-        <label className={styles.toggle}>
-          <input
-            type="checkbox"
-            checked={saveDraftInput}
-            onChange={(e) => setSetting('saveDraftInput', e.target.checked)}
-          />
-          <span>Save draft input</span>
-        </label>
-        <p className={styles.toggleHint}>
-          Automatically saves your unsent message so it persists across page refreshes and chat switches
-        </p>
-      </div>
+      <Toggle.Checkbox
+        checked={saveDraftInput}
+        onChange={(checked) => setSetting('saveDraftInput', checked)}
+        label="Save draft input"
+        hint="Automatically saves your unsent message so it persists across page refreshes and chat switches"
+      />
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Portrait panel side</label>
@@ -611,16 +599,11 @@ function ChatSettings() {
         When enabled, a feedback prompt appears before each regeneration or swipe, letting you guide the next response.
       </p>
 
-      <div>
-        <label className={styles.toggle}>
-          <input
-            type="checkbox"
-            checked={regenFeedback.enabled}
-            onChange={(e) => setSetting('regenFeedback', { ...regenFeedback, enabled: e.target.checked })}
-          />
-          <span>Prompt for feedback on regenerate</span>
-        </label>
-      </div>
+      <Toggle.Checkbox
+        checked={regenFeedback.enabled}
+        onChange={(checked) => setSetting('regenFeedback', { ...regenFeedback, enabled: checked })}
+        label="Prompt for feedback on regenerate"
+      />
 
       {regenFeedback.enabled && (
         <div className={styles.field}>
@@ -640,7 +623,7 @@ function ChatSettings() {
               </button>
             ))}
           </div>
-          <p className={styles.toggleHint}>
+          <p className={styles.helperText}>
             {regenFeedback.position === 'user'
               ? 'Feedback is appended to the last user message as [OOC: ...]'
               : 'Feedback is appended to the end of the system prompt as [OOC: ...]'}
@@ -700,7 +683,7 @@ function GuidedGenerationSettings() {
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
         <h3 className={styles.sectionTitle}>Guided Generations</h3>
-        <button type="button" className={styles.smallBtn} onClick={addGuide}>New Guide</button>
+        <Button size="sm" onClick={addGuide}>New Guide</Button>
       </div>
       <p className={styles.placeholder}>Attach reusable prompts as system content or user prefixes/suffixes.</p>
 
@@ -718,8 +701,8 @@ function GuidedGenerationSettings() {
                 <div className={styles.cardTitle}>{g.name || 'Untitled Guide'}</div>
                 <div className={styles.cardMeta}>{g.mode} • {g.position}</div>
               </div>
-              <button type="button" className={styles.textBtn} onClick={() => setEditingId(editing ? null : g.id)}>{editing ? 'Done' : 'Edit'}</button>
-              <button type="button" className={clsx(styles.textBtn, styles.textBtnDanger)} onClick={() => removeGuide(g.id)}>Delete</button>
+              <Button variant="ghost" size="sm" onClick={() => setEditingId(editing ? null : g.id)}>{editing ? 'Done' : 'Edit'}</Button>
+              <Button variant="danger-ghost" size="sm" onClick={() => removeGuide(g.id)}>Delete</Button>
             </div>
 
             {editing && (
@@ -817,7 +800,7 @@ function QuickRepliesSettings() {
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
         <h3 className={styles.sectionTitle}>Quick Replies</h3>
-        <button type="button" className={styles.smallBtn} onClick={addSet}>New Set</button>
+        <Button size="sm" onClick={addSet}>New Set</Button>
       </div>
       <p className={styles.placeholder}>Build your own quick-reply sets for the input bar popover.</p>
 
@@ -835,8 +818,8 @@ function QuickRepliesSettings() {
                 <div className={styles.cardTitle}>{set.name || 'Untitled Set'}</div>
                 <div className={styles.cardMeta}>{set.replies.length} replies</div>
               </div>
-              <button type="button" className={styles.textBtn} onClick={() => setEditingSetId(editing ? null : set.id)}>{editing ? 'Done' : 'Edit'}</button>
-              <button type="button" className={clsx(styles.textBtn, styles.textBtnDanger)} onClick={() => removeSet(set.id)}>Delete</button>
+              <Button variant="ghost" size="sm" onClick={() => setEditingSetId(editing ? null : set.id)}>{editing ? 'Done' : 'Edit'}</Button>
+              <Button variant="danger-ghost" size="sm" onClick={() => removeSet(set.id)}>Delete</Button>
             </div>
 
             {editing && (
@@ -863,11 +846,11 @@ function QuickRepliesSettings() {
                       placeholder="Message"
                       rows={2}
                     />
-                    <button type="button" className={clsx(styles.textBtn, styles.textBtnDanger)} onClick={() => removeReply(set.id, reply.id)}>Remove</button>
+                    <Button variant="danger-ghost" size="sm" onClick={() => removeReply(set.id, reply.id)}>Remove</Button>
                   </div>
                 ))}
 
-                <button type="button" className={styles.smallBtn} onClick={() => addReply(set.id)}>Add Reply</button>
+                <Button size="sm" onClick={() => addReply(set.id)}>Add Reply</Button>
               </div>
             )}
           </div>
@@ -1130,16 +1113,14 @@ function ExtensionPoolSettings() {
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
         <h3 className={styles.sectionTitle}>Extension Ephemeral Pools</h3>
-        <button
-          type="button"
-          className={styles.iconBtnCompact}
+        <Button
+          size="icon"
           onClick={() => load(true)}
           disabled={refreshing || loading}
           title="Refresh pool data"
           aria-label="Refresh pool data"
-        >
-          <RefreshCw size={13} className={refreshing ? styles.spin : undefined} />
-        </button>
+          icon={<RefreshCw size={13} className={refreshing ? spinClass : undefined} />}
+        />
       </div>
 
       {loading ? (
@@ -1284,9 +1265,9 @@ function ExtensionPoolSettings() {
                   placeholder="Enter owner password"
                 />
               </div>
-              <button type="button" className={styles.smallBtn} onClick={handleSave} disabled={saving}>
+              <Button size="sm" onClick={handleSave} disabled={saving} loading={saving}>
                 {saving ? 'Saving...' : 'Save Pool Config'}
-              </button>
+              </Button>
             </div>
           )}
         </>
@@ -1541,14 +1522,11 @@ function EmbeddingsSettings() {
         </div>
       </div>
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={cfg.enabled}
-          onChange={(e) => update({ enabled: e.target.checked })}
-        />
-        <span>Enable embeddings</span>
-      </label>
+      <Toggle.Checkbox
+        checked={cfg.enabled}
+        onChange={(checked) => update({ enabled: checked })}
+        label="Enable embeddings"
+      />
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Provider</label>
@@ -1585,17 +1563,12 @@ function EmbeddingsSettings() {
         />
       </div>
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={cfg.send_dimensions ?? false}
-          onChange={(e) => update({ send_dimensions: e.target.checked })}
-        />
-        <span>Send dimensions to provider</span>
-      </label>
-      <p className={styles.toggleHint}>
-        When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value.
-      </p>
+      <Toggle.Checkbox
+        checked={cfg.send_dimensions ?? false}
+        onChange={(checked) => update({ send_dimensions: checked })}
+        label="Send dimensions to provider"
+        hint="When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value."
+      />
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Vector Recall Size (top-k)</label>
@@ -1707,40 +1680,31 @@ function EmbeddingsSettings() {
         />
       </div>
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={cfg.vectorize_world_books}
-          onChange={(e) => update({ vectorize_world_books: e.target.checked })}
-        />
-        <span>Vectorize world book entries</span>
-      </label>
+      <Toggle.Checkbox
+        checked={cfg.vectorize_world_books}
+        onChange={(checked) => update({ vectorize_world_books: checked })}
+        label="Vectorize world book entries"
+      />
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={cfg.vectorize_chat_documents}
-          onChange={(e) => update({ vectorize_chat_documents: e.target.checked })}
-        />
-        <span>Vectorize attached chat documents (scaffold)</span>
-      </label>
+      <Toggle.Checkbox
+        checked={cfg.vectorize_chat_documents}
+        onChange={(checked) => update({ vectorize_chat_documents: checked })}
+        label="Vectorize attached chat documents (scaffold)"
+      />
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={cfg.vectorize_chat_messages}
-          onChange={(e) => update({ vectorize_chat_messages: e.target.checked })}
-        />
-        <span>Vectorize chat messages (long-term memory)</span>
-      </label>
+      <Toggle.Checkbox
+        checked={cfg.vectorize_chat_messages}
+        onChange={(checked) => update({ vectorize_chat_messages: checked })}
+        label="Vectorize chat messages (long-term memory)"
+      />
 
       <div className={styles.drawerRow}>
-        <button type="button" className={styles.smallBtn} onClick={save} disabled={saving}>
+        <Button size="sm" onClick={save} disabled={saving} loading={saving}>
           {saving ? 'Saving...' : 'Save Embedding Settings'}
-        </button>
-        <button type="button" className={styles.smallBtn} onClick={test} disabled={testing || saving}>
+        </Button>
+        <Button size="sm" onClick={test} disabled={testing || saving} loading={testing}>
           {testing ? 'Testing...' : 'Test Embedding API'}
-        </button>
+        </Button>
       </div>
       <p className={styles.placeholder}>
         Testing auto-detects native model dimensions and applies them to this configuration.
@@ -2027,14 +1991,11 @@ function AdvancedSettings() {
         </div>
       </div>
 
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={cfg.splitOnSceneBreaks}
-          onChange={(e) => update({ splitOnSceneBreaks: e.target.checked })}
-        />
-        <span>Split on scene breaks (---, ***, ===)</span>
-      </label>
+      <Toggle.Checkbox
+        checked={cfg.splitOnSceneBreaks}
+        onChange={(checked) => update({ splitOnSceneBreaks: checked })}
+        label="Split on scene breaks (---, ***, ===)"
+      />
 
       {/* Section: Retrieval */}
       <h4 className={styles.subsectionTitle} style={{ marginTop: 8 }}>Retrieval</h4>
@@ -2289,13 +2250,22 @@ function LumiHubSettings() {
             </div>
           )}
 
-          <button
-            className={clsx(styles.smallBtn, styles.textBtnDanger)}
+          <div className={styles.lumihubDisclosure}>
+            <span className={styles.lumihubDisclosureTitle}>Manifest Sync</span>
+            <span className={styles.lumihubDisclosureText}>
+              A basic manifest of your installed characters (names and creators only) is synced to your LumiHub account to enable remote card updates. No chat data, messages, or personal content is ever shared. Lumiverse and LumiHub developers cannot access your data. Third-party LumiHub instances may have different privacy practices — exercise caution.
+            </span>
+          </div>
+
+          <Button
+            variant="danger-ghost"
+            size="sm"
             onClick={handleUnlink}
             disabled={unlinking}
+            loading={unlinking}
           >
             {unlinking ? 'Unlinking...' : 'Unlink from LumiHub'}
-          </button>
+          </Button>
         </div>
       ) : (
         <div className={styles.lumihubCard}>
@@ -2378,29 +2348,26 @@ function DangerZone() {
           The vector store will reinitialize automatically on next use.
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-          <button
-            className={clsx(styles.smallBtn, styles.textBtnDanger)}
+          <Button
+            variant="danger"
+            size="sm"
             onClick={handleForceResetLanceDB}
             disabled={resetting}
-            style={{
-              border: '1px solid var(--lumiverse-error)',
-              padding: '6px 12px',
-              opacity: resetting ? 0.5 : 1,
-            }}
+            loading={resetting}
           >
             {resetting
               ? 'Resetting...'
               : confirmReset
               ? 'Are you sure? Click again to confirm'
               : 'Reset LanceDB'}
-          </button>
+          </Button>
           {confirmReset && (
-            <button
-              className={styles.smallBtn}
+            <Button
+              size="sm"
               onClick={() => setConfirmReset(false)}
             >
               Cancel
-            </button>
+            </Button>
           )}
         </div>
         {resetResult && (

@@ -1,26 +1,6 @@
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--lumiverse-modal-backdrop, rgba(4, 6, 10, 0.62));
-  display: flex;
-}
-
-:global([data-glass]) .overlay {
-  backdrop-filter: blur(var(--lcs-glass-soft-blur, 6px));
-  -webkit-backdrop-filter: blur(var(--lcs-glass-soft-blur, 6px));
-  align-items: center;
-  justify-content: center;
-  z-index: 1500;
-  padding: 20px;
-}
-
 .modal {
-  width: clamp(360px, 92vw, min(700px, var(--lumiverse-content-max-width, 700px)));
   background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
-  border-radius: 16px;
   box-shadow: var(--lumiverse-shadow-xl, 0 24px 64px rgba(0, 0, 0, 0.35));
-  overflow: hidden;
 }
 
 .header {
@@ -67,30 +47,11 @@
   color: var(--lumiverse-text-muted);
 }
 
-.closeBtn,
 .skipBtn,
 .actionCard {
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
   background: transparent;
   color: inherit;
-}
-
-.closeBtn {
-  width: var(--lumiverse-btn-icon);
-  height: var(--lumiverse-btn-icon);
-  border-radius: 6px;
-  background: transparent;
-  border: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--lumiverse-text-dim);
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.closeBtn:hover {
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text);
 }
 
 .error {

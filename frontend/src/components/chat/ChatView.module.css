@@ -98,6 +98,44 @@
   position: relative;
 }
 
+.chatToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 12px 0;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.toolbarBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast, 120ms);
+  opacity: 0.6;
+}
+
+.toolbarBtn:hover {
+  opacity: 1;
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-subtle);
+  border-color: var(--lumiverse-border);
+}
+
+.toolbarBtnActive {
+  opacity: 1;
+  color: var(--lumiverse-primary);
+  background: var(--lumiverse-primary-010);
+  border-color: var(--lumiverse-primary);
+}
+
 /* GPU optimization: disable backdrop-filter on all cards during streaming */
 .streaming [data-message-id] {
   backdrop-filter: none !important;

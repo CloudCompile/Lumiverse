@@ -25,6 +25,10 @@ export const connectionsApi = {
     return del<void>(`/connections/${id}`)
   },
 
+  duplicate(id: string) {
+    return post<ConnectionProfile>(`/connections/${id}/duplicate`)
+  },
+
   test(id: string) {
     return post<ConnectionTestResult>(`/connections/${id}/test`)
   },

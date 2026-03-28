@@ -14,6 +14,16 @@ export function connectionSecretKey(id: string): string {
   return `connection_${id}_api_key`;
 }
 
+/** Resolve effective API URL, accounting for provider-specific metadata flags (e.g. NanoGPT subscription mode). */
+export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: string | null; metadata?: Record<string, any> | null }): string {
+  const url = profile.api_url || "";
+  if (profile.provider === "nanogpt" && profile.metadata?.use_subscription_api) {
+    if (!url) return "https://nano-gpt.com/api/subscription/v1";
+    return url.replace("/api/v1", "/api/subscription/v1");
+  }
+  return url;
+}
+
 function rowToProfile(row: any): ConnectionProfile {
   return {
     ...row,
@@ -127,6 +137,49 @@ export async function updateConnection(userId: string, id: string, input: Update
   return updated;
 }
 
+export async function duplicateConnection(userId: string, id: string): Promise<ConnectionProfile | null> {
+  const existing = getConnection(userId, id);
+  if (!existing) return null;
+
+  const newId = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+
+  // Strip reasoningBindings from metadata copy to avoid bound state conflicts
+  const cleanMetadata = { ...existing.metadata };
+  delete cleanMetadata.reasoningBindings;
+
+  let hasApiKey = 0;
+  if (existing.has_api_key) {
+    try {
+      const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
+      if (apiKey) {
+        await secretsSvc.putSecret(userId, connectionSecretKey(newId), apiKey);
+        hasApiKey = 1;
+      }
+    } catch {
+      // If key read fails, duplicate without the key
+    }
+  }
+
+  getDb()
+    .query(
+      "INSERT INTO connection_profiles (id, user_id, name, provider, api_url, model, preset_id, is_default, has_api_key, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .run(
+      newId, userId, `${existing.name} (Copy)`, existing.provider,
+      existing.api_url, existing.model,
+      existing.preset_id || null,
+      0, // never default
+      hasApiKey,
+      JSON.stringify(cleanMetadata),
+      now, now
+    );
+
+  const profile = getConnection(userId, newId)!;
+  eventBus.emit(EventType.CONNECTION_PROFILE_LOADED, { id: newId, profile }, userId);
+  return profile;
+}
+
 export async function deleteConnection(userId: string, id: string): Promise<boolean> {
   const deleted = getDb().query("DELETE FROM connection_profiles WHERE id = ? AND user_id = ?").run(id, userId).changes > 0;
   if (deleted) {
@@ -161,7 +214,7 @@ export async function testConnection(userId: string, id: string): Promise<{ succ
   }
 
   try {
-    const valid = await provider.validateKey(apiKey || "", profile.api_url || "");
+    const valid = await provider.validateKey(apiKey || "", resolveEffectiveApiUrl(profile));
     return {
       success: valid,
       message: valid ? "Connection successful" : "API key validation failed",
@@ -185,7 +238,7 @@ export async function listConnectionModels(userId: string, id: string): Promise<
   }
 
   try {
-    const models = await provider.listModels(apiKey || "", profile.api_url || "");
+    const models = await provider.listModels(apiKey || "", resolveEffectiveApiUrl(profile));
     return { models, provider: profile.provider };
   } catch (err: any) {
     return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };

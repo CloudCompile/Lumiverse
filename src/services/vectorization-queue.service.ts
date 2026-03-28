@@ -231,4 +231,11 @@ export function cleanupQueryCache() {
   }
 }
 
-setInterval(cleanupQueryCache, 3600_000);
+let _queryCacheCleanupTimer: ReturnType<typeof setInterval> | null = setInterval(cleanupQueryCache, 3600_000);
+
+export function stopQueryCacheCleanup(): void {
+  if (_queryCacheCleanupTimer) {
+    clearInterval(_queryCacheCleanupTimer);
+    _queryCacheCleanupTimer = null;
+  }
+}

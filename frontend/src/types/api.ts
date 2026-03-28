@@ -95,6 +95,8 @@ export interface GroupedRecentChat {
   updated_at: number;
   chat_count: number;
   is_group: boolean;
+  group_character_ids?: string[];
+  group_name?: string;
 }
 
 export interface ChatSummary {
@@ -478,6 +480,7 @@ export interface WorldBookDiagnostics {
     character: boolean;
     persona: boolean;
     global: boolean;
+    chat: boolean;
   };
   embeddings: {
     enabled: boolean;
@@ -641,6 +644,8 @@ export interface ActivatedWorldInfoEntry {
   keys: string[];
   source: 'keyword' | 'vector';
   score?: number;
+  bookSource?: 'character' | 'persona' | 'chat' | 'global';
+  bookId?: string;
 }
 
 export type UpdateWorldBookEntryInput = CreateWorldBookEntryInput;

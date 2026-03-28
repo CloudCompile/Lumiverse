@@ -49,3 +49,14 @@ export interface InstallWorldbookResultPayload {
   worldbookName?: string;
   error?: string;
 }
+
+export interface ManifestSyncPayload {
+  entries: Array<{
+    slug: string;
+    type: "character" | "worldbook";
+    name: string;
+    creator: string;
+    source: "local" | "chub" | "lumihub";
+    installed_at: number;
+  }>;
+}

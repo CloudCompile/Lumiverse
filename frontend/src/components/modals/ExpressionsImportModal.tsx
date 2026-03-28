@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
-import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'motion/react'
-import { X } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { CloseButton } from '@/components/shared/CloseButton'
+import { Button } from '@/components/shared/FormComponents'
 import { expressionsApi } from '@/api/expressions'
 import styles from './LorebookImportModal.module.css'
 
@@ -48,74 +48,52 @@ export default function ExpressionsImportModal({ isOpen, items, onClose }: Props
     }
   }, [items, selected, onClose])
 
-  return createPortal(
-    <AnimatePresence>
-      {isOpen && items.length > 0 && (
-        <motion.div
-          className={styles.overlay}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
+  return (
+    <ModalShell isOpen={isOpen && items.length > 0} onClose={onClose} maxWidth={580}>
+      <div className={styles.header}>
+        <div className={styles.headerLeft}>
+          <span className={styles.title}>Imported Expressions</span>
+          <span className={styles.badge}>{items.length}</span>
+        </div>
+        <CloseButton onClick={onClose} />
+      </div>
+
+      <div className={styles.body}>
+        <p style={{ fontSize: 12, color: 'var(--lumiverse-text-dim)', margin: '0 0 8px' }}>
+          The following characters had expression mappings bundled in their CHARX files.
+          Would you like to enable expressions for them?
+        </p>
+        <div className={styles.lorebookList}>
+          {items.map((item) => (
+            <label key={item.characterId} className={styles.lorebookItem}>
+              <input
+                type="checkbox"
+                checked={selected.has(item.characterId)}
+                onChange={() => toggle(item.characterId)}
+              />
+              <div className={styles.lorebookInfo}>
+                <span className={styles.lorebookName}>{item.characterName}</span>
+              </div>
+              <span className={styles.entryBadge}>
+                {item.expressionCount} {item.expressionCount === 1 ? 'expression' : 'expressions'}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className={styles.footer}>
+        <Button variant="ghost" onClick={onClose}>
+          Skip
+        </Button>
+        <Button
+          variant="primary"
+          disabled={selected.size === 0 || enabling}
+          onClick={handleEnable}
         >
-          <motion.div
-            className={styles.modal}
-            initial={{ opacity: 0, scale: 0.95, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 10 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-          >
-            <div className={styles.header}>
-              <div className={styles.headerLeft}>
-                <span className={styles.title}>Imported Expressions</span>
-                <span className={styles.badge}>{items.length}</span>
-              </div>
-              <button type="button" className={styles.closeBtn} onClick={onClose}>
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className={styles.body}>
-              <p style={{ fontSize: 12, color: 'var(--lumiverse-text-dim)', margin: '0 0 8px' }}>
-                The following characters had expression mappings bundled in their CHARX files.
-                Would you like to enable expressions for them?
-              </p>
-              <div className={styles.lorebookList}>
-                {items.map((item) => (
-                  <label key={item.characterId} className={styles.lorebookItem}>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(item.characterId)}
-                      onChange={() => toggle(item.characterId)}
-                    />
-                    <div className={styles.lorebookInfo}>
-                      <span className={styles.lorebookName}>{item.characterName}</span>
-                    </div>
-                    <span className={styles.entryBadge}>
-                      {item.expressionCount} {item.expressionCount === 1 ? 'expression' : 'expressions'}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div className={styles.footer}>
-              <button type="button" className={styles.skipBtn} onClick={onClose}>
-                Skip
-              </button>
-              <button
-                type="button"
-                className={styles.importBtn}
-                disabled={selected.size === 0 || enabling}
-                onClick={handleEnable}
-              >
-                {enabling ? 'Enabling...' : `Enable ${selected.size > 0 ? selected.size : ''} Expressions`}
-              </button>
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body
+          {enabling ? 'Enabling...' : `Enable ${selected.size > 0 ? selected.size : ''} Expressions`}
+        </Button>
+      </div>
+    </ModalShell>
   )
 }

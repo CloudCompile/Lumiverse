@@ -110,8 +110,18 @@ export function notifyPermissionChanged(
   allGranted: string[]
 ): void {
   const host = runningExtensions.get(id);
-  if (!host) return;
-  host.notifyPermissionChanged(permission, granted, allGranted);
+  if (host) {
+    host.notifyPermissionChanged(permission, granted, allGranted);
+  }
+
+  // Broadcast on the EventBus so frontend modules can react in real-time.
+  // The extensionId lets each frontend scope the event to itself.
+  eventBus.emit(EventType.SPINDLE_PERMISSION_CHANGED, {
+    extensionId: id,
+    permission,
+    granted,
+    allGranted,
+  });
 }
 
 export function getRunningExtensions(): Map<string, WorkerHost> {

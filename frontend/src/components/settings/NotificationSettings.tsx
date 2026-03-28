@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Bell, BellOff, Smartphone, Trash2, Send, Shield, Zap } from 'lucide-react'
 import { useStore } from '@/store'
 import { usePushSubscription } from '@/hooks/usePushSubscription'
+import { Toggle } from '@/components/shared/Toggle'
 import styles from './NotificationSettings.module.css'
 import clsx from 'clsx'
 
@@ -152,35 +153,32 @@ export default function NotificationSettings() {
           <Shield size={14} />
           <span>Notification Events</span>
         </div>
-        <label className={styles.toggleRow}>
-          <input
-            type="checkbox"
+        <div className={styles.toggleRow}>
+          <Toggle.Checkbox
             checked={prefs.enabled}
-            onChange={(e) => updatePrefs({ enabled: e.target.checked })}
+            onChange={(v) => updatePrefs({ enabled: v })}
+            label="Enable push notifications"
+            hint="Master toggle"
           />
-          <span className={styles.toggleLabel}>Enable push notifications</span>
-          <span className={styles.toggleHint}>Master toggle</span>
-        </label>
-        <label className={clsx(styles.toggleRow, !prefs.enabled && styles.toggleRowDisabled)}>
-          <input
-            type="checkbox"
+        </div>
+        <div className={clsx(styles.toggleRow, !prefs.enabled && styles.toggleRowDisabled)}>
+          <Toggle.Checkbox
             checked={prefs.events.generation_ended}
-            onChange={(e) => updateEventPref('generation_ended', e.target.checked)}
+            onChange={(v) => updateEventPref('generation_ended', v)}
             disabled={!prefs.enabled}
+            label="Generation completed"
+            hint="When a character finishes responding"
           />
-          <span className={styles.toggleLabel}>Generation completed</span>
-          <span className={styles.toggleHint}>When a character finishes responding</span>
-        </label>
-        <label className={clsx(styles.toggleRow, !prefs.enabled && styles.toggleRowDisabled)}>
-          <input
-            type="checkbox"
+        </div>
+        <div className={clsx(styles.toggleRow, !prefs.enabled && styles.toggleRowDisabled)}>
+          <Toggle.Checkbox
             checked={prefs.events.generation_error}
-            onChange={(e) => updateEventPref('generation_error', e.target.checked)}
+            onChange={(v) => updateEventPref('generation_error', v)}
             disabled={!prefs.enabled}
+            label="Generation failed"
+            hint="When a generation encounters an error"
           />
-          <span className={styles.toggleLabel}>Generation failed</span>
-          <span className={styles.toggleHint}>When a generation encounters an error</span>
-        </label>
+        </div>
       </div>
 
       {/* ── Devices Section ─────────────────────────────────────────── */}

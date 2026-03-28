@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useMemo } from 'react'
 import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu } from 'lucide-react'
 import { useStore } from '@/store'
 import { settingsApi } from '@/api/settings'
-import { EditorSection, FormField, TextInput, Select } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
+import { Button, EditorSection, FormField, TextInput, Select } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import CouncilMemberItem from './council/CouncilMemberItem'
 import AddMemberDropdown from './council/AddMemberDropdown'
@@ -274,38 +275,26 @@ export default function CouncilManager() {
         </div>
 
         <div className={styles.checkboxGroup}>
-          <label className={styles.checkbox}>
-            <input
-              type="checkbox"
-              checked={ts.includeUserPersona}
-              onChange={(e) => setCouncilToolsSettings({ includeUserPersona: e.target.checked })}
-            />
-            Include User Persona
-          </label>
-          <label className={styles.checkbox}>
-            <input
-              type="checkbox"
-              checked={ts.includeCharacterInfo}
-              onChange={(e) => setCouncilToolsSettings({ includeCharacterInfo: e.target.checked })}
-            />
-            Include Character Info
-          </label>
-          <label className={styles.checkbox}>
-            <input
-              type="checkbox"
-              checked={ts.includeWorldInfo}
-              onChange={(e) => setCouncilToolsSettings({ includeWorldInfo: e.target.checked })}
-            />
-            Include World Info
-          </label>
-          <label className={styles.checkbox}>
-            <input
-              type="checkbox"
-              checked={ts.allowUserControl}
-              onChange={(e) => setCouncilToolsSettings({ allowUserControl: e.target.checked })}
-            />
-            Allow User Control
-          </label>
+          <Toggle.Checkbox
+            checked={ts.includeUserPersona}
+            onChange={(checked) => setCouncilToolsSettings({ includeUserPersona: checked })}
+            label="Include User Persona"
+          />
+          <Toggle.Checkbox
+            checked={ts.includeCharacterInfo}
+            onChange={(checked) => setCouncilToolsSettings({ includeCharacterInfo: checked })}
+            label="Include Character Info"
+          />
+          <Toggle.Checkbox
+            checked={ts.includeWorldInfo}
+            onChange={(checked) => setCouncilToolsSettings({ includeWorldInfo: checked })}
+            label="Include World Info"
+          />
+          <Toggle.Checkbox
+            checked={ts.allowUserControl}
+            onChange={(checked) => setCouncilToolsSettings({ allowUserControl: checked })}
+            label="Allow User Control"
+          />
         </div>
       </EditorSection>
 
@@ -325,12 +314,12 @@ export default function CouncilManager() {
           />
         ) : (
           <div className={styles.addButtons}>
-            <button type="button" className={styles.addBtn} onClick={() => setAddMode('member')}>
-              <Plus size={14} /> Add Member
-            </button>
-            <button type="button" className={styles.addBtnSecondary} onClick={() => setAddMode('pack')}>
-              <Package size={14} /> Quick Add Pack
-            </button>
+            <Button variant="ghost" size="sm" icon={<Plus size={14} />} className={styles.addBtn} onClick={() => setAddMode('member')}>
+              Add Member
+            </Button>
+            <Button variant="ghost" size="sm" icon={<Package size={14} />} className={styles.addBtn} onClick={() => setAddMode('pack')}>
+              Quick Add Pack
+            </Button>
           </div>
         )}
 

@@ -1,15 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Download, Globe, X, User, FileUp, Settings, Search } from 'lucide-react'
+import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, Upload, Download, Globe, X, User, FileUp, Settings, Search, MessageSquare } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import { worldBooksApi } from '@/api/world-books'
+import { chatsApi } from '@/api/chats'
 import WorldBookEntryEditor from '@/components/shared/WorldBookEntryEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ImportWorldBookModal, { type WorldBookImportResult } from '@/components/modals/ImportWorldBookModal'
 import PostImportWorldBookModal from '@/components/shared/PostImportWorldBookModal'
 import WorldBookDiagnosticsModal from '@/components/panels/world-book/WorldBookDiagnosticsModal'
 import { formatWorldBookReindexStatus } from '@/lib/worldBookVectorization'
+import { Button } from '@/components/shared/FormComponents'
 import type { WorldBook, WorldBookEntry, WorldBookVectorSummary, WorldInfoSettings } from '@/types/api'
 import styles from './WorldBookPanel.module.css'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
@@ -376,9 +378,75 @@ export default function WorldBookPanel() {
   const activeGlobalBooks = books.filter((b) => (globalWorldBooks ?? []).includes(b.id))
   const selectedBook = books.find((book) => book.id === selectedBookId) ?? null
 
+  // Chat-scoped world books
+  const [chatWorldBookIds, setChatWorldBookIds] = useState<string[]>([])
+  const [chatMetadata, setChatMetadata] = useState<Record<string, any>>({})
+  const [chatPopoverOpen, setChatPopoverOpen] = useState(false)
+  const chatPopoverRef = useRef<HTMLDivElement>(null)
+  const chatAddBtnRef = useRef<HTMLButtonElement>(null)
+  const [chatPopoverPos, setChatPopoverPos] = useState<{ top: number; left: number } | null>(null)
+
+  useEffect(() => {
+    if (!activeChatId) {
+      setChatWorldBookIds([])
+      setChatMetadata({})
+      return
+    }
+    chatsApi.get(activeChatId).then((chat) => {
+      const meta = (chat as any).metadata || {}
+      setChatMetadata(meta)
+      setChatWorldBookIds((meta.chat_world_book_ids as string[]) ?? [])
+    }).catch(() => {})
+  }, [activeChatId])
+
+  useEffect(() => {
+    if (!chatPopoverOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (
+        chatPopoverRef.current && !chatPopoverRef.current.contains(e.target as Node) &&
+        chatAddBtnRef.current && !chatAddBtnRef.current.contains(e.target as Node)
+      ) {
+        setChatPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [chatPopoverOpen])
+
+  const openChatPopover = useCallback(() => {
+    setChatPopoverOpen((prev) => {
+      const next = !prev
+      if (next && chatAddBtnRef.current) {
+        const rect = chatAddBtnRef.current.getBoundingClientRect()
+        setChatPopoverPos({ top: rect.bottom + 4, left: rect.right })
+      }
+      return next
+    })
+  }, [])
+
+  const toggleChatBook = (id: string) => {
+    const next = chatWorldBookIds.includes(id)
+      ? chatWorldBookIds.filter((x) => x !== id)
+      : [...chatWorldBookIds, id]
+    setChatWorldBookIds(next)
+    const meta = { ...chatMetadata, chat_world_book_ids: next }
+    setChatMetadata(meta)
+    if (activeChatId) chatsApi.update(activeChatId, { metadata: meta }).catch(() => {})
+  }
+
+  const removeChatBook = (id: string) => {
+    const next = chatWorldBookIds.filter((x) => x !== id)
+    setChatWorldBookIds(next)
+    const meta = { ...chatMetadata, chat_world_book_ids: next }
+    setChatMetadata(meta)
+    if (activeChatId) chatsApi.update(activeChatId, { metadata: meta }).catch(() => {})
+  }
+
+  const activeChatBooks = books.filter((b) => chatWorldBookIds.includes(b.id))
+
   // Export popover
   const [exportPopoverOpen, setExportPopoverOpen] = useState(false)
-  const exportBtnRef = useRef<HTMLButtonElement>(null)
+  const exportBtnRef = useRef<HTMLDivElement>(null)
   const exportPopoverRef = useRef<HTMLDivElement>(null)
   const [exportPopoverPos, setExportPopoverPos] = useState<{ top: number; left: number } | null>(null)
 
@@ -496,6 +564,79 @@ export default function WorldBookPanel() {
         )}
       </div>
 
+      {/* Chat-scoped world books section */}
+      <div className={clsx(styles.chatSection, !activeChatId && styles.chatSectionDisabled)}>
+        <div className={styles.chatHeader}>
+          <MessageSquare size={12} className={styles.chatIcon} />
+          <span className={styles.chatLabel}>This Chat Only</span>
+          {activeChatId ? (
+            <div className={styles.chatPopoverWrapper}>
+              <button
+                ref={chatAddBtnRef}
+                type="button"
+                className={styles.chatAddBtn}
+                onClick={openChatPopover}
+              >
+                <Plus size={11} />
+                <span>Add</span>
+                <ChevronDown
+                  size={10}
+                  className={clsx(styles.chevron, chatPopoverOpen && styles.chevronOpen)}
+                />
+              </button>
+              {chatPopoverOpen && chatPopoverPos && createPortal(
+                <div
+                  ref={chatPopoverRef}
+                  className={styles.chatPopover}
+                  style={{ top: chatPopoverPos.top, left: chatPopoverPos.left }}
+                >
+                  {books.length === 0 ? (
+                    <div className={styles.chatPopoverEmpty}>No world books available</div>
+                  ) : (
+                    books.map((book) => {
+                      const isActive = chatWorldBookIds.includes(book.id)
+                      return (
+                        <button
+                          key={book.id}
+                          type="button"
+                          className={clsx(styles.chatPopoverItem, isActive && styles.chatPopoverItemActive)}
+                          onClick={() => toggleChatBook(book.id)}
+                        >
+                          <span className={styles.chatPopoverCheck}>{isActive ? '\u2713' : ''}</span>
+                          <span className={styles.chatPopoverName}>{book.name}</span>
+                        </button>
+                      )
+                    })
+                  )}
+                </div>,
+                document.body
+              )}
+            </div>
+          ) : null}
+        </div>
+        {!activeChatId ? (
+          <span className={styles.chatHint}>Open a chat to add chat-scoped world books</span>
+        ) : activeChatBooks.length > 0 ? (
+          <div className={styles.chatPills}>
+            {activeChatBooks.map((book) => (
+              <span key={book.id} className={styles.chatPill}>
+                <span className={styles.chatPillName}>{book.name}</span>
+                <button
+                  type="button"
+                  className={styles.chatPillRemove}
+                  onClick={() => removeChatBook(book.id)}
+                  title="Remove from this chat"
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <span className={styles.chatHint}>No world books active for this chat</span>
+        )}
+      </div>
+
       {/* Activation Settings */}
       <div className={styles.wiSettingsSection}>
         <button
@@ -546,33 +687,11 @@ export default function WorldBookPanel() {
           )
           return null
         })()}
-        <button
-          type="button"
-          className={styles.iconBtn}
-          onClick={handleCreateBook}
-          title="New Book"
-        >
-          <Plus size={14} />
-        </button>
-        <button
-          type="button"
-          className={styles.iconBtn}
-          onClick={() => setShowImport(true)}
-          title="Import Book"
-        >
-          <Download size={14} />
-        </button>
+        <Button size="icon-sm" variant="ghost" onClick={handleCreateBook} title="New Book" icon={<Plus size={14} />} />
+        <Button size="icon-sm" variant="ghost" onClick={() => setShowImport(true)} title="Import Book" icon={<Download size={14} />} />
         {selectedBookId && (
-          <div className={styles.exportWrapper}>
-            <button
-              ref={exportBtnRef}
-              type="button"
-              className={styles.iconBtn}
-              onClick={openExportPopover}
-              title="Export Book"
-            >
-              <Upload size={14} />
-            </button>
+          <div className={styles.exportWrapper} ref={exportBtnRef}>
+            <Button size="icon-sm" variant="ghost" onClick={openExportPopover} title="Export Book" icon={<Upload size={14} />} />
             {exportPopoverOpen && exportPopoverPos && createPortal(
               <div
                 ref={exportPopoverRef}
@@ -594,14 +713,7 @@ export default function WorldBookPanel() {
           </div>
         )}
         {!isMobile && (
-          <button
-            type="button"
-            className={styles.iconBtn}
-            onClick={handlePopOut}
-            title="Pop out to modal"
-          >
-            <Maximize2 size={14} />
-          </button>
+          <Button size="icon-sm" variant="ghost" onClick={handlePopOut} title="Pop out to modal" icon={<Maximize2 size={14} />} />
         )}
       </div>
 
@@ -642,14 +754,9 @@ export default function WorldBookPanel() {
                   placeholder="Optional description..."
                 />
               </div>
-              <button
-                type="button"
-                className={styles.deleteBookBtn}
-                onClick={() => setDeleteBookConfirm(selectedBookId)}
-              >
-                <Trash2 size={11} />
+              <Button variant="danger-ghost" size="sm" icon={<Trash2 size={11} />} onClick={() => setDeleteBookConfirm(selectedBookId)}>
                 Delete Book
-              </button>
+              </Button>
               {vectorSummary && (
                 <div className={styles.vectorSummary}>
                   <div className={styles.vectorSummaryTitle}>Semantic activation status</div>
@@ -663,31 +770,15 @@ export default function WorldBookPanel() {
                 </div>
               )}
               <div className={styles.bookActionRow}>
-                <button
-                  type="button"
-                  className={styles.primaryActionBtn}
-                  onClick={handleReindexVectors}
-                  disabled={reindexing}
-                >
+                <Button variant="primary" size="sm" onClick={handleReindexVectors} disabled={reindexing}>
                   {reindexing ? 'Reindexing...' : 'Reindex semantic search'}
-                </button>
-                <button
-                  type="button"
-                  className={styles.subtleActionBtn}
-                  onClick={handleConvertToVectorizedPreview}
-                  disabled={reindexing}
-                >
+                </Button>
+                <Button variant="secondary" size="sm" onClick={handleConvertToVectorizedPreview} disabled={reindexing}>
                   Convert to Vectorized
-                </button>
-                <button
-                  type="button"
-                  className={styles.subtleActionBtn}
-                  onClick={handleDiagnostics}
-                  disabled={!activeChatId}
-                >
-                  <Search size={12} />
-                  <span>Diagnose Current Chat</span>
-                </button>
+                </Button>
+                <Button variant="secondary" size="sm" icon={<Search size={12} />} onClick={handleDiagnostics} disabled={!activeChatId}>
+                  Diagnose Current Chat
+                </Button>
               </div>
               {vectorStatus && <span className={styles.vectorStatusText}>{vectorStatus}</span>}
             </div>
@@ -698,14 +789,7 @@ export default function WorldBookPanel() {
             <span className={styles.entryListTitle}>
               Entries ({entryTotal})
             </span>
-            <button
-              type="button"
-              className={styles.newEntryBtn}
-              onClick={handleCreateEntry}
-            >
-              <Plus size={12} />
-              <span>New</span>
-            </button>
+            <Button variant="primary" size="sm" icon={<Plus size={12} />} onClick={handleCreateEntry}>New</Button>
           </div>
 
           <label className={styles.entrySearch}>
@@ -789,15 +873,14 @@ export default function WorldBookPanel() {
               <div className={styles.emptyState}>No entries match your search</div>
             )}
             {entries.length < entryTotal && (
-              <button
-                type="button"
-                className={styles.newEntryBtn}
+              <Button
+                variant="primary" size="sm"
                 onClick={loadMoreEntries}
                 disabled={loadingMore}
                 style={{ margin: '8px auto', display: 'block' }}
               >
                 {loadingMore ? 'Loading...' : `Load More (${entries.length}/${entryTotal})`}
-              </button>
+              </Button>
             )}
           </div>
           </PanelFadeIn>

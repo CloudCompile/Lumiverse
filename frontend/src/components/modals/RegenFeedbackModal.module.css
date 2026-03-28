@@ -1,25 +1,4 @@
-.backdrop {
-  position: fixed;
-  inset: 0;
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: var(--lumiverse-modal-backdrop, rgba(0, 0, 0, 0.6));
-  z-index: 10002;
-}
-
 .modal {
-  position: relative;
-  width: 100%;
-  max-width: clamp(320px, 90vw, min(520px, var(--lumiverse-content-max-width, 520px)));
-  background: var(--lumiverse-gradient-modal);
-  border-radius: 16px;
-  border: 1px solid var(--lumiverse-border);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5),
     0 0 40px var(--lumiverse-primary-020);
 }
@@ -140,13 +119,7 @@
 
 /* ── Mobile ── */
 @media (max-width: 480px) {
-  .backdrop {
-    padding: 12px;
-    align-items: flex-end;
-  }
-
   .modal {
-    max-width: 100%;
     border-radius: 14px 14px 0 0;
   }
 

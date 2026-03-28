@@ -90,39 +90,6 @@
   margin-top: 1px;
 }
 
-.toggle {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  border-radius: 10px;
-  border: none;
-  cursor: pointer;
-  background: var(--lumiverse-border);
-  transition: background var(--lumiverse-transition-fast);
-  flex-shrink: 0;
-  padding: 0;
-}
-
-.toggle::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: white;
-  transition: transform var(--lumiverse-transition-fast);
-}
-
-.toggleOn {
-  background: var(--lumiverse-primary);
-}
-
-.toggleOn::after {
-  transform: translateX(16px);
-}
-
 /* ── Select dropdown ── */
 .select {
   width: 100%;
@@ -140,6 +107,18 @@
 
 .select:focus {
   border-color: var(--lumiverse-primary-040, rgba(140, 130, 255, 0.4));
+}
+
+.selectDisabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.toggleOnlyHint {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+  font-weight: 400;
 }
 
 /* ── Textarea ── */

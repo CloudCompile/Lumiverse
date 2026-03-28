@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2 } from 'lucide-react'
+import { Spinner } from '@/components/shared/Spinner'
+import { CloseButton } from '@/components/shared/CloseButton'
 import styles from './ImportUrlModal.module.css'
 
 interface ImportUrlModalProps {
@@ -40,9 +41,7 @@ export default function ImportUrlModal({
       <div className={styles.modal}>
         <div className={styles.header}>
           <h3 className={styles.title}>Import from URL</h3>
-          <button type="button" className={styles.closeBtn} onClick={onClose}>
-            <X size={16} />
-          </button>
+          <CloseButton onClick={onClose} />
         </div>
         <form onSubmit={handleSubmit}>
           <p className={styles.hint}>
@@ -63,7 +62,7 @@ export default function ImportUrlModal({
               Cancel
             </button>
             <button type="submit" className={styles.importBtn} disabled={!url.trim() || loading}>
-              {loading ? <Loader2 size={14} className={styles.spinner} /> : null}
+              {loading ? <Spinner size={14} /> : null}
               Import
             </button>
           </div>

@@ -7,8 +7,10 @@ import * as exportSvc from "../services/character-export.service";
 import * as gallerySvc from "../services/character-gallery.service";
 import * as regexSvc from "../services/regex-scripts.service";
 import * as exprSvc from "../services/expressions.service";
+import * as wbSvc from "../services/world-books.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
+import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
 import { createAvatarResolverResponse } from "../utils/avatar-cache";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -686,12 +688,31 @@ app.post("/import", async (c) => {
             }
           }
 
+          // Import world books from Lumiverse modules
+          let importedWorldBookCount = 0;
+          if (Array.isArray(lumiverseModules.world_books) && lumiverseModules.world_books.length > 0) {
+            const importedBookIds: string[] = [];
+            for (const bookData of lumiverseModules.world_books) {
+              try {
+                const result = wbSvc.importLumiverseWorldBook(userId, character.id, bookData);
+                importedBookIds.push(result.worldBook.id);
+              } catch { /* skip individual failures */ }
+            }
+            if (importedBookIds.length > 0) {
+              const currentIds = getCharacterWorldBookIds(extensions);
+              Object.assign(extensions, setCharacterWorldBookIds(extensions, [...currentIds, ...importedBookIds]));
+              importedWorldBookCount = importedBookIds.length;
+            }
+          }
+
           svc.updateCharacter(userId, character.id, { extensions });
 
           lumiverseModulesSummary = {
             has_expressions: !!extensions.expressions,
             has_alternate_fields: !!lumiverseModules.alternate_fields,
             has_alternate_avatars: altAvatars.length > 0,
+            has_world_books: importedWorldBookCount > 0,
+            world_book_count: importedWorldBookCount,
             expression_count: Object.keys(extensions.expressions?.mappings || {}).length,
             alternate_field_counts: lumiverseModules.alternate_fields
               ? Object.fromEntries(

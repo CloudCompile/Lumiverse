@@ -278,6 +278,18 @@ export class GoogleProvider implements LlmProvider {
       body[key] = params[key];
     }
 
+    // Default safety settings: disable all content filters unless the user
+    // has already provided their own safetySettings via passthrough.
+    if (!body.safetySettings) {
+      body.safetySettings = [
+        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" },
+      ];
+    }
+
     // Inline council tools: pass as Google function calling format
     if (request.tools && request.tools.length > 0) {
       body.tools = [{
@@ -287,6 +299,16 @@ export class GoogleProvider implements LlmProvider {
           parameters: t.parameters,
         })),
       }];
+    } else {
+      // Insert dummy thought signature on model parts when tools are NOT in use.
+      // This bypasses Google's thought signature validator for non-tool contexts.
+      for (const entry of body.contents) {
+        if (entry.role === "model") {
+          for (const part of entry.parts) {
+            part.thoughtSignature = "context_engineering_is_the_way_to_go";
+          }
+        }
+      }
     }
 
     return body;

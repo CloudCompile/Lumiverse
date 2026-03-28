@@ -12,6 +12,7 @@ import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { getFirstUserId } from "../auth/seed";
 import * as wbSvc from "../services/world-books.service";
+import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
 import type { InstallCharacterPayload, InstallResultPayload, InstallWorldbookPayload, InstallWorldbookResultPayload } from "./types";
 
 /**
@@ -33,13 +34,15 @@ export async function installCharacter(
   }
 
   try {
+    let result: InstallResultPayload;
+
     if (payload.source === "chub" && payload.importUrl) {
-      return await installFromChub(requestId, userId, payload);
+      result = await installFromChub(requestId, userId, payload);
     } else if (payload.importUrl) {
       // LumiHub URL-based install (e.g. .charx download)
-      return await installFromUrl(requestId, userId, payload);
+      result = await installFromUrl(requestId, userId, payload);
     } else if (payload.cardData) {
-      return await installFromCardData(requestId, userId, payload);
+      result = await installFromCardData(requestId, userId, payload);
     } else {
       return {
         requestId,
@@ -48,6 +51,13 @@ export async function installCharacter(
         errorCode: "PARSE_ERROR",
       };
     }
+
+    // Stamp install source metadata for manifest tracking
+    if (result.success && result.characterId) {
+      stampInstallSource(userId, result.characterId, payload);
+    }
+
+    return result;
   } catch (err: any) {
     console.error("[LumiHub Installer] Error:", err);
     return {
@@ -56,6 +66,25 @@ export async function installCharacter(
       error: err.message || "Unknown error during installation",
       errorCode: "UNKNOWN",
     };
+  }
+}
+
+/** Stamp install source metadata on a freshly-installed character for manifest tracking. */
+function stampInstallSource(userId: string, characterId: string, payload: InstallCharacterPayload): void {
+  try {
+    const character = svc.getCharacter(userId, characterId);
+    if (!character) return;
+    const { buildCharacterSlug } = require("./manifest") as typeof import("./manifest");
+    const slug = buildCharacterSlug(character.creator, character.name);
+    svc.updateCharacter(userId, characterId, {
+      extensions: {
+        ...(character.extensions || {}),
+        _lumiverse_install_source: payload.source,
+        _lumiverse_install_slug: slug,
+      },
+    });
+  } catch {
+    // Non-critical — manifest will still work via creator/name derivation
   }
 }
 
@@ -77,13 +106,13 @@ function maybeExtractWorldbook(
 
   try {
     const { worldBook } = wbSvc.importCharacterBook(userId, characterId, characterName, charBook);
-    // Associate the worldbook with the character
-    svc.updateCharacter(userId, characterId, {
-      extensions: {
-        ...(character.extensions || {}),
-        world_book_id: worldBook.id,
-      },
-    });
+    // Associate the worldbook with the character (append to array)
+    const currentIds = getCharacterWorldBookIds(character.extensions);
+    const nextExtensions = setCharacterWorldBookIds(
+      { ...(character.extensions || {}) },
+      [...currentIds, worldBook.id],
+    );
+    svc.updateCharacter(userId, characterId, { extensions: nextExtensions });
   } catch (err) {
     console.warn("[LumiHub Installer] Embedded worldbook extraction failed:", err);
   }
@@ -515,6 +544,20 @@ export async function installWorldbook(
     }
 
     const result = await wbSvc.importWorldBook(userId, importData);
+
+    // Stamp install source metadata for manifest tracking
+    try {
+      const wb = wbSvc.getWorldBook(userId, result.worldBook.id);
+      if (wb) {
+        wbSvc.updateWorldBook(userId, result.worldBook.id, {
+          metadata: {
+            ...wb.metadata,
+            _lumiverse_install_source: payload.source,
+            source_creator: payload.worldbookName.includes("/") ? payload.worldbookName.split("/")[0] : "unknown",
+          },
+        });
+      }
+    } catch { /* non-critical */ }
 
     eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
       characterId: result.worldBook.id,

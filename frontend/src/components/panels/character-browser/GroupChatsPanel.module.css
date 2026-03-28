@@ -25,7 +25,7 @@
 }
 
 .mosaic2 {
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: 1fr 1fr;
 }
 
 .mosaic3 {
@@ -284,10 +284,3 @@
   border-color: var(--lumiverse-primary-050);
 }
 
-.spin {
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}

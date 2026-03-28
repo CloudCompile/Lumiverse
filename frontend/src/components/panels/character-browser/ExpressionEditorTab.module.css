@@ -33,16 +33,7 @@
 }
 
 .enableRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin-bottom: 12px;
-}
-
-.enableRow label {
-  font-size: 12px;
-  color: var(--lumiverse-text-muted);
-  cursor: pointer;
 }
 
 .detectionSection {

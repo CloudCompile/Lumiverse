@@ -6,9 +6,10 @@ import { getCharacter } from "./characters.service";
 import { getExpressionConfig } from "./expressions.service";
 import { listGallery } from "./character-gallery.service";
 import { getImage, getImageFilePath } from "./images.service";
-import { exportWorldBook } from "./world-books.service";
+import { exportWorldBook, getWorldBook } from "./world-books.service";
 import { isNsfwExpressionLabel } from "./character-card.service";
 import { getCharacterBoundScripts } from "./regex-scripts.service";
+import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import type { Character } from "../types/character";
 
 // ── CRC-32 (lookup table) ───────────────────────────────────────────────────
@@ -130,6 +131,7 @@ const INTERNAL_EXTENSION_KEYS = new Set([
   "alternate_fields",
   "alternate_avatars",
   "world_book_id",
+  "world_book_ids",
   "_lumiverse_source_filename",
 ]);
 
@@ -160,10 +162,10 @@ export function buildCCSv3Json(userId: string, character: Character): Record<str
     alternate_greetings: character.alternate_greetings || [],
   };
 
-  // Embed character_book if world book is attached
-  const worldBookId = character.extensions?.world_book_id;
-  if (worldBookId) {
-    const characterBook = exportWorldBook(userId, worldBookId, "character_book");
+  // Embed character_book from attached world books
+  const attachedBookIds = getCharacterWorldBookIds(character.extensions);
+  if (attachedBookIds.length > 0) {
+    const characterBook = mergeWorldBooksForExport(userId, attachedBookIds);
     if (characterBook) {
       data.character_book = characterBook;
     }
@@ -188,6 +190,44 @@ export function buildCCSv3Json(userId: string, character: Character): Record<str
     spec: "chara_card_v3",
     spec_version: "3.0",
     data,
+  };
+}
+
+/**
+ * Merge multiple world books into a single character_book object for CCSv3 export.
+ * If only one book, returns it directly. If multiple, concatenates entries with
+ * re-indexed IDs and [BookName] comment prefixes for traceability.
+ */
+function mergeWorldBooksForExport(userId: string, bookIds: string[]): Record<string, any> | null {
+  if (bookIds.length === 1) {
+    return exportWorldBook(userId, bookIds[0], "character_book");
+  }
+
+  const allEntries: Record<string, any>[] = [];
+  const bookNames: string[] = [];
+
+  for (const bookId of bookIds) {
+    const exported = exportWorldBook(userId, bookId, "character_book");
+    if (!exported?.entries) continue;
+    const book = getWorldBook(userId, bookId);
+    const bookName = book?.name || "Unknown Book";
+    bookNames.push(bookName);
+
+    for (const entry of exported.entries) {
+      allEntries.push({
+        ...entry,
+        id: allEntries.length,
+        comment: `[${bookName}] ${entry.comment || ""}`.trim(),
+      });
+    }
+  }
+
+  if (allEntries.length === 0) return null;
+
+  return {
+    name: bookNames.length > 1 ? `Merged Lorebook (${bookNames.length} books)` : bookNames[0] || "Lorebook",
+    description: `Merged from: ${bookNames.join(", ")}`,
+    entries: allEntries,
   };
 }
 
@@ -252,6 +292,7 @@ export interface LumiverseModulesExport {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  world_books?: Record<string, any>[];
   regex_scripts?: import("./character-card.service").BundledRegexScript[];
 }
 
@@ -344,6 +385,19 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
     modules.alternate_avatars = altAvatars;
   }
 
+  // World books (individual Lumiverse-format exports for lossless round-trips)
+  const charWorldBookIds = getCharacterWorldBookIds(character.extensions);
+  if (charWorldBookIds.length > 0) {
+    const worldBooksExport: Record<string, any>[] = [];
+    for (const wbId of charWorldBookIds) {
+      const exported = exportWorldBook(userId, wbId, "lumiverse");
+      if (exported) worldBooksExport.push(exported);
+    }
+    if (worldBooksExport.length > 0) {
+      modules.world_books = worldBooksExport;
+    }
+  }
+
   // Character-bound regex scripts
   const boundScripts = getCharacterBoundScripts(userId, characterId);
   if (boundScripts.length > 0) {
@@ -370,7 +424,7 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
 
   // Only include lumiverse_modules.json if there's content
   const hasModules =
-    modules.expressions || modules.alternate_fields || modules.alternate_avatars || modules.regex_scripts;
+    modules.expressions || modules.alternate_fields || modules.alternate_avatars || modules.world_books?.length || modules.regex_scripts;
   if (hasModules) {
     entries["lumiverse_modules.json"] = new TextEncoder().encode(
       JSON.stringify(modules, null, 2)

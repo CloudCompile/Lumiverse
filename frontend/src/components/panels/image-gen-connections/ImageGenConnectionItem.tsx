@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ImageIcon, Trash2, Edit3, Zap, Check, Loader, Star } from 'lucide-react'
+import { ImageIcon, Trash2, Edit3, Zap, Check, Loader, Star, Copy } from 'lucide-react'
 import { imageGenConnectionsApi } from '@/api/image-gen-connections'
 import type { ImageGenConnectionProfile, ImageGenProviderInfo, CreateImageGenConnectionInput } from '@/types/api'
 import ImageGenConnectionForm from './ImageGenConnectionForm'
@@ -18,10 +18,11 @@ interface Props {
   providers: ImageGenProviderInfo[]
   onSelect: () => void
   onUpdate: (profile: ImageGenConnectionProfile) => void
+  onDuplicate: () => void
   onDelete: () => void
 }
 
-export default function ImageGenConnectionItem({ profile, isActive, providers, onSelect, onUpdate, onDelete }: Props) {
+export default function ImageGenConnectionItem({ profile, isActive, providers, onSelect, onUpdate, onDuplicate, onDelete }: Props) {
   const [editing, setEditing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -106,6 +107,9 @@ export default function ImageGenConnectionItem({ profile, isActive, providers, o
           </button>
           <button type="button" className={styles.actionBtn} onClick={() => setEditing(true)} title="Edit">
             <Edit3 size={13} />
+          </button>
+          <button type="button" className={styles.actionBtn} onClick={onDuplicate} title="Duplicate">
+            <Copy size={13} />
           </button>
           <button type="button" className={clsx(styles.actionBtn, styles.deleteBtn)} onClick={onDelete} title="Delete">
             <Trash2 size={13} />

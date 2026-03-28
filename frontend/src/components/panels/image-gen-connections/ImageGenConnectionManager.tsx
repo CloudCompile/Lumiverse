@@ -6,7 +6,6 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ImageGenConnectionForm from './ImageGenConnectionForm'
 import ImageGenConnectionItem from './ImageGenConnectionItem'
 import type { ImageGenConnectionProfile, CreateImageGenConnectionInput } from '@/types/api'
-import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import styles from '../ConnectionManager.module.css'
 
 export default function ImageGenConnectionManager() {
@@ -79,6 +78,15 @@ export default function ImageGenConnectionManager() {
     }
   }, [profiles, updateProfile])
 
+  const handleDuplicate = useCallback(async (id: string) => {
+    try {
+      const duplicated = await imageGenConnectionsApi.duplicate(id)
+      addProfile(duplicated)
+    } catch (err) {
+      console.error('[ImageGenConnectionManager] Failed to duplicate:', err)
+    }
+  }, [addProfile])
+
   const handleDelete = useCallback(async () => {
     if (!deleteTarget) return
     try {
@@ -95,52 +103,51 @@ export default function ImageGenConnectionManager() {
   }
 
   return (
-    <PanelFadeIn>
-      <div className={styles.manager}>
-        {!creating && (
-          <button type="button" className={styles.createBtn} onClick={() => setCreating(true)}>
-            <Plus size={14} />
-            <span>New Image Gen Connection</span>
-          </button>
-        )}
+    <div className={styles.manager}>
+      {!creating && (
+        <button type="button" className={styles.createBtn} onClick={() => setCreating(true)}>
+          <Plus size={14} />
+          <span>New Image Gen Connection</span>
+        </button>
+      )}
 
-        {creating && (
-          <ImageGenConnectionForm
+      {creating && (
+        <ImageGenConnectionForm
+          providers={providers}
+          onSave={handleCreate}
+          onCancel={() => setCreating(false)}
+        />
+      )}
+
+      <div className={styles.list}>
+        {profiles.map((profile) => (
+          <ImageGenConnectionItem
+            key={profile.id}
+            profile={profile}
+            isActive={activeId === profile.id}
             providers={providers}
-            onSave={handleCreate}
-            onCancel={() => setCreating(false)}
+            onSelect={() => setActive(activeId === profile.id ? null : profile.id)}
+            onUpdate={handleUpdate}
+            onDuplicate={() => handleDuplicate(profile.id)}
+            onDelete={() => setDeleteTarget(profile)}
           />
-        )}
-
-        <div className={styles.list}>
-          {profiles.map((profile) => (
-            <ImageGenConnectionItem
-              key={profile.id}
-              profile={profile}
-              isActive={activeId === profile.id}
-              providers={providers}
-              onSelect={() => setActive(activeId === profile.id ? null : profile.id)}
-              onUpdate={handleUpdate}
-              onDelete={() => setDeleteTarget(profile)}
-            />
-          ))}
-          {profiles.length === 0 && !creating && (
-            <div className={styles.empty}>No image generation connections configured.</div>
-          )}
-        </div>
-
-        {deleteTarget && (
-          <ConfirmationModal
-            title="Delete Image Gen Connection"
-            message={`Delete "${deleteTarget.name}"? This cannot be undone.`}
-            isOpen={true}
-            variant="danger"
-            confirmText="Delete"
-            onConfirm={handleDelete}
-            onCancel={() => setDeleteTarget(null)}
-          />
+        ))}
+        {profiles.length === 0 && !creating && (
+          <div className={styles.empty}>No image generation connections configured.</div>
         )}
       </div>
-    </PanelFadeIn>
+
+      {deleteTarget && (
+        <ConfirmationModal
+          title="Delete Image Gen Connection"
+          message={`Delete "${deleteTarget.name}"? This cannot be undone.`}
+          isOpen={true}
+          variant="danger"
+          confirmText="Delete"
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+    </div>
   )
 }

@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { motion } from 'motion/react'
 import {
   X, Upload, Box, User, Wrench, Settings, Palette, Zap,
-  Check, Download, Loader2, RefreshCw,
+  Check, Download, RefreshCw,
 } from 'lucide-react'
+import { ModalShell } from '@/components/shared/ModalShell'
+import { Spinner } from '@/components/shared/Spinner'
+import { Button } from '@/components/shared/FormComponents'
 import { packsApi } from '@/api/packs'
 import { transformLucidPack, normalizePackJson } from '@/utils/pack-transform'
 import LazyImage from '@/components/shared/LazyImage'
@@ -184,242 +185,213 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
     }
   }, [url, onImport])
 
-  return createPortal(
-    <div className={styles.overlay} onClick={onClose}>
-      <motion.div
-        className={clsx(styles.modal, styles.modalLarge)}
-        onClick={(e) => e.stopPropagation()}
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
-        transition={{ duration: 0.15 }}
-      >
-        <div className={styles.modalHeader}>
-          <h2 className={styles.modalTitle}>Import Pack</h2>
-          <button type="button" className={styles.modalCloseBtn} onClick={onClose}>
-            <X size={16} />
+  return (
+    <ModalShell isOpen onClose={onClose} maxWidth={640} maxHeight="90vh" zIndex={10001} className={clsx(styles.modal, styles.modalLarge)}>
+      <div className={styles.modalHeader}>
+        <h2 className={styles.modalTitle}>Import Pack</h2>
+        <Button size="icon" variant="ghost" onClick={onClose} icon={<X size={16} />} />
+      </div>
+
+      {/* Import method tabs */}
+      <div className={styles.tabs}>
+        {(['file', 'url', 'lucid'] as ImportTab[]).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={clsx(styles.tab, activeImportTab === tab && styles.tabActive)}
+            onClick={() => setActiveImportTab(tab)}
+          >
+            {tab === 'file' ? 'File Upload' : tab === 'url' ? 'From URL' : 'Lucid Cards'}
           </button>
-        </div>
+        ))}
+      </div>
 
-        {/* Import method tabs */}
-        <div className={styles.tabs}>
-          {(['file', 'url', 'lucid'] as ImportTab[]).map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              className={clsx(styles.tab, activeImportTab === tab && styles.tabActive)}
-              onClick={() => setActiveImportTab(tab)}
-            >
-              {tab === 'file' ? 'File Upload' : tab === 'url' ? 'From URL' : 'Lucid Cards'}
-            </button>
-          ))}
+      {/* File Upload */}
+      {activeImportTab === 'file' && (
+        <div className={styles.modalBody}>
+          {fileError && <div className={styles.importError}>{fileError}</div>}
+          <div
+            className={clsx(styles.dropZone, isDragging && styles.dropZoneActive)}
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={24} style={{ margin: '0 auto 8px', opacity: 0.5, display: 'block' }} />
+            <div className={styles.dropZoneText}>Drop a JSON file here or click to browse</div>
+            <div className={styles.dropZoneSub}>Supports native pack format and extension format</div>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) handleFile(file)
+            }}
+          />
+          {fileLoading && <div className={styles.importStatus}>Importing...</div>}
         </div>
+      )}
 
-        {/* File Upload */}
-        {activeImportTab === 'file' && (
-          <div className={styles.modalBody}>
-            {fileError && <div className={styles.importError}>{fileError}</div>}
-            <div
-              className={clsx(styles.dropZone, isDragging && styles.dropZoneActive)}
-              onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Upload size={24} style={{ margin: '0 auto 8px', opacity: 0.5, display: 'block' }} />
-              <div className={styles.dropZoneText}>Drop a JSON file here or click to browse</div>
-              <div className={styles.dropZoneSub}>Supports native pack format and extension format</div>
-            </div>
+      {/* From URL */}
+      {activeImportTab === 'url' && (
+        <div className={styles.modalBody}>
+          {urlError && <div className={styles.importError}>{urlError}</div>}
+          <div className={styles.fieldGroup}>
+            <label className={styles.fieldLabel}>Pack URL</label>
             <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) handleFile(file)
-              }}
+              type="text"
+              className={styles.fieldInput}
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/pack.json"
+              autoFocus
+              onKeyDown={(e) => e.key === 'Enter' && handleUrlImport()}
             />
-            {fileLoading && <div className={styles.importStatus}>Importing...</div>}
           </div>
-        )}
+          <Button
+            variant="primary"
+            disabled={!url.trim() || urlLoading}
+            loading={urlLoading}
+            onClick={handleUrlImport}
+          >
+            {urlLoading ? 'Importing...' : 'Import'}
+          </Button>
+        </div>
+      )}
 
-        {/* From URL */}
-        {activeImportTab === 'url' && (
-          <div className={styles.modalBody}>
-            {urlError && <div className={styles.importError}>{urlError}</div>}
-            <div className={styles.fieldGroup}>
-              <label className={styles.fieldLabel}>Pack URL</label>
-              <input
-                type="text"
-                className={styles.fieldInput}
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/pack.json"
-                autoFocus
-                onKeyDown={(e) => e.key === 'Enter' && handleUrlImport()}
-              />
-            </div>
-            <button
-              type="button"
-              className={styles.btnSave}
-              disabled={!url.trim() || urlLoading}
-              onClick={handleUrlImport}
-            >
-              {urlLoading ? 'Importing...' : 'Import'}
-            </button>
+      {/* Lucid Cards browser */}
+      {activeImportTab === 'lucid' && (
+        <>
+          {/* Category tabs */}
+          <div className={styles.lucidCategoryTabs}>
+            {LUCID_TABS.map(({ id, label, Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className={clsx(styles.lucidCategoryTab, lucidTab === id && styles.lucidCategoryTabActive)}
+                onClick={() => { setLucidTab(id); setSelectedPacks([]) }}
+              >
+                <Icon size={13} />
+                <span>{label}</span>
+              </button>
+            ))}
           </div>
-        )}
 
-        {/* Lucid Cards browser */}
-        {activeImportTab === 'lucid' && (
-          <>
-            {/* Category tabs */}
-            <div className={styles.lucidCategoryTabs}>
-              {LUCID_TABS.map(({ id, label, Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={clsx(styles.lucidCategoryTab, lucidTab === id && styles.lucidCategoryTabActive)}
-                  onClick={() => { setLucidTab(id); setSelectedPacks([]) }}
-                >
-                  <Icon size={13} />
-                  <span>{label}</span>
-                </button>
-              ))}
-            </div>
+          {/* Pack grid */}
+          <div className={styles.lucidScrollArea}>
+            {lucidLoading ? (
+              <div className={styles.lucidStateCenter}>
+                <Spinner size={22} />
+                <span>Loading content from Lucid.cards...</span>
+              </div>
+            ) : lucidError ? (
+              <div className={styles.lucidStateCenter}>
+                <X size={28} style={{ color: '#f44336' }} />
+                <span className={styles.lucidErrorText}>{lucidError}</span>
+                <Button size="sm" onClick={fetchLucidCards} icon={<RefreshCw size={13} />}>
+                  Retry
+                </Button>
+              </div>
+            ) : filteredLucidPacks.length === 0 ? (
+              <div className={styles.lucidStateCenter}>
+                No items available in this category.
+              </div>
+            ) : (
+              <div className={styles.lucidCardGrid}>
+                {filteredLucidPacks.map((pack) => {
+                  const selected = isSelected(pack)
+                  const counts: string[] = []
+                  if (pack.lumiaCount > 0) counts.push(`${pack.lumiaCount} Lumia`)
+                  if (pack.loomCount > 0) counts.push(`${pack.loomCount} Loom`)
+                  if (pack.extrasCount > 0) counts.push(`${pack.extrasCount} Extra`)
 
-            {/* Pack grid */}
-            <div className={styles.lucidScrollArea}>
-              {lucidLoading ? (
-                <div className={styles.lucidStateCenter}>
-                  <Loader2 size={22} className={styles.lucidSpinner} />
-                  <span>Loading content from Lucid.cards...</span>
-                </div>
-              ) : lucidError ? (
-                <div className={styles.lucidStateCenter}>
-                  <X size={28} style={{ color: '#f44336' }} />
-                  <span className={styles.lucidErrorText}>{lucidError}</span>
-                  <button type="button" className={styles.lucidRetryBtn} onClick={fetchLucidCards}>
-                    <RefreshCw size={13} />
-                    Retry
-                  </button>
-                </div>
-              ) : filteredLucidPacks.length === 0 ? (
-                <div className={styles.lucidStateCenter}>
-                  No items available in this category.
-                </div>
-              ) : (
-                <div className={styles.lucidCardGrid}>
-                  {filteredLucidPacks.map((pack) => {
-                    const selected = isSelected(pack)
-                    const counts: string[] = []
-                    if (pack.lumiaCount > 0) counts.push(`${pack.lumiaCount} Lumia`)
-                    if (pack.loomCount > 0) counts.push(`${pack.loomCount} Loom`)
-                    if (pack.extrasCount > 0) counts.push(`${pack.extrasCount} Extra`)
-
-                    return (
-                      <div
-                        key={pack.slug}
-                        className={clsx(styles.lucidCard, selected && styles.lucidCardSelected)}
-                        onClick={() => toggleSelection(pack)}
-                      >
-                        <div className={styles.lucidCardImage}>
-                          <LazyImage
-                            src={pack.coverUrl}
-                            alt=""
-                            containerClassName={styles.lucidCardImg}
-                            fallback={<Box size={28} style={{ color: 'var(--lumiverse-text-muted)' }} />}
-                            spinnerSize={18}
-                          />
-                          <div className={clsx(styles.lucidCardCheck, selected && styles.lucidCardCheckVisible)}>
-                            <Check size={13} />
-                          </div>
-                        </div>
-                        <div className={styles.lucidCardInfo}>
-                          <div className={styles.lucidCardTitle}>{pack.packName || 'Unknown'}</div>
-                          <div className={styles.lucidCardAuthor}>{pack.packAuthor || 'Unknown Author'}</div>
-                          {counts.length > 0 && (
-                            <div className={styles.lucidCardCounts}>{counts.join(', ')}</div>
-                          )}
+                  return (
+                    <div
+                      key={pack.slug}
+                      className={clsx(styles.lucidCard, selected && styles.lucidCardSelected)}
+                      onClick={() => toggleSelection(pack)}
+                    >
+                      <div className={styles.lucidCardImage}>
+                        <LazyImage
+                          src={pack.coverUrl}
+                          alt=""
+                          containerClassName={styles.lucidCardImg}
+                          fallback={<Box size={28} style={{ color: 'var(--lumiverse-text-muted)' }} />}
+                          spinnerSize={18}
+                        />
+                        <div className={clsx(styles.lucidCardCheck, selected && styles.lucidCardCheckVisible)}>
+                          <Check size={13} />
                         </div>
                       </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Import result */}
-            {importResult && (
-              <div className={clsx(styles.importStatus, importResult.failed > 0 && styles.importStatusWarn)}>
-                Import complete: {importResult.imported} imported
-                {importResult.failed > 0 && `, ${importResult.failed} failed`}
+                      <div className={styles.lucidCardInfo}>
+                        <div className={styles.lucidCardTitle}>{pack.packName || 'Unknown'}</div>
+                        <div className={styles.lucidCardAuthor}>{pack.packAuthor || 'Unknown Author'}</div>
+                        {counts.length > 0 && (
+                          <div className={styles.lucidCardCounts}>{counts.join(', ')}</div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
-
-            {/* Lucid Cards footer */}
-            <div className={styles.lucidFooter}>
-              <button
-                type="button"
-                className={styles.btnCancel}
-                onClick={onClose}
-              >
-                Close
-              </button>
-
-              <div className={styles.lucidFooterRight}>
-                {selectedPacks.length > 0 && (
-                  <>
-                    <button type="button" className={styles.lucidFooterLink} onClick={selectAll}>
-                      Select All
-                    </button>
-                    <button type="button" className={styles.lucidFooterLink} onClick={clearSelection}>
-                      Clear
-                    </button>
-                    <span className={styles.lucidSelectedCount}>
-                      {selectedPacks.length} selected
-                    </span>
-                  </>
-                )}
-                {selectedPacks.length > 0 && (
-                  <button
-                    type="button"
-                    className={clsx(styles.btnSave, styles.lucidImportBtn)}
-                    disabled={importing}
-                    onClick={handleLucidImport}
-                  >
-                    {importing ? (
-                      <>
-                        <Loader2 size={13} className={styles.lucidSpinner} />
-                        Importing {importProgress.current}/{importProgress.total}...
-                      </>
-                    ) : (
-                      <>
-                        <Download size={13} />
-                        Import {selectedPacks.length === 1 ? 'Pack' : `${selectedPacks.length} Packs`}
-                      </>
-                    )}
-                  </button>
-                )}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Footer for file/url tabs */}
-        {activeImportTab !== 'lucid' && (
-          <div className={styles.modalFooter}>
-            <button type="button" className={styles.btnCancel} onClick={onClose}>
-              Close
-            </button>
           </div>
-        )}
 
-        {/* Spinner keyframe */}
-        <style>{`@keyframes lv-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-      </motion.div>
-    </div>,
-    document.body
+          {/* Import result */}
+          {importResult && (
+            <div className={clsx(styles.importStatus, importResult.failed > 0 && styles.importStatusWarn)}>
+              Import complete: {importResult.imported} imported
+              {importResult.failed > 0 && `, ${importResult.failed} failed`}
+            </div>
+          )}
+
+          {/* Lucid Cards footer */}
+          <div className={styles.lucidFooter}>
+            <Button variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+
+            <div className={styles.lucidFooterRight}>
+              {selectedPacks.length > 0 && (
+                <>
+                  <button type="button" className={styles.lucidFooterLink} onClick={selectAll}>
+                    Select All
+                  </button>
+                  <button type="button" className={styles.lucidFooterLink} onClick={clearSelection}>
+                    Clear
+                  </button>
+                  <span className={styles.lucidSelectedCount}>
+                    {selectedPacks.length} selected
+                  </span>
+                </>
+              )}
+              {selectedPacks.length > 0 && (
+                <Button
+                  variant="primary"
+                  disabled={importing}
+                  loading={importing}
+                  icon={!importing ? <Download size={13} /> : undefined}
+                  onClick={handleLucidImport}
+                >
+                  {importing
+                    ? `Importing ${importProgress.current}/${importProgress.total}...`
+                    : `Import ${selectedPacks.length === 1 ? 'Pack' : `${selectedPacks.length} Packs`}`}
+                </Button>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Footer for file/url tabs */}
+      {activeImportTab !== 'lucid' && (
+        <div className={styles.modalFooter}>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+        </div>
+      )}
+    </ModalShell>
   )
 }
