@@ -121,12 +121,12 @@ export async function stopServer(): Promise<void> {
   console.log(`[${ts()}] [runner] Stopping server...`);
 
   const proc = instance.proc;
-  proc.kill("SIGTERM");
+  proc.kill();
 
   // Force kill after timeout
   const forceKill = setTimeout(() => {
     try {
-      proc.kill("SIGKILL");
+      proc.kill();
       console.log(`[${ts()}] [runner] Force killed server (timeout).`);
     } catch { /* already dead */ }
   }, STOP_FORCE_KILL_MS);
@@ -170,7 +170,7 @@ export function getStartedAt(): number | null {
 export function killServerSync(): void {
   if (instance?.proc) {
     try {
-      instance.proc.kill("SIGTERM");
+      instance.proc.kill();
     } catch { /* already dead */ }
   }
 }

@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { ENV_FILE } from "./lib/constants.js";
 
 export interface EnvConfig {
@@ -10,10 +10,7 @@ export function readEnvConfig(): EnvConfig {
   const config: EnvConfig = { port: 7860, trustAnyOrigin: false };
   if (!existsSync(ENV_FILE)) return config;
 
-  const content = Bun.file(ENV_FILE).text();
-  // text() is async but we need sync — use spawnSync to cat the file
-  const result = Bun.spawnSync(["cat", ENV_FILE], { stdout: "pipe" });
-  const text = result.stdout.toString();
+  const text = readFileSync(ENV_FILE, "utf-8");
 
   const portMatch = text.match(/^PORT=(\d+)/m);
   if (portMatch) config.port = parseInt(portMatch[1], 10);
