@@ -338,14 +338,12 @@ export class GoogleVertexProvider implements LlmProvider {
       const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
       const accessToken = await getAccessToken(sa);
       const host = `https://${location}-aiplatform.googleapis.com`;
-      // The project-scoped path (.../projects/.../publishers/google/models) does NOT
-      // support LIST — only per-model operations like generateContent.
-      // Use the publisher-level endpoint for validation.
-      const url = `${host}/v1/publishers/google/models?pageSize=1`;
+      // Use the Vertex AI Model Registry list endpoint for validation.
+      // https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.models/list
+      const url = `${host}/v1/projects/${projectId}/locations/${location}/models?pageSize=1`;
       const res = await fetch(url, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          "x-goog-user-project": projectId,
         },
       });
       if (!res.ok) {
@@ -370,12 +368,11 @@ export class GoogleVertexProvider implements LlmProvider {
       do {
         const params = new URLSearchParams();
         if (pageToken) params.set("pageToken", pageToken);
-        // The project-scoped path does NOT support LIST — use the publisher-level endpoint.
-        const url = `${host}/v1/publishers/google/models${params.toString() ? `?${params}` : ""}`;
+        // https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.models/list
+        const url = `${host}/v1/projects/${projectId}/locations/${location}/models${params.toString() ? `?${params}` : ""}`;
         const res = await fetch(url, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
-            "x-goog-user-project": projectId,
           },
         });
         if (!res.ok) {
@@ -384,16 +381,13 @@ export class GoogleVertexProvider implements LlmProvider {
           break;
         }
         const data = (await res.json()) as any;
-        const models = data.publisherModels || data.models || [];
+        const models: any[] = data.models || [];
         for (const m of models) {
-          // Vertex returns full resource names like "publishers/google/models/gemini-2.5-flash"
+          // Response names are like "projects/{p}/locations/{l}/models/{id}"
           const name: string = m.name || "";
-          const shortName = name
-            .replace(/^publishers\/google\/models\//, "")
-            .replace(/^projects\/[^/]+\/locations\/[^/]+\/publishers\/google\/models\//, "")
-            .replace(/^models\//, "");
+          const shortName = name.replace(/^projects\/[^/]+\/locations\/[^/]+\/models\//, "");
           const id = shortName || name;
-          if (id.includes("gemini")) allModels.push(id);
+          allModels.push(id);
         }
         pageToken = data.nextPageToken;
       } while (pageToken);
