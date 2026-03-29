@@ -230,7 +230,6 @@ export interface ConnectionTestResult {
 }
 
 export interface ConnectionModelsResult {
-  model_labels?: Record<string, string>
   models: string[]
   model_labels?: Record<string, string>
   provider: string
