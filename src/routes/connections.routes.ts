@@ -51,6 +51,12 @@ app.get("/:id/models", async (c) => {
   return c.json(result);
 });
 
+app.get("/:id/regions", async (c) => {
+  const userId = c.get("userId");
+  const result = await svc.listConnectionRegions(userId, c.req.param("id"));
+  return c.json(result);
+});
+
 app.put("/:id/api-key", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();

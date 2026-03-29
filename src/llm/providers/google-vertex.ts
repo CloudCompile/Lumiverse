@@ -116,6 +116,45 @@ function parseServiceAccount(apiKey: string): ServiceAccountCredentials {
   }
 }
 
+/** Resolve the API hostname for a given Vertex AI location. */
+function vertexHostForLocation(location: string): string {
+  if (!location || location === "global") return "https://aiplatform.googleapis.com";
+  return `https://${location}-aiplatform.googleapis.com`;
+}
+
+/**
+ * List Vertex AI locations available to the service account's project.
+ * Uses the global endpoint since the caller doesn't have a region yet.
+ */
+export async function listVertexLocations(apiKey: string): Promise<string[]> {
+  const sa = parseServiceAccount(apiKey);
+  const accessToken = await getAccessToken(sa);
+  const allLocations: string[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams();
+    if (pageToken) params.set("pageToken", pageToken);
+    const url = `https://aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations${params.toString() ? `?${params}` : ""}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to list Vertex AI locations (${res.status}): ${err}`);
+    }
+    const data = (await res.json()) as any;
+    const locations: any[] = data.locations || [];
+    for (const loc of locations) {
+      const id: string = loc.locationId || loc.name?.split("/").pop() || "";
+      if (id) allLocations.push(id);
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return allLocations.sort();
+}
+
 // ── Provider implementation ────────────────────────────────────────────────
 
 export class GoogleVertexProvider implements LlmProvider {
@@ -138,10 +177,9 @@ export class GoogleVertexProvider implements LlmProvider {
     modelListStyle: "none", // Vertex model list requires project/location — handled in listModels()
   };
 
-  /** Build the Vertex AI base URL using the regional endpoint. */
-  private endpointBase(_apiUrl: string, projectId: string, location: string): string {
-    // Always use the regional endpoint to avoid malformed URLs when apiUrl contains query params
-    const host = `https://${location}-aiplatform.googleapis.com`;
+  /** Build the Vertex AI base URL for model operations (generate, stream, etc.). */
+  private endpointBase(projectId: string, location: string): string {
+    const host = vertexHostForLocation(location);
     return `${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models`;
   }
 
@@ -153,30 +191,17 @@ export class GoogleVertexProvider implements LlmProvider {
       .replace(/^models\//, "");
   }
 
-  /** Extract project_id and location from the connection metadata stored alongside the service account. */
+  /** Extract project_id and location from the resolved API URL. */
   private resolveProjectConfig(apiKey: string, apiUrl: string): { sa: ServiceAccountCredentials; projectId: string; location: string } {
     const sa = parseServiceAccount(apiKey);
-    // The connection's api_url may encode location as metadata, or we default to us-central1.
-    // Convention: users can store location in the api_url query string ?location=xxx
-    // or we parse it from the URL if it matches the regional pattern.
-    let location = "us-central1";
+    // Location is encoded in the URL by resolveEffectiveApiUrl (from metadata.vertex_region).
+    // Regional: https://{location}-aiplatform.googleapis.com  →  extract location
+    // Global:   https://aiplatform.googleapis.com              →  "global"
+    let location = "global";
     const parsedUrl = apiUrl || this.defaultUrl;
-    // Check for regional endpoint pattern: https://{location}-aiplatform.googleapis.com
     const regionalMatch = parsedUrl.match(/^https?:\/\/([a-z0-9-]+)-aiplatform\.googleapis\.com/);
     if (regionalMatch) {
       location = regionalMatch[1];
-    }
-    // Also allow explicit ?location= query param override
-    try {
-      const u = new URL(parsedUrl);
-      const locParam = u.searchParams.get("location");
-      if (locParam) location = locParam;
-    } catch { /* not a valid URL, use default */ }
-
-    // "global" is not a valid Vertex AI region for API calls — fall back to default
-    if (location === "global") {
-      console.warn("[Vertex AI] 'global' is not a valid region, falling back to us-central1");
-      location = "us-central1";
     }
 
     return { sa, projectId: sa.project_id, location };
@@ -185,7 +210,7 @@ export class GoogleVertexProvider implements LlmProvider {
   async generate(apiKey: string, apiUrl: string, request: GenerationRequest): Promise<GenerationResponse> {
     const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
     const accessToken = await getAccessToken(sa);
-    const base = this.endpointBase(apiUrl, projectId, location);
+    const base = this.endpointBase(projectId, location);
     const model = this.sanitizeModelId(request.model);
     const url = `${base}/${model}:generateContent`;
     const body = this.buildBody(request);
@@ -246,7 +271,7 @@ export class GoogleVertexProvider implements LlmProvider {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
     const accessToken = await getAccessToken(sa);
-    const base = this.endpointBase(apiUrl, projectId, location);
+    const base = this.endpointBase(projectId, location);
     const model = this.sanitizeModelId(request.model);
     const url = `${base}/${model}:streamGenerateContent?alt=sse`;
     const body = this.buildBody(request);
@@ -337,14 +362,11 @@ export class GoogleVertexProvider implements LlmProvider {
     try {
       const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
       const accessToken = await getAccessToken(sa);
-      const host = `https://${location}-aiplatform.googleapis.com`;
-      // Use the Vertex AI Model Registry list endpoint for validation.
+      const host = vertexHostForLocation(location);
       // https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.models/list
       const url = `${host}/v1/projects/${projectId}/locations/${location}/models?pageSize=1`;
       const res = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!res.ok) {
         const err = await res.text();
@@ -361,7 +383,7 @@ export class GoogleVertexProvider implements LlmProvider {
     try {
       const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
       const accessToken = await getAccessToken(sa);
-      const host = `https://${location}-aiplatform.googleapis.com`;
+      const host = vertexHostForLocation(location);
       const allModels: string[] = [];
       let pageToken: string | undefined;
 
@@ -371,9 +393,7 @@ export class GoogleVertexProvider implements LlmProvider {
         // https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.models/list
         const url = `${host}/v1/projects/${projectId}/locations/${location}/models${params.toString() ? `?${params}` : ""}`;
         const res = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
+          headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (!res.ok) {
           const err = await res.text();

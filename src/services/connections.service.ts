@@ -14,12 +14,17 @@ export function connectionSecretKey(id: string): string {
   return `connection_${id}_api_key`;
 }
 
-/** Resolve effective API URL, accounting for provider-specific metadata flags (e.g. NanoGPT subscription mode). */
+/** Resolve effective API URL, accounting for provider-specific metadata flags. */
 export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: string | null; metadata?: Record<string, any> | null }): string {
   const url = profile.api_url || "";
   if (profile.provider === "nanogpt" && profile.metadata?.use_subscription_api) {
     if (!url) return "https://nano-gpt.com/api/subscription/v1";
     return url.replace("/api/v1", "/api/subscription/v1");
+  }
+  if (profile.provider === "google_vertex") {
+    const region = profile.metadata?.vertex_region;
+    if (!region || region === "global") return "https://aiplatform.googleapis.com";
+    return `https://${region}-aiplatform.googleapis.com`;
   }
   return url;
 }
@@ -257,5 +262,25 @@ export async function listConnectionModels(userId: string, id: string): Promise<
     return { models, model_labels, provider: profile.provider };
   } catch (err: any) {
     return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+  }
+}
+
+export async function listConnectionRegions(userId: string, id: string): Promise<{ regions: string[]; error?: string }> {
+  const profile = getConnection(userId, id);
+  if (!profile) return { regions: [], error: "Connection not found" };
+
+  if (profile.provider !== "google_vertex") {
+    return { regions: [], error: "Region listing is only supported for Google Vertex AI" };
+  }
+
+  const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
+  if (!apiKey) return { regions: [], error: "No service account configured" };
+
+  try {
+    const { listVertexLocations } = await import("../llm/providers/google-vertex");
+    const regions = await listVertexLocations(apiKey);
+    return { regions };
+  } catch (err: any) {
+    return { regions: [], error: err.message || "Failed to list regions" };
   }
 }
