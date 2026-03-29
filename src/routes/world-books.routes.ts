@@ -29,7 +29,10 @@ type DiagnosticVectorHitOutcomeCode =
   | "blocked_by_max_entries"
   | "blocked_by_token_budget"
   | "deduplicated"
-  | "blocked_during_final_assembly";
+  | "blocked_during_final_assembly"
+  | "trimmed_by_top_k"
+  | "rejected_by_rerank_cutoff"
+  | "rejected_by_similarity_threshold";
 
 interface DiagnosticVectorHitOutcome {
   code: DiagnosticVectorHitOutcomeCode;
@@ -37,7 +40,31 @@ interface DiagnosticVectorHitOutcome {
   reason: string;
 }
 
-type VectorHitEntry = Awaited<ReturnType<typeof collectVectorActivatedWorldInfoDetailed>>["entries"][number];
+type VectorHitEntry = Awaited<ReturnType<typeof collectVectorActivatedWorldInfoDetailed>>["candidateTrace"][number];
+type VectorTraceEntry = Awaited<ReturnType<typeof collectVectorActivatedWorldInfoDetailed>>["candidateTrace"][number];
+
+function formatDiagnosticMetric(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "0.000";
+}
+
+function buildRerankLead(options: {
+  rerankRank?: number | null;
+  finalScore?: number | null;
+  distance?: number | null;
+}): string {
+  const score = typeof options.finalScore === "number" && Number.isFinite(options.finalScore)
+    ? `rerank ${formatDiagnosticMetric(options.finalScore)}`
+    : null;
+  const distance = typeof options.distance === "number" && Number.isFinite(options.distance)
+    ? `distance ${formatDiagnosticMetric(options.distance)}`
+    : null;
+  const metrics = [score, distance].filter((value): value is string => Boolean(value));
+  const metricText = metrics.length > 0 ? ` (${metrics.join(", ")})` : "";
+  if (typeof options.rerankRank === "number" && Number.isFinite(options.rerankRank)) {
+    return `It ranked #${options.rerankRank} after reranking${metricText}.`;
+  }
+  return `This candidate was pulled from vector search${metricText}.`;
+}
 
 function getWorldInfoGroupKey(entry: WorldBookEntry): string | null {
   const groupName = typeof entry.group_name === "string" ? entry.group_name.trim() : "";
@@ -54,47 +81,59 @@ function buildDiagnosticVectorOutcome(
     conflictingSource?: "keyword" | "vector";
     keptEntryComment?: string;
     dedupTier?: "exact" | "near-exact" | "fuzzy";
+    rerankRank?: number | null;
+    finalScore?: number | null;
+    distance?: number | null;
+    topK?: number;
+    rerankCutoff?: number;
+    similarityThreshold?: number;
   } = {},
 ): DiagnosticVectorHitOutcome {
+  const rerankLead = buildRerankLead({
+    rerankRank: options.rerankRank,
+    finalScore: options.finalScore,
+    distance: options.distance,
+  });
   switch (code) {
     case "injected_vector":
       return {
         code,
         label: "Made final prompt",
-        reason: "This vector hit survived reranking and final prompt assembly as a vector-activated entry.",
+        reason: `${rerankLead} It survived final prompt assembly as a vector-activated entry.`,
       };
     case "already_keyword":
       return {
         code,
         label: "Already keyword-active",
-        reason: "This same entry was already activated by keyword logic, so vector retrieval did not add a second copy.",
+        reason: `${rerankLead} The same entry was already activated by keyword logic, so vector retrieval did not add a second copy.`,
       };
     case "blocked_by_group": {
       const conflicting = options.conflictingEntry?.comment?.trim() || "another entry";
       const source = options.conflictingSource === "vector" ? "another vector hit" : "keyword activation";
+      const groupName = options.entry?.group_name?.trim() || "this mutually exclusive group";
       return {
         code,
         label: "Blocked by group rule",
-        reason: `This entry shares a mutually exclusive group with "${conflicting}", which had already claimed the slot via ${source}.`,
+        reason: `${rerankLead} ${groupName} was already occupied by "${conflicting}" via ${source}.`,
       };
     }
     case "blocked_by_min_priority":
       return {
         code,
         label: "Below minimum priority",
-        reason: `This entry's priority (${options.entry?.priority ?? 0}) is below the current World Info minimum priority (${options.minPriority ?? 0}).`,
+        reason: `${rerankLead} Its priority (${options.entry?.priority ?? 0}) is below the current World Info minimum priority (${options.minPriority ?? 0}).`,
       };
     case "blocked_by_max_entries":
       return {
         code,
         label: "No room under entry cap",
-        reason: `The final World Info list had already reached the ${options.maxActivatedEntries ?? 0}-entry cap before this vector hit could be added.`,
+        reason: `${rerankLead} The final World Info list had already reached the ${options.maxActivatedEntries ?? 0}-entry cap before this entry could be added.`,
       };
     case "blocked_by_token_budget":
       return {
         code,
         label: "No room under token budget",
-        reason: "Adding this entry would have pushed the World Info prompt past the current token budget, so earlier entries kept the room.",
+        reason: `${rerankLead} Adding it would have pushed the World Info prompt past the current token budget, so earlier entries kept the room.`,
       };
     case "deduplicated": {
       const kept = options.keptEntryComment?.trim() || "another entry";
@@ -106,15 +145,33 @@ function buildDiagnosticVectorOutcome(
       return {
         code,
         label: "Removed as duplicate",
-        reason: `This vector hit initially made the merged set, but it was removed as a ${tier} of "${kept}".`,
+        reason: `${rerankLead} It initially made the merged set, but it was removed as a ${tier} of "${kept}".`,
       };
     }
+    case "trimmed_by_top_k":
+      return {
+        code,
+        label: "Outside returned top-k",
+        reason: `${rerankLead} It cleared the rerank cutoff, but only the top ${options.topK ?? 0} reranked candidates are kept in the shortlist shown here.`,
+      };
+    case "rejected_by_rerank_cutoff":
+      return {
+        code,
+        label: "Below rerank cutoff",
+        reason: `It was pulled from vector search (rerank ${formatDiagnosticMetric(options.finalScore)}, distance ${formatDiagnosticMetric(options.distance)}), but the rerank score stayed below the current cutoff (${formatDiagnosticMetric(options.rerankCutoff)}).`,
+      };
+    case "rejected_by_similarity_threshold":
+      return {
+        code,
+        label: "Above similarity threshold",
+        reason: `It was pulled from vector search at distance ${formatDiagnosticMetric(options.distance)}, but that exceeded the current similarity threshold (${formatDiagnosticMetric(options.similarityThreshold)}), so reranking never got a chance to keep it.`,
+      };
     case "blocked_during_final_assembly":
     default:
       return {
         code: "blocked_during_final_assembly",
         label: "Lost during final assembly",
-        reason: "This vector hit survived retrieval, but later prompt-assembly rules left no room for it in the final World Info list.",
+        reason: `${rerankLead} Later prompt-assembly rules still left no room for it in the final World Info list.`,
       };
   }
 }
@@ -157,7 +214,12 @@ function traceDiagnosticVectorHitOutcomes(
 
   for (const item of vectorEntries) {
     if (seen.has(item.entry.id)) {
-      outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("already_keyword"));
+      outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("already_keyword", {
+        entry: item.entry,
+        rerankRank: item.rerankRank,
+        finalScore: item.finalScore,
+        distance: item.distance,
+      }));
       continue;
     }
 
@@ -165,6 +227,9 @@ function traceDiagnosticVectorHitOutcomes(
       outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("blocked_by_min_priority", {
         entry: item.entry,
         minPriority: settings.minPriority,
+        rerankRank: item.rerankRank,
+        finalScore: item.finalScore,
+        distance: item.distance,
       }));
       continue;
     }
@@ -174,8 +239,12 @@ function traceDiagnosticVectorHitOutcomes(
       const occupied = occupiedGroups.get(groupKey);
       if (occupied) {
         outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("blocked_by_group", {
+          entry: item.entry,
           conflictingEntry: occupied.entry,
           conflictingSource: occupied.source,
+          rerankRank: item.rerankRank,
+          finalScore: item.finalScore,
+          distance: item.distance,
         }));
         continue;
       }
@@ -184,6 +253,9 @@ function traceDiagnosticVectorHitOutcomes(
     if (finalized.activatedEntries.length >= maxActivatedTarget && !item.entry.constant) {
       outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("blocked_by_max_entries", {
         maxActivatedEntries: settings.maxActivatedEntries,
+        rerankRank: item.rerankRank,
+        finalScore: item.finalScore,
+        distance: item.distance,
       }));
       continue;
     }
@@ -199,6 +271,11 @@ function traceDiagnosticVectorHitOutcomes(
     if (!itemSurvived || (!grewActivationSet && !item.entry.constant)) {
       outcomes.set(item.entry.id, buildDiagnosticVectorOutcome(
         settings.maxTokenBudget > 0 ? "blocked_by_token_budget" : "blocked_during_final_assembly",
+        {
+          rerankRank: item.rerankRank,
+          finalScore: item.finalScore,
+          distance: item.distance,
+        },
       ));
       continue;
     }
@@ -208,7 +285,11 @@ function traceDiagnosticVectorHitOutcomes(
     sources.set(item.entry.id, { source: "vector", score: item.finalScore });
     if (groupKey) occupiedGroups.set(groupKey, { entry: item.entry, source: "vector" });
     finalized = nextFinalized;
-    outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("injected_vector"));
+    outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("injected_vector", {
+      rerankRank: item.rerankRank,
+      finalScore: item.finalScore,
+      distance: item.distance,
+    }));
   }
 
   const dedupResult = deduplicateWorldInfoEntries(mergedEntries, sources);
@@ -221,6 +302,50 @@ function traceDiagnosticVectorHitOutcomes(
   }
 
   return outcomes;
+}
+
+function resolveDiagnosticVectorTraceOutcome(
+  item: VectorTraceEntry,
+  shortlistedOutcomes: Map<string, DiagnosticVectorHitOutcome>,
+  options: {
+    topK: number;
+    rerankCutoff: number;
+    similarityThreshold: number;
+  },
+): DiagnosticVectorHitOutcome {
+  if (item.retrievalStage === "rejected_by_similarity_threshold") {
+    return buildDiagnosticVectorOutcome("rejected_by_similarity_threshold", {
+      entry: item.entry,
+      distance: item.distance,
+      similarityThreshold: options.similarityThreshold,
+    });
+  }
+
+  if (item.retrievalStage === "rejected_by_rerank_cutoff") {
+    return buildDiagnosticVectorOutcome("rejected_by_rerank_cutoff", {
+      entry: item.entry,
+      distance: item.distance,
+      finalScore: item.finalScore,
+      rerankCutoff: options.rerankCutoff,
+    });
+  }
+
+  if (item.retrievalStage === "trimmed_by_top_k") {
+    return buildDiagnosticVectorOutcome("trimmed_by_top_k", {
+      entry: item.entry,
+      rerankRank: item.rerankRank,
+      finalScore: item.finalScore,
+      distance: item.distance,
+      topK: options.topK,
+    });
+  }
+
+  return shortlistedOutcomes.get(item.entry.id) ?? buildDiagnosticVectorOutcome("blocked_during_final_assembly", {
+    entry: item.entry,
+    rerankRank: item.rerankRank,
+    finalScore: item.finalScore,
+    distance: item.distance,
+  });
 }
 
 app.get("/", (c) => {
@@ -363,6 +488,7 @@ app.post("/:id/diagnostics", async (c) => {
     ? await collectVectorActivatedWorldInfoDetailed(userId, [bookId], bookEntries, messages)
       : {
         entries: [],
+        candidateTrace: [],
         queryPreview,
         eligibleCount: 0,
         hitsBeforeThreshold: 0,
@@ -384,9 +510,33 @@ app.post("/:id/diagnostics", async (c) => {
   );
   const vectorHitOutcomes = traceDiagnosticVectorHitOutcomes(
     wiResult.activatedEntries,
-    vectorDetail.entries,
+    vectorDetail.candidateTrace.filter((item) => item.retrievalStage === "shortlisted"),
     worldInfoSettings,
   );
+  const vectorTrace = vectorDetail.candidateTrace.map((item) => {
+    const outcome = resolveDiagnosticVectorTraceOutcome(item, vectorHitOutcomes, {
+      topK: vectorDetail.topK,
+      rerankCutoff: embeddings.rerank_cutoff,
+      similarityThreshold: embeddings.similarity_threshold,
+    });
+    return {
+      entry_id: item.entry.id,
+      comment: item.entry.comment || "",
+      score: item.score,
+      distance: item.distance,
+      final_score: item.finalScore,
+      lexical_candidate_score: item.lexicalCandidateScore,
+      matched_primary_keys: item.matchedPrimaryKeys,
+      matched_secondary_keys: item.matchedSecondaryKeys,
+      matched_comment: item.matchedComment,
+      score_breakdown: item.scoreBreakdown,
+      search_text_preview: item.searchTextPreview,
+      rerank_rank: item.rerankRank,
+      final_outcome_code: outcome.code,
+      final_outcome_label: outcome.label,
+      final_outcome_reason: outcome.reason,
+    };
+  });
 
   const keywordHits = mergedWorldInfo.activatedWorldInfo
     .filter((entry) => entry.source === "keyword")
@@ -498,23 +648,12 @@ app.post("/:id/diagnostics", async (c) => {
       rerank_rejected: vectorDetail.rerankRejected,
     },
     keyword_hits: keywordHits,
-    vector_hits: vectorDetail.entries.map((item) => ({
-      entry_id: item.entry.id,
-      comment: item.entry.comment || "",
-      score: item.score,
-      distance: item.distance,
-      final_score: item.finalScore,
-      lexical_candidate_score: item.lexicalCandidateScore,
-      matched_primary_keys: item.matchedPrimaryKeys,
-      matched_secondary_keys: item.matchedSecondaryKeys,
-      matched_comment: item.matchedComment,
-      score_breakdown: item.scoreBreakdown,
-      search_text_preview: item.searchTextPreview,
-      final_outcome_code: vectorHitOutcomes.get(item.entry.id)?.code ?? "blocked_during_final_assembly",
-      final_outcome_label: vectorHitOutcomes.get(item.entry.id)?.label ?? "Lost during final assembly",
-      final_outcome_reason: vectorHitOutcomes.get(item.entry.id)?.reason
-        ?? "This vector hit survived retrieval, but later prompt-assembly rules left no room for it in the final World Info list.",
-    })),
+    vector_hits: vectorTrace.filter((item) =>
+      item.final_outcome_code !== "rejected_by_similarity_threshold" &&
+      item.final_outcome_code !== "rejected_by_rerank_cutoff" &&
+      item.final_outcome_code !== "trimmed_by_top_k"
+    ),
+    vector_trace: vectorTrace,
     blocker_messages: Array.from(new Set(blockerMessages)),
     deduplication: mergedWorldInfo.deduplicated > 0 ? {
       removed_count: mergedWorldInfo.deduplicated,
