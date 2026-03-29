@@ -231,8 +231,6 @@ export interface ConnectionTestResult {
 
 export interface ConnectionModelsResult {
   models: string[]
-  /** Map of model ID → human-readable display name (when available). */
-  model_labels?: Record<string, string>
   provider: string
   error?: string
 }
@@ -532,6 +530,17 @@ export interface WorldBookDiagnostics {
       focusMissPenalty: number;
     };
     search_text_preview: string;
+    final_outcome_code:
+      | 'injected_vector'
+      | 'already_keyword'
+      | 'blocked_by_group'
+      | 'blocked_by_min_priority'
+      | 'blocked_by_max_entries'
+      | 'blocked_by_token_budget'
+      | 'deduplicated'
+      | 'blocked_during_final_assembly';
+    final_outcome_label: string;
+    final_outcome_reason: string;
   }>;
   blocker_messages: string[];
   stats: WorldInfoStats;

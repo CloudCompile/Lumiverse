@@ -11,13 +11,217 @@ import {
   getWorldInfoVectorQueryPreview,
   mergeActivatedWorldInfoEntries,
 } from "../services/prompt-assembly.service";
-import { activateWorldInfo, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
+import { deduplicateWorldInfoEntries } from "../services/world-info-dedup.service";
+import { activateWorldInfo, finalizeActivatedWorldInfoEntries, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
+import type { WorldBookEntry } from "../types/world-book";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
 
 const MAX_IMPORT_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 const app = new Hono();
+
+type DiagnosticVectorHitOutcomeCode =
+  | "injected_vector"
+  | "already_keyword"
+  | "blocked_by_group"
+  | "blocked_by_min_priority"
+  | "blocked_by_max_entries"
+  | "blocked_by_token_budget"
+  | "deduplicated"
+  | "blocked_during_final_assembly";
+
+interface DiagnosticVectorHitOutcome {
+  code: DiagnosticVectorHitOutcomeCode;
+  label: string;
+  reason: string;
+}
+
+type VectorHitEntry = Awaited<ReturnType<typeof collectVectorActivatedWorldInfoDetailed>>["entries"][number];
+
+function getWorldInfoGroupKey(entry: WorldBookEntry): string | null {
+  const groupName = typeof entry.group_name === "string" ? entry.group_name.trim() : "";
+  return groupName ? groupName.toLowerCase() : null;
+}
+
+function buildDiagnosticVectorOutcome(
+  code: DiagnosticVectorHitOutcomeCode,
+  options: {
+    entry?: WorldBookEntry;
+    maxActivatedEntries?: number;
+    minPriority?: number;
+    conflictingEntry?: WorldBookEntry;
+    conflictingSource?: "keyword" | "vector";
+    keptEntryComment?: string;
+    dedupTier?: "exact" | "near-exact" | "fuzzy";
+  } = {},
+): DiagnosticVectorHitOutcome {
+  switch (code) {
+    case "injected_vector":
+      return {
+        code,
+        label: "Made final prompt",
+        reason: "This vector hit survived reranking and final prompt assembly as a vector-activated entry.",
+      };
+    case "already_keyword":
+      return {
+        code,
+        label: "Already keyword-active",
+        reason: "This same entry was already activated by keyword logic, so vector retrieval did not add a second copy.",
+      };
+    case "blocked_by_group": {
+      const conflicting = options.conflictingEntry?.comment?.trim() || "another entry";
+      const source = options.conflictingSource === "vector" ? "another vector hit" : "keyword activation";
+      return {
+        code,
+        label: "Blocked by group rule",
+        reason: `This entry shares a mutually exclusive group with "${conflicting}", which had already claimed the slot via ${source}.`,
+      };
+    }
+    case "blocked_by_min_priority":
+      return {
+        code,
+        label: "Below minimum priority",
+        reason: `This entry's priority (${options.entry?.priority ?? 0}) is below the current World Info minimum priority (${options.minPriority ?? 0}).`,
+      };
+    case "blocked_by_max_entries":
+      return {
+        code,
+        label: "No room under entry cap",
+        reason: `The final World Info list had already reached the ${options.maxActivatedEntries ?? 0}-entry cap before this vector hit could be added.`,
+      };
+    case "blocked_by_token_budget":
+      return {
+        code,
+        label: "No room under token budget",
+        reason: "Adding this entry would have pushed the World Info prompt past the current token budget, so earlier entries kept the room.",
+      };
+    case "deduplicated": {
+      const kept = options.keptEntryComment?.trim() || "another entry";
+      const tier = options.dedupTier === "exact"
+        ? "exact duplicate"
+        : options.dedupTier === "near-exact"
+          ? "near-exact duplicate"
+          : "fuzzy duplicate";
+      return {
+        code,
+        label: "Removed as duplicate",
+        reason: `This vector hit initially made the merged set, but it was removed as a ${tier} of "${kept}".`,
+      };
+    }
+    case "blocked_during_final_assembly":
+    default:
+      return {
+        code: "blocked_during_final_assembly",
+        label: "Lost during final assembly",
+        reason: "This vector hit survived retrieval, but later prompt-assembly rules left no room for it in the final World Info list.",
+      };
+  }
+}
+
+function traceDiagnosticVectorHitOutcomes(
+  keywordEntries: WorldBookEntry[],
+  vectorEntries: VectorHitEntry[],
+  settingsInput?: Partial<WorldInfoSettings>,
+): Map<string, DiagnosticVectorHitOutcome> {
+  const settings: WorldInfoSettings = {
+    globalScanDepth: null,
+    maxRecursionPasses: 0,
+    maxActivatedEntries: 50,
+    maxTokenBudget: 0,
+    minPriority: 0,
+    ...settingsInput,
+  };
+  const mergedEntries: WorldBookEntry[] = [];
+  const sources = new Map<string, { source: "keyword" | "vector"; score?: number }>();
+  const seen = new Set<string>();
+  const occupiedGroups = new Map<string, { entry: WorldBookEntry; source: "keyword" | "vector" }>();
+  const outcomes = new Map<string, DiagnosticVectorHitOutcome>();
+  const maxActivatedTarget = settings.maxActivatedEntries > 0
+    ? settings.maxActivatedEntries
+    : Number.POSITIVE_INFINITY;
+
+  for (const entry of keywordEntries) {
+    if (seen.has(entry.id)) continue;
+    mergedEntries.push(entry);
+    seen.add(entry.id);
+    sources.set(entry.id, { source: "keyword" });
+    const groupKey = getWorldInfoGroupKey(entry);
+    if (groupKey) occupiedGroups.set(groupKey, { entry, source: "keyword" });
+  }
+
+  let finalized = finalizeActivatedWorldInfoEntries(mergedEntries, settings, {
+    skipGroupLogic: true,
+    preserveOrder: true,
+  });
+
+  for (const item of vectorEntries) {
+    if (seen.has(item.entry.id)) {
+      outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("already_keyword"));
+      continue;
+    }
+
+    if (settings.minPriority > 0 && item.entry.priority < settings.minPriority && !item.entry.constant) {
+      outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("blocked_by_min_priority", {
+        entry: item.entry,
+        minPriority: settings.minPriority,
+      }));
+      continue;
+    }
+
+    const groupKey = getWorldInfoGroupKey(item.entry);
+    if (groupKey) {
+      const occupied = occupiedGroups.get(groupKey);
+      if (occupied) {
+        outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("blocked_by_group", {
+          conflictingEntry: occupied.entry,
+          conflictingSource: occupied.source,
+        }));
+        continue;
+      }
+    }
+
+    if (finalized.activatedEntries.length >= maxActivatedTarget && !item.entry.constant) {
+      outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("blocked_by_max_entries", {
+        maxActivatedEntries: settings.maxActivatedEntries,
+      }));
+      continue;
+    }
+
+    const nextMergedEntries = [...mergedEntries, item.entry];
+    const nextFinalized = finalizeActivatedWorldInfoEntries(nextMergedEntries, settings, {
+      skipGroupLogic: true,
+      preserveOrder: true,
+    });
+    const itemSurvived = nextFinalized.activatedEntries.some((entry) => entry.id === item.entry.id);
+    const grewActivationSet = nextFinalized.activatedEntries.length > finalized.activatedEntries.length;
+
+    if (!itemSurvived || (!grewActivationSet && !item.entry.constant)) {
+      outcomes.set(item.entry.id, buildDiagnosticVectorOutcome(
+        settings.maxTokenBudget > 0 ? "blocked_by_token_budget" : "blocked_during_final_assembly",
+      ));
+      continue;
+    }
+
+    mergedEntries.push(item.entry);
+    seen.add(item.entry.id);
+    sources.set(item.entry.id, { source: "vector", score: item.finalScore });
+    if (groupKey) occupiedGroups.set(groupKey, { entry: item.entry, source: "vector" });
+    finalized = nextFinalized;
+    outcomes.set(item.entry.id, buildDiagnosticVectorOutcome("injected_vector"));
+  }
+
+  const dedupResult = deduplicateWorldInfoEntries(mergedEntries, sources);
+  for (const removed of dedupResult.removed) {
+    if (!outcomes.has(removed.removedEntryId)) continue;
+    outcomes.set(removed.removedEntryId, buildDiagnosticVectorOutcome("deduplicated", {
+      keptEntryComment: removed.keptEntryComment,
+      dedupTier: removed.tier,
+    }));
+  }
+
+  return outcomes;
+}
 
 app.get("/", (c) => {
   const userId = c.get("userId");
@@ -178,6 +382,11 @@ app.post("/:id/diagnostics", async (c) => {
     vectorDetail.entries,
     worldInfoSettings,
   );
+  const vectorHitOutcomes = traceDiagnosticVectorHitOutcomes(
+    wiResult.activatedEntries,
+    vectorDetail.entries,
+    worldInfoSettings,
+  );
 
   const keywordHits = mergedWorldInfo.activatedWorldInfo
     .filter((entry) => entry.source === "keyword")
@@ -190,6 +399,11 @@ app.post("/:id/diagnostics", async (c) => {
     (count, item) => count + (keywordHitIds.has(item.entry.id) ? 1 : 0),
     0,
   );
+  const displacedFreshVectorHits = vectorDetail.entries.filter((item) => {
+    if (keywordHitIds.has(item.entry.id)) return false;
+    const outcome = vectorHitOutcomes.get(item.entry.id);
+    return outcome?.code !== "injected_vector";
+  });
 
   if (vectorDetail.thresholdRejected > 0 && vectorDetail.entries.length === 0) {
     blockerMessages.push("Vector matches were found, but all of them were rejected by the current similarity threshold.");
@@ -219,7 +433,7 @@ app.post("/:id/diagnostics", async (c) => {
     mergedWorldInfo.vectorActivated === 0 &&
     mergedWorldInfo.evictedByBudget > 0
   ) {
-    blockerMessages.push("Semantic matches were found, but the World Info max-activated or token budget limits left no room for them after keyword activation.");
+    blockerMessages.push("Vector matches were found, but the World Info max-activated or token budget limits left no room for them after keyword activation.");
   }
 
   if (
@@ -237,12 +451,26 @@ app.post("/:id/diagnostics", async (c) => {
     mergedWorldInfo.evictedByBudget === 0 &&
     vectorKeywordOverlapCount === vectorDetail.entries.length
   ) {
-    blockerMessages.push("Semantic matches were found, but the top vector hits were already activated by keyword, so the final list still counts them as keyword entries.");
+    blockerMessages.push("Vector matches were found, but the top vector hits were already activated by keyword, so the final list still counts them as keyword entries.");
   }
 
   if (mergedWorldInfo.deduplicationDetails.some(d => d.removedEntryBookId === bookId)) {
     const dedupCount = mergedWorldInfo.deduplicationDetails.filter(d => d.removedEntryBookId === bookId).length;
     blockerMessages.push(`${dedupCount} entry/entries from this book were removed as content duplicates of entries from other books.`);
+  }
+
+  if (displacedFreshVectorHits.length > 0) {
+    const grouped = new Map<string, { outcome: DiagnosticVectorHitOutcome; count: number }>();
+    for (const item of displacedFreshVectorHits) {
+      const outcome = vectorHitOutcomes.get(item.entry.id);
+      if (!outcome) continue;
+      const existing = grouped.get(outcome.code);
+      if (existing) existing.count += 1;
+      else grouped.set(outcome.code, { outcome, count: 1 });
+    }
+    for (const { outcome, count } of grouped.values()) {
+      blockerMessages.push(`${count} fresh vector candidate${count === 1 ? "" : "s"}: ${outcome.reason}`);
+    }
   }
 
   return c.json({
@@ -282,6 +510,10 @@ app.post("/:id/diagnostics", async (c) => {
       matched_comment: item.matchedComment,
       score_breakdown: item.scoreBreakdown,
       search_text_preview: item.searchTextPreview,
+      final_outcome_code: vectorHitOutcomes.get(item.entry.id)?.code ?? "blocked_during_final_assembly",
+      final_outcome_label: vectorHitOutcomes.get(item.entry.id)?.label ?? "Lost during final assembly",
+      final_outcome_reason: vectorHitOutcomes.get(item.entry.id)?.reason
+        ?? "This vector hit survived retrieval, but later prompt-assembly rules left no room for it in the final World Info list.",
     })),
     blocker_messages: Array.from(new Set(blockerMessages)),
     deduplication: mergedWorldInfo.deduplicated > 0 ? {

@@ -759,7 +759,7 @@ export default function WorldBookPanel() {
               </Button>
               {vectorSummary && (
                 <div className={styles.vectorSummary}>
-                  <div className={styles.vectorSummaryTitle}>Semantic activation status</div>
+                  <div className={styles.vectorSummaryTitle}>Vector activation status</div>
                   <div className={styles.vectorSummaryGrid}>
                     <span>{vectorSummary.enabled} enabled</span>
                     <span>{vectorSummary.enabled_non_empty}/{vectorSummary.non_empty} non-empty</span>
@@ -771,7 +771,7 @@ export default function WorldBookPanel() {
               )}
               <div className={styles.bookActionRow}>
                 <Button variant="primary" size="sm" onClick={handleReindexVectors} disabled={reindexing}>
-                  {reindexing ? 'Reindexing...' : 'Reindex semantic search'}
+                  {reindexing ? 'Reindexing...' : 'Reindex vector search'}
                 </Button>
                 <Button variant="secondary" size="sm" onClick={handleConvertToVectorizedPreview} disabled={reindexing}>
                   Convert to Vectorized
@@ -934,7 +934,7 @@ export default function WorldBookPanel() {
             convertPreview.eligible === 0
               ? 'No entries are eligible for conversion. All non-constant entries are either already vectorized, empty, or disabled.'
               : <>
-                  <p>This will enable semantic activation for <strong>{convertPreview.eligible}</strong> {convertPreview.eligible === 1 ? 'entry' : 'entries'} and immediately start reindexing.</p>
+                  <p>This will enable vector activation for <strong>{convertPreview.eligible}</strong> {convertPreview.eligible === 1 ? 'entry' : 'entries'} and immediately start reindexing.</p>
                   <ul style={{ textAlign: 'left', margin: '8px 0', paddingLeft: '20px', fontSize: '12px', opacity: 0.8 }}>
                     {convertPreview.constant_skipped > 0 && <li>{convertPreview.constant_skipped} constant {convertPreview.constant_skipped === 1 ? 'entry' : 'entries'} skipped (always active)</li>}
                     {convertPreview.already_vectorized > 0 && <li>{convertPreview.already_vectorized} already vectorized</li>}

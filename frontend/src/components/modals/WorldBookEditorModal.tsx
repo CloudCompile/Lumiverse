@@ -383,7 +383,7 @@ export default function WorldBookEditorModal() {
                 </div>
                 {vectorSummary && (
                   <div className={styles.vectorSummary}>
-                    <div className={styles.vectorSummaryTitle}>Semantic activation status</div>
+                    <div className={styles.vectorSummaryTitle}>Vector activation status</div>
                     <div className={styles.vectorSummaryGrid}>
                       <span>{vectorSummary.enabled} enabled</span>
                       <span>{vectorSummary.enabled_non_empty}/{vectorSummary.non_empty} non-empty</span>
@@ -400,7 +400,7 @@ export default function WorldBookEditorModal() {
                     onClick={handleReindexVectors}
                     disabled={reindexing}
                   >
-                    {reindexing ? 'Reindexing...' : 'Reindex semantic search'}
+                    {reindexing ? 'Reindexing...' : 'Reindex vector search'}
                   </button>
                   {vectorStatus && (
                     <span className={styles.vectorStatusText}>{vectorStatus}</span>

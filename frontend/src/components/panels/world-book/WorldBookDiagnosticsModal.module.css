@@ -443,11 +443,48 @@
   text-transform: uppercase;
 }
 
+.outcomeBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--lumiverse-border);
+}
+
+.outcomeBadgeSuccess {
+  background: rgba(76, 191, 135, 0.12);
+  border-color: color-mix(in srgb, #4cbf87 35%, var(--lumiverse-border));
+  color: #4cbf87;
+}
+
+.outcomeBadgeWarning {
+  background: rgba(211, 155, 50, 0.12);
+  border-color: color-mix(in srgb, #d39b32 35%, var(--lumiverse-border));
+  color: #d39b32;
+}
+
+.outcomeBadgeMuted {
+  background: color-mix(in srgb, var(--lumiverse-primary) 14%, transparent);
+  border-color: color-mix(in srgb, var(--lumiverse-primary) 22%, var(--lumiverse-border));
+  color: var(--lumiverse-primary);
+}
+
 .hitSummary {
   margin: 0;
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--lumiverse-text-muted);
+}
+
+.hitOutcomeReason {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--lumiverse-text);
 }
 
 .hitScores {

@@ -187,51 +187,51 @@ app.get("/health", async (c) => {
   if (sidecarRequired && !sidecarConnectionId) {
     pushCheck(
       "sidecar_required",
-      "Sidecar connection",
+      "Sidecard connection",
       "fail",
-      "Sidecar-assisted cortex features are enabled, but no sidecar connection is selected.",
+      "Sidecard-assisted cortex features are enabled, but no sidecard connection is selected.",
     );
   } else if (sidecarConnectionId && !sidecarProfile) {
     pushCheck(
       "sidecar_exists",
-      "Sidecar connection",
+      "Sidecard connection",
       sidecarRequired ? "fail" : "warn",
-      "The selected sidecar connection profile no longer exists.",
+      "The selected sidecard connection profile no longer exists.",
     );
   } else if (sidecarConnectionId && !sidecarProvider) {
     pushCheck(
       "sidecar_provider",
-      "Sidecar provider",
+      "Sidecard provider",
       sidecarRequired ? "fail" : "warn",
       `The selected provider "${sidecarProfile?.provider}" is not available.`,
     );
   } else if (sidecarConnectionId && !sidecarHasApiKey) {
     pushCheck(
       "sidecar_api_key",
-      "Sidecar API key",
+      "Sidecard API key",
       sidecarRequired ? "fail" : "warn",
-      "The selected sidecar connection is missing its API key.",
+      "The selected sidecard connection is missing its API key.",
     );
   } else if (sidecarRequired) {
     pushCheck(
       "sidecar_ready",
-      "Sidecar readiness",
+      "Sidecard readiness",
       "pass",
-      "A valid sidecar connection is configured for cortex features that require it.",
+      "A valid sidecard connection is configured for cortex features that require it.",
     );
   } else if (sidecarConnectionId) {
     pushCheck(
       "sidecar_optional",
-      "Sidecar connection",
+      "Sidecard connection",
       "info",
-      "A sidecar connection is configured, but current cortex modes can still run in heuristic mode.",
+      "A sidecard connection is configured, but current cortex modes can still run in heuristic mode.",
     );
   } else {
     pushCheck(
       "sidecar_optional",
-      "Sidecar connection",
+      "Sidecard connection",
       "info",
-      "No sidecar connection is configured. Heuristic cortex mode can still run without it.",
+      "No sidecard connection is configured. Heuristic cortex mode can still run without it.",
     );
   }
 
@@ -242,7 +242,7 @@ app.get("/health", async (c) => {
   } = {
     attempted: false,
     success: null,
-    message: "Live sidecar probe not run.",
+    message: "Live sidecard probe not run.",
   };
 
   if (probeConnectivity && sidecarConnectionId && sidecarProfile) {
@@ -254,7 +254,7 @@ app.get("/health", async (c) => {
     };
     pushCheck(
       "sidecar_probe",
-      "Sidecar connectivity",
+      "Sidecard connectivity",
       result.success ? "pass" : "fail",
       result.message,
     );
@@ -808,16 +808,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
     };
   }
 
-  // First rebuild the underlying LTCM chunks (re-chunk from messages, re-vectorize)
-  // so the cortex processes fresh data instead of potentially stale chunks.
-  try {
-    const { rebuildChatChunks } = require("../services/chats.service");
-    await rebuildChatChunks(userId, chatId);
-  } catch (err: any) {
-    console.warn("[memory-cortex] LTCM chunk rebuild failed (proceeding with existing chunks):", err?.message);
-  }
-
-  // Run cortex rebuild in the background — return immediately so Bun doesn't timeout
+  // Run rebuild in the background — return immediately so Bun doesn't timeout
   memoryCortex.rebuildCortex(
     userId, chatId, characterNames, generateRawFn, sidecarConnectionId,
     // Progress callback: streams WS events to the client

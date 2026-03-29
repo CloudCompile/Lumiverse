@@ -442,12 +442,6 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     : null;
   const perChatOverrides = (chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null;
 
-  // LTCM freshness check: if settings or code changed since chunks were built, rebuild lazily
-  try {
-    const { ensureChatMemoryFresh } = require("./chats.service");
-    await ensureChatMemoryFresh(ctx.userId, ctx.chatId);
-  } catch { /* non-fatal — first generation after update may use stale data */ }
-
   // Memory Cortex: enhanced retrieval with entity graph, salience, and emotional resonance
   const cortexConfig = memoryCortex.getCortexConfig(ctx.userId);
   let cortexResult: memoryCortex.CortexResult | null = null;
@@ -2320,7 +2314,7 @@ export async function collectVectorActivatedWorldInfoDetailed(
   if (!cfg.dimensions) blockerMessages.push("Embeddings have not been tested yet, so dimensions are still unknown.");
   if (!cfg.vectorize_world_books) blockerMessages.push("World-book vectorization is disabled in embeddings settings.");
   if (!queryText) blockerMessages.push("The current chat does not have enough visible recent text to build a vector query.");
-  if (eligibleEntries.length === 0) blockerMessages.push("This chat has no semantic-enabled, non-disabled, non-empty lorebook entries to search.");
+  if (eligibleEntries.length === 0) blockerMessages.push("This chat has no vector-enabled, non-disabled, non-empty lorebook entries to search.");
 
   if (blockerMessages.length > 0) {
     return {
@@ -3175,11 +3169,6 @@ function buildParameters(
     if (effort !== "auto" || isToggleOnly) {
       injectReasoningParams(params, providerName, effort, modelName || undefined);
     }
-  }
-
-  // Streaming toggle from sampler overrides
-  if (overrides?.enabled && typeof (overrides as any).streaming === "boolean") {
-    params._streaming = (overrides as any).streaming;
   }
 
   // Custom body from preset.parameters.customBody

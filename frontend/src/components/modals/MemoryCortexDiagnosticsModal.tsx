@@ -83,7 +83,7 @@ function buildReportText(report: CortexHealthReport): string {
   lines.push(`- Connectivity: ${report.embeddings.connectivity.message}`)
   lines.push('')
 
-  lines.push('Sidecar')
+  lines.push('Sidecard')
   lines.push(`- Required: ${report.sidecar.required ? 'Yes' : 'No'}`)
   lines.push(`- Configured: ${report.sidecar.configured ? 'Yes' : 'No'}`)
   lines.push(`- Connection: ${report.sidecar.connectionName ?? 'None'}`)
@@ -194,7 +194,7 @@ export default function MemoryCortexDiagnosticsModal({ chatId, onClose }: Props)
             <div className={styles.eyebrow}>Popup Diagnostics</div>
             <h2 className={styles.title}>Memory Cortex Diagnostics</h2>
             <p className={styles.subtitle}>
-              Focused health checks for cortex setup, embeddings, sidecar readiness, and the selected chat.
+              Focused health checks for cortex setup, embeddings, sidecard readiness, and the selected chat.
               {chatId ? ` Chat: ${chatId}` : ' Open this from an active chat for chat-specific checks.'}
             </p>
           </div>
@@ -287,7 +287,8 @@ export default function MemoryCortexDiagnosticsModal({ chatId, onClose }: Props)
                           <div className={styles.checkMessage}>{check.message}</div>
                         </div>
                       ))}
-                      </div>
+                      <div className={styles.scrollSpacer} aria-hidden="true" />
+                    </div>
                   </div>
                 )}
               </div>
@@ -307,7 +308,7 @@ export default function MemoryCortexDiagnosticsModal({ chatId, onClose }: Props)
                 </div>
 
                 <div className={styles.section}>
-                  <div className={styles.sectionHeader}>Sidecar</div>
+                  <div className={styles.sectionHeader}>Sidecard</div>
                   <div className={styles.metaList}>
                     <div className={styles.metaRow}><span>Required</span><strong>{report?.sidecar.required ? 'Yes' : 'No'}</strong></div>
                     <div className={styles.metaRow}><span>Configured</span><strong>{report?.sidecar.configured ? 'Yes' : 'No'}</strong></div>
@@ -338,7 +339,8 @@ export default function MemoryCortexDiagnosticsModal({ chatId, onClose }: Props)
                       <div className={styles.metaRow}><span>Relations</span><strong>{report.chat.relationCount}</strong></div>
                       <div className={styles.metaRow}><span>Consolidations</span><strong>{report.chat.consolidationCount}</strong></div>
                       <div className={styles.metaRow}><span>Rebuild status</span><strong>{report.chat.rebuildStatus.status}</strong></div>
-                      </div>
+                      <div className={styles.scrollSpacer} aria-hidden="true" />
+                    </div>
                   </div>
                 )}
               </div>

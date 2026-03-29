@@ -37,11 +37,22 @@ const DIAGNOSTIC_BREAKDOWN_LABELS: Array<{
 
 const SCORE_GUIDE_TITLE = 'How to read these scores'
 const SCORE_GUIDE_BODY =
-  'Vector distance is the raw semantic distance, so lower is better. Rerank score is the final composite ranking after boosts and penalties, so higher is better.'
+  'Vector distance is the raw embedding distance, so lower is better. Rerank score is the final composite ranking after boosts and penalties, so higher is better.'
 const LEXICAL_GUIDE_BODY =
   'Lexical candidate score is an optional keyword/FTS-side signal used during reranking. Higher means stronger lexical support when it appears.'
 const CUTOFF_GUIDE_BODY =
   'Similarity Threshold filters on vector distance before reranking. Rerank Cutoff filters on rerank score after reranking.'
+
+const OUTCOME_SUMMARY_PRIORITY: WorldBookDiagnostics['vector_hits'][number]['final_outcome_code'][] = [
+  'blocked_by_max_entries',
+  'blocked_by_token_budget',
+  'blocked_by_group',
+  'blocked_by_min_priority',
+  'deduplicated',
+  'blocked_during_final_assembly',
+  'already_keyword',
+  'injected_vector',
+]
 
 function formatDiagnosticNumber(value: number): string {
   return Number.isFinite(value) ? value.toFixed(3) : '0.000'
@@ -74,10 +85,51 @@ function buildDiagnosticMatchSummary(hit: WorldBookDiagnostics['vector_hits'][nu
   }
 
   if (reasons.length === 0) {
-    return 'This entry reached the shortlist mostly on semantic similarity.'
+    return 'This entry reached the shortlist mostly on vector similarity.'
   }
 
   return `Lexical boosts came from ${reasons.join(' | ')}.`
+}
+
+function joinReadableList(parts: string[]): string {
+  if (parts.length === 0) return ''
+  if (parts.length === 1) return parts[0]
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`
+  return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`
+}
+
+function formatOutcomeSummaryPart(
+  code: WorldBookDiagnostics['vector_hits'][number]['final_outcome_code'],
+  count: number,
+): string {
+  switch (code) {
+    case 'injected_vector':
+      return `${count} made the final prompt`
+    case 'already_keyword':
+      return `${count} ${count === 1 ? 'was' : 'were'} already keyword-active`
+    case 'blocked_by_group':
+      return `${count} ${count === 1 ? 'was' : 'were'} blocked by a group rule`
+    case 'blocked_by_min_priority':
+      return `${count} ${count === 1 ? 'was' : 'were'} below minimum priority`
+    case 'blocked_by_max_entries':
+      return `${count} had no room under the entry cap`
+    case 'blocked_by_token_budget':
+      return `${count} had no room under the token budget`
+    case 'deduplicated':
+      return `${count} ${count === 1 ? 'was' : 'were'} removed as duplicate${count === 1 ? '' : 's'}`
+    case 'blocked_during_final_assembly':
+    default:
+      return `${count} ${count === 1 ? 'was' : 'were'} dropped during final assembly`
+  }
+}
+
+function getOutcomeBadgeClassName(
+  code: WorldBookDiagnostics['vector_hits'][number]['final_outcome_code'],
+  styles: Record<string, string>,
+): string {
+  if (code === 'injected_vector') return styles.outcomeBadgeSuccess
+  if (code === 'already_keyword') return styles.outcomeBadgeMuted
+  return styles.outcomeBadgeWarning
 }
 
 async function copyTextToClipboard(text: string): Promise<void> {
@@ -181,26 +233,51 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
   const displacedSemanticCount = diagnostics
     ? Math.max(freshSemanticCount - diagnostics.stats.vectorActivated, 0)
     : 0
+  const injectedVectorCount = diagnostics
+    ? diagnostics.vector_hits.filter((hit) => hit.final_outcome_code === 'injected_vector').length
+    : 0
+  const displacedOutcomeSummaryParts = useMemo(() => {
+    if (!diagnostics) return [] as string[]
+
+    const counts = new Map<WorldBookDiagnostics['vector_hits'][number]['final_outcome_code'], number>()
+    for (const hit of diagnostics.vector_hits) {
+      if (keywordHitIds.has(hit.entry_id)) continue
+      if (hit.final_outcome_code === 'injected_vector') continue
+      counts.set(hit.final_outcome_code, (counts.get(hit.final_outcome_code) ?? 0) + 1)
+    }
+
+    return OUTCOME_SUMMARY_PRIORITY
+      .map((code) => {
+        const count = counts.get(code)
+        if (!count) return null
+        return formatOutcomeSummaryPart(code, count)
+      })
+      .filter((value): value is string => Boolean(value))
+  }, [diagnostics, keywordHitIds])
 
   const noteMessages = useMemo(() => {
     if (!diagnostics) return [] as string[]
 
     const notes = [...diagnostics.blocker_messages]
 
+    if (displacedOutcomeSummaryParts.length > 0) {
+      notes.unshift(`Fresh vector candidates were displaced because ${joinReadableList(displacedOutcomeSummaryParts)}.`)
+    }
+
     if (diagnostics.vector_summary.pending > 0) {
       notes.push(
-        `${diagnostics.vector_summary.pending} semantic entries are still pending reindex, so retrieval may still be incomplete.`,
+        `${diagnostics.vector_summary.pending} vector entries are still pending reindex, so retrieval may still be incomplete.`,
       )
     }
 
     if (diagnostics.vector_summary.error > 0) {
       notes.push(
-        `${diagnostics.vector_summary.error} semantic entries have indexing errors and will not participate until they are fixed and reindexed.`,
+        `${diagnostics.vector_summary.error} vector entries have indexing errors and will not participate until they are fixed and reindexed.`,
       )
     }
 
     return Array.from(new Set(notes))
-  }, [diagnostics])
+  }, [diagnostics, displacedOutcomeSummaryParts])
 
   const hero = useMemo(() => {
     if (loading && !diagnostics) {
@@ -231,7 +308,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
       return {
         tone: 'warning',
         title: 'This lorebook is not attached to the current chat',
-        body: 'Semantic retrieval cannot inject anything until the book is attached through the character, persona, or global books.',
+        body: 'Vector retrieval cannot inject anything until the book is attached through the character, persona, or global books.',
       } as const
     }
 
@@ -246,23 +323,23 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
     if (diagnostics.eligible_entries === 0) {
       return {
         tone: 'warning',
-        title: 'This book has no semantic-ready entries',
-        body: 'No non-empty, semantic-enabled entries are eligible for retrieval in this lorebook.',
+        title: 'This book has no vector-ready entries',
+        body: 'No non-empty, vector-enabled entries are eligible for retrieval in this lorebook.',
       } as const
     }
 
     if (diagnostics.stats.vectorActivated > 0) {
       return {
         tone: 'success',
-        title: `${diagnostics.stats.vectorActivated} semantic entr${diagnostics.stats.vectorActivated === 1 ? 'y' : 'ies'} made the final prompt`,
-        body: `Reranking found ${diagnostics.vector_hits.length} semantic candidates, and ${diagnostics.stats.vectorActivated} survived into the final world-info result.`,
+        title: `${diagnostics.stats.vectorActivated} vector entr${diagnostics.stats.vectorActivated === 1 ? 'y' : 'ies'} made the final prompt`,
+        body: `Reranking found ${diagnostics.vector_hits.length} vector candidates, and ${diagnostics.stats.vectorActivated} survived into the final world-info result.`,
       } as const
     }
 
     if (diagnostics.vector_hits.length === 0) {
       return {
         tone: 'neutral',
-        title: 'No semantic matches cleared retrieval',
+        title: 'No vector matches cleared retrieval',
         body: 'The current chat query did not produce any vector hits that survived thresholding and reranking.',
       } as const
     }
@@ -270,25 +347,28 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
     if (freshSemanticCount === 0) {
       return {
         tone: 'neutral',
-        title: 'Semantic retrieval mostly confirmed entries already hit by keywords',
-        body: 'The vector shortlist overlaps with keyword matches, so semantic search did not add anything new for this chat.',
+        title: 'Vector retrieval mostly confirmed entries already hit by keywords',
+        body: 'The vector shortlist overlaps with keyword matches, so vector search did not add anything new for this chat.',
       } as const
     }
 
     if (displacedSemanticCount > 0 || diagnostics.stats.evictedByBudget > 0) {
+      const displacementWhy = displacedOutcomeSummaryParts.length > 0
+        ? `Why: ${joinReadableList(displacedOutcomeSummaryParts)}.`
+        : 'Open the reranked shortlist below to see which entries were displaced and why.'
       return {
         tone: 'warning',
-        title: 'Semantic matches were found, but they did not survive final prompt assembly',
-        body: `${freshSemanticCount} fresh semantic candidate${freshSemanticCount === 1 ? '' : 's'} appeared after reranking, but ${displacedSemanticCount} were displaced before the final prompt.`,
+        title: 'Vector matches were found, but they did not survive final prompt assembly',
+        body: `${freshSemanticCount} fresh vector candidate${freshSemanticCount === 1 ? '' : 's'} appeared after reranking, but ${displacedSemanticCount} were displaced before the final prompt. ${displacementWhy}`,
       } as const
     }
 
     return {
       tone: 'warning',
-      title: 'Semantic retrieval found candidates, but none became vector-activated entries',
-      body: 'The reranked shortlist exists, but the final prompt still ended up with zero semantic-only additions.',
+      title: 'Vector retrieval found candidates, but none became vector-activated entries',
+      body: 'The reranked shortlist exists, but the final prompt still ended up with zero vector-only additions.',
     } as const
-  }, [attached, diagnostics, displacedSemanticCount, error, freshSemanticCount, loading])
+  }, [attached, diagnostics, displacedOutcomeSummaryParts, displacedSemanticCount, error, freshSemanticCount, loading])
 
   const reportText = useMemo(() => {
     if (!diagnostics) return ''
@@ -302,7 +382,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
       'SUMMARY',
       `Hero: ${hero.title}`,
       `Attached: ${attached ? attachedSources.join(', ') : 'No'}`,
-      `Eligible semantic entries: ${diagnostics.eligible_entries}`,
+      `Eligible vector entries: ${diagnostics.eligible_entries}`,
       `Indexed: ${diagnostics.vector_summary.indexed}`,
       `Pending: ${diagnostics.vector_summary.pending}`,
       `Errors: ${diagnostics.vector_summary.error}`,
@@ -313,8 +393,8 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
       `Reranked vector hits: ${diagnostics.vector_hits.length}`,
       `Keyword hits: ${diagnostics.keyword_hits.length}`,
       `Keyword/vector overlap: ${overlapCount}`,
-      `Fresh semantic candidates: ${freshSemanticCount}`,
-      `Displaced semantic candidates: ${displacedSemanticCount}`,
+      `Fresh vector candidates: ${freshSemanticCount}`,
+      `Displaced vector candidates: ${displacedSemanticCount}`,
       '',
       'EMBEDDINGS',
       `Enabled: ${diagnostics.embeddings.enabled}`,
@@ -372,6 +452,8 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
       diagnostics.vector_hits.forEach((hit, index) => {
         lines.push(
           `${index + 1}. ${hit.comment || '(unnamed entry)'} [${hit.entry_id}]`,
+          `   final_outcome=${hit.final_outcome_label}`,
+          `   final_outcome_reason=${hit.final_outcome_reason}`,
           `   vector_distance=${formatDiagnosticNumber(hit.distance)} rerank_score=${formatDiagnosticNumber(hit.final_score)} lexical_candidate_score=${hit.lexical_candidate_score == null ? '(none)' : formatDiagnosticNumber(hit.lexical_candidate_score)}`,
           `   matched_primary_keys=${hit.matched_primary_keys.join(', ') || '(none)'}`,
           `   matched_secondary_keys=${hit.matched_secondary_keys.join(', ') || '(none)'}`,
@@ -441,7 +523,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
             <div className={styles.eyebrow}>Current Chat Diagnostics</div>
             <h2 className={styles.title}>Why "{book.name}" did or did not inject</h2>
             <p className={styles.subtitle}>
-              This view checks attachment, semantic readiness, the query built from recent chat context,
+              This view checks attachment, vector readiness, the query built from recent chat context,
               reranked vector matches, and what finally survived into the prompt.
             </p>
           </div>
@@ -512,7 +594,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                   </span>
                   <span className={styles.heroTag}>
                     <Activity size={12} />
-                    <span>{diagnostics.eligible_entries} eligible semantic entries</span>
+                    <span>{diagnostics.eligible_entries} eligible vector entries</span>
                   </span>
                   <span className={styles.heroTag}>
                     <Search size={12} />
@@ -541,7 +623,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                 </article>
 
                 <article className={styles.metricCard}>
-                  <span className={styles.metricLabel}>Semantic Index</span>
+                  <span className={styles.metricLabel}>Vector Index</span>
                   <strong className={styles.metricValue}>
                     {diagnostics.vector_summary.indexed}/{diagnostics.eligible_entries}
                   </strong>
@@ -554,7 +636,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                   <span className={styles.metricLabel}>Reranked Hits</span>
                   <strong className={styles.metricValue}>{diagnostics.vector_hits.length}</strong>
                   <span className={styles.metricMeta}>
-                    {freshSemanticCount} fresh semantic, {overlapCount} already keyword-active
+                    {injectedVectorCount} made prompt, {displacedSemanticCount} displaced, {overlapCount} already keyword-active
                   </span>
                 </article>
 
@@ -602,11 +684,20 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                                 <div className={styles.hitText}>
                                   <div className={styles.hitTitleRow}>
                                     <h4 className={styles.hitTitle}>{hit.comment || '(unnamed entry)'}</h4>
-                                    {keywordHitIds.has(hit.entry_id) && (
+                                    <span
+                                      className={clsx(
+                                        styles.outcomeBadge,
+                                        getOutcomeBadgeClassName(hit.final_outcome_code, styles),
+                                      )}
+                                    >
+                                      {hit.final_outcome_label}
+                                    </span>
+                                    {keywordHitIds.has(hit.entry_id) && hit.final_outcome_code !== 'already_keyword' && (
                                       <span className={styles.keywordBadge}>Already keyword-active</span>
                                     )}
                                   </div>
                                   <p className={styles.hitSummary}>{buildDiagnosticMatchSummary(hit)}</p>
+                                  <p className={styles.hitOutcomeReason}>{hit.final_outcome_reason}</p>
                                 </div>
                                 <div className={styles.hitScores}>
                                   <span className={styles.scorePill}>
@@ -674,7 +765,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                       </div>
                     </div>
                     <div className={styles.queryBlock}>
-                      {diagnostics.query_preview || 'No recent visible chat messages were available to build a semantic query.'}
+                      {diagnostics.query_preview || 'No recent visible chat messages were available to build a vector query.'}
                     </div>
                   </section>
 
@@ -711,7 +802,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                         <span className={styles.factValue}>{formatDiagnosticNumber(diagnostics.embeddings.rerank_cutoff)}</span>
                       </div>
                       <div className={styles.factRow}>
-                        <span className={styles.factLabel}>Semantic-ready</span>
+                        <span className={styles.factLabel}>Vector-ready</span>
                         <span className={styles.factValue}>{diagnostics.embeddings.ready ? 'Ready' : 'Not ready'}</span>
                       </div>
                     </div>
@@ -750,11 +841,11 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                         <span className={styles.factValue}>{diagnostics.stats.evictedByBudget}</span>
                       </div>
                       <div className={styles.factRow}>
-                        <span className={styles.factLabel}>Fresh semantic candidates</span>
+                        <span className={styles.factLabel}>Fresh vector candidates</span>
                         <span className={styles.factValue}>{freshSemanticCount}</span>
                       </div>
                       <div className={styles.factRow}>
-                        <span className={styles.factLabel}>Displaced semantic candidates</span>
+                        <span className={styles.factLabel}>Displaced vector candidates</span>
                         <span className={styles.factValue}>{displacedSemanticCount}</span>
                       </div>
                     </div>
@@ -768,7 +859,7 @@ export default function WorldBookDiagnosticsModal({ book, chatId, onClose }: Pro
                       </div>
                     </div>
                     <div className={styles.overlapSummary}>
-                      {overlapCount} of {diagnostics.vector_hits.length} semantic matches were already activated by keyword logic.
+                        {overlapCount} of {diagnostics.vector_hits.length} vector matches were already activated by keyword logic.
                     </div>
                     {diagnostics.keyword_hits.length > 0 ? (
                       <div className={styles.keywordChips}>
