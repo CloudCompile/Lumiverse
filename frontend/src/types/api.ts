@@ -230,6 +230,7 @@ export interface ConnectionTestResult {
 }
 
 export interface ConnectionModelsResult {
+  model_labels?: Record<string, string>
   models: string[]
   provider: string
   error?: string
@@ -530,6 +531,7 @@ export interface WorldBookDiagnostics {
       focusMissPenalty: number;
     };
     search_text_preview: string;
+    rerank_rank: number | null;
     final_outcome_code:
       | 'injected_vector'
       | 'already_keyword'
@@ -538,7 +540,50 @@ export interface WorldBookDiagnostics {
       | 'blocked_by_max_entries'
       | 'blocked_by_token_budget'
       | 'deduplicated'
-      | 'blocked_during_final_assembly';
+      | 'blocked_during_final_assembly'
+      | 'trimmed_by_top_k'
+      | 'rejected_by_rerank_cutoff'
+      | 'rejected_by_similarity_threshold';
+    final_outcome_label: string;
+    final_outcome_reason: string;
+  }>;
+  vector_trace: Array<{
+    entry_id: string;
+    comment: string;
+    score: number;
+    distance: number;
+    final_score: number;
+    lexical_candidate_score: number | null;
+    matched_primary_keys: string[];
+    matched_secondary_keys: string[];
+    matched_comment: string | null;
+    score_breakdown: {
+      vectorSimilarity: number;
+      primaryExact: number;
+      primaryPartial: number;
+      secondaryExact: number;
+      secondaryPartial: number;
+      commentExact: number;
+      commentPartial: number;
+      focusBoost: number;
+      priority: number;
+      broadPenalty: number;
+      focusMissPenalty: number;
+    };
+    search_text_preview: string;
+    rerank_rank: number | null;
+    final_outcome_code:
+      | 'injected_vector'
+      | 'already_keyword'
+      | 'blocked_by_group'
+      | 'blocked_by_min_priority'
+      | 'blocked_by_max_entries'
+      | 'blocked_by_token_budget'
+      | 'deduplicated'
+      | 'blocked_during_final_assembly'
+      | 'trimmed_by_top_k'
+      | 'rejected_by_rerank_cutoff'
+      | 'rejected_by_similarity_threshold';
     final_outcome_label: string;
     final_outcome_reason: string;
   }>;

@@ -1289,6 +1289,7 @@ export interface VectorActivatedEntry {
 
 export interface VectorWorldInfoRetrievalResult {
   entries: VectorActivatedEntry[];
+  candidateTrace: VectorRetrievalTraceEntry[];
   queryPreview: string;
   eligibleCount: number;
   hitsBeforeThreshold: number;
@@ -1299,6 +1300,17 @@ export interface VectorWorldInfoRetrievalResult {
   topK: number;
   cap: number;
   blockerMessages: string[];
+}
+
+export type VectorRetrievalTraceStage =
+  | "shortlisted"
+  | "trimmed_by_top_k"
+  | "rejected_by_rerank_cutoff"
+  | "rejected_by_similarity_threshold";
+
+export interface VectorRetrievalTraceEntry extends VectorActivatedEntry {
+  retrievalStage: VectorRetrievalTraceStage;
+  rerankRank: number | null;
 }
 
 export interface MergedWorldInfoEntriesResult {
@@ -2284,6 +2296,7 @@ export async function collectVectorActivatedWorldInfoDetailed(
 ): Promise<VectorWorldInfoRetrievalResult> {
   const emptyResult: VectorWorldInfoRetrievalResult = {
     entries: [],
+    candidateTrace: [],
     queryPreview: "",
     eligibleCount: 0,
     hitsBeforeThreshold: 0,
@@ -2368,18 +2381,20 @@ export async function collectVectorActivatedWorldInfoDetailed(
 
     const pooledCandidates = Array.from(candidates.values());
     const hitsBeforeThreshold = pooledCandidates.length;
-    const filteredCandidates = cfg.similarity_threshold > 0
-      ? pooledCandidates.filter((item) => item.candidate.distance <= cfg.similarity_threshold)
-      : pooledCandidates;
-    const hitsAfterThreshold = filteredCandidates.length;
-    const thresholdRejected = hitsBeforeThreshold - hitsAfterThreshold;
     const specificityState = buildPhraseSpecificityState(eligibleEntries);
     const queryState = buildVectorQueryLexicalState(queryText, specificityState);
-    const scored = filteredCandidates.map(({ entry, candidate }) =>
+    const scoredCandidates = pooledCandidates.map(({ entry, candidate }) =>
       scoreVectorWorldInfoCandidate(entry, candidate, queryState, preset)
     );
-
-    scored.sort((a, b) => {
+    const thresholdPassed = cfg.similarity_threshold > 0
+      ? scoredCandidates.filter((item) => item.distance <= cfg.similarity_threshold)
+      : scoredCandidates;
+    const thresholdRejectedCandidates = cfg.similarity_threshold > 0
+      ? scoredCandidates.filter((item) => item.distance > cfg.similarity_threshold)
+      : [];
+    const hitsAfterThreshold = thresholdPassed.length;
+    const thresholdRejected = hitsBeforeThreshold - hitsAfterThreshold;
+    thresholdPassed.sort((a, b) => {
       if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
       if (a.distance !== b.distance) return a.distance - b.distance;
       if (b.entry.priority !== a.entry.priority) return b.entry.priority - a.entry.priority;
@@ -2387,15 +2402,48 @@ export async function collectVectorActivatedWorldInfoDetailed(
     });
 
     const rerankFiltered = cfg.rerank_cutoff > 0
-      ? scored.filter((item) => item.finalScore >= cfg.rerank_cutoff)
-      : scored;
+      ? thresholdPassed.filter((item) => item.finalScore >= cfg.rerank_cutoff)
+      : thresholdPassed;
+    const rerankRejectedCandidates = cfg.rerank_cutoff > 0
+      ? thresholdPassed.filter((item) => item.finalScore < cfg.rerank_cutoff)
+      : [];
     const hitsAfterRerankCutoff = rerankFiltered.length;
-    const rerankRejected = scored.length - hitsAfterRerankCutoff;
+    const rerankRejected = thresholdPassed.length - hitsAfterRerankCutoff;
 
     const cap = topK;
+    const shortlistedEntries = rerankFiltered.slice(0, cap);
+    const topKTrimmedEntries = rerankFiltered.slice(cap);
+    const rerankRankById = new Map<string, number>(
+      thresholdPassed.map((item, index) => [item.entry.id, index + 1]),
+    );
+    const candidateTrace: VectorRetrievalTraceEntry[] = [
+      ...shortlistedEntries.map((item) => ({
+        ...item,
+        retrievalStage: "shortlisted" as const,
+        rerankRank: rerankRankById.get(item.entry.id) ?? null,
+      })),
+      ...topKTrimmedEntries.map((item) => ({
+        ...item,
+        retrievalStage: "trimmed_by_top_k" as const,
+        rerankRank: rerankRankById.get(item.entry.id) ?? null,
+      })),
+      ...rerankRejectedCandidates.map((item) => ({
+        ...item,
+        retrievalStage: "rejected_by_rerank_cutoff" as const,
+        rerankRank: rerankRankById.get(item.entry.id) ?? null,
+      })),
+      ...thresholdRejectedCandidates
+        .sort((a, b) => a.distance - b.distance)
+        .map((item) => ({
+          ...item,
+          retrievalStage: "rejected_by_similarity_threshold" as const,
+          rerankRank: null,
+        })),
+    ];
 
     return {
-      entries: rerankFiltered.slice(0, cap),
+      entries: shortlistedEntries,
+      candidateTrace,
       queryPreview: queryText,
       eligibleCount: eligibleEntries.length,
       hitsBeforeThreshold,
