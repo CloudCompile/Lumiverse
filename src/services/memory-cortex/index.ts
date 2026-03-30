@@ -141,6 +141,9 @@ export async function processChunk(
     parameters: Record<string, any>;
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
+  /** Alias → canonical name. Built from character/persona descriptions and world books.
+   *  Used to auto-associate nicknames from descriptions to their canonical entity. */
+  descriptionAliases?: Map<string, string>,
 ): Promise<void> {
   const config = getCortexConfig(data.userId);
   if (!config.enabled) return;
@@ -381,6 +384,58 @@ export async function processChunk(
           entityGraph.updateEntityMentionTimestamp(resolved, data.createdAt);
           continue;
         }
+
+        // Check morphological variants — prevents different tense forms of the
+        // same word from being registered as separate entities.
+        const variants = getInflectionalVariants(np.text);
+        let variantResolved = false;
+        for (const variant of variants) {
+          const existing = entityGraph.resolveCanonicalId(variant, data.chatId);
+          if (existing) {
+            entityGraph.updateEntityMentionTimestamp(existing, data.createdAt);
+            variantResolved = true;
+            break;
+          }
+        }
+        if (variantResolved) continue;
+
+        // Check description-derived aliases — maps nicknames from character/persona
+        // descriptions to their canonical entity.
+        if (descriptionAliases) {
+          const aliasCanonical = descriptionAliases.get(np.text.toLowerCase());
+          if (aliasCanonical) {
+            const entity = entityGraph.findEntityByName(data.chatId, aliasCanonical);
+            if (entity) {
+              entityGraph.updateEntityMentionTimestamp(entity.id, data.createdAt);
+              // Register as alias so future chunks resolve automatically
+              entityGraph.upsertEntity(data.chatId, {
+                name: entity.name,
+                type: entity.entityType,
+                aliases: [np.text],
+                confidence: Number(entity.confidence) || 0.9,
+              }, data.chunkId, data.createdAt);
+              continue;
+            }
+          }
+        }
+
+        // Check prefix match — handles abbreviations where the NP is an
+        // unambiguous prefix of exactly one character name.
+        const prefixMatch = findPrefixMatch(np.text, characterNames);
+        if (prefixMatch) {
+          const entity = entityGraph.findEntityByName(data.chatId, prefixMatch);
+          if (entity) {
+            entityGraph.updateEntityMentionTimestamp(entity.id, data.createdAt);
+            entityGraph.upsertEntity(data.chatId, {
+              name: entity.name,
+              type: entity.entityType,
+              aliases: [np.text],
+              confidence: Number(entity.confidence) || 0.9,
+            }, data.chunkId, data.createdAt);
+            continue;
+          }
+        }
+
         // Unknown entity — create as provisional
         if (np.text.length >= 2 && np.text.length <= 50) {
           entityGraph.upsertEntity(data.chatId, {
@@ -471,6 +526,7 @@ export async function rebuildCortex(
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
   onProgress?: (current: number, total: number) => void,
+  descriptionAliases?: Map<string, string>,
 ): Promise<{ chunksProcessed: number; entitiesFound: number; relationsFound: number }> {
   const config = getCortexConfig(userId);
   const db = getDb();
@@ -507,7 +563,7 @@ export async function rebuildCortex(
     if (!generateRawFn || !sidecarConnectionId) {
       // Heuristic-only: sequential, ~1-2ms per chunk — no concurrency needed
       for (let i = 0; i < chunks.length; i++) {
-        await processChunkFromRaw(chunks[i], chatId, userId, characterNames);
+        await processChunkFromRaw(chunks[i], chatId, userId, characterNames, undefined, undefined, descriptionAliases);
         state.current = i + 1;
         state.percent = Math.round(((i + 1) / chunks.length) * 100);
         if (onProgress) onProgress(i + 1, chunks.length);
@@ -538,13 +594,13 @@ export async function rebuildCortex(
             );
 
             if (sidecarResult) {
-              await processChunkWithPrecomputedSidecar(chunk, chatId, userId, characterNames, sidecarResult);
+              await processChunkWithPrecomputedSidecar(chunk, chatId, userId, characterNames, sidecarResult, descriptionAliases);
             } else {
-              await processChunkFromRaw(chunk, chatId, userId, characterNames);
+              await processChunkFromRaw(chunk, chatId, userId, characterNames, undefined, undefined, descriptionAliases);
             }
           } catch {
             // Sidecar failed — fall back to heuristic for this chunk
-            await processChunkFromRaw(chunk, chatId, userId, characterNames);
+            await processChunkFromRaw(chunk, chatId, userId, characterNames, undefined, undefined, descriptionAliases);
           }
 
           completed++;
@@ -594,6 +650,7 @@ async function processChunkFromRaw(
   characterNames: string[],
   generateRawFn?: any,
   sidecarConnectionId?: string,
+  descriptionAliases?: Map<string, string>,
 ): Promise<void> {
   await processChunk(
     {
@@ -609,6 +666,7 @@ async function processChunkFromRaw(
     characterNames,
     generateRawFn,
     sidecarConnectionId,
+    descriptionAliases,
   );
 }
 
@@ -623,6 +681,7 @@ async function processChunkWithPrecomputedSidecar(
   userId: string,
   characterNames: string[],
   sidecarResult: import("./types").SidecarExtractionResult,
+  descriptionAliases?: Map<string, string>,
 ): Promise<void> {
   // Build a fake generateRawFn that returns pre-computed tool_calls so processChunk's
   // sidecar branch gets structured data without making an actual API call.
@@ -682,6 +741,7 @@ async function processChunkWithPrecomputedSidecar(
     characterNames,
     fakeGenerateRaw as any,
     "precomputed",
+    descriptionAliases,
   );
 }
 
@@ -816,6 +876,301 @@ function mergeExtractedEntities(
 function safeJsonArray(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try { return JSON.parse(raw); } catch { return []; }
+}
+
+/**
+ * Find an unambiguous prefix match of an NP against character names.
+ * Handles abbreviations where the NP is a ≥3-char prefix of exactly
+ * ONE character name (or first/last name part).
+ *
+ * Returns the canonical character name if exactly one match, null otherwise.
+ * Ambiguous matches (prefix matches multiple characters) return null.
+ */
+function findPrefixMatch(np: string, characterNames: string[]): string | null {
+  const lower = np.toLowerCase();
+  if (lower.length < 3) return null;
+
+  const matches: string[] = [];
+  for (const name of characterNames) {
+    const parts = [name, ...name.split(/\s+/)];
+    for (const part of parts) {
+      const partLower = part.toLowerCase();
+      // Prefix match: must be shorter than the full part to avoid exact matches
+      if (partLower.startsWith(lower) && lower.length < partLower.length && lower.length >= 3) {
+        if (!matches.includes(name)) matches.push(name);
+        break;
+      }
+    }
+  }
+
+  // Only return if unambiguous — exactly one character matches
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Extract nickname/alias patterns from character or persona description text.
+ * Returns a map of lowercase alias → canonical name.
+ *
+ * Patterns detected:
+ *   - "known as X", "also known as X", "aka X", "nicknamed X"
+ *   - "called X", "goes by X", "referred to as X", "titled X"
+ *   - Quoted nicknames in description text
+ *
+ * Usage: call once per character/persona during chunk processing setup,
+ * pass the merged map to processChunk as `descriptionAliases`.
+ */
+// ─── Bot Name Filler ──────────────────────────────────────────
+// Words that appear in sloppy bot-card names as genre tags, meta labels,
+// or scenario descriptors. Used by normalizeCharacterName to distinguish
+// the real character name from the surrounding noise.
+
+const BOT_NAME_FILLER = new Set([
+  // Meta / platform tags
+  "live", "new", "old", "reloaded", "remake", "rework", "updated", "original",
+  "alternate", "version", "edition", "nsfw", "sfw", "oc", "wip", "beta", "au", "canon",
+  // Narrative structure
+  "episode", "chapter", "part", "scenario", "adventure", "story", "encounter",
+  "meeting", "date", "quest", "tale", "journey", "arc", "prologue", "epilogue",
+  // Genre tags
+  "modern", "fantasy", "romance", "action", "horror", "mystery", "drama",
+  "comedy", "thriller", "historical", "futuristic", "dystopian", "supernatural",
+  // Common descriptive filler
+  "chance", "interrogation", "confrontation", "conversation", "introduction",
+  // Interjections / filler words
+  "ah", "oh", "hey", "hi", "yo", "welcome",
+  // Articles / prepositions (short ones caught by length, but include for safety)
+  "the", "a", "an", "of", "in", "at", "to", "for", "with", "by", "and", "or",
+]);
+
+/**
+ * Normalize a sloppy character card name to extract the real character name.
+ *
+ * Handles common bot-card naming patterns:
+ *   - Tag prefixes: "LIVE:", "NSFW:", "OC:", "[WIP]"
+ *   - Structural separators: |, _, —, –, :, /
+ *   - Decorative Unicode: emoji, CJK brackets, symbols
+ *   - Scenario suffixes: "A Chance Interrogation", "Episode 3", "Modern AU"
+ *
+ * Returns the extracted proper name, or the original trimmed name if
+ * no clear proper noun sequence is found.
+ */
+export function normalizeCharacterName(rawName: string): string {
+  // 1. Strip emoji and decorative Unicode
+  let cleaned = rawName;
+  try {
+    cleaned = cleaned.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "");
+  } catch { /* regex unicode support varies */ }
+  cleaned = cleaned.replace(/[\u{300}-\u{36F}]/gu, ""); // combining diacritical marks that aren't part of names
+  cleaned = cleaned.replace(/[「」『』【】〖〗★☆✨~♡♥●○◆◇■□▪▫▲△▶◀♪♫§†‡※•·]/g, "");
+
+  // 2. Strip bracketed tags: [OC], (NSFW), {WIP}, etc.
+  cleaned = cleaned.replace(/[\[({]\s*(?:OC|NSFW|SFW|WIP|BETA|AU|CANON|NEW|UPDATED?|REMAKE|V\d+(?:\.\d+)?)\s*[\])}]/gi, "");
+
+  // 3. Split on structural separators
+  const segments = cleaned.split(/[|_—–:\/\\]/).map((s) => s.trim()).filter((s) => s.length >= 2);
+
+  // 4. From each segment, extract runs of title-cased non-filler words
+  const candidates: { text: string; wordCount: number; index: number }[] = [];
+  let candidateIndex = 0;
+
+  for (const segment of segments) {
+    const words = segment.split(/[\s,]+/).filter(Boolean);
+    let current: string[] = [];
+
+    const flush = () => {
+      if (current.length >= 1 && current.length <= 5) {
+        candidates.push({ text: current.join(" "), wordCount: current.length, index: candidateIndex++ });
+      }
+      current = [];
+    };
+
+    for (const word of words) {
+      const clean = word.replace(/[.,;:!?"'()\[\]{}]+/g, "").trim();
+      if (!clean || clean.length < 2) { flush(); continue; }
+
+      // Must be title-cased (uppercase + lowercase) and not a filler word
+      if (/^[A-Z][a-z]/.test(clean) && !BOT_NAME_FILLER.has(clean.toLowerCase())) {
+        current.push(clean);
+      } else {
+        flush();
+      }
+    }
+    flush();
+  }
+
+  if (candidates.length === 0) return rawName.trim();
+
+  // 5. Pick the best candidate
+  // Priority: 2-3 word names > other multi-word > single word > fallback
+  // Tiebreaker: earlier position in the string (real name usually comes first)
+  candidates.sort((a, b) => {
+    const aMulti = a.wordCount >= 2 ? 1 : 0;
+    const bMulti = b.wordCount >= 2 ? 1 : 0;
+    if (aMulti !== bMulti) return bMulti - aMulti;
+    // Among multi-word, prefer 2-3 words (typical name length)
+    if (aMulti && bMulti) {
+      const aIdeal = a.wordCount >= 2 && a.wordCount <= 3 ? 1 : 0;
+      const bIdeal = b.wordCount >= 2 && b.wordCount <= 3 ? 1 : 0;
+      if (aIdeal !== bIdeal) return bIdeal - aIdeal;
+    }
+    // Earlier position wins (stable tiebreaker)
+    return a.index - b.index;
+  });
+
+  return candidates[0].text;
+}
+
+export function extractDescriptionAliases(
+  canonicalName: string,
+  ...descriptions: (string | null | undefined)[]
+): Map<string, string> {
+  const aliases = new Map<string, string>();
+
+  for (const desc of descriptions) {
+    if (!desc) continue;
+
+    // Pattern 1: Verb-based with quoted name.
+    // Handles verb + optional pronoun + quoted name patterns
+    // Optional pronoun object (him/her/them/me/it) + space between verb and quote.
+    const quotedPatterns = /(?:known as|also known as|aka|nicknamed|called|goes by|referred to as|titled|call(?:s|ed)?)\s+(?:(?:him|her|them|me|it)\s+)?["'""\u201C\u2018]([^"'""'\u201D\u2019]{2,50})["'""\u201D\u2019]/gi;
+    let match;
+    while ((match = quotedPatterns.exec(desc)) !== null) {
+      addAlias(aliases, match[1], canonicalName);
+    }
+
+    // Pattern 2: Unquoted capitalized name — only captures title-cased words.
+    // "Known as Lady Fellini among the nobility" → captures "Lady Fellini" (stops at lowercase "among")
+    // Note: NO `i` flag — the capture group MUST match actual uppercase to avoid
+    // grabbing lowercase words like "him" or "among" as aliases.
+    // Keywords use [Xx] alternation for first-letter case insensitivity instead.
+    const unquotedPatterns = /(?:[Kk]nown as|[Aa]lso known as|[Aa]ka|[Nn]icknamed|[Cc]alled|[Gg]oes by|[Rr]eferred to as|[Tt]itled)\s+(?:[Tt]he\s+)?([A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,4})/g;
+    while ((match = unquotedPatterns.exec(desc)) !== null) {
+      addAlias(aliases, match[1], canonicalName);
+    }
+
+    // Pattern 3: parenthetical aliases — "Name (Alias)", "Name (Alias1, Alias2)"
+    const parenPatterns = /\(([^)]{2,60})\)/g;
+    while ((match = parenPatterns.exec(desc)) !== null) {
+      // Split on commas for multiple aliases in one parenthetical
+      for (const part of match[1].split(/,/)) {
+        const trimmed = part.trim();
+        // Must look name-like: starts with capital or "the"
+        if (/^(?:the\s+)?[A-Z]/i.test(trimmed) && trimmed.length >= 2) {
+          addAlias(aliases, trimmed, canonicalName);
+        }
+      }
+    }
+  }
+
+  return aliases;
+}
+
+/** Add an alias to the map, including the "without the" variant */
+function addAlias(map: Map<string, string>, alias: string, canonical: string): void {
+  const trimmed = alias.trim();
+  if (trimmed.length < 2 || trimmed.length > 50) return;
+  map.set(trimmed.toLowerCase(), canonical);
+  // Also add without leading "the" / "The"
+  const withoutThe = trimmed.replace(/^the\s+/i, "");
+  if (withoutThe !== trimmed && withoutThe.length >= 2) {
+    map.set(withoutThe.toLowerCase(), canonical);
+  }
+}
+
+/**
+ * Merge description aliases from multiple characters with collision detection.
+ *
+ * In group chats, multiple characters might claim the same nickname (e.g., both
+ * are "called 'Captain'" or "nicknamed 'Shadow'"). Ambiguous aliases — where
+ * the same alias maps to different canonical names — are dropped to prevent
+ * misattribution. Unambiguous aliases are preserved.
+ *
+ * Usage: extract aliases per-character with extractDescriptionAliases(), then
+ * pass all maps here. Returns a single clean map safe for group chats.
+ */
+export function mergeDescriptionAliases(
+  ...aliasMaps: Map<string, string>[]
+): Map<string, string> {
+  // Track every canonical name each alias points to
+  const owners = new Map<string, Set<string>>();
+
+  for (const aliasMap of aliasMaps) {
+    for (const [alias, canonical] of aliasMap) {
+      if (!owners.has(alias)) owners.set(alias, new Set());
+      owners.get(alias)!.add(canonical);
+    }
+  }
+
+  // Only keep aliases that map to exactly one character
+  const merged = new Map<string, string>();
+  for (const [alias, canonicals] of owners) {
+    if (canonicals.size === 1) {
+      merged.set(alias, [...canonicals][0]);
+    }
+    // size > 1: ambiguous — silently dropped
+  }
+
+  return merged;
+}
+
+/**
+ * Generate common English inflectional variants of a word.
+ * Used to prevent different tense forms from being registered as
+ * separate provisional entities — if a variant already exists in the
+ * entity graph, the new occurrence is treated as a mention, not a new entity.
+ *
+ * Only handles regular inflection (covers ~90% of English verbs).
+ * Irregular forms (run/ran, go/went) are handled by the COMMON_ENGLISH reject set.
+ */
+function getInflectionalVariants(word: string): string[] {
+  if (word.length < 5) return [];
+  const lower = word.toLowerCase();
+  const variants: string[] = [];
+
+  if (lower.endsWith("ing") && lower.length >= 6) {
+    // walking → walk, walked, walks; cutting → cut
+    const stem = lower.slice(0, -3);
+    variants.push(stem, stem + "ed", stem + "s", stem + "e", stem + "es");
+    // Doubled consonant: running → run, runs, ran
+    if (stem.length >= 2 && stem[stem.length - 1] === stem[stem.length - 2]) {
+      const short = stem.slice(0, -1);
+      variants.push(short, short + "s", short + "ed");
+    }
+  } else if (lower.endsWith("ed") && lower.length >= 5) {
+    // walked → walk, walking, walks
+    const stem = lower.slice(0, -2);
+    variants.push(stem, stem + "ing", stem + "s");
+    // -ied → -y: carried → carry, carrying
+    if (lower.endsWith("ied")) {
+      const ystem = lower.slice(0, -3) + "y";
+      variants.push(ystem, ystem + "ing");
+    }
+    // Doubled consonant: stopped → stop, stopping
+    if (stem.length >= 2 && stem[stem.length - 1] === stem[stem.length - 2]) {
+      const short = stem.slice(0, -1);
+      variants.push(short, short + "s", short + "ing");
+    }
+    // -e + d: moved → move, moving
+    if (stem.endsWith("e")) {
+      variants.push(stem.slice(0, -1) + "ing");
+    }
+  } else if (lower.endsWith("s") && !lower.endsWith("ss") && lower.length >= 4) {
+    // walks → walk, walked, walking
+    const stem = lower.slice(0, -1);
+    variants.push(stem, stem + "ed", stem + "ing");
+    if (lower.endsWith("ies") && lower.length >= 5) {
+      const ystem = lower.slice(0, -3) + "y";
+      variants.push(ystem, ystem + "ed", ystem + "ing");
+    } else if (lower.endsWith("es") && lower.length >= 5) {
+      const estem = lower.slice(0, -2);
+      variants.push(estem, estem + "ed", estem + "ing");
+    }
+  }
+
+  // Return title-cased variants (entity names are capitalized), deduplicated
+  return [...new Set(variants)]
+    .filter((v) => v.length >= 3 && v !== lower)
+    .map((v) => v.charAt(0).toUpperCase() + v.slice(1));
 }
 
 /**

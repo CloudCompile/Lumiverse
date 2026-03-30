@@ -181,7 +181,10 @@ const NARRATIVE_FLAG_PATTERNS: Record<NarrativeFlag, RegExp[]> = {
 
 // ─── Sarcasm & Negation Detection ──────────────────────────────
 
-const NEGATION_WORDS = /\b(not|n't|never|hardly|barely|scarcely|no|neither|nor|without)\b/i;
+// Two-part negation: standard words use \b boundaries, but contractions like
+// "can't", "don't", "wouldn't" need special handling — \b before "n" in "couldn't"
+// is word-to-word (d→n), so \bn't\b never matches inside contractions.
+const NEGATION_WORDS = /\b(not|never|hardly|barely|scarcely|no|neither|nor|without)\b|n[''\u2019]t\b/i;
 
 const SARCASM_INDICATORS = [
   /\b(oh\s+how\s+\w+|oh\s+great|oh\s+wonderful|oh\s+joy|how\s+delightful|what\s+a\s+surprise)\b/i,
@@ -193,10 +196,27 @@ function isNegatedOrSarcastic(keyword: string, content: string): boolean {
   const idx = content.toLowerCase().indexOf(keyword.toLowerCase());
   if (idx === -1) return false;
 
+  // Negation check — scoped to the current clause.
+  // Negation words don't cross clause boundaries (em-dashes, semicolons,
+  // sentence-ending punctuation). "was not among them — gone forever"
+  // → "not" is in a different clause from "gone forever" → no negation.
   const prefixStart = Math.max(0, idx - 50);
-  const prefix = content.slice(prefixStart, idx);
+  let prefix = content.slice(prefixStart, idx);
+
+  // Trim prefix to the current clause — find the last clause boundary
+  const boundaryPattern = /[.!?;](?:\s)|[—–]/g;
+  let lastBoundary = -1;
+  let m: RegExpExecArray | null;
+  while ((m = boundaryPattern.exec(prefix)) !== null) {
+    lastBoundary = m.index + m[0].length;
+  }
+  if (lastBoundary > 0) {
+    prefix = prefix.slice(lastBoundary);
+  }
+
   if (NEGATION_WORDS.test(prefix)) return true;
 
+  // Sarcasm check — uses full sentence scope
   const sentenceStart = Math.max(0, content.lastIndexOf(".", idx - 1) + 1);
   const sentenceEnd = content.indexOf(".", idx);
   const sentence = content.slice(sentenceStart, sentenceEnd > idx ? sentenceEnd : idx + 60);
@@ -405,20 +425,25 @@ export function scoreChunkHeuristic(content: string): SalienceResult {
   let emotionalWeight = 0;
 
   for (const [tag, patterns] of Object.entries(EMOTIONAL_PATTERNS)) {
-    for (let pi = 0; pi < patterns.length; pi++) {
-      const match = content.match(patterns[pi]);
-      if (match) {
+    let tagFound = false;
+    for (let pi = 0; pi < patterns.length && !tagFound; pi++) {
+      // Use matchAll to check ALL occurrences — if the first match is negated
+      // (e.g., "didn't cry"), a later occurrence ("the anguish") may not be.
+      const regex = new RegExp(patterns[pi].source, patterns[pi].flags.replace("g", "") + "g");
+      for (const match of content.matchAll(regex)) {
         const keyword = match[1] || match[0];
         if (!isNegatedOrSarcastic(keyword, content)) {
           emotionalTags.push(tag as EmotionalTag);
-
           // Compound phrases (earlier patterns) get higher weight than single-word
           const baseWeight = pi < patterns.length - 1 ? 0.05 : 0.035;
           const intensityMod = getIntensityModifier(keyword, content);
           emotionalWeight += baseWeight * intensityMod;
+          tagFound = true;
+          break;
         }
-        break;
       }
+      // If all matches of this pattern were negated, fall through to the next
+      // pattern — lets single-word fallbacks try different keywords.
     }
   }
   score += emotionalWeight;
@@ -472,17 +497,18 @@ export function detectEmotionalTags(content: string): EmotionalTag[] {
   const tags: Array<{ tag: EmotionalTag; confidence: number }> = [];
 
   for (const [tag, patterns] of Object.entries(EMOTIONAL_PATTERNS)) {
-    for (let pi = 0; pi < patterns.length; pi++) {
-      const match = content.match(patterns[pi]);
-      if (match) {
+    let tagFound = false;
+    for (let pi = 0; pi < patterns.length && !tagFound; pi++) {
+      const regex = new RegExp(patterns[pi].source, patterns[pi].flags.replace("g", "") + "g");
+      for (const match of content.matchAll(regex)) {
         const keyword = match[1] || match[0];
         if (!isNegatedOrSarcastic(keyword, content)) {
-          // Earlier pattern = higher confidence (compound > single-word)
           const confidence = pi < patterns.length - 1 ? 0.8 : 0.5;
           const intensityMod = getIntensityModifier(keyword, content);
           tags.push({ tag: tag as EmotionalTag, confidence: confidence * intensityMod });
+          tagFound = true;
+          break;
         }
-        break;
       }
     }
   }

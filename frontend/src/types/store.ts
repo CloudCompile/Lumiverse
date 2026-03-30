@@ -866,6 +866,23 @@ export interface OperatorSlice {
   clearOperatorLogs: () => void
 }
 
+// ---- Floating Avatar Slice ----
+export interface FloatingAvatarState {
+  imageUrl: string
+  displayName: string
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface FloatingAvatarSlice {
+  floatingAvatar: FloatingAvatarState | null
+  openFloatingAvatar: (imageUrl: string, displayName: string) => void
+  updateFloatingAvatar: (partial: Partial<FloatingAvatarState>) => void
+  closeFloatingAvatar: () => void
+}
+
 // ---- Combined Store ----
 export type AppStore = ChatSlice &
   CharactersSlice &
@@ -890,4 +907,5 @@ export type AppStore = ChatSlice &
   ImageGenConnectionsSlice &
   LoadoutsSlice &
   MigrationSlice &
-  OperatorSlice
+  OperatorSlice &
+  FloatingAvatarSlice

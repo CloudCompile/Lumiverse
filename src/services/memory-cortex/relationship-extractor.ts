@@ -47,7 +47,7 @@ const DIRECTED_VERB_PATTERNS: Array<{ pattern: RegExp; signal: VerbSignal }> = [
 
   // Cooperative
   { pattern: /\b(helped|aided|assisted|supported|backed|covered|joined|accompanied|followed)\b/i, signal: { type: "ally", sentiment: 0.4, label: "cooperative" } },
-  { pattern: /\b(trusted|relied\s+on|counted\s+on|believed\s+in)\b/i, signal: { type: "ally", sentiment: 0.5, label: "trust" } },
+  { pattern: /\b(trusts?|trusted|relied?\s+on|counts?\s+on|counted\s+on|believes?\s+in|believed\s+in)\b/i, signal: { type: "ally", sentiment: 0.5, label: "trust" } },
 
   // Shared experience / companionship
   { pattern: /\b(walked\s+(?:with|beside|alongside)|traveled\s+with|sat\s+(?:beside|next\s+to|with)|ate\s+with|drank\s+with|shared\s+(?:a\s+)?(?:meal|drink|fire|camp|tent|room|bed))\b/i, signal: { type: "ally", sentiment: 0.3, label: "companionship" } },
@@ -80,7 +80,7 @@ const DIRECTED_VERB_PATTERNS: Array<{ pattern: RegExp; signal: VerbSignal }> = [
   { pattern: /\b(taught|trained|mentored|guided|showed|explained\s+to|lectured)\b/i, signal: { type: "mentor", sentiment: 0.3, label: "teacher" } },
 
   // Fear
-  { pattern: /\b(feared|dreaded|was\s+afraid\s+of|cowered\s+(?:from|before)|flinched\s+(?:from|at))\b/i, signal: { type: "fears", sentiment: -0.3, label: "fears" } },
+  { pattern: /\b(fears?|feared|dreads?|dreaded|was\s+afraid\s+of|cowered?\s+(?:from|before)|flinch(?:ed|es)?\s+(?:from|at))\b/i, signal: { type: "fears", sentiment: -0.3, label: "fears" } },
 ];
 
 // ─── Relational Noun Patterns ──────────────────────────────────
@@ -148,8 +148,8 @@ export function extractRelationshipsHeuristic(
         }
       }
 
-      // 2. Relational nouns: "Source's [relation]" where Target is nearby
-      if (i < j) { // Only check one direction for possessive
+      // 2. Relational nouns: "Source's [relation]" or "Target's [relation]" nearby
+      if (i < j) { // Only process each pair once — function checks both directions
         const nounRels = detectRelationalNouns(source, target, content);
         for (const rel of nounRels) {
           const key = `${rel.source}→${rel.target}:${rel.type}`;
@@ -228,9 +228,10 @@ function detectVerbMediated(
   const tgtEsc = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
   for (const { pattern, signal } of DIRECTED_VERB_PATTERNS) {
-    // "Source [verb] Target" — direct adjacency (within ~60 chars)
+    // "Source [verb] Target" — tight window (0-2 words between verb and target)
+    // to avoid cross-entity false positives in multi-entity scenes.
     const directPattern = new RegExp(
-      `${srcEsc}\\s+${pattern.source}\\s+(?:\\w+\\s+){0,4}${tgtEsc}`,
+      `${srcEsc}\\s+${pattern.source}\\s+(?:\\w+\\s+){0,2}${tgtEsc}`,
       "i",
     );
     if (directPattern.test(content)) {
@@ -271,54 +272,58 @@ function detectRelationalNouns(
   content: string,
 ): HeuristicRelationship[] {
   const results: HeuristicRelationship[] = [];
-  const esc1 = name1.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const esc2 = name2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-  for (const { pattern, type, sentiment } of RELATIONAL_NOUNS) {
-    // "Name1's [relation]" near Name2 (within ~100 chars)
-    // "Melina's brother" near "Caesar" → Caesar is Melina's brother
-    const possPattern = new RegExp(
-      `${esc1}[''\u2019]s\\s+${pattern.source}`,
-      "i",
-    );
-    if (possPattern.test(content)) {
-      // Check if name2 is within 150 chars of this possessive
-      const matchIdx = content.search(possPattern);
-      if (matchIdx >= 0) {
-        const searchWindow = content.slice(Math.max(0, matchIdx - 80), matchIdx + 150);
-        if (searchWindow.toLowerCase().includes(name2.toLowerCase())) {
-          const nounMatch = content.match(possPattern);
-          const relNoun = nounMatch ? nounMatch[0].split(/[''\u2019]s\s+/)[1] : type;
-          results.push({
-            source: name2, // Caesar IS Melina's brother
-            target: name1,
-            type,
-            label: relNoun?.toLowerCase() || type,
-            sentiment,
-            confidence: 0.7,
-          });
+  // Check BOTH directions: "name1's [relation]" near name2,
+  // AND "name2's [relation]" near name1.
+  const pairs: [string, string][] = [[name1, name2], [name2, name1]];
+
+  for (const [possessor, other] of pairs) {
+    const escPoss = possessor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    for (const { pattern, type, sentiment } of RELATIONAL_NOUNS) {
+      // "Possessor's [relation]" near Other
+      const possPattern = new RegExp(
+        `${escPoss}[''\u2019]s\\s+${pattern.source}`,
+        "i",
+      );
+      if (possPattern.test(content)) {
+        const matchIdx = content.search(possPattern);
+        if (matchIdx >= 0) {
+          const searchWindow = content.slice(Math.max(0, matchIdx - 40), matchIdx + 80);
+          if (searchWindow.toLowerCase().includes(other.toLowerCase())) {
+            const nounMatch = content.match(possPattern);
+            const relNoun = nounMatch ? nounMatch[0].split(/[''\u2019]s\s+/)[1] : type;
+            results.push({
+              source: other,   // Other IS Possessor's [relation]
+              target: possessor,
+              type,
+              label: relNoun?.toLowerCase() || type,
+              sentiment,
+              confidence: 0.7,
+            });
+          }
         }
       }
-    }
 
-    // "[relation] of Name1" near Name2 — "the mentor of Melina"
-    const ofPattern = new RegExp(
-      `\\b${pattern.source}\\s+of\\s+${esc1}`,
-      "i",
-    );
-    if (ofPattern.test(content)) {
-      const matchIdx = content.search(ofPattern);
-      if (matchIdx >= 0) {
-        const searchWindow = content.slice(Math.max(0, matchIdx - 80), matchIdx + 150);
-        if (searchWindow.toLowerCase().includes(name2.toLowerCase())) {
-          results.push({
-            source: name2,
-            target: name1,
-            type,
-            label: type,
-            sentiment,
-            confidence: 0.65,
-          });
+      // "[relation] of Possessor" near Other
+      const ofPattern = new RegExp(
+        `\\b${pattern.source}\\s+of\\s+${escPoss}`,
+        "i",
+      );
+      if (ofPattern.test(content)) {
+        const matchIdx = content.search(ofPattern);
+        if (matchIdx >= 0) {
+          const searchWindow = content.slice(Math.max(0, matchIdx - 40), matchIdx + 80);
+          if (searchWindow.toLowerCase().includes(other.toLowerCase())) {
+            results.push({
+              source: other,
+              target: possessor,
+              type,
+              label: type,
+              sentiment,
+              confidence: 0.65,
+            });
+          }
         }
       }
     }
@@ -363,6 +368,9 @@ function detectCoordinatedAction(
   return null;
 }
 
+/** Indicators that an endearment is being used mockingly/sarcastically */
+const MOCKING_CONTEXT = /\b(mock(?:ing|ingly)?|sarcas(?:m|tic(?:ally)?)|dryly?|contempt(?:uous(?:ly)?)?|sneer(?:ed|ing)?|taunt(?:ed|ing)?|cruel(?:ly)?|cold(?:ly)?|venom(?:ous)?|bitter(?:ly)?|hiss(?:ed)?|spat)\b/i;
+
 function detectTermsOfAddress(
   speaker: string,
   target: string,
@@ -371,32 +379,64 @@ function detectTermsOfAddress(
   const spkEsc = speaker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const tgtEsc = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-  // Speaker says endearment near target: "said to Target" + endearment in quote
-  // Or: endearment in dialogue + speaker attribution + target nearby
+  // Speaker says endearment — tight scoping to prevent false positives.
+  // Only matches if target appears within 100 chars FORWARD of the
+  // dialogue+speaker attribution (no backward scan).
   const speakerDialogue = new RegExp(
-    `[""\u201C][^""\u201D]*${ENDEARMENT_TERMS.source}[^""\u201D]*[""\u201D][^.]*${spkEsc}`,
+    `[""\u201C][^""\u201D]*${ENDEARMENT_TERMS.source}[^""\u201D]*[""\u201D][^.]{0,15}${spkEsc}`,
     "i",
   );
   if (speakerDialogue.test(content)) {
-    // Check target is within 200 chars
     const matchIdx = content.search(speakerDialogue);
-    const window = content.slice(Math.max(0, matchIdx - 100), matchIdx + 250);
+    const match = content.match(speakerDialogue);
+    const matchEnd = matchIdx + (match?.[0]?.length || 0);
+
+    // Forward-only window: from dialogue start to 80 chars past the speaker name
+    const window = content.slice(matchIdx, Math.min(content.length, matchEnd + 80));
+
+    // If the speaker has a specific addressee ("said to Pul", "told Pul"),
+    // only that entity qualifies as target — prevents leaking to nearby entities.
+    // If the speaker has a specific addressee ("said to Pul", "called at Kael"),
+    // only that entity qualifies as target.
+    const specificAddressee = window.match(
+      new RegExp(`${spkEsc}\\s+(?:said|told|whispered|called|murmured|spoke)\\s+(?:\\w+\\s+){0,3}(?:to|at)\\s+(\\w+)`, "i"),
+    );
+    if (specificAddressee) {
+      if (specificAddressee[1].toLowerCase() !== target.split(/\s+/)[0].toLowerCase()) return null;
+    }
+
     if (window.toLowerCase().includes(target.toLowerCase())) {
+      const isMocking = MOCKING_CONTEXT.test(window);
       return {
         source: speaker, target,
-        type: "lover", label: "endearment", sentiment: 0.6, confidence: 0.5,
+        type: isMocking ? "enemy" : "lover",
+        label: isMocking ? "mocking endearment" : "endearment",
+        sentiment: isMocking ? -0.4 : 0.6,
+        confidence: 0.5,
       };
     }
   }
 
-  // Speaker says hostility near target
+  // Speaker says hostility near target — same tight forward-only scoping
   const hostileDialogue = new RegExp(
-    `[""\u201C][^""\u201D]*${HOSTILITY_TERMS.source}[^""\u201D]*[""\u201D][^.]*${spkEsc}`,
+    `[""\u201C][^""\u201D]*${HOSTILITY_TERMS.source}[^""\u201D]*[""\u201D][^.]{0,15}${spkEsc}`,
     "i",
   );
   if (hostileDialogue.test(content)) {
     const matchIdx = content.search(hostileDialogue);
-    const window = content.slice(Math.max(0, matchIdx - 100), matchIdx + 250);
+    const match = content.match(hostileDialogue);
+    const matchEnd = matchIdx + (match?.[0]?.length || 0);
+
+    const window = content.slice(matchIdx, Math.min(content.length, matchEnd + 80));
+
+    // Same specific-addressee check for hostility
+    const specificAddressee = window.match(
+      new RegExp(`${spkEsc}\\s+(?:shouted|snarled|yelled|screamed|spat|hissed|snapped)\\s+(?:at\\s+)?(\\w+)`, "i"),
+    );
+    if (specificAddressee) {
+      if (specificAddressee[1].toLowerCase() !== target.split(/\s+/)[0].toLowerCase()) return null;
+    }
+
     if (window.toLowerCase().includes(target.toLowerCase())) {
       return {
         source: speaker, target,

@@ -11,6 +11,7 @@ import ReasoningBlock from './ReasoningBlock'
 import StreamingIndicator from './StreamingIndicator'
 import BubbleActions from './BubbleActions'
 import LazyImage from '@/components/shared/LazyImage'
+import { useStore } from '@/store'
 import type { Message } from '@/types/api'
 import styles from './BubbleMessage.module.css'
 import clsx from 'clsx'
@@ -36,6 +37,7 @@ export interface BubbleMessageDefaultProps {
   reasoningDuration: number | undefined
   tokenCount: number | undefined
   avatarUrl: string | null
+  fullAvatarUrl: string | null
   displayName: string
   macroUserName: string
   isHidden: boolean
@@ -61,10 +63,12 @@ export default function BubbleMessageDefault({
   message, chatId, depth, isSelectMode, isSelected, onToggleSelect,
   isEditing, editContent, setEditContent, editReasoning, setEditReasoning, showReasoningEditor,
   isUser, isActivelyStreaming, displayContent, reasoning, reasoningDuration,
-  tokenCount, avatarUrl, displayName, macroUserName, isHidden, userLeft,
+  tokenCount, avatarUrl, fullAvatarUrl, displayName, macroUserName, isHidden, userLeft,
   handleEdit, handleSaveEdit, handleCancelEdit, handleDelete, handleToggleHidden,
   handleFork, handlePromptBreakdown,
 }: BubbleMessageDefaultProps) {
+  const openFloatingAvatar = useStore((s) => s.openFloatingAvatar)
+
   return (
     <div
       className={clsx(
@@ -91,7 +95,11 @@ export default function BubbleMessageDefault({
       <div className={styles.bubble}>
         <div className={styles.header}>
           <div className={styles.headerLeft}>
-            <div className={styles.avatar}>
+            <div
+              className={styles.avatar}
+              style={fullAvatarUrl ? { cursor: 'pointer' } : undefined}
+              onClick={fullAvatarUrl ? (e) => { e.stopPropagation(); openFloatingAvatar(fullAvatarUrl, displayName) } : undefined}
+            >
               {avatarUrl ? (
                 <LazyImage
                   src={avatarUrl}

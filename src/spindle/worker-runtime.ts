@@ -634,7 +634,7 @@ const spindleApi: SpindleAPI = {
     async getCurrent(userId?: string): Promise<{
       id: string; name: string; mode: "light" | "dark";
       accent: { h: number; s: number; l: number };
-      enableGlass: boolean; radiusScale: number; fontScale: number; characterAware: boolean;
+      enableGlass: boolean; radiusScale: number; fontScale: number; uiScale: number; characterAware: boolean;
     }> {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "theme_get_current", requestId, userId });

@@ -4698,6 +4698,7 @@ export class WorkerHost {
           enableGlass: themeConfig?.enableGlass ?? true,
           radiusScale: themeConfig?.radiusScale ?? 1,
           fontScale: themeConfig?.fontScale ?? 1,
+          uiScale: themeConfig?.uiScale ?? 1,
           characterAware: !!themeConfig?.characterAware,
         },
       });

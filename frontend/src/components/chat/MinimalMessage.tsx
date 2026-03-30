@@ -37,6 +37,7 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
     reasoning,
     reasoningDuration,
     avatarUrl,
+    fullAvatarUrl,
     displayName,
     macroUserName,
     isHidden,
@@ -49,6 +50,7 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
   } = useMessageCard(message, chatId)
 
   const openModal = useStore((s) => s.openModal)
+  const openFloatingAvatar = useStore((s) => s.openFloatingAvatar)
   const handlePromptBreakdown = useCallback(() => {
     openModal('promptItemizer', { messageId: message.id })
   }, [openModal, message.id])
@@ -69,7 +71,11 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
       onClick={isSelectMode ? onToggleSelect : undefined}
     >
       {/* Avatar */}
-      <div className={styles.avatar}>
+      <div
+        className={styles.avatar}
+        style={fullAvatarUrl ? { cursor: 'pointer' } : undefined}
+        onClick={fullAvatarUrl ? (e) => { e.stopPropagation(); openFloatingAvatar(fullAvatarUrl, displayName) } : undefined}
+      >
         <LazyImage
           src={avatarUrl}
           alt={displayName}

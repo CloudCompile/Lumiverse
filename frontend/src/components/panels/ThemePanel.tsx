@@ -74,6 +74,11 @@ export default function ThemePanel() {
     [update]
   )
 
+  const handleUiScaleChange = useCallback(
+    (uiScale: number) => update({ uiScale }),
+    [update]
+  )
+
   const resolvedMode = resolveMode(current)
 
   const handleBaseColorsChange = useCallback(
@@ -153,9 +158,11 @@ export default function ThemePanel() {
           radiusScale={current.radiusScale}
           enableGlass={current.enableGlass}
           fontScale={current.fontScale}
+          uiScale={current.uiScale ?? 1}
           onRadiusChange={handleRadiusChange}
           onGlassToggle={handleGlassToggle}
           onFontScaleChange={handleFontScaleChange}
+          onUiScaleChange={handleUiScaleChange}
         />
       </section>
 

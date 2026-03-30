@@ -752,23 +752,39 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   const chat = getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  // Gather character names for entity extraction (AI characters + user persona)
+  // Gather character names + description aliases for entity extraction
   const characterNames: string[] = [];
+  const aliasMaps: Map<string, string>[] = [];
   const character = getCharacter(userId, chat.character_id);
-  if (character) characterNames.push(character.name);
+  if (character) {
+    const normalized = memoryCortex.normalizeCharacterName(character.name);
+    characterNames.push(normalized);
+    aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, character.description, character.personality, character.scenario));
+  }
   if (chat.metadata?.character_ids) {
     for (const cid of chat.metadata.character_ids as string[]) {
       const ch = getCharacter(userId, cid);
-      if (ch && !characterNames.includes(ch.name)) characterNames.push(ch.name);
+      if (!ch) continue;
+      const normalized = memoryCortex.normalizeCharacterName(ch.name);
+      if (!characterNames.includes(normalized)) {
+        characterNames.push(normalized);
+        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, ch.description, ch.personality));
+      }
     }
   }
   try {
     const { resolvePersonaOrDefault } = require("../services/personas.service");
     const persona = resolvePersonaOrDefault(userId);
-    if (persona?.name && !characterNames.includes(persona.name)) {
-      characterNames.push(persona.name);
+    if (persona?.name) {
+      const normalized = memoryCortex.normalizeCharacterName(persona.name);
+      if (!characterNames.includes(normalized)) {
+        characterNames.push(normalized);
+        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, persona.description));
+      }
     }
   } catch { /* non-fatal */ }
+  // Merge with collision detection (safe for group chats)
+  const descriptionAliases = memoryCortex.mergeDescriptionAliases(...aliasMaps);
 
   // Build sidecar adapter if Tier 2 is configured
   const cortexConfig = memoryCortex.getCortexConfig(userId);
@@ -812,6 +828,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   memoryCortex.rebuildCortex(
     userId, chatId, characterNames, generateRawFn, sidecarConnectionId,
     // Progress callback: streams WS events to the client
+    // (onProgress is the next arg, descriptionAliases is after)
     (current, total) => {
       eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
         chatId,
@@ -821,6 +838,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
         percent: Math.round((current / total) * 100),
       }, userId);
     },
+    descriptionAliases.size > 0 ? descriptionAliases : undefined,
   ).then((result) => {
     eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
       chatId,

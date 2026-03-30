@@ -316,6 +316,10 @@ export function generateThemeVariables(
   // Font scale: always set so UI updates immediately in both directions.
   vars['--lumiverse-font-scale'] = `${fs}`
 
+  // UI scale: CSS zoom on body for full UI magnification.
+  const us = config.uiScale ?? 1
+  vars['--lumiverse-ui-scale'] = `${us}`
+
   // ── Chat Sheld glass tokens ──
   if (isDark) {
     vars['--lcs-glass-bg'] = glass ? hsla(h, bgSat, 6, 0.55) : hsla(h, bgSat, 10, 0.97)

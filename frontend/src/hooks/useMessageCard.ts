@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
-import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getCharacterAvatarUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
 import { imagesApi } from '@/api/images'
 import type { Message } from '@/types/api'
 
@@ -124,6 +124,16 @@ export function useMessageCard(message: Message, chatId: string) {
     : (activeChatAvatarId && effectiveCharId === activeCharacterId)
       ? getImageUrl(activeChatAvatarId)
       : getCharAvatarUrl(effectiveCharId, effectiveCharacter?.image_id ?? null)
+
+  // Full-size avatar URL for lightbox/floating viewer (no resize)
+  const fullAvatarUrl = isUser
+    ? getPersonaAvatarUrlById(
+        userPersonaId ?? activePersona?.id ?? null,
+        messagePersona?.image_id ?? activePersona?.image_id ?? null
+      )
+    : (activeChatAvatarId && effectiveCharId === activeCharacterId)
+      ? imagesApi.url(activeChatAvatarId)
+      : getCharacterAvatarUrlById(effectiveCharId, effectiveCharacter?.image_id ?? null)
 
   const macroUserName = useMemo(() => {
     const fallback = activePersona?.name ?? 'User'
@@ -285,6 +295,7 @@ export function useMessageCard(message: Message, chatId: string) {
     reasoningDuration,
     tokenCount,
     avatarUrl,
+    fullAvatarUrl,
     displayName,
     macroUserName,
     isHidden,

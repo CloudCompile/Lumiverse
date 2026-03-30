@@ -283,7 +283,7 @@ function resolveAliasesInResult(
 
   const resolve = (name: string) => aliasMap.get(name.toLowerCase()) || name;
 
-  // Resolve entity names and deduplicate (e.g., "Pulchra" + "Pul" both → "Pulchra Fellini")
+  // Resolve entity names and deduplicate (merge alias variants into canonical form)
   const seenEntities = new Map<string, (typeof result.entitiesPresent)[0]>();
   for (const entity of result.entitiesPresent) {
     const resolved = resolve(entity.name);
@@ -692,15 +692,14 @@ function isValidEntityName(name: string): boolean {
   if (words.length > 1 && !words.some((w) => /^[A-Z]/.test(w))) return false;
 
   // ALL-CAPS single words are emphasis/shouting, not proper nouns
-  // (proper nouns are title-cased: "Melina", not "MELINA")
+  // (proper nouns are title-cased in prose, not ALL-CAPS)
   if (words.length === 1 && trimmed.length > 1 && /^[A-Z]+$/.test(trimmed)) return false;
 
   // Single-word: reject known verbs, expletives, adjectives, common nouns
   if (words.length === 1) {
     if (SIDECAR_SINGLE_REJECT.has(trimmed.toLowerCase())) return false;
-    // Suffix patterns that strongly indicate non-entity (adverbs, abstract nouns, adjectives)
-    // Only for words ≥6 chars to avoid rejecting short names
     const lower = trimmed.toLowerCase();
+    // Suffix patterns: adverbs, abstract nouns, adjectives (≥6 chars)
     if (trimmed.length >= 6 && /(?:ly|ness|ment|ful|less|ously|ively|ably|ibly|ally)$/.test(lower)) return false;
   }
 

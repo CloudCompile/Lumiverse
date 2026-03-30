@@ -24,6 +24,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const isNearBottomRef = useRef(true)
+  const isProgrammaticScrollRef = useRef(false)
   const rafRef = useRef<number>(0)
   const { visibleMessages, hasMore, loadMore, loadingOlder, justPrependedRef } = useChunkedMessages(messages, chatId)
   const lastScrollHeightRef = useRef(0)
@@ -115,10 +116,17 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     return () => observer.disconnect()
   }, [hasMore, loadMore])
 
-  // Track if user is near bottom
+  // Track if user is near bottom — only update pin state for user-initiated
+  // scrolls so that programmatic auto-scrolls don't fight user intent.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+
+    if (isProgrammaticScrollRef.current) {
+      isProgrammaticScrollRef.current = false
+      return
+    }
+
     const threshold = 150
     isNearBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < threshold
@@ -134,6 +142,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       justPrependedRef.current = false
       const heightDiff = el.scrollHeight - lastScrollHeightRef.current
       if (heightDiff > 0 && lastScrollHeightRef.current > 0) {
+        isProgrammaticScrollRef.current = true
         el.scrollTop += heightDiff
       }
     }
@@ -141,7 +150,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     lastScrollHeightRef.current = el.scrollHeight
   })
 
-  // RAF-batched auto-scroll during streaming
+  // RAF-batched auto-scroll during streaming — skipped when user scrolls up
   useEffect(() => {
     if (!isNearBottomRef.current) return
 
@@ -149,6 +158,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     rafRef.current = requestAnimationFrame(() => {
       const el = scrollRef.current
       if (el) {
+        isProgrammaticScrollRef.current = true
         el.scrollTop = el.scrollHeight
       }
     })
@@ -156,10 +166,12 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     return () => cancelAnimationFrame(rafRef.current)
   }, [messages.length, streamingContent])
 
-  // Scroll to bottom on chat change
+  // Scroll to bottom on chat change — always pin when switching chats
   useEffect(() => {
     const el = scrollRef.current
     if (el) {
+      isNearBottomRef.current = true
+      isProgrammaticScrollRef.current = true
       el.scrollTop = el.scrollHeight
     }
   }, [chatId])

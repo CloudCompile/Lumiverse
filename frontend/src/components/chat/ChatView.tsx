@@ -17,6 +17,7 @@ import CouncilPill from './CouncilPill'
 import LumiPill from './LumiPill'
 import PortraitPanel from './PortraitPanel'
 import ExpressionDisplay from './expressions/ExpressionDisplay'
+import FloatingAvatarViewer from './FloatingAvatarViewer'
 import styles from './ChatView.module.css'
 import clsx from 'clsx'
 
@@ -330,6 +331,7 @@ export default function ChatView() {
         )}
       </div>
       <ExpressionDisplay />
+      <FloatingAvatarViewer />
     </div>
   )
 }

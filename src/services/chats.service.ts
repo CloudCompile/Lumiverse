@@ -1239,26 +1239,44 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
     if (chunk) {
       const chat = getChat(userId, chatId);
       const characterNames: string[] = [];
+      const aliasMaps: Map<string, string>[] = [];
       if (chat) {
         const character = getCharacter(userId, chat.character_id);
-        if (character) characterNames.push(character.name);
-        // Group chat: add all character names
+        if (character) {
+          // Normalize sloppy bot-card names to extract the real character name
+          const normalized = memoryCortex.normalizeCharacterName(character.name);
+          characterNames.push(normalized);
+          aliasMaps.push(memoryCortex.extractDescriptionAliases(
+            normalized, character.description, character.personality, character.scenario,
+          ));
+        }
+        // Group chat: add all character names + extract aliases
         if (chat.metadata?.character_ids) {
           for (const cid of chat.metadata.character_ids as string[]) {
             const c = getCharacter(userId, cid);
-            if (c && !characterNames.includes(c.name)) characterNames.push(c.name);
+            if (!c) continue;
+            const normalized = memoryCortex.normalizeCharacterName(c.name);
+            if (!characterNames.includes(normalized)) {
+              characterNames.push(normalized);
+              aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, c.description, c.personality));
+            }
           }
         }
-        // User's persona: the player character. Critical for entity detection —
-        // without this, the user's name (e.g., "Prolix") won't get auto-tagged as character.
+        // User's persona
         try {
           const { resolvePersonaOrDefault } = require("./personas.service");
           const persona = resolvePersonaOrDefault(userId);
-          if (persona?.name && !characterNames.includes(persona.name)) {
-            characterNames.push(persona.name);
+          if (persona?.name) {
+            const normalized = memoryCortex.normalizeCharacterName(persona.name);
+            if (!characterNames.includes(normalized)) {
+              characterNames.push(normalized);
+              aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, persona.description));
+            }
           }
         } catch { /* non-fatal */ }
       }
+      // Merge aliases with collision detection (safe for group chats)
+      const descriptionAliases = memoryCortex.mergeDescriptionAliases(...aliasMaps);
 
       // Resolve sidecar connection for Tier 2 features (LLM-assisted extraction).
       const cortexConfig = memoryCortex.getCortexConfig(userId);
@@ -1319,6 +1337,7 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
         characterNames,
         generateRawFn,
         sidecarConnectionId,
+        descriptionAliases.size > 0 ? descriptionAliases : undefined,
       ).catch(err => {
         console.warn("[chats] Memory cortex processing failed:", err);
       });

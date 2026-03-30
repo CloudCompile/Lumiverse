@@ -127,6 +127,19 @@ const COMMON_ENGLISH = new Set([
   "throw", "touch", "trade", "train", "transfer", "travel", "treat",
   "trust", "twist", "urge", "warn", "waste", "wear", "win", "wonder",
   "wrap",
+  // Roleplay action verbs (base forms — stem checker catches -ing/-ed variants)
+  "advance", "announce", "approach", "arrive", "beg", "bow", "charge",
+  "choke", "clench", "clutch", "collapse", "compromise", "confuse",
+  "cough", "crouch", "curse", "devastate",
+  "dare", "dash", "disappear", "emerge", "embrace", "exhaust",
+  "flinch", "gasp", "gaze", "gesture", "glare", "grasp", "groan",
+  "growl", "grunt", "hesitate", "hiss", "howl", "kneel", "lunge",
+  "march", "moan", "mutter", "nod", "pace", "peer", "plead", "plunge",
+  "point", "pounce", "recover", "recoil", "retreat", "roam", "scan",
+  "scatter", "scowl", "scream", "seize", "shatter", "shout", "shriek",
+  "shudder", "slam", "snarl", "snatch", "sneer", "sob", "sprint",
+  "stagger", "stomp", "stumble", "surrender", "swear", "tense",
+  "tremble", "vanish", "wander", "weep", "wince", "yell",
   // ── Expletives / interjections ──
   "fuck", "shit", "damn", "hell", "crap", "bloody", "bastard", "bitch",
   "god", "christ", "jesus", "ugh", "hmm", "huh", "wow", "oh", "ah",
@@ -290,12 +303,91 @@ const COMMON_ENGLISH = new Set([
   "wonder", "wood", "word", "work", "world", "wound",
 ]);
 
+// ─── Title / Rank / Honorific Prefixes ────────────────────────
+// When one of these words appears at a clause boundary followed by a title-cased
+// word, include BOTH in the NP. This preserves identity-carrying titles that
+// distinguish between entities sharing the same surname.
+
+const TITLE_PREFIXES = new Set([
+  // Military / law enforcement
+  "agent", "officer", "private", "corporal", "sergeant", "lieutenant",
+  "captain", "major", "colonel", "general", "admiral", "commander",
+  "commodore", "marshal", "constable", "deputy", "sheriff", "inspector",
+  "detective", "chief", "ensign", "cadet",
+  // Nobility / royalty
+  "king", "queen", "prince", "princess", "emperor", "empress",
+  "duke", "duchess", "baron", "baroness", "count", "countess",
+  "lord", "lady", "sir", "dame", "knight", "squire",
+  // Religious
+  "father", "mother", "brother", "sister", "priest", "bishop",
+  "cardinal", "pope", "reverend", "pastor", "elder", "abbot", "abbess",
+  // Academic / professional
+  "doctor", "professor", "chancellor", "dean", "judge", "senator",
+  "governor", "president", "director", "minister", "ambassador",
+  "councilor", "secretary", "chairman", "chairwoman", "nurse",
+  // Honorifics (full + abbreviated forms)
+  "mr", "mrs", "ms", "miss", "mister", "madame", "madam",
+  "dr", "prof", "sgt", "lt", "cpt", "cpl", "pvt", "gen",
+  "col", "cmdr", "adm", "rev", "gov", "sen",
+  // Fantasy / RPG
+  "master", "mistress", "warden", "keeper", "guardian", "sentinel",
+  "ranger", "scout", "champion", "overlord", "archon",
+]);
+
+/** Suffixes that follow a name and carry identity (generational, professional) */
+const NAME_SUFFIXES = new Set(["jr", "sr", "esq"]);
+
 // ─── Suffix Patterns ──────────────────────────────────────────
 // Morphological patterns that strongly indicate a word is NOT a proper noun.
-// Applied to single-word candidates ≥6 chars that weren't caught by
-// the COMMON_ENGLISH set (backup for less frequent words).
+// Applied to single-word candidates that weren't caught by COMMON_ENGLISH.
 
+/** Adjective/adverb/abstract noun suffixes — applied at ≥6 chars */
 const NOT_PROPER_NOUN_SUFFIX = /(?:ly|ness|ment|ful|less|ously|ively|ably|ibly|ally)$/;
+
+/**
+ * Check if a word ending in -ing or -ed is an inflected form of a common word.
+ * Uses stem extraction + cross-inflection lookup against COMMON_ENGLISH.
+ *
+ * Verb forms are rejected when the stem is a known common word.
+ * Surnames ending in -ing/-ed are preserved when the stem is NOT a common word.
+ */
+function isInflectedCommonWord(lower: string): boolean {
+  if (lower.endsWith("ing") && lower.length >= 7) {
+    const stem = lower.slice(0, -3);
+    if (COMMON_ENGLISH.has(stem)) return true;           // walk → known
+    if (COMMON_ENGLISH.has(stem + "e")) return true;     // danc → dance
+    if (COMMON_ENGLISH.has(stem + "ed")) return true;    // scream → screamed
+    if (COMMON_ENGLISH.has(stem + "s")) return true;     // scream → screams
+    // Doubled consonant: running → runn → run
+    if (stem.length >= 3 && stem[stem.length - 1] === stem[stem.length - 2]) {
+      const short = stem.slice(0, -1);
+      if (COMMON_ENGLISH.has(short)) return true;
+      if (COMMON_ENGLISH.has(short + "ed")) return true;
+    }
+    return false;
+  }
+
+  if (lower.endsWith("ed") && lower.length >= 7) {
+    const stem = lower.slice(0, -2);
+    if (COMMON_ENGLISH.has(stem)) return true;           // climb → known
+    if (COMMON_ENGLISH.has(stem + "e")) return true;     // creat → create
+    if (COMMON_ENGLISH.has(stem + "ing")) return true;   // climb → climbing
+    if (COMMON_ENGLISH.has(stem + "s")) return true;     // climb → climbs
+    // Doubled consonant: stopped → stopp → stop
+    if (stem.length >= 3 && stem[stem.length - 1] === stem[stem.length - 2]) {
+      const short = stem.slice(0, -1);
+      if (COMMON_ENGLISH.has(short)) return true;
+      if (COMMON_ENGLISH.has(short + "ing")) return true;
+    }
+    // -ied → -y: carried → carri → carry
+    if (lower.endsWith("ied")) {
+      if (COMMON_ENGLISH.has(lower.slice(0, -3) + "y")) return true;
+    }
+    return false;
+  }
+
+  return false;
+}
 
 // ─── Verb Markers ─────────────────────────────────────────────
 // Crude but domain-appropriate for subject-position detection in English SVO
@@ -323,10 +415,12 @@ export function extractNPCandidates(tokens: string[]): string[] {
   // ── Pre-scan: build a set of words that appear in lowercase form ──
   // If a word appears lowercase ANYWHERE in the chunk, it's a common English
   // word — the capitalized occurrence is just clause-initial or emphatic.
-  // Proper nouns only ever appear capitalized ("Melina" never appears as "melina").
+  // Proper nouns only ever appear capitalized; common words appear in both forms.
   const lowercaseWords = new Set<string>();
   for (const t of tokens) {
-    const c = t.replace(/[.,;:!?"''"\u201C\u201D\u2018\u2019()\[\]{}]+$/g, "");
+    const c = t
+      .replace(/[.,;:!?"''"\u201C\u201D\u2018\u2019()\[\]{}]+$/g, "")
+      .replace(/[''\u2019]s$/i, "");
     // Original token starts with lowercase letter → record as common word
     if (c && /^[a-z]/.test(c)) {
       lowercaseWords.add(c.toLowerCase());
@@ -335,12 +429,23 @@ export function extractNPCandidates(tokens: string[]): string[] {
 
   const candidates: string[] = [];
   let current: string[] = [];
+  // When a title lookahead succeeds, the name
+  // that follows must be force-included even though "Mrs." ends with a period
+  // that makes the next token look like a clause-start.
+  let forceIncludeNext = false;
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    // Strip trailing punctuation for classification but keep original for output
-    const cleaned = token.replace(/[.,;:!?"''"\u201C\u201D\u2018\u2019()\[\]{}]+$/g, "");
+    // Strip leading quotes, trailing punctuation, and possessive 's.
+    // Leading quotes stripped so dialogue-initial words like "Captain are
+    // recognized as title-cased. Possessive stripped to yield canonical form
+    // (the canonical name, not a variant). Raw token still used for clause detection.
+    const cleaned = token
+      .replace(/^["""\u201C\u201D''\u2018\u2019]+/, "")
+      .replace(/[.,;:!?"''"\u201C\u201D\u2018\u2019()\[\]{}]+$/g, "")
+      .replace(/[''\u2019]s$/i, "");
     if (!cleaned) {
+      forceIncludeNext = false;
       if (current.length > 0) {
         candidates.push(current.join(" "));
         current = [];
@@ -352,6 +457,7 @@ export function extractNPCandidates(tokens: string[]): string[] {
     const lower = cleaned.toLowerCase().replace(/[\u2018\u2019\u02BC\u0060\u00B4\u2032'']/g, "'");
 
     if (CLOSED_CLASS.has(lower)) {
+      forceIncludeNext = false;
       if (current.length > 0) {
         candidates.push(current.join(" "));
         current = [];
@@ -361,6 +467,7 @@ export function extractNPCandidates(tokens: string[]): string[] {
 
     // ── Clause/sentence boundary detection ──
     // Capitalization after these boundaries is unreliable (structural, not semantic).
+    // Uses raw token (not cleaned) so quote markers are still visible.
     const prevToken = tokens[i - 1] ?? "";
     const isClauseStart = i === 0
       || /[.!?]\s*$/.test(prevToken)              // sentence-ending punctuation
@@ -369,12 +476,69 @@ export function extractNPCandidates(tokens: string[]): string[] {
       || /[""\u201C\u201D]\s*$/.test(prevToken)    // after closing/opening quote
       || /^[""\u201C]/.test(token);                // token starts with opening quote
 
+    // ── Comma boundary ──
+    // Commas separate noun phrases in English. If the previous raw token ends
+    // with a comma, flush the accumulated NP — commas delimit noun phrases.
+    if (current.length > 0 && /,[^a-zA-Z]*$/.test(prevToken)) {
+      candidates.push(current.join(" "));
+      current = [];
+    }
+
+    // ── Force-include after title/suffix lookahead ──
+    // When a title prefix (e.g., "Mrs.") was included in the previous iteration,
+    // the NEXT token is the name — include it regardless of clause-start status.
+    // "Mrs." ends with "." which makes "Smith" look like a sentence start, but
+    // the title lookahead already confirmed it's a title+name pair.
+    if (forceIncludeNext) {
+      forceIncludeNext = false;
+      if (/^[A-Z][a-z]/.test(cleaned)) {
+        current.push(cleaned);
+        continue;
+      }
+      // Not title-cased — fall through to normal handling
+    }
+
     // ── Title-cased mid-clause words qualify as proper noun candidates ──
-    // Must start with uppercase FOLLOWED BY lowercase: "Melina" yes, "COST" no.
-    // ALL-CAPS words are emphasis/shouting in roleplay, not proper nouns.
+    // Must be title-cased (uppercase + lowercase). ALL-CAPS = emphasis, not a name.
     if (!isClauseStart && /^[A-Z][a-z]/.test(cleaned)) {
       current.push(cleaned);
+      // Title abbreviation lookahead: "Mrs." / "Dr." / "Prof." end with a period
+      // that makes the NEXT token falsely appear to be a clause start. When this
+      // word is a known title and the raw token ends with ".", force-include the
+      // following name so abbreviated titles and their names stay together.
+      if (TITLE_PREFIXES.has(lower) && /\.$/.test(token)) {
+        forceIncludeNext = true;
+      }
       continue;
+    }
+
+    // ── Clause-initial lookahead: title prefixes and name suffixes ──
+    // At clause boundaries, capitalization is normally unreliable. BUT two
+    // patterns justify inclusion:
+    //   1. Known title/rank + proper noun → title-name pair
+    //   2. Proper noun + generational suffix → name-suffix pair
+    // Always flush accumulated NP first — clause start = new phrase.
+    if (isClauseStart && /^[A-Z][a-z]/.test(cleaned)) {
+      if (current.length > 0) {
+        candidates.push(current.join(" "));
+        current = [];
+      }
+      const nextCleaned = peekNextCleaned(tokens, i);
+      const nextLower = nextCleaned.toLowerCase();
+
+      // Pattern 1: Title prefix + proper noun
+      if (TITLE_PREFIXES.has(lower) && /^[A-Z][a-z]/.test(nextCleaned)) {
+        current.push(cleaned);
+        forceIncludeNext = true;
+        continue;
+      }
+
+      // Pattern 2: Name + generational suffix (Jr, Sr, Esq)
+      if (!COMMON_ENGLISH.has(lower) && !lowercaseWords.has(lower) && NAME_SUFFIXES.has(nextLower)) {
+        current.push(cleaned);
+        forceIncludeNext = true;
+        continue;
+      }
     }
 
     // Anything else (clause-start, all-caps, lowercase) flushes the current NP
@@ -391,6 +555,15 @@ export function extractNPCandidates(tokens: string[]): string[] {
   // Deduplicate, filter, and validate quality
   const unique = [...new Set(candidates)].filter((c) => c.length > 1);
   return unique.filter((c) => isValidNPCandidate(c, lowercaseWords));
+}
+
+/** Peek at the next token's cleaned form (for lookahead without advancing the index). */
+function peekNextCleaned(tokens: string[], i: number): string {
+  const next = tokens[i + 1];
+  if (!next) return "";
+  return next
+    .replace(/^["""\u201C\u201D''\u2018\u2019]+/, "")
+    .replace(/[.,;:!?"''"\u201C\u201D\u2018\u2019()\[\]{}]+$/g, "");
 }
 
 /**
@@ -428,6 +601,10 @@ function isValidNPCandidate(candidate: string, lowercaseWords: Set<string>): boo
     // Suffix-based backup for words not in the dictionary
     // Only for words ≥6 chars to avoid rejecting short names (e.g., "Lily" = 4 chars)
     if (candidate.length >= 6 && NOT_PROPER_NOUN_SUFFIX.test(lower)) return false;
+
+    // Stem-based verb inflection filter — rejects -ing/-ed words whose stem is
+    // a known common word, while preserving surnames whose stems aren't common words
+    if (isInflectedCommonWord(lower)) return false;
   }
 
   return true;

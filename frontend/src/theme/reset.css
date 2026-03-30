@@ -29,7 +29,9 @@ html {
 }
 
 body {
-  height: 100%;
+  width: calc(100% / var(--lumiverse-ui-scale, 1));
+  height: calc(100% / var(--lumiverse-ui-scale, 1));
+  zoom: var(--lumiverse-ui-scale, 1);
   overflow: hidden;
   overscroll-behavior: none;
   font-family: var(--lumiverse-font-family);
@@ -93,9 +95,15 @@ ol {
   flex-direction: column;
 }
 
-html[data-pwa],
-html[data-pwa] body,
-html[data-pwa] #root {
+html[data-pwa] {
   width: var(--app-viewport-width);
   height: var(--app-shell-height);
+}
+html[data-pwa] body {
+  width: calc(var(--app-viewport-width) / var(--lumiverse-ui-scale, 1));
+  height: calc(var(--app-shell-height) / var(--lumiverse-ui-scale, 1));
+}
+html[data-pwa] #root {
+  width: 100%;
+  height: 100%;
 }

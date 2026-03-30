@@ -24,6 +24,7 @@ import { createImageGenConnectionsSlice } from './slices/image-gen-connections'
 import { createLoadoutsSlice } from './slices/loadouts'
 import { createMigrationSlice } from './slices/migration'
 import { createOperatorSlice } from './slices/operator'
+import { createFloatingAvatarSlice } from './slices/floating-avatar'
 
 export const useStore = create<AppStore>()((...a) => ({
   ...createChatSlice(...a),
@@ -50,4 +51,5 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createLoadoutsSlice(...a),
   ...createMigrationSlice(...a),
   ...createOperatorSlice(...a),
+  ...createFloatingAvatarSlice(...a),
 }))

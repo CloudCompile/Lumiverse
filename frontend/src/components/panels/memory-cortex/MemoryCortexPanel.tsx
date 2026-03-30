@@ -577,14 +577,7 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
               );
             })()}
             {drill === "salience" && drillData.map((s: any) => (
-              <DrillRecord key={s.id} lines={[
-                { label: "Score", value: `${(s.score * 100).toFixed(0)}%` },
-                { label: "Source", value: s.score_source },
-                { label: "Preview", value: (s.chunk_content || "").slice(0, 180) + ((s.chunk_content || "").length > 180 ? "..." : "") },
-                { label: "Flags", value: (() => { try { return JSON.parse(s.narrative_flags || "[]").join(", ") || "none"; } catch { return "none"; } })() },
-                { label: "Dialogue", value: s.has_dialogue ? "yes" : "no" },
-                { label: "Words", value: s.word_count },
-              ]} tags={(() => { try { return JSON.parse(s.emotional_tags || "[]"); } catch { return []; } })()} />
+              <SalienceDrillRecord key={s.id} record={s} />
             ))}
             {drill === "entities" && drillData.map((e: CortexEntity) => (
               <DrillRecord key={e.id} lines={[
@@ -656,80 +649,227 @@ function StatCard({
   );
 }
 
+// ─── Emotion Tag Colors ──────────────────────────────────────
+
+const EMOTION_COLORS: Record<string, string> = {
+  grief: "#6366f1",
+  joy: "#22c55e",
+  tension: "#f59e0b",
+  dread: "#7c3aed",
+  intimacy: "#ec4899",
+  betrayal: "#dc2626",
+  revelation: "#06b6d4",
+  resolve: "#0ea5e9",
+  humor: "#84cc16",
+  melancholy: "#8b5cf6",
+  awe: "#a855f7",
+  fury: "#ef4444",
+};
+
+const RELATION_TYPE_COLORS: Record<string, string> = {
+  ally: "#22c55e",
+  enemy: "#ef4444",
+  rival: "#f59e0b",
+  lover: "#ec4899",
+  mentor: "#06b6d4",
+  fears: "#7c3aed",
+  serves: "#0ea5e9",
+  parent: "#8b5cf6",
+  child: "#a855f7",
+  sibling: "#6366f1",
+  member_of: "#14b8a6",
+  located_in: "#64748b",
+  owns: "#d97706",
+  custom: "#94a3b8",
+};
+
+// ─── Salience Drill Record ────────────────────────────────────
+
+function SalienceDrillRecord({ record: s }: { record: any }) {
+  const score = s.score ?? 0;
+  const preview = (s.chunk_content || "").slice(0, 200) + ((s.chunk_content || "").length > 200 ? "..." : "");
+  const emotionalTags: string[] = (() => { try { return JSON.parse(s.emotional_tags || "[]"); } catch { return []; } })();
+  const narrativeFlags: string[] = (() => { try { return JSON.parse(s.narrative_flags || "[]"); } catch { return []; } })();
+  const scoreColor = score >= 0.7 ? "#22c55e" : score >= 0.4 ? "#f59e0b" : "#94a3b8";
+
+  return (
+    <div className={styles.drillRecord}>
+      {/* Score header bar */}
+      <div className={styles.salienceRecordHeader}>
+        <div className={styles.salienceScoreSection}>
+          <div className={styles.salienceScoreBar}>
+            <div
+              className={styles.salienceScoreFill}
+              style={{ width: `${Math.min(100, score * 100)}%`, background: scoreColor }}
+            />
+          </div>
+          <span className={styles.salienceScoreValue} style={{ color: scoreColor }}>
+            {(score * 100).toFixed(0)}%
+          </span>
+        </div>
+        <span className={clsx(
+          styles.sourceBadge,
+          s.score_source === "sidecar" && styles.sourceBadgeSidecar,
+        )}>
+          {s.score_source || "heuristic"}
+        </span>
+      </div>
+
+      {/* Structural signals */}
+      <div className={styles.salienceSignals}>
+        {s.has_dialogue ? <span className={styles.signalActive}>dialogue</span> : <span className={styles.signalDim}>no dialogue</span>}
+        {s.has_action ? <span className={styles.signalActive}>action</span> : null}
+        {s.has_internal_thought ? <span className={styles.signalActive}>thought</span> : null}
+        <span className={styles.signalDim}>{s.word_count} words</span>
+      </div>
+
+      {/* Emotional tags */}
+      {emotionalTags.length > 0 && (
+        <div className={styles.salienceTagSection}>
+          {emotionalTags.map((tag) => (
+            <span
+              key={tag}
+              className={styles.emotionTagColored}
+              style={{
+                borderColor: `color-mix(in srgb, ${EMOTION_COLORS[tag] || "var(--lumiverse-primary)"} 35%, transparent)`,
+                background: `color-mix(in srgb, ${EMOTION_COLORS[tag] || "var(--lumiverse-primary)"} 10%, transparent)`,
+                color: EMOTION_COLORS[tag] || "var(--lumiverse-primary)",
+              }}
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Narrative flags */}
+      {narrativeFlags.length > 0 && (
+        <div className={styles.salienceTagSection}>
+          {narrativeFlags.map((flag) => (
+            <span key={flag} className={styles.narrativeFlagTag}>
+              {flag.replace(/_/g, " ")}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Preview */}
+      {preview && (
+        <div className={styles.saliencePreview}>
+          {preview}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Relation Drill Record ────────────────────────────────────
 
 function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
   const contradictionFlag = r.contradictionFlag ?? "none";
   const hasContradiction = contradictionFlag !== "none";
   const edgeSalience = r.edgeSalience ?? r.strength ?? 0;
+  const sentiment = r.sentiment ?? 0;
   const sentimentRange = r.sentimentRange;
   const aliases = r.labelAliases ?? [];
+  const typeColor = RELATION_TYPE_COLORS[r.relationType] || "#94a3b8";
+  const sentColor = sentiment > 0.2 ? "#22c55e" : sentiment < -0.2 ? "#ef4444" : "#94a3b8";
+  // Sentiment bar: maps -1..+1 to 0%..100% (50% = neutral center)
+  const sentBarPos = ((sentiment + 1) / 2) * 100;
 
   return (
     <div className={styles.drillRecord}>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Edge</span>
-        <span className={styles.drillLineValue}>
-          {r.sourceName || (r.sourceEntityId ?? "").slice(0, 8)} → {r.targetName || (r.targetEntityId ?? "").slice(0, 8)}
+      {/* Edge header with type badge */}
+      <div className={styles.relationHeader}>
+        <span className={styles.relationEdge}>
+          <span className={styles.relationEntityName}>{r.sourceName || (r.sourceEntityId ?? "").slice(0, 8)}</span>
+          <span className={styles.relationArrow}>→</span>
+          <span className={styles.relationEntityName}>{r.targetName || (r.targetEntityId ?? "").slice(0, 8)}</span>
+        </span>
+        <span
+          className={styles.relationTypeBadge}
+          style={{
+            borderColor: `color-mix(in srgb, ${typeColor} 40%, transparent)`,
+            background: `color-mix(in srgb, ${typeColor} 12%, transparent)`,
+            color: typeColor,
+          }}
+        >
+          {r.relationType}
         </span>
       </div>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Type</span>
-        <span className={styles.drillLineValue}>{r.relationType}</span>
-      </div>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Label</span>
-        <span className={styles.drillLineValue}>{r.relationLabel || "—"}</span>
-      </div>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Strength</span>
-        <span className={styles.drillLineValue}>{((r.strength ?? 0) * 100).toFixed(0)}%</span>
-      </div>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Edge salience</span>
-        <span className={styles.edgeSalienceBar}>
-          <span className={styles.edgeSalienceTrack}>
-            <span className={styles.edgeSalienceFill} style={{ width: `${Math.min(100, edgeSalience * 100)}%` }} />
-          </span>
-          <span className={styles.edgeSalienceLabel}>{(edgeSalience * 100).toFixed(0)}%</span>
-        </span>
-      </div>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Sentiment</span>
-        <span className={styles.drillLineValue}>
-          {(r.sentiment ?? 0) > 0 ? `+${(r.sentiment ?? 0).toFixed(2)}` : (r.sentiment ?? 0).toFixed(2)}
-          {sentimentRange && (
-            <span className={styles.sentimentRangeLabel}>
-              {" "}[{sentimentRange[0].toFixed(1)}..{sentimentRange[1].toFixed(1)}]
+
+      {/* Label + strength */}
+      <div className={styles.relationBody}>
+        {r.relationLabel && (
+          <div className={styles.drillLine}>
+            <span className={styles.drillLineLabel}>Label</span>
+            <span className={styles.drillLineValue}>{r.relationLabel}</span>
+          </div>
+        )}
+
+        {/* Sentiment gradient bar */}
+        <div className={styles.drillLine}>
+          <span className={styles.drillLineLabel}>Sentiment</span>
+          <span className={styles.sentimentBarContainer}>
+            <span className={styles.sentimentTrack}>
+              <span className={styles.sentimentCenter} />
+              <span
+                className={styles.sentimentIndicator}
+                style={{ left: `${sentBarPos}%`, background: sentColor }}
+              />
             </span>
-          )}
-        </span>
-      </div>
-      <div className={styles.drillLine}>
-        <span className={styles.drillLineLabel}>Evidence</span>
-        <span className={styles.drillLineValue}>{(r.evidenceChunkIds || []).length} chunks</span>
-      </div>
-      {hasContradiction && (
-        <div className={styles.relationMeta}>
-          <span className={clsx(
-            styles.contradictionBadge,
-            contradictionFlag === "complex" && styles.contradictionComplex,
-            contradictionFlag === "suspect" && styles.contradictionSuspect,
-            contradictionFlag === "temporal" && styles.contradictionTemporal,
-          )}>
-            <AlertTriangle size={9} />
-            {contradictionFlag}
+            <span className={styles.sentimentValue} style={{ color: sentColor }}>
+              {sentiment > 0 ? "+" : ""}{sentiment.toFixed(2)}
+            </span>
+            {sentimentRange && (
+              <span className={styles.sentimentRangeLabel}>
+                [{sentimentRange[0].toFixed(1)}..{sentimentRange[1].toFixed(1)}]
+              </span>
+            )}
           </span>
         </div>
-      )}
-      {aliases.length > 0 && (
-        <div className={styles.relationMeta}>
-          <span className={styles.drillLineLabel}>Also called</span>
-          <div className={styles.labelAliasList}>
-            {aliases.map((a, i) => (
-              <span key={i} className={styles.labelAlias}>{a}</span>
-            ))}
-          </div>
+
+        {/* Strength + edge salience */}
+        <div className={styles.drillLine}>
+          <span className={styles.drillLineLabel}>Strength</span>
+          <span className={styles.edgeSalienceBar}>
+            <span className={styles.edgeSalienceTrack}>
+              <span className={styles.edgeSalienceFill} style={{ width: `${Math.min(100, edgeSalience * 100)}%` }} />
+            </span>
+            <span className={styles.edgeSalienceLabel}>{(edgeSalience * 100).toFixed(0)}%</span>
+          </span>
+        </div>
+
+        <div className={styles.drillLine}>
+          <span className={styles.drillLineLabel}>Evidence</span>
+          <span className={styles.drillLineValue}>{(r.evidenceChunkIds || []).length} chunks</span>
+        </div>
+      </div>
+
+      {/* Footer: contradiction flags + aliases */}
+      {(hasContradiction || aliases.length > 0) && (
+        <div className={styles.relationFooter}>
+          {hasContradiction && (
+            <span className={clsx(
+              styles.contradictionBadge,
+              contradictionFlag === "complex" && styles.contradictionComplex,
+              contradictionFlag === "suspect" && styles.contradictionSuspect,
+              contradictionFlag === "temporal" && styles.contradictionTemporal,
+            )}>
+              <AlertTriangle size={9} />
+              {contradictionFlag}
+            </span>
+          )}
+          {aliases.length > 0 && (
+            <>
+              <span className={styles.drillLineLabel}>Also called</span>
+              <div className={styles.labelAliasList}>
+                {aliases.map((a, i) => (
+                  <span key={i} className={styles.labelAlias}>{a}</span>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
