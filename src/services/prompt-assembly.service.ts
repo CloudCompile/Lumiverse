@@ -236,11 +236,13 @@ interface PendingAppend {
  * Falls back to legacy simple message mapping if no preset/blocks are found.
  */
 export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResult> {
-  // ---- Load data ----
-  const chat = chatsSvc.getChat(ctx.userId, ctx.chatId);
+  const pf = ctx.prefetched; // shorthand for prefetched data
+
+  // ---- Load data (use prefetched when available, fallback to DB) ----
+  const chat = pf?.chat ?? chatsSvc.getChat(ctx.userId, ctx.chatId);
   if (!chat) throw new Error("Chat not found");
 
-  const allMessages = chatsSvc.getMessages(ctx.userId, ctx.chatId);
+  const allMessages = pf?.messages ?? chatsSvc.getMessages(ctx.userId, ctx.chatId);
   // Filter out the excluded message (e.g. regenerate/swipe target with a blank swipe)
   // so it doesn't appear in macros, WI scanning, or any assembly path.
   const messages = ctx.excludeMessageId
@@ -248,20 +250,20 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     : allMessages;
   // For group chats, resolve the target character; fall back to the chat's primary character
   const characterId = ctx.targetCharacterId || chat.character_id;
-  const character = charactersSvc.getCharacter(ctx.userId, characterId);
+  const character = pf?.character ?? charactersSvc.getCharacter(ctx.userId, characterId);
   if (!character) throw new Error("Character not found");
 
-  const persona = personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+  const persona = pf?.persona !== undefined ? pf.persona : personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
 
   // Resolve connection
-  const connection = ctx.connectionId
+  const connection = pf?.connection !== undefined ? pf.connection : (ctx.connectionId
     ? connectionsSvc.getConnection(ctx.userId, ctx.connectionId)
-    : connectionsSvc.getDefaultConnection(ctx.userId);
+    : connectionsSvc.getDefaultConnection(ctx.userId));
 
   // Resolve preset: request presetId takes priority, then connection's preset_id
   const resolvedPresetId = ctx.presetId || connection?.preset_id;
-  let preset: Preset | null = null;
-  if (resolvedPresetId) {
+  let preset: Preset | null = pf?.preset !== undefined ? pf.preset : null;
+  if (!pf && resolvedPresetId) {
     preset = presetsSvc.getPreset(ctx.userId, resolvedPresetId);
   }
 
@@ -292,24 +294,24 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     return await legacyAssembly(messages, ctx.generationType, character, persona, chat, connection, ctx.userId);
   }
 
-  // ---- Pre-flight: kick off cortex retrieval concurrently ----
-  // Start memory cortex as a non-blocking promise so it runs in parallel with
-  // WI activation and macro setup below. By the time we need the result, cortex
-  // has had several hundred milliseconds of concurrent execution time.
-  const cortexConfig = memoryCortex.getCortexConfig(ctx.userId);
-  let cortexPromise: Promise<memoryCortex.CortexResult | null> | null = null;
+  // ---- Pre-flight: kick off background cortex cache refresh ----
+  // Memory cortex runs as a true sidecar — it never blocks generation.
+  // We fire a background query to warm the cache for the *next* generation,
+  // and read the cached result (from a previous query) for the current one.
+  const cortexConfig = pf?.cortexConfig ?? memoryCortex.getCortexConfig(ctx.userId);
   let cortexChatMemSettings: import("./embeddings.service").ChatMemorySettings | null = null;
   let cortexPerChatOverrides: import("./embeddings.service").PerChatMemoryOverrides | null = null;
 
   if (cortexConfig.enabled) {
-    const cmRaw = settingsSvc.getSetting(ctx.userId, "chatMemorySettings")?.value ?? null;
+    const cmRaw = pf?.allSettings.get("chatMemorySettings") ?? settingsSvc.getSetting(ctx.userId, "chatMemorySettings")?.value ?? null;
     cortexChatMemSettings = cmRaw ? embeddingsSvc.normalizeChatMemorySettings(cmRaw) : null;
     cortexPerChatOverrides = (chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null;
 
-    // Fire immediately — the async IIFE resolves settings then queries cortex.
-    // .catch() ensures failures never propagate; we fall back to vector search.
-    cortexPromise = (async () => {
-      const embCfg = await embeddingsSvc.getEmbeddingConfig(ctx.userId);
+    // Fire-and-forget: query cortex in the background. The result auto-caches
+    // inside queryCortex() so future generations can read it non-blockingly.
+    // The .catch() ensures failures never propagate.
+    (async () => {
+      const embCfg = pf?.embeddingConfig ?? await embeddingsSvc.getEmbeddingConfig(ctx.userId);
       const effective = cortexChatMemSettings
         ? embeddingsSvc.resolveEffectiveChatMemorySettings(cortexChatMemSettings, embCfg)
         : embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS;
@@ -329,18 +331,17 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
       }, cortexConfig);
     })().catch(err => {
-      console.warn("[prompt-assembly] Cortex retrieval failed, will use vector fallback:", err);
-      return null;
+      console.warn("[prompt-assembly] Background cortex refresh failed:", err);
     });
   }
 
   // ---- World Info activation ----
-  const globalWorldBooks = (settingsSvc.getSetting(ctx.userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
+  const globalWorldBooks = (pf?.allSettings.get("globalWorldBooks") ?? settingsSvc.getSetting(ctx.userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
   const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
-  const wiSources = collectWorldInfoSources(ctx.userId, character, persona, globalWorldBooks, chatWorldBookIds);
+  const wiSources = pf?.worldInfoSources ?? collectWorldInfoSources(ctx.userId, character, persona, globalWorldBooks, chatWorldBookIds);
   const wiEntries = wiSources.entries;
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
-  const worldInfoSettings = (settingsSvc.getSetting(ctx.userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
+  const worldInfoSettings = (pf?.allSettings.get("worldInfoSettings") ?? settingsSvc.getSetting(ctx.userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
   const wiResult = activateWorldInfo({
     entries: wiEntries,
     messages,
@@ -354,13 +355,20 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // When pre-computed results are available (from the generation pipeline's
   // council enrichment phase), reuse them to avoid redundant embedding queries.
   const vectorQueryPreview = await getWorldInfoVectorQueryPreview(ctx.userId, messages);
-  const vectorActivated = ctx.precomputedVectorEntries
-    ?? await collectVectorActivatedWorldInfo(
-      ctx.userId,
-      wiSources.worldBookIds,
-      wiEntries,
-      messages,
-    );
+  let vectorActivated = ctx.precomputedVectorEntries ?? null;
+  if (!vectorActivated) {
+    try {
+      vectorActivated = await collectVectorActivatedWorldInfo(
+        ctx.userId,
+        wiSources.worldBookIds,
+        wiEntries,
+        messages,
+      );
+    } catch (err) {
+      console.warn("[prompt-assembly] Vector world info activation failed, continuing with keyword-only:", err);
+      vectorActivated = [];
+    }
+  }
   const mergedWorldInfo = mergeActivatedWorldInfoEntries(
     wiResult.activatedEntries,
     vectorActivated,
@@ -392,12 +400,14 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // ---- Macro engine ----
   initMacros();
-  const groupCharacterNames = resolveGroupCharacterNames(chat, (cid) =>
-    charactersSvc.getCharacter(ctx.userId, cid)?.name);
+  const groupCharsMap = pf?.groupCharacters;
+  const resolveCharName = (cid: string) =>
+    groupCharsMap?.get(cid)?.name ?? charactersSvc.getCharacter(ctx.userId, cid)?.name;
+  const groupCharacterNames = resolveGroupCharacterNames(chat, resolveCharName);
   const mutedIds = chatsSvc.getGroupMutedIds(chat);
   const groupNotMutedNames = groupCharacterNames && mutedIds.length > 0
     ? resolveGroupCharacterNames(chat, (cid) =>
-        mutedIds.includes(cid) ? undefined : charactersSvc.getCharacter(ctx.userId, cid)?.name)
+        mutedIds.includes(cid) ? undefined : resolveCharName(cid))
     : undefined;
   // Resolve alternate field overrides from per-chat bindings, then group scenario override
   const effectiveCharacter = resolveGroupScenarioOverride(
@@ -419,8 +429,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     targetCharacterName: ctx.targetCharacterId ? effectiveCharacter.name : undefined,
   });
 
-  // Batch-load all settings needed for assembly in a single query
-  const settingsKeys = [
+  // Use prefetched settings or batch-load all needed settings in a single query
+  const settingsMap = pf?.allSettings ?? settingsSvc.getSettingsByKeys(ctx.userId, [
     "reasoningSettings",
     "selectedDefinition", "selectedBehaviors", "selectedPersonalities",
     "chimeraMode", "lumiaQuirks", "lumiaQuirksEnabled",
@@ -432,8 +442,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     "contextFilters",
     "summarization",
     "chatMemorySettings",
-  ];
-  const settingsMap = settingsSvc.getSettingsByKeys(ctx.userId, settingsKeys);
+    "council_settings",
+  ]);
 
   // Populate reasoning macros from user settings
   const reasoningVal = settingsMap.get("reasoningSettings");
@@ -465,14 +475,17 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     : null);
   const perChatOverrides = cortexPerChatOverrides ?? ((chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null);
 
-  // Memory Cortex: await the pre-flighted concurrent retrieval (started before WI activation).
-  // By now cortex has had the full WI + macro setup duration to execute in the background.
+  // Memory Cortex: read from the warm cache — fully non-blocking.
+  // The background query fired above will update the cache for the next generation.
+  // On the very first generation there's no cached result, so we fall back to
+  // pure vector retrieval (which is also the correct behavior since no chunks
+  // have been processed yet).
   let cortexResult: memoryCortex.CortexResult | null = null;
 
   let memoryResult: Awaited<ReturnType<typeof collectChatVectorMemory>>;
 
-  if (cortexConfig.enabled && cortexPromise) {
-    cortexResult = await cortexPromise;
+  if (cortexConfig.enabled) {
+    cortexResult = memoryCortex.getCachedCortexResult(ctx.chatId);
 
     if (cortexResult && cortexResult.memories.length > 0) {
       // Format cortex data using shadow prompt formatter
@@ -516,13 +529,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       };
     } else {
       // Cortex returned no results or failed — fall back to pure vector retrieval
-      memoryResult = await collectChatVectorMemory(
+      memoryResult = await safeCollectChatVectorMemory(
         ctx.userId, ctx.chatId, messages, chatMemSettings, perChatOverrides, ctx.excludeMessageId,
       );
     }
   } else {
     // Existing path: pure vector retrieval
-    memoryResult = await collectChatVectorMemory(
+    memoryResult = await safeCollectChatVectorMemory(
       ctx.userId, ctx.chatId, messages, chatMemSettings, perChatOverrides, ctx.excludeMessageId,
     );
   }
@@ -600,6 +613,24 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       // Insert chat messages — evaluate macros in each message's content
       // Skip messages marked as hidden drafts (extra.hidden === true)
       // (excludeMessageId is already filtered out at the top of assemblePrompt)
+      // Pre-resolve all attachment files in parallel so the per-message loop
+      // doesn't pay sequential file I/O costs per attachment.
+      const attachmentImageIds = new Set<string>();
+      for (const msg of effectiveMessages) {
+        if (msg.extra?.hidden === true) continue;
+        const atts = Array.isArray(msg.extra?.attachments) ? msg.extra.attachments : [];
+        for (const att of atts) {
+          if (att.image_id) attachmentImageIds.add(att.image_id);
+        }
+      }
+      const attachmentCache = new Map<string, string | null>();
+      if (attachmentImageIds.size > 0) {
+        const entries = await Promise.all(
+          [...attachmentImageIds].map(async (id) => [id, await resolveAttachmentBase64(ctx.userId, id)] as const)
+        );
+        for (const [id, b64] of entries) attachmentCache.set(id, b64);
+      }
+
       let historyCount = 0;
       const historyParts: string[] = [];
       for (const msg of effectiveMessages) {
@@ -612,7 +643,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
           // Build multipart content: text + attachment parts
           const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolvedContent }];
           for (const att of attachments) {
-            const b64 = await resolveAttachmentBase64(ctx.userId, att.image_id);
+            const b64 = attachmentCache.get(att.image_id) ?? null;
             if (!b64) continue;
             if (att.type === "image") {
               parts.push({ type: "image", data: b64, mime_type: att.mime_type });
@@ -2619,6 +2650,21 @@ function formatMemoryOutput(
   return settings.memoryHeaderTemplate.replace(/\{\{memories\}\}/g, joined);
 }
 
+/** Fault-tolerant wrapper: embedding timeouts or failures should never kill generation. */
+async function safeCollectChatVectorMemory(
+  ...args: Parameters<typeof collectChatVectorMemory>
+): Promise<Awaited<ReturnType<typeof collectChatVectorMemory>>> {
+  try {
+    return await collectChatVectorMemory(...args);
+  } catch (err) {
+    console.warn("[prompt-assembly] Chat vector memory retrieval failed, continuing without memories:", err);
+    return {
+      chunks: [], formatted: "", count: 0, enabled: false,
+      queryPreview: "", settingsSource: "global", chunksAvailable: 0, chunksPending: 0,
+    };
+  }
+}
+
 export async function collectChatVectorMemory(
   userId: string,
   chatId: string,
@@ -3524,7 +3570,7 @@ async function legacyAssembly(
   }
 
   if (userId && chat) {
-    const legacyMemoryResult = await collectChatVectorMemory(userId, chat.id, messages);
+    const legacyMemoryResult = await safeCollectChatVectorMemory(userId, chat.id, messages);
     if (legacyMemoryResult.count > 0) {
       const memoryContent = legacyMemoryResult.formatted;
       llmMessages.push({ role: "system", content: memoryContent });
@@ -3534,6 +3580,23 @@ async function legacyAssembly(
 
   // Chat history — evaluate macros in each message
   // Skip messages marked as hidden drafts (extra.hidden === true)
+  // Pre-resolve all attachment files in parallel (same pattern as main assembly)
+  const legacyAttachmentIds = new Set<string>();
+  for (const m of messages) {
+    if (m.extra?.hidden === true) continue;
+    const atts = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];
+    for (const att of atts) {
+      if (att.image_id) legacyAttachmentIds.add(att.image_id as string);
+    }
+  }
+  const legacyAttachmentCache = new Map<string, string | null>();
+  if (legacyAttachmentIds.size > 0 && userId) {
+    const entries = await Promise.all(
+      [...legacyAttachmentIds].map(async (id) => [id, await resolveAttachmentBase64(userId, id)] as const)
+    );
+    for (const [id, b64] of entries) legacyAttachmentCache.set(id, b64);
+  }
+
   const legacyFirstChatIdx = llmMessages.length;
   let legacyHistoryCount = 0;
   const legacyHistoryParts: string[] = [];
@@ -3546,7 +3609,7 @@ async function legacyAssembly(
       const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolved }];
       for (const att of attachments) {
         if (!att.image_id || !userId) continue;
-        const b64 = await resolveAttachmentBase64(userId, att.image_id as string);
+        const b64 = legacyAttachmentCache.get(att.image_id as string) ?? null;
         if (!b64) continue;
         if (att.type === "image") {
           parts.push({ type: "image", data: b64, mime_type: att.mime_type });

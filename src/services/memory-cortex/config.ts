@@ -87,6 +87,16 @@ export interface MemoryCortexConfig {
   /** Max tokens for all cortex-injected content */
   contextTokenBudget: number;
 
+  /** Max milliseconds to wait for cortex retrieval during prompt assembly.
+   *  If exceeded, generation falls back to plain vector search instead of stalling.
+   *  0 = no timeout (not recommended). Default: 8000 (8s). */
+  retrievalTimeoutMs: number;
+  /** Max milliseconds to wait for a sidecar LLM call (chunk ingestion,
+   *  consolidation). Prevents fire-and-forget promises from hanging indefinitely.
+   *  Set higher for thinking/reasoning models that need extended processing time.
+   *  0 = no timeout. Default: 60000 (60s). */
+  sidecarTimeoutMs: number;
+
   /** Retrieval pipeline tuning */
   retrieval: {
     /** Use multi-signal score fusion vs. pure vector similarity */
@@ -162,6 +172,8 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
   },
   formatterMode: "shadow",
   contextTokenBudget: 600,
+  retrievalTimeoutMs: 8000,
+  sidecarTimeoutMs: 60000,
   consolidation: { ...DEFAULT_CONSOLIDATION_CONFIG },
   retrieval: {
     useFusedScoring: true,
@@ -320,6 +332,8 @@ export function normalizeCortexConfig(
     },
     formatterMode: input.formatterMode ?? defaults.formatterMode,
     contextTokenBudget: input.contextTokenBudget ?? defaults.contextTokenBudget,
+    retrievalTimeoutMs: input.retrievalTimeoutMs ?? defaults.retrievalTimeoutMs,
+    sidecarTimeoutMs: input.sidecarTimeoutMs ?? defaults.sidecarTimeoutMs,
     consolidation: {
       enabled: input.consolidation?.enabled ?? defaults.consolidation.enabled,
       chunkThreshold: input.consolidation?.chunkThreshold ?? defaults.consolidation.chunkThreshold,

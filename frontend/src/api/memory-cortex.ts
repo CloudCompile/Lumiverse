@@ -20,6 +20,8 @@ export interface CortexConfig {
   };
   formatterMode: "shadow" | "attributed" | "clinical" | "minimal";
   contextTokenBudget: number;
+  retrievalTimeoutMs: number;
+  sidecarTimeoutMs: number;
   consolidation: {
     enabled: boolean;
     chunkThreshold: number;

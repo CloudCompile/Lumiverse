@@ -171,6 +171,15 @@ export function useLoomBuilder() {
     await saveStructure(blocks)
   }, [saveStructure])
 
+  // Rename a preset
+  const renamePreset = useCallback(async (presetId: string, newName: string) => {
+    await presetsApi.update(presetId, { name: newName })
+    await refreshRegistry()
+    if (activePreset && presetId === activeLoomPresetId) {
+      setActivePreset({ ...activePreset, name: newName })
+    }
+  }, [activePreset, activeLoomPresetId, refreshRegistry])
+
   // Delete a preset
   const deletePreset = useCallback(async (presetId: string) => {
     await presetsApi.delete(presetId)
@@ -445,6 +454,7 @@ export function useLoomBuilder() {
     saveBlocks,
     deletePreset,
     duplicatePreset,
+    renamePreset,
     refreshRegistry,
 
     // Block manipulation

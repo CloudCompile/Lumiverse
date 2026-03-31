@@ -7,6 +7,7 @@ export interface RegexScript {
   id: string;
   user_id: string;
   name: string;
+  script_id: string;
   find_regex: string;
   replace_string: string;
   flags: string;
@@ -31,6 +32,7 @@ export interface RegexScript {
 export interface CreateRegexScriptInput {
   name: string;
   find_regex: string;
+  script_id?: string;
   replace_string?: string;
   flags?: string;
   placement?: RegexPlacement[];

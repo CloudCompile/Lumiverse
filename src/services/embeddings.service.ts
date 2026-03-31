@@ -19,6 +19,9 @@ const LANCEDB_PATH = join(env.dataDir, "lancedb");
 const EMBEDDINGS_TABLE = "embeddings";
 const WORLD_BOOK_VECTOR_VERSION = 2;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
+/** Safety timeout for embedding API requests. Prevents a hanging upstream
+ *  server from stalling the entire generation pipeline. */
+const EMBEDDING_REQUEST_TIMEOUT_MS = 15_000; // 15 seconds
 
 export type EmbeddingProvider =
   | "openai-compatible"
@@ -786,14 +789,27 @@ async function requestEmbeddings(
   if (!options?.omitDimensions && cfg.send_dimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
 
   const url = resolveEmbeddingUrl(cfg.api_url);
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new Error(`Embedding request timed out after ${EMBEDDING_REQUEST_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const msg = await res.text().catch(() => "Embedding request failed");

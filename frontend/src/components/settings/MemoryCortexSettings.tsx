@@ -404,9 +404,14 @@ export default function MemoryCortexSettings() {
                   <span className={styles.infoLabel}>Parallel requests</span>
                   <input type="number" className={styles.numberInput} value={config.sidecar.rebuildConcurrency ?? 3} min={1} max={10} step={1} onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, rebuildConcurrency: parseInt(e.target.value) || 3 } })} />
                 </div>
+                <div className={styles.infoRow}>
+                  <span className={styles.infoLabel}>Sidecar timeout (seconds)</span>
+                  <input type="number" className={styles.numberInput} value={Math.round((config.sidecarTimeoutMs ?? 60000) / 1000)} min={0} max={300} step={5} onChange={(e) => updateConfig({ sidecarTimeoutMs: (parseInt(e.target.value) || 60) * 1000 })} />
+                </div>
                 <div className={styles.hintText}>
                   Chunks per request: how many memory chunks to analyze in a single LLM call. Higher = fewer API calls but larger prompts.
                   Parallel requests: how many LLM calls to run simultaneously during rebuild.
+                  Sidecar timeout: max wait per sidecar call. Increase for thinking/reasoning models that need more processing time. 0 = no limit.
                 </div>
               </>
             )}

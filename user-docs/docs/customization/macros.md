@@ -42,10 +42,14 @@ Current time: 14:30 on Wednesday.
 |----------|----------|-----------|
 | **Names** | `{{user}}`, `{{char}}`, `{{group}}` | [Identity macros](../presets/macros-reference.md#identity--names) |
 | **Character data** | `{{description}}`, `{{personality}}`, `{{scenario}}` | [Character macros](../presets/macros-reference.md#character-data) |
-| **Chat state** | `{{lastMessage}}`, `{{messageCount}}` | [Chat macros](../presets/macros-reference.md#chat--conversation) |
+| **Chat state** | `{{lastMessage}}`, `{{messageCount}}`, `{{messageAt::0}}` | [Chat macros](../presets/macros-reference.md#chat--conversation) |
+| **String** | `{{upper}}`, `{{replace}}`, `{{len}}`, `{{split}}` | [String macros](../presets/macros-reference.md#string-manipulation) |
+| **Math** | `{{calc::2+3}}`, `{{clamp}}`, `{{min}}`, `{{max}}` | [Math macros](../presets/macros-reference.md#math) |
+| **Logic** | `{{switch}}`, `{{default}}`, `{{and}}`, `{{not}}` | [Logic macros](../presets/macros-reference.md#logic--comparisons) |
 | **Random** | `{{random::1::100}}`, `{{pick::a::b::c}}`, `{{roll::2d6}}` | [Entropy macros](../presets/macros-reference.md#random--entropy) |
-| **Variables** | `{{getvar::key}}`, `{{setvar::key::value}}` | [Variable macros](../presets/macros-reference.md#variables) |
-| **Conditionals** | `{{if::condition}}...{{else}}...{{/if}}` | [Core macros](../presets/macros-reference.md#core-macros) |
+| **Variables** | `{{getvar::key}}`, `{{.var}}`, `{{$globalVar}}` | [Variable macros](../presets/macros-reference.md#variables) |
+| **Conditionals** | `{{if .var == 5}}...{{else}}...{{/if}}` | [Core macros](../presets/macros-reference.md#core-macros) |
+| **Formatting** | `{{bullets}}`, `{{numbered}}` | [Formatting macros](../presets/macros-reference.md#formatting) |
 | **Council & Lumia** | `{{lumiaCouncilDeliberation}}`, `{{loomStyle}}` | [Council macros](../presets/macros-reference.md#lumia--council) |
 
-Lumiverse has **117 built-in macros** across 14 categories. See the [full reference](../presets/macros-reference.md) for the complete list.
+Lumiverse has **150+ built-in macros** across 19 categories. See the [full reference](../presets/macros-reference.md) for the complete list.

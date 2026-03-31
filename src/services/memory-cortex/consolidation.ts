@@ -97,6 +97,7 @@ export async function maybeConsolidate(
     parameters: Record<string, any>;
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
+  sidecarTimeoutMs?: number,
 ): Promise<void> {
   if (!config.enabled) return;
 
@@ -122,11 +123,30 @@ export async function maybeConsolidate(
   let title: string | null = null;
 
   if (config.useSidecar && generateRawFn && sidecarConnectionId) {
-    const result = await generateConsolidationSummary(
+    // Time-bound the sidecar call to prevent hanging promises during consolidation.
+    // Timeout is user-configurable to accommodate thinking models.
+    const timeoutMs = sidecarTimeoutMs ?? 30_000;
+    const summaryPromise = generateConsolidationSummary(
       batch, generateRawFn, sidecarConnectionId, config.maxTokensPerSummary,
     );
-    summary = result.summary;
-    title = result.title;
+    const result = timeoutMs > 0
+      ? await Promise.race([
+          summaryPromise,
+          new Promise<null>((resolve) =>
+            setTimeout(() => {
+              console.warn(`[memory-cortex] Consolidation sidecar timed out after ${timeoutMs}ms, using extractive fallback`);
+              resolve(null);
+            }, timeoutMs),
+          ),
+        ])
+      : await summaryPromise;
+    if (result) {
+      summary = result.summary;
+      title = result.title;
+    } else {
+      summary = extractiveConsolidation(batch);
+      title = inferTitle(batch);
+    }
   } else {
     summary = extractiveConsolidation(batch);
     title = inferTitle(batch);
@@ -186,7 +206,7 @@ export async function maybeConsolidate(
   );
 
   // Check for arc-level consolidation
-  await maybeConsolidateArcs(userId, chatId, config, generateRawFn, sidecarConnectionId);
+  await maybeConsolidateArcs(userId, chatId, config, generateRawFn, sidecarConnectionId, sidecarTimeoutMs);
 }
 
 /**
@@ -203,6 +223,7 @@ async function maybeConsolidateArcs(
     parameters: Record<string, any>;
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
+  sidecarTimeoutMs?: number,
 ): Promise<void> {
   const db = getDb();
 
@@ -230,11 +251,28 @@ async function maybeConsolidateArcs(
 
   if (config.useSidecar && generateRawFn && sidecarConnectionId) {
     const combined = summaries.join("\n\n---\n\n");
-    const result = await generateArcSummary(
+    const timeoutMs = sidecarTimeoutMs ?? 30_000;
+    const arcPromise = generateArcSummary(
       combined, generateRawFn, sidecarConnectionId, config.maxTokensPerSummary,
     );
-    arcSummary = result.summary;
-    arcTitle = result.title;
+    const result = timeoutMs > 0
+      ? await Promise.race([
+          arcPromise,
+          new Promise<null>((resolve) =>
+            setTimeout(() => {
+              console.warn(`[memory-cortex] Arc consolidation sidecar timed out after ${timeoutMs}ms, using join fallback`);
+              resolve(null);
+            }, timeoutMs),
+          ),
+        ])
+      : await arcPromise;
+    if (result) {
+      arcSummary = result.summary;
+      arcTitle = result.title;
+    } else {
+      arcSummary = summaries.join(" ");
+      arcTitle = null;
+    }
   } else {
     arcSummary = summaries.join(" ");
     arcTitle = `Arc: Messages ${batch[0].message_range_start}-${batch[batch.length - 1].message_range_end}`;

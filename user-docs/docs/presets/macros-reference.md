@@ -18,7 +18,7 @@ During prompt assembly, each macro is replaced with its current value.
 
 ### Arguments
 
-Some macros accept arguments, separated by `::` (double colon):
+Some macros accept arguments, separated by `::` (double colon) **or spaces**:
 
 ```
 {{random::1::100}}          — random number between 1 and 100
@@ -26,8 +26,40 @@ Some macros accept arguments, separated by `::` (double colon):
 {{roll::2d6}}               — rolls two six-sided dice
 ```
 
-!!! warning "Always use `::` to pass arguments"
-    Arguments are separated by `::` (double colon). A space after the macro name does **not** separate arguments — `{{random 1 100}}` passes `"1 100"` as a single string, not two numbers. Always use `{{random::1::100}}`.
+**Space-delimited arguments** are also supported — each word becomes a separate argument:
+
+```
+{{upper hello}}             — same as {{upper::hello}}
+{{setvar key value}}        — same as {{setvar::key::value}}
+{{abs -5}}                  — same as {{abs::-5}}
+```
+
+!!! tip "When to use `::` vs spaces"
+    Use **spaces** for quick single-word arguments: `{{upper hello}}`, `{{floor 3.7}}`.
+    Use **`::`** when an argument contains spaces: `{{replace::hello world::goodbye world::text}}`.
+    You can mix both: `{{setvar key::long value with spaces}}`.
+
+### Variable Shorthand
+
+Access variables directly with `.` (local) or `$` (global) prefixes:
+
+```
+{{.myVar}}                  — same as {{getvar::myVar}}
+{{$theme}}                  — same as {{getgvar::theme}}
+{{.score = 100}}            — same as {{setvar::score::100}}
+{{.hp -= 25}}               — subtract 25 from hp
+{{.counter++}}              — increment by 1
+{{.counter--}}              — decrement by 1
+```
+
+Variable shorthands work inside conditions too:
+
+```
+{{if .myVar}}has a value{{/if}}
+{{if .score == 100}}perfect!{{/if}}
+{{if !.gameOver}}still playing{{/if}}
+{{if $theme == dark}}dark mode{{/if}}
+```
 
 ### Scoped Macros
 
@@ -80,7 +112,29 @@ Utility macros for text manipulation and flow control.
 {{/if}}
 ```
 
-The condition can be any macro that returns `"yes"` or `"true"`. Several macros are specifically designed to work as conditions — they're marked below.
+The condition can be any value — it's truthy unless it's empty, `"0"`, `"false"`, `"null"`, or `"undefined"`.
+
+**Negation** — prefix with `!` to invert:
+
+```
+{{if::!0}}yes{{/if}}                — "yes" (0 is falsy, negated → truthy)
+{{if::!{{hasvar::key}}}}missing{{/if}}
+```
+
+**Comparisons** — use `==`, `!=`, `>`, `<`, `>=`, `<=` inside the condition:
+
+```
+{{if::{{messageCount}} > 10}}long chat{{/if}}
+{{if::{{.score}} == 100}}perfect!{{/if}}
+```
+
+**Variable shorthand** — `.var` and `$var` resolve automatically in conditions:
+
+```
+{{if .myVar}}has a value{{/if}}
+{{if .x > .y}}x is bigger{{/if}}
+{{if !.gameOver}}still playing{{/if}}
+```
 
 ---
 
@@ -187,6 +241,211 @@ Macros for randomness and dice rolling.
 The weather today is {{pick::sunny::cloudy::rainy::stormy}}.
 A random number: {{random::1::100}}
 ```
+
+---
+
+## String Manipulation
+
+Transform, measure, and extract from text.
+
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{len::text}}` | `{{length}}` | Character count | Text (or scoped: `{{len}}text{{/len}}`) |
+| `{{upper::text}}` | `{{uppercase}}`, `{{toUpper}}` | Uppercased text | Text (or scoped) |
+| `{{lower::text}}` | `{{lowercase}}`, `{{toLower}}` | Lowercased text | Text (or scoped) |
+| `{{capitalize::text}}` | `{{titlecase}}` | First letter capitalized | Text (or scoped) |
+| `{{replace::find::with::text}}` | — | Text with replacements | Find, replacement, source (or scoped body) |
+| `{{substr::text::start::end}}` | `{{substring}}` | Substring | Source, start index, optional end index |
+| `{{split::text::delimiter::index}}` | — | Nth item from split | Source, delimiter, 0-based index (negative from end) |
+| `{{join::sep::a::b::...}}` | — | Joined string | Separator, then items |
+| `{{repeat::N::text}}` | — | Repeated text | Count (max 1000), text (or scoped) |
+| `{{wrap::prefix::suffix::text}}` | — | Wrapped text (empty if text is empty) | Prefix, suffix, text (or scoped) |
+| `{{regex::pattern::replacement::text}}` | — | Regex-replaced text | Pattern, replacement, text (or scoped), optional flags |
+| `{{tokenCount::text}}` | `{{token_count}}`, `{{tokens}}` | Approximate token count | Text (or scoped) |
+| `{{truncate::text::maxTokens}}` | — | Truncated text (word-boundary, adds `...`) | Text, max tokens |
+
+**Examples:**
+
+```
+{{upper::{{char}}}}                     — "BOB"
+{{len::{{description}}}}                — "234" (character count)
+{{replace::they::she::{{persona}}}}     — pronoun swap
+{{split::{{charTags}}::,::0}}           — first tag
+{{join::, ::{{char}}::{{user}}}}        — "Bob, Alice"
+{{repeat::3}}---{{newline}}{{/repeat}}  — three separator lines
+{{wrap::(**::**)::{{.note}}}}           — "(**important**)" or "" if empty
+{{regex::\b(he|him)\b::she/her::{{description}}}}
+```
+
+---
+
+## Math
+
+Arithmetic without intermediate variable gymnastics.
+
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{calc::expression}}` | `{{math}}`, `{{evaluate}}` | Result of `+ - * / % ()` | Expression string |
+| `{{min::a::b::...}}` | — | Smallest number | Two or more numbers |
+| `{{max::a::b::...}}` | — | Largest number | Two or more numbers |
+| `{{clamp::value::min::max}}` | — | Value clamped to range | Value, floor, ceiling |
+| `{{abs::value}}` | — | Absolute value | Number |
+| `{{floor::value}}` | — | Rounded down | Number |
+| `{{ceil::value}}` | — | Rounded up | Number |
+| `{{round::value::decimals}}` | — | Rounded to N decimal places | Number, optional decimal count (default 0) |
+| `{{mod::a::b}}` | — | Remainder of a / b | Dividend, divisor |
+
+**Examples:**
+
+```
+{{calc::{{messageCount}} * 2 + 1}}      — arithmetic with macros
+{{calc::({{.hp}} / {{.maxHp}}) * 100}}   — health percentage
+{{clamp::{{.score}}::0::100}}            — keep score in bounds
+{{max::{{.str}}::{{.dex}}}}              — highest stat
+{{round::3.14159::2}}                    — "3.14"
+```
+
+!!! note "Safe evaluator"
+    `{{calc}}` uses a sandboxed arithmetic parser — no `eval()`. Supports `+`, `-`, `*`, `/`, `%`, parentheses, unary minus, and decimal numbers. Division by zero returns `0`.
+
+---
+
+## Logic & Comparisons
+
+Composable boolean logic and multi-branch conditionals.
+
+### Branching
+
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{switch::value::c1::r1::c2::r2::default}}` | — | Matching result, or default | Value, then case/result pairs, optional default |
+| `{{default::value::fallback}}` | `{{fallback}}`, `{{coalesce}}` | First truthy value | Primary value, fallback |
+
+### Boolean Operators
+
+| Macro | Returns | Args |
+|-------|---------|------|
+| `{{and::a::b::...}}` | `"true"` if all args truthy, else `""` | Two or more values |
+| `{{or::a::b::...}}` | `"true"` if any arg truthy, else `""` | Two or more values |
+| `{{not::value}}` | `"true"` if value is falsy, else `""` | One value |
+
+### Comparison Operators
+
+| Macro | Returns |
+|-------|---------|
+| `{{eq::a::b}}` | `"true"` if equal (numeric-aware) |
+| `{{ne::a::b}}` | `"true"` if not equal |
+| `{{gt::a::b}}` | `"true"` if a > b |
+| `{{lt::a::b}}` | `"true"` if a < b |
+| `{{gte::a::b}}` | `"true"` if a >= b |
+| `{{lte::a::b}}` | `"true"` if a <= b |
+
+**Examples:**
+
+```
+{{switch::{{.mood}}::happy::😊::sad::😢::neutral}}
+
+{{default::{{.title}}::Stranger}}
+
+{{if::{{and::{{isGroupChat}}::{{lumiaCouncilModeActive}}}}}}
+  Group council is active.
+{{/if}}
+
+{{if::{{gt::{{messageCount}}::50}}}}
+  This is a long conversation.
+{{/if}}
+```
+
+!!! tip "`switch` vs nested `if`"
+    Instead of chaining `{{if}}...{{else}}{{if}}...` for multiple cases, use `{{switch}}`. It's cleaner and easier to read.
+
+---
+
+## Formatting
+
+Quick list formatting.
+
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{bullets::item1::item2::...}}` | — | `- item1\n- item2\n...` | Items via args, or newline-split body if scoped |
+| `{{numbered::item1::item2::...}}` | `{{ol}}`, `{{enumerate}}` | `1. item1\n2. item2\n...` | Items via args, or newline-split body if scoped |
+
+**Examples:**
+
+```
+{{bullets::{{char}}::{{user}}::{{group}}}}
+{{numbered}}
+Establish the scene
+Describe the character's action
+Include internal thoughts
+{{/numbered}}
+```
+
+---
+
+## Chat Utilities
+
+Access individual messages, track state, and query character metadata.
+
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{messageAt::index}}` | `{{message_at}}`, `{{msgAt}}` | Message content at index | 0-based index (negative counts from end) |
+| `{{messagesBy::name::count}}` | `{{messages_by}}`, `{{msgBy}}` | Last N messages from a speaker | Speaker name, optional count (default 3) |
+| `{{chatAge}}` | `{{chat_age}}` | Human-readable time since chat creation | — |
+| `{{counter::name}}` | — | Incremented value (1, 2, 3...) | Counter name (stored as local variable) |
+| `{{toggle::name}}` | — | Flipped boolean (`"true"` ↔ `"false"`) | Toggle name (stored as local variable) |
+| `{{charTags}}` | `{{char_tags}}`, `{{characterTags}}` | Comma-separated list of the character's tags | — |
+| `{{charTag::tag}}` | `{{char_tag}}`, `{{hasTag}}`, `{{has_tag}}` | `"true"` / `"false"` — whether character has this tag | Tag name (case-insensitive) |
+
+**Examples:**
+
+```
+{{messageAt::0}}                  — the first message (greeting)
+{{messageAt::-1}}                 — the most recent message
+{{messagesBy::{{char}}::3}}       — last 3 things the character said
+
+{{counter::scene_count}}          — auto-incrementing scene counter
+{{toggle::narrator_mode}}         — flip between narrator on/off
+
+{{if::{{charTag::fantasy}}}}
+Include world-building details.
+{{/if}}
+
+This chat started {{chatAge}} ago.
+```
+
+---
+
+## Regex Script References
+
+Call installed regex scripts by their **Script ID** — a stable, user-defined identifier you set on any regex script.
+
+Script IDs are auto-normalized: lowercase, spaces/hyphens become underscores, punctuation stripped. `"My Cool-Script!"` becomes `my_cool_script`.
+
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{regexInstalled::scriptId}}` | `{{regex_installed}}`, `{{hasRegex}}`, `{{has_regex}}` | `"true"` / `"false"` — whether the script exists and is enabled | Script ID only |
+| `{{regexInstalled::scriptId::text}}` | — | Text with the regex applied (unchanged if script missing) | Script ID + text (or scoped body) |
+
+**Examples:**
+
+```
+{{!-- Check if a script is installed --}}
+{{if::{{regexInstalled::censor}}}}
+  Content filtering is active.
+{{/if}}
+
+{{!-- Apply a regex script inline --}}
+{{regexInstalled::fix_pronouns::{{description}}}}
+
+{{!-- Scoped form --}}
+{{regexInstalled::format_dialogue}}
+  "Hello," she said. "How are you?"
+{{/regexInstalled}}
+```
+
+!!! tip "Setting a Script ID"
+    Open any regex script in the Regex Scripts panel and fill in the **Script ID** field. This is the identifier you use in `{{regexInstalled}}`. Keep it short and descriptive — e.g., `censor`, `fix_pronouns`, `format_dialogue`.
 
 ---
 
@@ -381,7 +640,7 @@ Macros for the Loom narrative system.
 
 ## Condition-Compatible Macros
 
-These macros return `"yes"` or `"no"` and are designed for use with `{{if}}`:
+These macros return `"yes"` / `"no"` or `"true"` / `"false"` and are designed for use with `{{if}}`:
 
 | Macro | True When |
 |-------|-----------|
@@ -390,6 +649,14 @@ These macros return `"yes"` or `"no"` and are designed for use with `{{if}}`:
 | `{{lumiaCouncilToolsActive}}` | Council tools ran this generation |
 | `{{loomSovHandActive}}` | Sovereign Hand mode is on |
 | `{{memoriesActive}}` | Memories were retrieved |
+| `{{hasvar::key}}` | Local variable exists |
+| `{{hasgvar::key}}` | Global variable exists |
+| `{{charTag::tag}}` | Character has the specified tag |
+| `{{regexInstalled::id}}` | Regex script with that ID is installed and enabled |
+| `{{and::a::b}}` | All arguments are truthy |
+| `{{or::a::b}}` | Any argument is truthy |
+| `{{not::value}}` | Value is falsy |
+| `{{eq::a::b}}` / `{{gt}}` / `{{lt}}` / etc. | Comparison is true |
 
 **Usage:**
 
@@ -397,6 +664,10 @@ These macros return `"yes"` or `"no"` and are designed for use with `{{if}}`:
 {{if::{{lumiaCouncilModeActive}}}}
 Council deliberation results:
 {{lumiaCouncilDeliberation}}
+{{/if}}
+
+{{if::{{and::{{charTag::fantasy}}::{{gt::{{messageCount}}::5}}}}}}
+The adventure is well underway.
 {{/if}}
 ```
 
@@ -414,10 +685,25 @@ Council deliberation results:
     Wrap council-specific content in `{{if::{{lumiaCouncilModeActive}}}}` so it only appears when council is active. Same for group chat content with `{{if::{{isGroupChat}}}}`. This keeps prompts lean.
 
 !!! tip "Variables for state tracking"
-    Use `{{setvar}}` and `{{getvar}}` to track story state across turns. For example, track relationship points, quest stages, or discovered secrets. Global variables persist across all chats.
+    Use `{{setvar}}` and `{{getvar}}` to track story state across turns — or use the shorthand `{{.var}}` and `{{.var = value}}`. For example, track relationship points, quest stages, or discovered secrets. Global variables (`{{$var}}`) persist across all chats.
+
+!!! tip "`{{default}}` replaces common if/else patterns"
+    Instead of `{{if::{{hasvar::title}}}}{{.title}}{{else}}Stranger{{/if}}`, just write `{{default::{{.title}}::Stranger}}`. Cleaner and shorter.
+
+!!! tip "`{{switch}}` for multi-branch logic"
+    Instead of nested if/else chains, use `{{switch::{{.mood}}::happy::cheerful tone::sad::somber tone::neutral tone}}`.
+
+!!! tip "`{{wrap}}` for conditional formatting"
+    `{{wrap}}` only outputs if the content is non-empty — `{{wrap::(**::**)::{{.note}}}}` produces nothing when the note is unset, avoiding stray delimiters.
+
+!!! tip "`{{calc}}` for dynamic math"
+    `{{calc::({{.hp}} / {{.maxHp}}) * 100}}` gives you a health percentage without juggling `setvar`/`addvar` chains.
 
 !!! tip "Random adds variety"
     Sprinkle `{{pick}}` into your presets for natural variation: `"Write in a {{pick::vivid::poetic::visceral::atmospheric}} style."` Each generation picks a different word.
 
+!!! tip "Coming from SillyTavern?"
+    Lumiverse supports SillyTavern-style syntax: `{{.var}}` shorthand, space-delimited arguments, `{{if .var}}` conditions, and `!` negation. Your existing presets should work with minimal changes. See the [Execution Order](execution-order.md) guide for any differences.
+
 !!! tip "Mind the evaluation order"
-    Macros are evaluated iteratively (up to 5 passes) in strict left-to-right order. A macro inside another macro's output will be resolved in the next pass. See the [Execution Order](execution-order.md) guide for the complete breakdown — especially important if you're coming from SillyTavern.
+    Macros are evaluated iteratively (up to 5 passes) in strict left-to-right order. A macro inside another macro's output will be resolved in the next pass. See the [Execution Order](execution-order.md) guide for the complete breakdown.
