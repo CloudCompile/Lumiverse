@@ -666,18 +666,17 @@ export default function InputArea({ chatId }: InputAreaProps) {
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === 'Enter') {
         if (enterToSend) {
-          if (!e.shiftKey) {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault()
+            handleQueueMessage()
+          } else if (!e.shiftKey) {
             e.preventDefault()
             handleSend()
           }
         } else {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault()
-            if (e.shiftKey) {
-              handleQueueMessage()
-            } else {
-              handleSend()
-            }
+            handleQueueMessage()
           }
         }
       }
@@ -685,13 +684,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
     [enterToSend, handleSend, handleQueueMessage]
   )
 
-  // Send button: shift+click queues, normal click sends
+  // Send button: ctrl+click queues, normal click sends
   const handleSendClick = useCallback((e: React.MouseEvent) => {
     if (queueLockRef.current) {
       queueLockRef.current = false
       return
     }
-    if (e.shiftKey && (text.trim() || pendingAttachments.length > 0)) {
+    if (e.ctrlKey && (text.trim() || pendingAttachments.length > 0)) {
       handleQueueMessage()
     } else {
       handleSend()
@@ -1278,7 +1277,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
             onTouchCancel={handleSendTouchEnd}
             title={
               text.trim() || pendingAttachments.length > 0
-                ? 'Send message (Shift+click to queue)'
+                ? 'Send message (Ctrl+click to queue)'
                 : hasQueuedMessages
                   ? 'Send queued messages'
                   : 'Silent continue (nudge)'
