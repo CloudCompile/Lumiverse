@@ -26,10 +26,16 @@ export interface SMBConnectionConfig {
   domain?: string
 }
 
+export interface GoogleDriveConnectionConfig {
+  type: 'google-drive'
+  accessToken: string
+}
+
 export type FileConnectionConfig =
   | LocalConnectionConfig
   | SFTPConnectionConfig
   | SMBConnectionConfig
+  | GoogleDriveConnectionConfig
 
 // ─── API result types ───────────────────────────────────────────────────────
 
@@ -133,5 +139,33 @@ export const stMigrationApi = {
 
   connectionTypes() {
     return get<{ types: Array<FileConnectionConfig['type']> }>('/st-migration/connection-types')
+  },
+}
+
+// ─── Google Drive API ───────────────────────────────────────────────────────
+
+export const googleDriveApi = {
+  initiateAuth() {
+    const callbackUrl = `${window.location.origin}/api/v1/google-drive/oauth-landing`
+    return get<{ auth_url: string; session_token: string }>('/google-drive/auth', { callback_url: callbackUrl })
+  },
+
+  completeAuth(sessionToken: string, code: string) {
+    return post<{ success: boolean }>('/google-drive/auth/callback', {
+      session_token: sessionToken,
+      code,
+    })
+  },
+
+  getStatus() {
+    return get<{ configured: boolean; authorized: boolean }>('/google-drive/auth/status')
+  },
+
+  revoke() {
+    return post<{ success: boolean }>('/google-drive/auth/revoke')
+  },
+
+  getAccessToken() {
+    return get<{ access_token: string }>('/google-drive/access-token')
   },
 }

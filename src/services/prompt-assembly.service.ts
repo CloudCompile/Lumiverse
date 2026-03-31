@@ -35,10 +35,10 @@ import * as packsSvc from "./packs.service";
 import * as embeddingsSvc from "./embeddings.service";
 import * as imagesSvc from "./images.service";
 import * as presetProfilesSvc from "./preset-profiles.service";
+import { readCachedChatMemory } from "./chat-memory-cache.service";
 import { deduplicateWorldInfoEntries } from "./world-info-dedup.service";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import { getCouncilSettings } from "./council/council-settings.service";
-import { getDb } from "../db/connection";
 import * as memoryCortex from "./memory-cortex";
 import { buildEmotionalContext } from "./memory-cortex";
 import { getSidecarSettings } from "./sidecar-settings.service";
@@ -296,24 +296,21 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // ---- Pre-flight: kick off cortex query ----
   // The cortex query runs concurrently with world info activation and macro
-  // setup below. At the consumption point we check the warm cache first
-  // (instant); on cache miss we await this promise instead of falling back
-  // to a redundant embedding API call.
+  // setup below. Prompt assembly only ever consumes warm-cache hits from this
+  // request path; on a cold miss we fall back immediately so cortex never
+  // blocks generation or dry-run rendering.
   const cortexConfig = pf?.cortexConfig ?? memoryCortex.getCortexConfig(ctx.userId);
   let cortexChatMemSettings: import("./embeddings.service").ChatMemorySettings | null = null;
   let cortexPerChatOverrides: import("./embeddings.service").PerChatMemoryOverrides | null = null;
-  let cortexPromise: Promise<memoryCortex.CortexResult> | undefined;
 
   if (cortexConfig.enabled) {
     const cmRaw = pf?.allSettings.get("chatMemorySettings") ?? settingsSvc.getSetting(ctx.userId, "chatMemorySettings")?.value ?? null;
     cortexChatMemSettings = cmRaw ? embeddingsSvc.normalizeChatMemorySettings(cmRaw) : null;
     cortexPerChatOverrides = (chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null;
 
-    // Capture the promise so the consumption point can await it on cache miss.
-    // queryCortex() internally applies Promise.race with an 8s timeout, so
-    // awaiting this is always bounded. The result auto-caches inside
-    // queryCortex() for future generations' warm-cache fast path.
-    cortexPromise = (async () => {
+    // Fire cortex retrieval as best-effort warm-cache work for subsequent
+    // generations. This must stay detached from the hot path.
+    void (async () => {
       const embCfg = pf?.embeddingConfig ?? await embeddingsSvc.getEmbeddingConfig(ctx.userId);
       const effective = cortexChatMemSettings
         ? embeddingsSvc.resolveEffectiveChatMemorySettings(cortexChatMemSettings, embCfg)
@@ -333,10 +330,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         includeRelationships: cortexConfig.retrieval.relationshipInjection,
         excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
       }, cortexConfig);
-    })();
-
-    // Log failures but keep the promise awaitable (separate .catch chain)
-    cortexPromise.catch(err => {
+    })().catch(err => {
       console.warn("[prompt-assembly] Background cortex query failed:", err);
     });
   }
@@ -481,8 +475,9 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     : null);
   const perChatOverrides = cortexPerChatOverrides ?? ((chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null);
 
-  // Memory Cortex: check warm cache first (instant), then await the in-flight
-  // cortex promise on miss — avoids a redundant embedding API call.
+  // Memory Cortex: use warm cache hits only. On a cold miss, fall back
+  // immediately to vector retrieval so background cortex work never stalls the
+  // generation path.
   let cortexResult: memoryCortex.CortexResult | null = null;
 
   let memoryResult: Awaited<ReturnType<typeof collectChatVectorMemory>>;
@@ -490,25 +485,6 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   if (cortexConfig.enabled) {
     // Fast path: warm cache from a previous generation (synchronous, no I/O)
     cortexResult = memoryCortex.getCachedCortexResult(ctx.chatId);
-
-    // If cache miss or timed-out empty result, await the in-flight cortex query
-    // that was kicked off at pre-flight. This is bounded by queryCortex()'s
-    // internal 8s timeout, so it won't hang indefinitely.
-    if ((!cortexResult || cortexResult.memories.length === 0) && cortexPromise) {
-      try {
-        cortexResult = await cortexPromise;
-      } catch {
-        // Already logged by the .catch() attached at pre-flight
-        cortexResult = null;
-      }
-
-      // If cortex timed out, check if there's a stale cache entry we can use
-      // (timeout doesn't overwrite the cache, so a previous good result may survive)
-      if (cortexResult?.stats.timedOut) {
-        const staleResult = memoryCortex.getCachedCortexResult(ctx.chatId);
-        cortexResult = (staleResult && staleResult.memories.length > 0) ? staleResult : null;
-      }
-    }
 
     if (cortexResult && cortexResult.memories.length > 0) {
       memoryResult = formatCortexForAssembly(cortexResult, cortexConfig, character, macroEnv, ctx.chatId);
@@ -2707,172 +2683,46 @@ export async function collectChatVectorMemory(
   perChatOverrides?: import("./embeddings.service").PerChatMemoryOverrides | null,
   _excludeMessageId?: string,
 ): Promise<MemoryRetrievalResult> {
-  const emptyResult: MemoryRetrievalResult = {
-    chunks: [], formatted: "", count: 0, enabled: false,
-    queryPreview: "", settingsSource: "global", chunksAvailable: 0, chunksPending: 0,
+  const result = await readCachedChatMemory(
+    userId,
+    chatId,
+    messages,
+    chatMemorySettings ?? null,
+    perChatOverrides ?? null,
+  );
+
+  if (_excludeMessageId && result.chunks.length > 0) {
+    const filteredChunks = result.chunks.filter((chunk) => {
+      const messageIds = Array.isArray(chunk.metadata?.messageIds) ? chunk.metadata.messageIds as string[] : null;
+      return !(messageIds && messageIds.includes(_excludeMessageId));
+    });
+
+    if (filteredChunks.length !== result.chunks.length) {
+      const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
+      const settings = embeddingsSvc.resolveEffectiveChatMemorySettings(chatMemorySettings ?? null, cfg);
+      return {
+        chunks: filteredChunks,
+        formatted: formatMemoryOutput(filteredChunks, settings),
+        count: filteredChunks.length,
+        enabled: result.enabled,
+        queryPreview: result.queryPreview,
+        settingsSource: result.settingsSource,
+        chunksAvailable: result.chunksAvailable,
+        chunksPending: result.chunksPending,
+      };
+    }
+  }
+
+  return {
+    chunks: result.chunks,
+    formatted: result.formatted,
+    count: result.count,
+    enabled: result.enabled,
+    queryPreview: result.queryPreview,
+    settingsSource: result.settingsSource,
+    chunksAvailable: result.chunksAvailable,
+    chunksPending: result.chunksPending,
   };
-
-  // Per-chat disable
-  if (perChatOverrides?.enabled === false) return emptyResult;
-
-  const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
-  if (!cfg.enabled || !cfg.vectorize_chat_messages) return emptyResult;
-
-  const settings = embeddingsSvc.resolveEffectiveChatMemorySettings(chatMemorySettings ?? null, cfg);
-  const settingsSource: "per_chat" | "global" = perChatOverrides ? "per_chat" : "global";
-
-  // Apply per-chat overrides
-  const effectiveTopK = perChatOverrides?.retrievalTopK ?? settings.retrievalTopK;
-  const effectiveExclusionWindow = perChatOverrides?.exclusionWindow ?? settings.exclusionWindow;
-  const effectiveThreshold = settings.similarityThreshold;
-
-  const queryText = buildQueryText(messages, settings);
-  if (!queryText) return { ...emptyResult, enabled: true, settingsSource };
-
-  // Get chunk stats
-  const allChunks = chatsSvc.getChatChunks(userId, chatId);
-  const pendingChunks = allChunks.filter(c => !c.vectorized_at);
-
-  try {
-    const queryHash = hashQueryText(queryText);
-    const cachedVector = await getQueryVectorFromCache(chatId, queryHash);
-
-    let queryVector: number[];
-
-    if (cachedVector) {
-      queryVector = cachedVector;
-    } else {
-      if (pendingChunks.length > 0) {
-        // Chunks not ready - use SQLite fallback
-        const fallbackContents = getRecentRelevantChunks(userId, chatId, queryText, effectiveTopK);
-        const fallbackChunks = fallbackContents.map(c => ({ content: c, score: 0, metadata: {} }));
-        const formatted = formatMemoryOutput(fallbackChunks, settings);
-        return {
-          chunks: fallbackChunks, formatted, count: fallbackChunks.length, enabled: true,
-          queryPreview: queryText.slice(0, 200), settingsSource,
-          chunksAvailable: allChunks.length, chunksPending: pendingChunks.length,
-        };
-      }
-
-      const [vector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText]);
-      if (!vector || vector.length === 0) return { ...emptyResult, enabled: true, settingsSource };
-
-      queryVector = vector;
-      await cacheQueryVector(chatId, queryHash, queryText, queryVector);
-    }
-
-    // Build exclusion set — recent messages PLUS the regeneration target.
-    // The regeneration target was already filtered out of `messages` at the top
-    // of assemblePrompt, so it won't appear in the window. We must add it
-    // explicitly to prevent its chunk from being retrieved as a "memory",
-    // which causes verbatim reproduction on regenerate/swipe.
-    const excludeIds = new Set<string>();
-    const visibleMessages = messages.filter(m => !(m.extra?.hidden) && m.content.trim().length > 0);
-    const recentMessages = visibleMessages.slice(-effectiveExclusionWindow);
-    for (const m of recentMessages) {
-      excludeIds.add(m.id);
-    }
-    // Also exclude the regeneration/swipe target if provided via closure
-    if (_excludeMessageId) {
-      excludeIds.add(_excludeMessageId);
-    }
-
-    const hits = await embeddingsSvc.searchChatChunks(userId, chatId, queryVector, excludeIds, effectiveTopK, queryText, cfg.hybrid_weight_mode);
-
-    let filteredHits = hits;
-    if (effectiveThreshold > 0) {
-      filteredHits = hits.filter(h => h.score <= effectiveThreshold);
-    }
-
-    if (filteredHits.length > 0) {
-      console.info(`[chat-memory] Retrieved ${filteredHits.length} memory chunk(s) from past conversation`);
-    }
-
-    const chunks = filteredHits.map(h => ({
-      content: h.content,
-      score: h.score,
-      metadata: h.metadata ?? {},
-    }));
-    const formatted = formatMemoryOutput(chunks, settings);
-
-    return {
-      chunks, formatted, count: chunks.length, enabled: true,
-      queryPreview: queryText.slice(0, 200), settingsSource,
-      chunksAvailable: allChunks.length, chunksPending: pendingChunks.length,
-    };
-  } catch (err) {
-    console.warn("[prompt] Chat memory retrieval failed:", err);
-    return { ...emptyResult, enabled: true, settingsSource };
-  }
-}
-
-/**
- * Hash query text for cache lookup.
- */
-function hashQueryText(text: string): string {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    const char = text.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return hash.toString(36);
-}
-
-/**
- * Get cached query vector from SQLite.
- */
-async function getQueryVectorFromCache(chatId: string, queryHash: string): Promise<number[] | null> {
-  const now = Math.floor(Date.now() / 1000);
-  const row = getDb()
-    .query("SELECT vector_json, expires_at FROM query_vector_cache WHERE chat_id = ? AND query_hash = ? AND expires_at > ?")
-    .get(chatId, queryHash, now) as any;
-
-  if (!row) return null;
-
-  try {
-    const vector = JSON.parse(row.vector_json);
-    // Update hit count and last used
-    getDb()
-      .query("UPDATE query_vector_cache SET hit_count = hit_count + 1, last_used_at = ? WHERE chat_id = ? AND query_hash = ?")
-      .run(now, chatId, queryHash);
-    return vector;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Cache a query vector in SQLite.
- */
-async function cacheQueryVector(chatId: string, queryHash: string, queryText: string, vector: number[]): Promise<void> {
-  const now = Math.floor(Date.now() / 1000);
-  const expiresAt = now + 300; // 5 minutes
-
-  getDb()
-    .query(
-      `INSERT INTO query_vector_cache (id, chat_id, query_hash, query_text, vector_json, hit_count, created_at, last_used_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
-       ON CONFLICT(chat_id, query_hash) DO UPDATE SET
-         vector_json = excluded.vector_json,
-         last_used_at = excluded.last_used_at,
-         expires_at = excluded.expires_at`
-    )
-    .run(crypto.randomUUID(), chatId, queryHash, queryText, JSON.stringify(vector), now, now, expiresAt);
-}
-
-/**
- * Fallback retrieval using SQLite when vectors aren't ready.
- * Returns recent chunks that might be relevant based on recency.
- */
-function getRecentRelevantChunks(userId: string, chatId: string, queryText: string, limit: number): string[] {
-  const chunks = chatsSvc.getChatChunks(userId, chatId);
-
-  // Simple recency-based retrieval
-  const sorted = chunks.sort((a, b) => b.created_at - a.created_at);
-  const topChunks = sorted.slice(0, limit);
-
-  return topChunks.map(c => c.content);
 }
 
 function injectWorldInfoAt(

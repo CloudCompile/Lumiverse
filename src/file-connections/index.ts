@@ -7,6 +7,7 @@ export type {
   LocalConnectionConfig,
   SFTPConnectionConfig,
   SMBConnectionConfig,
+  GoogleDriveConnectionConfig,
 } from "./types";
 
 export { LocalFileSystem } from "./providers/local";

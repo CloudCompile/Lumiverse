@@ -89,9 +89,16 @@ export interface SMBConnectionConfig {
   domain?: string;
 }
 
+export interface GoogleDriveConnectionConfig {
+  type: "google-drive";
+  /** OAuth access token (short-lived, resolved from refresh token) */
+  accessToken: string;
+}
+
 export type FileConnectionConfig =
   | LocalConnectionConfig
   | SFTPConnectionConfig
-  | SMBConnectionConfig;
+  | SMBConnectionConfig
+  | GoogleDriveConnectionConfig;
 
 export type FileConnectionType = FileConnectionConfig["type"];

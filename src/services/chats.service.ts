@@ -10,6 +10,7 @@ import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
 import * as memoryCortex from "./memory-cortex";
 import { removePoolEntriesForChat } from "./generation-pool.service";
+import { invalidateChatMemoryCache, scheduleChatMemoryRefresh } from "./chat-memory-cache.service";
 import { sanitizeForVectorization } from "../utils/content-sanitizer";
 
 // --- Chat helpers ---
@@ -241,6 +242,7 @@ export function createGroupChat(userId: string, input: CreateGroupChatInput): Ch
 export function deleteChat(userId: string, id: string): boolean {
   const result = getDb().query("DELETE FROM chats WHERE id = ? AND user_id = ?").run(id, userId);
   if (result.changes > 0) {
+    invalidateChatMemoryCache(id);
     removePoolEntriesForChat(userId, id);
     eventBus.emit(EventType.CHAT_DELETED, { id }, userId);
   }
@@ -599,6 +601,7 @@ export function updateMessage(userId: string, id: string, input: UpdateMessageIn
   getDb().query(`UPDATE messages SET ${fields.join(", ")} WHERE id = ?`).run(...values);
   const updated = getMessage(userId, id)!;
   eventBus.emit(EventType.MESSAGE_EDITED, { chatId: updated.chat_id, message: updated }, userId);
+  invalidateChatMemoryCache(updated.chat_id);
 
   rebuildChatChunks(userId, updated.chat_id).catch(err => {
     console.warn("[chats] Failed to rebuild chunks after message edit:", err);
@@ -644,6 +647,8 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
     eventBus.emit(EventType.MESSAGE_EDITED, { chatId, message: msg }, userId);
   }
 
+  invalidateChatMemoryCache(chatId);
+
   // Rebuild chunks once after all updates
   rebuildChatChunks(userId, chatId).catch(err => {
     console.warn("[chats] Failed to rebuild chunks after bulk hide:", err);
@@ -658,6 +663,7 @@ export function deleteMessage(userId: string, id: string): boolean {
   const result = getDb().query("DELETE FROM messages WHERE id = ?").run(id);
   if (result.changes > 0) {
     eventBus.emit(EventType.MESSAGE_DELETED, { chatId: msg.chat_id, messageId: id }, userId);
+    invalidateChatMemoryCache(msg.chat_id);
 
     rebuildChatChunks(userId, msg.chat_id).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message delete:", err);
@@ -1234,6 +1240,8 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
     vectorizationQueue.queueChunkVectorization(userId, chatId, lastChunk.id, 5);
   }
 
+  scheduleChatMemoryRefresh(userId, chatId, 8);
+
   // Memory Cortex: process chunk for entity extraction, salience scoring, etc.
   // Runs async and never blocks the main flow.
   try {
@@ -1438,6 +1446,8 @@ export async function ensureChatMemoryFresh(userId: string, chatId: string): Pro
  * Used for migration or when chunk structure needs to be reset.
  */
 export async function rebuildChatChunks(userId: string, chatId: string): Promise<void> {
+  invalidateChatMemoryCache(chatId);
+
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
   if (!cfg.enabled || !cfg.vectorize_chat_messages) return;
 
@@ -1514,6 +1524,7 @@ export async function rebuildChatChunks(userId: string, chatId: string): Promise
 
   // Stamp the config hash so we can detect staleness later
   stampChatMemoryHash(userId, chatId);
+  scheduleChatMemoryRefresh(userId, chatId, 9);
 
   console.info(`[chats] Rebuilt chunks for chat ${chatId}`);
 }

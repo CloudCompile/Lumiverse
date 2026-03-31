@@ -110,7 +110,28 @@ interface CachedCortexEntry {
 }
 
 const cortexResultCache = new Map<string, CachedCortexEntry>();
+const inflightCortexQueries = new Map<string, Promise<CortexResult>>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function buildCortexQueryKey(query: CortexQuery, config: MemoryCortexConfig): string {
+  return JSON.stringify({
+    chatId: query.chatId,
+    userId: query.userId,
+    queryText: query.queryText,
+    entityFilter: query.entityFilter ?? [],
+    timeRange: query.timeRange ?? null,
+    emotionalContext: query.emotionalContext ?? [],
+    generationType: query.generationType,
+    topK: query.topK,
+    includeConsolidations: query.includeConsolidations,
+    includeRelationships: query.includeRelationships,
+    excludeMessageIds: [...(query.excludeMessageIds ?? [])].sort(),
+    entityTracking: config.entityTracking,
+    salienceScoring: config.salienceScoring,
+    retrieval: config.retrieval,
+    decay: config.decay,
+  });
+}
 
 /**
  * Read the most recent cortex result from the warm cache.
@@ -148,44 +169,60 @@ export async function queryCortex(
   const cfg = config ?? getCortexConfig(query.userId);
   if (!cfg.enabled) return EMPTY_CORTEX_RESULT;
 
-  // Time-bound the retrieval to prevent hanging promises from accumulating
-  // when embedding APIs or vector search are unresponsive.
-  const timeoutMs = cfg.retrievalTimeoutMs ?? 8000;
-  let result: CortexResult;
+  const queryKey = buildCortexQueryKey(query, cfg);
+  const inflight = inflightCortexQueries.get(queryKey);
+  if (inflight) return inflight;
 
-  if (timeoutMs > 0) {
-    const TIMEOUT = Symbol("cortex-timeout");
-    const raced = await Promise.race([
-      queryCortexImpl(query, cfg),
-      new Promise<typeof TIMEOUT>((resolve) =>
-        setTimeout(() => {
-          console.warn(`[memory-cortex] Retrieval timed out after ${timeoutMs}ms`);
-          resolve(TIMEOUT);
-        }, timeoutMs),
-      ),
-    ]);
+  const runQuery = (async (): Promise<CortexResult> => {
+    // Time-bound the retrieval to prevent hanging promises from accumulating
+    // when embedding APIs or vector search are unresponsive.
+    const timeoutMs = cfg.retrievalTimeoutMs ?? 8000;
+    let result: CortexResult;
 
-    if (raced === TIMEOUT) {
-      // Do NOT cache timeouts — leave any existing cache entry intact so
-      // future generations can still use stale-but-real results instead of
-      // falling through to the slow vector retrieval fallback.
-      return {
-        ...EMPTY_CORTEX_RESULT,
-        stats: { ...EMPTY_CORTEX_RESULT.stats, timedOut: true },
-      };
+    if (timeoutMs > 0) {
+      const TIMEOUT = Symbol("cortex-timeout");
+      const raced = await Promise.race([
+        queryCortexImpl(query, cfg),
+        new Promise<typeof TIMEOUT>((resolve) =>
+          setTimeout(() => {
+            console.warn(`[memory-cortex] Retrieval timed out after ${timeoutMs}ms`);
+            resolve(TIMEOUT);
+          }, timeoutMs),
+        ),
+      ]);
+
+      if (raced === TIMEOUT) {
+        // Do NOT cache timeouts — leave any existing cache entry intact so
+        // future generations can still use stale-but-real results instead of
+        // falling through to the slow vector retrieval fallback.
+        return {
+          ...EMPTY_CORTEX_RESULT,
+          stats: { ...EMPTY_CORTEX_RESULT.stats, timedOut: true },
+        };
+      }
+
+      result = raced as CortexResult;
+    } else {
+      result = await queryCortexImpl(query, cfg);
     }
 
-    result = raced as CortexResult;
-  } else {
-    result = await queryCortexImpl(query, cfg);
+    // Auto-populate warm cache for non-blocking reads in future generations.
+    // Only genuine completions (success or "no memories") reach here — timeouts
+    // are returned early above without touching the cache.
+    cortexResultCache.set(query.chatId, { result, queriedAt: Date.now() });
+
+    return result;
+  })();
+
+  inflightCortexQueries.set(queryKey, runQuery);
+
+  try {
+    return await runQuery;
+  } finally {
+    if (inflightCortexQueries.get(queryKey) === runQuery) {
+      inflightCortexQueries.delete(queryKey);
+    }
   }
-
-  // Auto-populate warm cache for non-blocking reads in future generations.
-  // Only genuine completions (success or "no memories") reach here — timeouts
-  // are returned early above without touching the cache.
-  cortexResultCache.set(query.chatId, { result, queriedAt: Date.now() });
-
-  return result;
 }
 
 // ─── Ingestion Pipeline ────────────────────────────────────────

@@ -1,5 +1,6 @@
 import * as embeddingsSvc from "./embeddings.service";
 import { getDb } from "../db/connection";
+import { scheduleChatMemoryRefresh } from "./chat-memory-cache.service";
 
 interface VectorizationJob {
   type: "chunk" | "query";
@@ -113,6 +114,7 @@ class VectorizationQueue {
       const cfg = await embeddingsSvc.getEmbeddingConfig(jobs[0].userId);
       const texts = chunks.map((c) => c.content);
       const vectors = await embeddingsSvc.embedTexts(jobs[0].userId, texts);
+      const refreshedChats = new Set<string>();
 
       for (let i = 0; i < chunks.length; i++) {
         await embeddingsSvc.upsertChunkVector(
@@ -127,6 +129,11 @@ class VectorizationQueue {
         db.query(
           "UPDATE chat_chunks SET vectorized_at = ?, vector_model = ? WHERE id = ?"
         ).run(now, cfg.model, chunks[i].id);
+        refreshedChats.add(chunks[i].chatId);
+      }
+
+      for (const chatId of refreshedChats) {
+        scheduleChatMemoryRefresh(jobs[0].userId, chatId, 7);
       }
 
       console.info(`[vectorization] Processed ${chunks.length} chunk(s)`);

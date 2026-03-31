@@ -1394,6 +1394,7 @@ export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: str
     );
     db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
     db.run(`DELETE FROM query_vector_cache`);
+    db.run(`DELETE FROM chat_memory_cache`);
   } catch (err) {
     console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
   }

@@ -32,9 +32,16 @@ async function probeSmb(): Promise<boolean> {
   }
 }
 
+async function probeGoogleDrive(): Promise<boolean> {
+  // Always available — pure fetch, no native deps.
+  // Whether the user has configured a Client ID is checked at the route level.
+  return true;
+}
+
 const probes: Record<string, () => Promise<boolean>> = {
   sftp: probeSftp,
   smb: probeSmb,
+  "google-drive": probeGoogleDrive,
 };
 
 async function isProviderAvailable(type: string): Promise<boolean> {
@@ -99,6 +106,11 @@ export async function createFileSystem(
       }
       const { SMBFileSystem } = await import("./providers/smb");
       return new SMBFileSystem(config);
+    }
+
+    case "google-drive": {
+      const { GoogleDriveFileSystem } = await import("./providers/google-drive");
+      return new GoogleDriveFileSystem(config);
     }
 
     default:

@@ -9,13 +9,15 @@ import {
   Upload,
   X,
   KeyRound,
+  CloudCog,
+  LogOut,
 } from 'lucide-react'
 import { Spinner } from '@/components/shared/Spinner'
-import { stMigrationApi } from '@/api/st-migration'
+import { stMigrationApi, googleDriveApi } from '@/api/st-migration'
 import type { FileConnectionConfig, SFTPConnectionConfig, SMBConnectionConfig } from '@/api/st-migration'
 import styles from './ConnectionPicker.module.css'
 
-type ConnectionType = 'local' | 'sftp' | 'smb'
+type ConnectionType = 'local' | 'sftp' | 'smb' | 'google-drive'
 type SFTPAuthMode = 'password' | 'key'
 
 interface ConnectionPickerProps {
@@ -32,6 +34,8 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
     value.type === 'sftp' && value.privateKey ? 'key' : 'password'
   )
   const [availableTypes, setAvailableTypes] = useState<ConnectionType[]>(['local'])
+  const [gdriveStatus, setGdriveStatus] = useState<{ configured: boolean; authorized: boolean } | null>(null)
+  const [gdriveLoading, setGdriveLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Probe which connection types the server actually supports
@@ -39,6 +43,9 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
     stMigrationApi.connectionTypes()
       .then((res) => setAvailableTypes(res.types as ConnectionType[]))
       .catch(() => setAvailableTypes(['local']))
+    googleDriveApi.getStatus()
+      .then(setGdriveStatus)
+      .catch(() => {})
   }, [])
 
   const activeType = value.type
@@ -53,9 +60,16 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
     } else if (type === 'sftp') {
       onChange({ type: 'sftp', host: '', username: '', port: 22 })
       onConnected?.(false)
-    } else {
+    } else if (type === 'smb') {
       onChange({ type: 'smb', host: '', share: '' })
       onConnected?.(false)
+    } else if (type === 'google-drive') {
+      // Google Drive uses OAuth — if already authorized, fetch token and connect
+      onChange({ type: 'google-drive', accessToken: '' })
+      onConnected?.(false)
+      if (gdriveStatus?.authorized) {
+        handleGdriveConnect()
+      }
     }
   }
 
@@ -108,6 +122,79 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
     updateField('privateKey', '')
   }
 
+  // ─── Google Drive handlers ──────────────────────────────────────────
+
+  const handleGdriveAuth = async () => {
+    setGdriveLoading(true)
+    try {
+      const { auth_url, session_token } = await googleDriveApi.initiateAuth()
+
+      // Open popup
+      const popup = window.open(auth_url, 'gdrive-auth', 'width=600,height=700')
+
+      // Listen for postMessage from the landing page
+      const handler = async (event: MessageEvent) => {
+        if (event.origin !== window.location.origin) return
+        if (event.data?.type !== 'GOOGLE_DRIVE_OAUTH') return
+        window.removeEventListener('message', handler)
+
+        if (event.data.error) {
+          setTestState('fail')
+          setTestError(event.data.error)
+          setGdriveLoading(false)
+          return
+        }
+
+        try {
+          await googleDriveApi.completeAuth(session_token, event.data.code)
+          setGdriveStatus({ configured: true, authorized: true })
+          await handleGdriveConnect()
+        } catch (err: any) {
+          setTestState('fail')
+          setTestError(err?.message || 'Authorization failed')
+        }
+        setGdriveLoading(false)
+      }
+
+      window.addEventListener('message', handler)
+
+      // Fallback: if popup is closed without completing
+      const checkClosed = setInterval(() => {
+        if (popup?.closed) {
+          clearInterval(checkClosed)
+          window.removeEventListener('message', handler)
+          setGdriveLoading(false)
+        }
+      }, 500)
+    } catch (err: any) {
+      setTestState('fail')
+      setTestError(err?.body?.error || err?.message || 'Failed to initiate auth')
+      setGdriveLoading(false)
+    }
+  }
+
+  const handleGdriveConnect = async () => {
+    try {
+      const { access_token } = await googleDriveApi.getAccessToken()
+      onChange({ type: 'google-drive', accessToken: access_token })
+      setTestState('ok')
+      onConnected?.(true)
+    } catch (err: any) {
+      setTestState('fail')
+      setTestError(err?.body?.error || err?.message || 'Failed to get access token')
+    }
+  }
+
+  const handleGdriveRevoke = async () => {
+    try {
+      await googleDriveApi.revoke()
+      setGdriveStatus({ configured: gdriveStatus?.configured ?? false, authorized: false })
+      setTestState('idle')
+      onConnected?.(false)
+      onChange({ type: 'google-drive', accessToken: '' })
+    } catch { /* ignore */ }
+  }
+
   const sftp = value as SFTPConnectionConfig
   const smb = value as SMBConnectionConfig
 
@@ -148,6 +235,16 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           >
             <Server size={13} className={styles.tabIcon} />
             SMB
+          </button>
+        )}
+        {availableTypes.includes('google-drive') && (
+          <button
+            type="button"
+            className={activeType === 'google-drive' ? styles.tabActive : styles.tab}
+            onClick={() => switchType('google-drive')}
+          >
+            <CloudCog size={13} className={styles.tabIcon} />
+            Google Drive
           </button>
         )}
       </div>
@@ -379,6 +476,61 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
               </span>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ─── Google Drive config ─────────────────────────────────────── */}
+      {activeType === 'google-drive' && (
+        <div className={styles.configForm}>
+          {!gdriveStatus?.configured ? (
+            <>
+              <p className={styles.hint}>
+                Google Drive requires a Client ID to be configured in Settings before you can connect.
+                Create a Desktop application credential in the Google Cloud Console with the Drive API enabled.
+              </p>
+            </>
+          ) : gdriveStatus?.authorized ? (
+            <>
+              <div className={styles.testRow}>
+                <span className={styles.testOk}>
+                  <CheckCircle size={12} /> Google Drive authorized
+                </span>
+                <button type="button" className={styles.testBtn} onClick={handleGdriveRevoke}>
+                  <LogOut size={11} /> Disconnect
+                </button>
+              </div>
+              {testState !== 'ok' && (
+                <div className={styles.testRow}>
+                  <button type="button" className={styles.testBtn} onClick={handleGdriveConnect} disabled={gdriveLoading}>
+                    {gdriveLoading ? <Spinner size={11} /> : <Plug size={11} />}
+                    Connect
+                  </button>
+                  {testState === 'fail' && (
+                    <span className={styles.testFail}>
+                      <XCircle size={12} /> {testError}
+                    </span>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <p className={styles.hint}>
+                Authorize Lumiverse to read files from your Google Drive. A popup will open for you to sign in with Google.
+              </p>
+              <div className={styles.testRow}>
+                <button type="button" className={styles.testBtn} onClick={handleGdriveAuth} disabled={gdriveLoading}>
+                  {gdriveLoading ? <Spinner size={11} /> : <CloudCog size={11} />}
+                  Authorize Google Drive
+                </button>
+                {testState === 'fail' && (
+                  <span className={styles.testFail}>
+                    <XCircle size={12} /> {testError}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
