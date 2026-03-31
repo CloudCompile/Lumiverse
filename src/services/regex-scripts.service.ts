@@ -25,6 +25,7 @@ const MAX_PATTERN_LENGTH = 10_000;
 function rowToRegexScript(row: any): RegexScript {
   return {
     ...row,
+    script_id: row.script_id || "",
     placement: JSON.parse(row.placement),
     trim_strings: JSON.parse(row.trim_strings),
     folder: row.folder || "",
@@ -90,8 +91,25 @@ function validateInput(input: CreateRegexScriptInput | UpdateRegexScriptInput, i
   if (input.substitute_macros !== undefined && !VALID_MACRO_MODES.has(input.substitute_macros)) {
     return `Invalid substitute_macros: ${input.substitute_macros}`;
   }
+  if (input.script_id !== undefined) {
+    input.script_id = normalizeScriptId(input.script_id);
+    if (input.script_id.length > 100) {
+      return "script_id exceeds maximum length (100 characters)";
+    }
+  }
 
   return null;
+}
+
+/**
+ * Normalize a script_id to lowercase alphanumeric + underscores.
+ * Uppercase → lowercase, spaces/hyphens → underscores, strip all other punctuation.
+ */
+function normalizeScriptId(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[\s\-]+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -149,13 +167,14 @@ export function createRegexScript(userId: string, input: CreateRegexScriptInput)
 
   getDb()
     .query(
-      `INSERT INTO regex_scripts (id, user_id, name, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO regex_scripts (id, user_id, name, script_id, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
       userId,
       input.name.trim(),
+      input.script_id ?? "",
       input.find_regex,
       input.replace_string ?? "",
       input.flags ?? "gi",
@@ -201,6 +220,7 @@ export function updateRegexScript(userId: string, id: string, input: UpdateRegex
   const values: any[] = [];
 
   if (input.name !== undefined) { fields.push("name = ?"); values.push(input.name.trim()); }
+  if (input.script_id !== undefined) { fields.push("script_id = ?"); values.push(input.script_id); }
   if (input.find_regex !== undefined) { fields.push("find_regex = ?"); values.push(input.find_regex); }
   if (input.replace_string !== undefined) { fields.push("replace_string = ?"); values.push(input.replace_string); }
   if (input.flags !== undefined) { fields.push("flags = ?"); values.push(input.flags); }
@@ -253,13 +273,14 @@ export function duplicateRegexScript(userId: string, id: string): RegexScript | 
 
   getDb()
     .query(
-      `INSERT INTO regex_scripts (id, user_id, name, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO regex_scripts (id, user_id, name, script_id, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       newId,
       userId,
       existing.name + " (Copy)",
+      "", // script_id intentionally blank on duplicate — must be unique
       existing.find_regex,
       existing.replace_string,
       existing.flags,
@@ -319,6 +340,17 @@ export function getCharacterBoundScripts(userId: string, characterId: string): R
     .query("SELECT * FROM regex_scripts WHERE user_id = ? AND scope = 'character' AND scope_id = ? ORDER BY sort_order ASC, created_at ASC")
     .all(userId, characterId) as any[];
   return rows.map(rowToRegexScript);
+}
+
+// ── Lookup by script_id ─────────────────────────────────────────────────────
+
+/** Find a regex script by its user-defined script_id. Returns null if not found or script_id is empty. */
+export function getRegexScriptByScriptId(userId: string, scriptId: string): RegexScript | null {
+  if (!scriptId) return null;
+  const row = getDb()
+    .query("SELECT * FROM regex_scripts WHERE user_id = ? AND script_id = ?")
+    .get(userId, scriptId) as any;
+  return row ? rowToRegexScript(row) : null;
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────────
@@ -562,6 +594,7 @@ export function importRegexScripts(
 
       item = {
         name: item.scriptName ?? item.name ?? `Imported Script ${i + 1}`,
+        script_id: item.script_id ?? "",
         find_regex: pattern,
         replace_string: item.replaceString ?? item.replace_string ?? "",
         flags,

@@ -26,6 +26,12 @@ import { registerLoomMacros } from "./definitions/loom";
 import { registerLumiEngineMacros } from "./definitions/lumi-engine";
 import { registerMemoryMacros } from "./definitions/memory";
 import { registerCortexMacros } from "./definitions/cortex";
+import { registerStringMacros } from "./definitions/strings";
+import { registerMathMacros } from "./definitions/math";
+import { registerLogicMacros } from "./definitions/logic";
+import { registerFormattingMacros } from "./definitions/formatting";
+import { registerChatUtilsMacros } from "./definitions/chat-utils";
+import { registerRegexRefMacros } from "./definitions/regex-ref";
 
 let initialized = false;
 
@@ -50,4 +56,10 @@ export function initMacros(): void {
   registerLumiEngineMacros();
   registerMemoryMacros();
   registerCortexMacros();
+  registerStringMacros();
+  registerMathMacros();
+  registerLogicMacros();
+  registerFormattingMacros();
+  registerChatUtilsMacros();
+  registerRegexRefMacros();
 }

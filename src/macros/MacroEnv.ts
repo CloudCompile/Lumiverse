@@ -13,6 +13,7 @@ export interface BuildEnvContext {
   messages: Message[];
   generationType: GenerationType;
   connection?: ConnectionProfile | null;
+  userId?: string;
   dynamicMacros?: Record<string, string | MacroHandler | MacroDefinition>;
   /** Pre-resolved group character names (all members). Used for {{group}} macro. */
   groupCharacterNames?: string[];
@@ -95,7 +96,12 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     },
     dynamicMacros: ctx.dynamicMacros || {},
     _dynamicMacrosLower: buildDynamicLookup(ctx.dynamicMacros),
-    extra: {},
+    extra: {
+      userId: ctx.userId ?? (chat as any).user_id as string | undefined,
+      messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
+      chatCreatedAt: (chat as any).created_at as number | undefined,
+      characterTags: Array.isArray((character as any).tags) ? (character as any).tags : [],
+    },
   };
 }
 

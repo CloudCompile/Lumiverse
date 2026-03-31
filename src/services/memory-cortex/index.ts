@@ -84,35 +84,94 @@ export {
 } from "./entity-graph";
 export type { MigrationResult } from "./entity-graph";
 
+// ─── Result Cache ─────────────────────────────────────────────
+// Warm cache of cortex retrieval results per chat. Background queries
+// populate the cache so prompt assembly can read non-blockingly — cortex
+// never stalls generation.
+
+const EMPTY_CORTEX_RESULT: CortexResult = {
+  memories: [],
+  entityContext: [],
+  activeRelationships: [],
+  arcContext: null,
+  stats: {
+    candidatePoolSize: 0,
+    vectorSearchResults: 0,
+    entitiesMatched: 0,
+    scoreFusionApplied: false,
+    topScore: 0,
+    retrievalTimeMs: 0,
+  },
+};
+
+interface CachedCortexEntry {
+  result: CortexResult;
+  queriedAt: number;
+}
+
+const cortexResultCache = new Map<string, CachedCortexEntry>();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Read the most recent cortex result from the warm cache.
+ * Returns null if no cached result exists or if it has expired.
+ * This is a synchronous, non-blocking call — safe to use in the generation hot path.
+ */
+export function getCachedCortexResult(chatId: string): CortexResult | null {
+  const entry = cortexResultCache.get(chatId);
+  if (!entry) return null;
+  if (Date.now() - entry.queriedAt > CACHE_TTL_MS) {
+    cortexResultCache.delete(chatId);
+    return null;
+  }
+  return entry.result;
+}
+
+/** Invalidate cached cortex result for a chat (e.g. on rebuild or delete). */
+export function invalidateCortexCache(chatId: string): void {
+  cortexResultCache.delete(chatId);
+}
+
 // ─── Retrieval ─────────────────────────────────────────────────
 
 /**
  * Execute a cortex-enhanced memory retrieval query.
- * This is the primary entry point called from prompt assembly.
+ *
+ * The result is automatically cached so that prompt assembly can read it
+ * non-blockingly via getCachedCortexResult(). The query itself is always
+ * fired as a background task — never awaited in the generation hot path.
  */
 export async function queryCortex(
   query: CortexQuery,
   config?: MemoryCortexConfig,
 ): Promise<CortexResult> {
   const cfg = config ?? getCortexConfig(query.userId);
-  if (!cfg.enabled) {
-    return {
-      memories: [],
-      entityContext: [],
-      activeRelationships: [],
-      arcContext: null,
-      stats: {
-        candidatePoolSize: 0,
-        vectorSearchResults: 0,
-        entitiesMatched: 0,
-        scoreFusionApplied: false,
-        topScore: 0,
-        retrievalTimeMs: 0,
-      },
-    };
+  if (!cfg.enabled) return EMPTY_CORTEX_RESULT;
+
+  // Time-bound the retrieval to prevent hanging promises from accumulating
+  // when embedding APIs or vector search are unresponsive.
+  const timeoutMs = cfg.retrievalTimeoutMs ?? 8000;
+  let result: CortexResult;
+
+  if (timeoutMs > 0) {
+    const raced = await Promise.race([
+      queryCortexImpl(query, cfg),
+      new Promise<null>((resolve) =>
+        setTimeout(() => {
+          console.warn(`[memory-cortex] Retrieval timed out after ${timeoutMs}ms`);
+          resolve(null);
+        }, timeoutMs),
+      ),
+    ]);
+    result = raced ?? EMPTY_CORTEX_RESULT;
+  } else {
+    result = await queryCortexImpl(query, cfg);
   }
 
-  return queryCortexImpl(query, cfg);
+  // Auto-populate warm cache for non-blocking reads in future generations
+  cortexResultCache.set(query.chatId, { result, queriedAt: Date.now() });
+
+  return result;
 }
 
 // ─── Ingestion Pipeline ────────────────────────────────────────
@@ -192,12 +251,24 @@ export async function processChunk(
       // Sidecar mode: send RAW content (with font tags) so the LLM can
       // also attribute colors. The LLM handles HTML tags gracefully.
       // Pass known entities with aliases so the LLM uses canonical names.
-      const extraction = await extractWithSidecar(
+      const sidecarTimeout = config.sidecarTimeoutMs ?? 30000;
+      const extractionPromise = extractWithSidecar(
         data.content,
         generateRawFn,
         sidecarConnectionId,
         { characterNames, knownEntities: entityContext },
       );
+      const extraction = sidecarTimeout > 0
+        ? await Promise.race([
+            extractionPromise,
+            new Promise<null>((resolve) =>
+              setTimeout(() => {
+                console.warn("[memory-cortex] Sidecar extraction timed out, falling back to heuristic");
+                resolve(null);
+              }, sidecarTimeout),
+            ),
+          ])
+        : await extractionPromise;
 
       if (extraction) {
         salienceResult = {
@@ -477,6 +548,7 @@ export async function processChunk(
         config.consolidation,
         generateRawFn,
         sidecarConnectionId,
+        config.sidecarTimeoutMs,
       )
       .catch((err) => {
         console.warn("[memory-cortex] Consolidation failed:", err);
@@ -532,6 +604,9 @@ export async function rebuildCortex(
   const db = getDb();
 
   console.info(`[memory-cortex] Rebuilding cortex for chat ${chatId} (sidecar: ${sidecarConnectionId ? "yes" : "heuristic only"})`);
+
+  // Invalidate cached retrieval results — they'll be stale after rebuild
+  invalidateCortexCache(chatId);
 
   // Clear all derived data
   entityGraph.deleteEntitiesForChat(chatId);

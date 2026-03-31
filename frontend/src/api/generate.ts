@@ -1,4 +1,8 @@
-import { get, post } from './client'
+import { get, post, type RequestOptions } from './client'
+
+/** Generation requests go through prompt assembly + council + embedding calls
+ *  which can legitimately take longer than the default 30s client timeout. */
+const LONG: RequestOptions = { timeout: 120_000 }
 
 export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate' | 'quiet'
 
@@ -139,7 +143,7 @@ export interface ActiveGenerationEntry {
 
 export const generateApi = {
   start(request: GenerateRequest) {
-    return post<GenerateResponse>('/generate', request)
+    return post<GenerateResponse>('/generate', request, LONG)
   },
 
   stop(generationId?: string) {
@@ -147,23 +151,23 @@ export const generateApi = {
   },
 
   regenerate(request: GenerateRequest) {
-    return post<GenerateResponse>('/generate/regenerate', request)
+    return post<GenerateResponse>('/generate/regenerate', request, LONG)
   },
 
   continueGeneration(request: GenerateRequest) {
-    return post<GenerateResponse>('/generate/continue', request)
+    return post<GenerateResponse>('/generate/continue', request, LONG)
   },
 
   quiet(request: QuietGenerateRequest) {
-    return post<QuietGenerateResponse>('/generate/quiet', request)
+    return post<QuietGenerateResponse>('/generate/quiet', request, LONG)
   },
 
   summarize(request: QuietGenerateRequest) {
-    return post<QuietGenerateResponse>('/generate/summarize', request)
+    return post<QuietGenerateResponse>('/generate/summarize', request, LONG)
   },
 
   dryRun(request: GenerateRequest) {
-    return post<DryRunResponse>('/generate/dry-run', request)
+    return post<DryRunResponse>('/generate/dry-run', request, LONG)
   },
 
   getBreakdown(messageId: string) {

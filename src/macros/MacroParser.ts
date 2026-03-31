@@ -1,6 +1,10 @@
 import { TokenType, type Token, type AstNode, type TextNode, type MacroNode, type ScopedMacroNode, type MacroFlags } from "./types";
 import { lex } from "./MacroLexer";
 
+/** Sentinel characters for escaped braces — survive re-evaluation passes. */
+export const ESCAPED_OPEN = "\x01";
+export const ESCAPED_CLOSE = "\x02";
+
 const DEFAULT_FLAGS: MacroFlags = {
   immediate: false,
   delayed: false,
@@ -82,7 +86,7 @@ function parseDocument(ctx: ParseContext): AstNode[] {
       pushTextNode(nodes, tok.value);
     } else if (tok.type === TokenType.ESCAPED_BRACE) {
       ctx.advance();
-      pushTextNode(nodes, tok.value);
+      pushTextNode(nodes, tok.value === "{" ? ESCAPED_OPEN : ESCAPED_CLOSE);
     } else if (tok.type === TokenType.MACRO_OPEN) {
       nodes.push(parseMacroExpr(ctx));
     } else {
@@ -138,7 +142,7 @@ function parseMacroExpr(ctx: ParseContext): MacroNode {
         argNodes.push(parseMacroExpr(ctx));
       } else if (tok.type === TokenType.ESCAPED_BRACE) {
         ctx.advance();
-        pushTextNode(argNodes, tok.value);
+        pushTextNode(argNodes, tok.value === "{" ? ESCAPED_OPEN : ESCAPED_CLOSE);
       } else {
         // Consume unknown token as text
         ctx.advance();
@@ -184,6 +188,11 @@ function parseVariableShorthand(ctx: ParseContext, flags: MacroFlags, startOffse
     if (ctx.at(TokenType.TEXT)) {
       operandValue = ctx.advance().value;
     }
+  }
+
+  // Handle -= by negating the operand so addvar subtracts
+  if (operator === "-=" && operandValue) {
+    operandValue = operandValue.startsWith("-") ? operandValue.slice(1) : `-${operandValue}`;
   }
 
   // Consume closing }}

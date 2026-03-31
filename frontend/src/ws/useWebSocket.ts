@@ -532,6 +532,13 @@ export function useWebSocket() {
         }
       }),
 
+      // Chat deletion — remove lingering chat head so it doesn't navigate to a dead chat
+      wsClient.on(EventType.CHAT_DELETED, (payload: { id: string }) => {
+        if (payload?.id) {
+          store.getState().removeChatHead(payload.id)
+        }
+      }),
+
       // Regex script events — reload for multi-tab sync
       wsClient.on(EventType.REGEX_SCRIPT_CHANGED, () => {
         store.getState().loadRegexScripts()

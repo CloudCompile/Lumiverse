@@ -219,6 +219,20 @@ export function removePoolEntry(generationId: string): void {
   pool.delete(generationId);
 }
 
+/**
+ * Remove all pool entries for a given chat. Called when a chat is deleted
+ * so that stale entries don't linger as phantom chat heads.
+ */
+export function removePoolEntriesForChat(userId: string, chatId: string): void {
+  const chatKey = `${userId}:${chatId}`;
+  for (const [id, entry] of pool) {
+    if (entry.userId === userId && entry.chatId === chatId) {
+      pool.delete(id);
+    }
+  }
+  chatIndex.delete(chatKey);
+}
+
 // ── Sweep ────────────────────────────────────────────────────────────────────
 
 function sweep(): void {

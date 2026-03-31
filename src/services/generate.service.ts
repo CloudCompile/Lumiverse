@@ -600,6 +600,19 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     targetMessageId: lifecycle.targetMessageId,
   });
 
+  // Emit GENERATION_STARTED immediately so the frontend can show a chat head
+  // and streaming indicator BEFORE prompt assembly (which may involve slow
+  // embedding calls, council sidecar, etc.). Without this, navigating away
+  // during assembly leaves no chat head and the UI appears stuck.
+  eventBus.emit(EventType.GENERATION_STARTED, {
+    generationId,
+    chatId: input.chat_id,
+    model: connection.model,
+    targetMessageId: lifecycle.targetMessageId,
+    characterId: targetCharId,
+    characterName,
+  }, input.userId);
+
   // Execute council if enabled (before prompt assembly so it doesn't slow the critical path visibly)
   const councilSettings = getCouncilSettings(input.userId);
   let councilResult: CouncilExecutionResult | null = null;
@@ -1141,6 +1154,8 @@ async function runGeneration(
   tools?: ToolDefinition[],
   assistantPrefill?: string,
 ): Promise<void> {
+  // GENERATION_STARTED was already emitted when the pool entry was created
+  // (before assembly). Now update to streaming status and push breakdown data.
   pool.setPoolStatus(generationId, "streaming");
   eventBus.emit(EventType.GENERATION_STARTED, {
     generationId, chatId, model,

@@ -9,6 +9,7 @@ import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
 import * as memoryCortex from "./memory-cortex";
+import { removePoolEntriesForChat } from "./generation-pool.service";
 import { sanitizeForVectorization } from "../utils/content-sanitizer";
 
 // --- Chat helpers ---
@@ -240,6 +241,7 @@ export function createGroupChat(userId: string, input: CreateGroupChatInput): Ch
 export function deleteChat(userId: string, id: string): boolean {
   const result = getDb().query("DELETE FROM chats WHERE id = ? AND user_id = ?").run(id, userId);
   if (result.changes > 0) {
+    removePoolEntriesForChat(userId, id);
     eventBus.emit(EventType.CHAT_DELETED, { id }, userId);
   }
   return result.changes > 0;

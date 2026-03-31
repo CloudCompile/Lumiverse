@@ -293,12 +293,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     return await legacyAssembly(messages, ctx.generationType, character, persona, chat, connection, ctx.userId);
   }
 
-  // ---- Pre-flight: kick off cortex retrieval concurrently ----
-  // Start memory cortex as a non-blocking promise so it runs in parallel with
-  // WI activation and macro setup below. By the time we need the result, cortex
-  // has had several hundred milliseconds of concurrent execution time.
+  // ---- Pre-flight: kick off background cortex cache refresh ----
+  // Memory cortex runs as a true sidecar — it never blocks generation.
+  // We fire a background query to warm the cache for the *next* generation,
+  // and read the cached result (from a previous query) for the current one.
   const cortexConfig = pf?.cortexConfig ?? memoryCortex.getCortexConfig(ctx.userId);
-  let cortexPromise: Promise<memoryCortex.CortexResult | null> | null = null;
   let cortexChatMemSettings: import("./embeddings.service").ChatMemorySettings | null = null;
   let cortexPerChatOverrides: import("./embeddings.service").PerChatMemoryOverrides | null = null;
 
@@ -307,9 +306,10 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     cortexChatMemSettings = cmRaw ? embeddingsSvc.normalizeChatMemorySettings(cmRaw) : null;
     cortexPerChatOverrides = (chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null;
 
-    // Fire immediately — the async IIFE resolves settings then queries cortex.
-    // .catch() ensures failures never propagate; we fall back to vector search.
-    cortexPromise = (async () => {
+    // Fire-and-forget: query cortex in the background. The result auto-caches
+    // inside queryCortex() so future generations can read it non-blockingly.
+    // The .catch() ensures failures never propagate.
+    (async () => {
       const embCfg = pf?.embeddingConfig ?? await embeddingsSvc.getEmbeddingConfig(ctx.userId);
       const effective = cortexChatMemSettings
         ? embeddingsSvc.resolveEffectiveChatMemorySettings(cortexChatMemSettings, embCfg)
@@ -330,8 +330,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
       }, cortexConfig);
     })().catch(err => {
-      console.warn("[prompt-assembly] Cortex retrieval failed, will use vector fallback:", err);
-      return null;
+      console.warn("[prompt-assembly] Background cortex refresh failed:", err);
     });
   }
 
@@ -355,13 +354,20 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // When pre-computed results are available (from the generation pipeline's
   // council enrichment phase), reuse them to avoid redundant embedding queries.
   const vectorQueryPreview = await getWorldInfoVectorQueryPreview(ctx.userId, messages);
-  const vectorActivated = ctx.precomputedVectorEntries
-    ?? await collectVectorActivatedWorldInfo(
-      ctx.userId,
-      wiSources.worldBookIds,
-      wiEntries,
-      messages,
-    );
+  let vectorActivated = ctx.precomputedVectorEntries ?? null;
+  if (!vectorActivated) {
+    try {
+      vectorActivated = await collectVectorActivatedWorldInfo(
+        ctx.userId,
+        wiSources.worldBookIds,
+        wiEntries,
+        messages,
+      );
+    } catch (err) {
+      console.warn("[prompt-assembly] Vector world info activation failed, continuing with keyword-only:", err);
+      vectorActivated = [];
+    }
+  }
   const mergedWorldInfo = mergeActivatedWorldInfoEntries(
     wiResult.activatedEntries,
     vectorActivated,
@@ -495,14 +501,17 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     : null);
   const perChatOverrides = cortexPerChatOverrides ?? ((chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null);
 
-  // Memory Cortex: await the pre-flighted concurrent retrieval (started before WI activation).
-  // By now cortex has had the full WI + macro setup duration to execute in the background.
+  // Memory Cortex: read from the warm cache — fully non-blocking.
+  // The background query fired above will update the cache for the next generation.
+  // On the very first generation there's no cached result, so we fall back to
+  // pure vector retrieval (which is also the correct behavior since no chunks
+  // have been processed yet).
   let cortexResult: memoryCortex.CortexResult | null = null;
 
   let memoryResult: Awaited<ReturnType<typeof collectChatVectorMemory>>;
 
-  if (cortexConfig.enabled && cortexPromise) {
-    cortexResult = await cortexPromise;
+  if (cortexConfig.enabled) {
+    cortexResult = memoryCortex.getCachedCortexResult(ctx.chatId);
 
     if (cortexResult && cortexResult.memories.length > 0) {
       // Format cortex data using shadow prompt formatter
@@ -546,13 +555,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       };
     } else {
       // Cortex returned no results or failed — fall back to pure vector retrieval
-      memoryResult = await collectChatVectorMemory(
+      memoryResult = await safeCollectChatVectorMemory(
         ctx.userId, ctx.chatId, messages, chatMemSettings, perChatOverrides, ctx.excludeMessageId,
       );
     }
   } else {
     // Existing path: pure vector retrieval
-    memoryResult = await collectChatVectorMemory(
+    memoryResult = await safeCollectChatVectorMemory(
       ctx.userId, ctx.chatId, messages, chatMemSettings, perChatOverrides, ctx.excludeMessageId,
     );
   }
@@ -2667,6 +2676,21 @@ function formatMemoryOutput(
   return settings.memoryHeaderTemplate.replace(/\{\{memories\}\}/g, joined);
 }
 
+/** Fault-tolerant wrapper: embedding timeouts or failures should never kill generation. */
+async function safeCollectChatVectorMemory(
+  ...args: Parameters<typeof collectChatVectorMemory>
+): Promise<Awaited<ReturnType<typeof collectChatVectorMemory>>> {
+  try {
+    return await collectChatVectorMemory(...args);
+  } catch (err) {
+    console.warn("[prompt-assembly] Chat vector memory retrieval failed, continuing without memories:", err);
+    return {
+      chunks: [], formatted: "", count: 0, enabled: false,
+      queryPreview: "", settingsSource: "global", chunksAvailable: 0, chunksPending: 0,
+    };
+  }
+}
+
 export async function collectChatVectorMemory(
   userId: string,
   chatId: string,
@@ -3572,7 +3596,7 @@ async function legacyAssembly(
   }
 
   if (userId && chat) {
-    const legacyMemoryResult = await collectChatVectorMemory(userId, chat.id, messages);
+    const legacyMemoryResult = await safeCollectChatVectorMemory(userId, chat.id, messages);
     if (legacyMemoryResult.count > 0) {
       const memoryContent = legacyMemoryResult.formatted;
       llmMessages.push({ role: "system", content: memoryContent });
