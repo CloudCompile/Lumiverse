@@ -285,6 +285,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       presetProfilesSvc.applyProfileToBlocks(blocks, resolved.binding);
     }
   }
+  presetProfilesSvc.normalizeCategoryBlockStates(blocks);
 
   // If no blocks, fall back to legacy mapping
   if (!blocks.length) {
@@ -449,33 +450,6 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // Populate Lumia / Loom / Council / OOC / Sovereign Hand context for macros
   populateLumiaLoomContext(macroEnv, ctx.userId, chat, ctx, settingsMap);
-
-  // Inject Lumi pipeline results into macroEnv.
-  // If the pipeline was fired as a non-blocking promise, await it here — by now it has
-  // had the full WI activation + macro setup duration to execute concurrently.
-  const lumiPipelineResults = ctx.lumiPipelinePromise
-    ? await ctx.lumiPipelinePromise
-    : ctx.lumiPipelineResults;
-
-  if (lumiPipelineResults && lumiPipelineResults.size > 0) {
-    const pipelineResults = lumiPipelineResults;
-    const moduleNames = new Map<string, string>();
-    const lumiMeta = preset?.metadata as any;
-    if (lumiMeta?.pipelines) {
-      for (const pipeline of lumiMeta.pipelines) {
-        if (Array.isArray(pipeline.modules)) {
-          for (const mod of pipeline.modules) {
-            moduleNames.set(mod.key, mod.name);
-          }
-        }
-      }
-    }
-    macroEnv.extra.lumiPipeline = {
-      results: pipelineResults,
-      moduleNames,
-    };
-    console.log("[lumi-assembly] Injected %d pipeline results into macroEnv. Module names: %s", pipelineResults.size, [...moduleNames.values()].join(", "));
-  }
 
   // ---- Impersonate one-liner mode: skip preset blocks, just chat history + impersonation prompt ----
   if (ctx.generationType === "impersonate" && ctx.impersonateMode === "oneliner") {

@@ -3,7 +3,7 @@ import {
   User, Wand2, GitFork, Link2, Package, Zap,
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
-  GitBranch, Globe, Wallpaper, Replace, Library,
+  GitBranch, Globe, Wallpaper, Replace, Library, Sparkles,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -17,7 +17,7 @@ import ConnectionManager from '@/components/panels/ConnectionManager'
 import ImageGenConnectionManager from '@/components/panels/image-gen-connections/ImageGenConnectionManager'
 import PresetManager from '@/components/panels/PresetManager'
 import LoomBuilder from '@/components/panels/LoomBuilder'
-import LumiBuilder from '@/components/panels/LumiBuilder'
+import DreamWeaverPanel from '@/components/panels/DreamWeaverPanel'
 import SummaryEditor from '@/components/panels/SummaryEditor'
 import ThemePanel from '@/components/panels/ThemePanel'
 import WorldBookPanel from '@/components/panels/world-book/WorldBookPanel'
@@ -85,13 +85,13 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     component: () => <LoomBuilder compact />,
   },
   {
-    id: 'lumi',
-    shortName: 'Lumi',
-    tabName: 'Lumi',
-    tabDescription: 'Configure Lumia items and behavior',
-    tabIcon: Zap,
-    keywords: ['lumi', 'lumia', 'items', 'builder', 'system prompt', 'jailbreak', 'instructions', 'prefill', 'nudge'],
-    component: () => <LumiBuilder compact />,
+    id: 'dream-weaver',
+    shortName: 'Dream',
+    tabName: 'Dream Weaver',
+    tabDescription: 'Create characters from your imagination',
+    tabIcon: Sparkles,
+    keywords: ['dream', 'weave', 'create'],
+    component: () => <DreamWeaverPanel />,
   },
   {
     id: 'connections',

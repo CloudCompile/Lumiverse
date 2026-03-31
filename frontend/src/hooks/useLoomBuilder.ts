@@ -22,6 +22,8 @@ import {
   detectSupportedParams,
   getAvailableMacros,
   importFromSTPreset,
+  normalizeCategoryBlockState,
+  toggleBlockWithCategoryRules,
 } from '@/lib/loom/service'
 
 export function useLoomBuilder() {
@@ -145,18 +147,29 @@ export function useLoomBuilder() {
     }
   }, [])
 
-  // Save blocks — immediate state update, immediate API save (blocks are structural)
-  const saveBlocks = useCallback(async (blocks: PromptBlock[]) => {
+  const saveStructure = useCallback(async (
+    blocks: PromptBlock[],
+  ) => {
     if (!activePreset) return
-    const updated = { ...activePreset, blocks, updatedAt: Date.now() }
+    const normalizedBlocks = normalizeCategoryBlockState(blocks)
+    const updated = {
+      ...activePreset,
+      blocks: normalizedBlocks,
+      updatedAt: Date.now(),
+    }
     setActivePreset(updated)
     try {
       await presetsApi.update(updated.id, marshalUpdate(updated))
       refreshRegistry()
     } catch (err) {
-      console.warn('[LoomBuilder] Failed to save blocks:', err)
+      console.warn('[LoomBuilder] Failed to save preset structure:', err)
     }
   }, [activePreset, refreshRegistry])
+
+  // Save blocks
+  const saveBlocks = useCallback(async (blocks: PromptBlock[]) => {
+    await saveStructure(blocks)
+  }, [saveStructure])
 
   // Delete a preset
   const deletePreset = useCallback(async (presetId: string) => {
@@ -227,9 +240,7 @@ export function useLoomBuilder() {
 
   const toggleBlock = useCallback((blockId: string) => {
     if (!activePreset) return
-    const blocks = activePreset.blocks.map(b =>
-      b.id === blockId ? { ...b, enabled: !b.enabled } : b
-    )
+    const blocks = toggleBlockWithCategoryRules(activePreset.blocks, blockId)
     saveBlocks(blocks)
   }, [activePreset, saveBlocks])
 

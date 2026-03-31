@@ -22,6 +22,7 @@ import RegenFeedbackModal from './RegenFeedbackModal'
 import PersonaAddonsModal from './PersonaAddonsModal'
 import GroupSettingsModal from './GroupSettingsModal'
 import CustomCSSModal from './CustomCSSModal'
+import DreamWeaverStudioModal from './DreamWeaverStudioModal'
 
 export default function ModalContainer() {
   const settingsModalOpen = useStore((s) => s.settingsModalOpen)
@@ -122,6 +123,7 @@ export default function ModalContainer() {
       )}
 
       {activeModal === 'customCSS' && <CustomCSSModal />}
+      {activeModal === 'dreamWeaverStudio' && modalProps.sessionId && <DreamWeaverStudioModal />}
 
       <PermissionRequestModal />
       <CommandPalette />

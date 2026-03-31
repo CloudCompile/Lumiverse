@@ -58,7 +58,7 @@ import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
 import { resolveMacros as resolveMacrosApi } from '@/api/macros'
 import { useLoomBuilder } from '@/hooks/useLoomBuilder'
 import { usePresetProfiles } from '@/hooks/usePresetProfiles'
-import { createBlock, createMarkerBlock } from '@/lib/loom/service'
+import { computeGroups, createBlock, createMarkerBlock } from '@/lib/loom/service'
 import {
   MARKER_NAMES,
   PROMPT_TEMPLATES,
@@ -72,7 +72,6 @@ import {
   DEFAULT_COMPLETION_SETTINGS,
   DEFAULT_ADVANCED_SETTINGS,
 } from '@/lib/loom/constants'
-import { computeGroups } from '@/lib/loom/service'
 import type { PromptBlock, LoomConnectionProfile, SamplerParam, MacroGroup } from '@/lib/loom/types'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import NumberStepper from '@/components/shared/NumberStepper'
@@ -145,9 +144,14 @@ function SortableCategoryItem({
       <Button size="icon-sm" variant="ghost" onClick={onToggleCollapse} title={isCollapsed ? 'Expand category' : 'Collapse category'}>
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </Button>
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }} onClick={onToggleCollapse}>
+      <div className={s.categoryMeta} onClick={onToggleCollapse}>
         <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>{displayName}</span>
         <span className={s.categoryCount}>({childCount})</span>
+        {block.categoryMode && (
+          <span className={s.groupBadge}>
+            {block.categoryMode === 'radio' ? 'pick one' : 'multi'}
+          </span>
+        )}
       </div>
       <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
@@ -250,6 +254,7 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
   const [depth, setDepth] = useState(block.depth || 0)
   const [isLocked, setIsLocked] = useState(block.isLocked || false)
   const [injectionTrigger, setInjectionTrigger] = useState<string[]>(block.injectionTrigger || [])
+  const [categoryMode, setCategoryMode] = useState<PromptBlock['categoryMode']>(block.categoryMode ?? null)
   const [showMacros, setShowMacros] = useState(false)
   const [macroSearch, setMacroSearch] = useState('')
   const [showPreview, setShowPreview] = useState(false)
@@ -300,6 +305,7 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
       position: isAppend ? 'pre_history' : position,
       depth: (position === 'in_history' || isAppend) ? depth : 0,
       isLocked, injectionTrigger,
+      categoryMode: block.marker === 'category' ? categoryMode : null,
     })
   }
 
@@ -450,6 +456,24 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Toggle.Checkbox checked={isLocked} onChange={setIsLocked} label={<><Lock size={14} /> Lock block (prevent accidental edits)</>} />
           </div>
+
+          {block.marker === 'category' && (
+            <div className={s.formGroup}>
+              <label className={s.label}>Category Mode</label>
+              <select
+                className={s.select}
+                value={categoryMode || ''}
+                onChange={e => setCategoryMode((e.target.value || null) as PromptBlock['categoryMode'])}
+              >
+                <option value="">Normal toggles</option>
+                <option value="checkbox">Multi-select</option>
+                <option value="radio">Pick one</option>
+              </select>
+              <span className={s.settingsHint}>
+                Applies to the blocks inside this category. Ungrouped blocks and categories left on normal toggles behave exactly as they do now.
+              </span>
+            </div>
+          )}
 
           <div className={s.formGroup}>
             <label className={s.label}>Injection Triggers</label>

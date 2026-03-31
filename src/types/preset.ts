@@ -38,6 +38,7 @@ export interface PromptBlock {
   color: string | null;
   injectionTrigger: string[];
   group: string | null;
+  categoryMode?: 'radio' | 'checkbox' | null;
 }
 
 export interface PromptBehavior {
