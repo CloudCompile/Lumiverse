@@ -460,7 +460,7 @@ async function installFromChub(
   }
 
   // Fetch from Chub API (same logic as characters.routes.ts fetchChubCharacter)
-  const apiUrl = `https://api.chub.ai/api/characters/${chubPath}?full=true`;
+  const apiUrl = `https://gateway.chub.ai/api/characters/${chubPath}?full=true`;
   const res = await safeFetch(apiUrl, {
     timeoutMs: 15_000,
     headers: { "Accept": "application/json", "User-Agent": "Lumiverse" },

@@ -268,6 +268,7 @@ async function runPromptPipeline(opts: {
   councilNamedResults?: Record<string, string>;
   precomputedVectorEntries?: VectorActivatedEntry[];
   lumiPipelineResults?: LumiPipelineResult;
+  lumiPipelinePromise?: Promise<LumiPipelineResult | undefined>;
   regenFeedback?: string;
   regenFeedbackPosition?: "system" | "user";
 }): Promise<PromptPipelineResult> {
@@ -312,6 +313,7 @@ async function runPromptPipeline(opts: {
       councilNamedResults: opts.councilNamedResults,
       precomputedVectorEntries: opts.precomputedVectorEntries,
       lumiPipelineResults: opts.lumiPipelineResults,
+      lumiPipelinePromise: opts.lumiPipelinePromise,
       regenFeedback: opts.regenFeedback,
       regenFeedbackPosition: opts.regenFeedbackPosition,
     });
@@ -568,7 +570,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
       if (completionSettings?.enableFunctionCalling === false) {
         console.warn("[council] Inline tools skipped: enableFunctionCalling is disabled in preset '%s'", preset?.name);
       } else {
-        const availableTools = getAvailableTools(input.userId);
+        const availableTools = await getAvailableTools(input.userId);
         const activeMembers = councilSettings.members.filter((m) => m.tools.length > 0);
         inlineTools = [];
         for (const member of activeMembers) {
@@ -696,8 +698,11 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     }
   }
 
-  // Execute Lumi pipeline if preset uses the lumi engine
+  // Execute Lumi pipeline if preset uses the lumi engine.
+  // Fires as a non-blocking promise — assembly awaits it when macroEnv needs population.
+  // This keeps sidecar-assisted work off the critical path per the zero-blocking rule.
   let lumiPipelineResults: LumiPipelineResult | undefined;
+  let lumiPipelinePromise: Promise<LumiPipelineResult | undefined> | undefined;
   {
     const presetId = input.preset_id || connection.preset_id;
     const preset = presetId ? presetsSvc.getPreset(input.userId, presetId) : null;
@@ -714,8 +719,9 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         .filter((m) => m.id !== excludeMessageId && m.id !== stagedMessageId);
 
       if (pipelineCharacter && chat && lumiMeta?.pipelines) {
-        console.log("[lumi] Executing pipeline with %d messages for context", pipelineMessages.length);
-        lumiPipelineResults = await executeLumiPipeline({
+        console.log("[lumi] Executing pipeline with %d messages for context (non-blocking)");
+        // Fire without awaiting — runs concurrently with prompt assembly setup
+        lumiPipelinePromise = executeLumiPipeline({
           userId: input.userId,
           chatId: input.chat_id,
           pipelines: lumiMeta.pipelines,
@@ -725,21 +731,20 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
           persona: resolvedPersona,
           chat,
           signal: abortController.signal,
+        }).catch(err => {
+          console.warn("[lumi] Pipeline failed (non-fatal):", err);
+          return undefined;
         });
-        console.log("[lumi] Pipeline done: %d results", lumiPipelineResults?.size ?? 0);
-        if (lumiPipelineResults && lumiPipelineResults.size > 0) {
-          for (const [k, v] of lumiPipelineResults) {
-            console.log("[lumi]   module '%s': %d chars", k, v.content.length);
-          }
-        }
-        checkAborted();
       } else {
         console.warn("[lumi] Skipped: character=%s chat=%s pipelines=%s", !!pipelineCharacter, !!chat, !!lumiMeta?.pipelines);
       }
     }
   }
 
-  // Run shared prompt pipeline
+  checkAborted();
+
+  // Run shared prompt pipeline — cortex retrieval and Lumi pipeline both run
+  // concurrently inside assembly (cortex as pre-flighted promise, Lumi via promise).
   const pipeline = await runPromptPipeline({
     userId: input.userId,
     chatId: input.chat_id,
@@ -755,10 +760,18 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     councilToolResults,
     councilNamedResults,
     precomputedVectorEntries,
-    lumiPipelineResults,
+    lumiPipelinePromise,
     regenFeedback: input.regen_feedback,
     regenFeedbackPosition: input.regen_feedback_position,
   });
+
+  // Resolve Lumi results for breakdown injection (should be resolved by now)
+  lumiPipelineResults = lumiPipelinePromise ? await lumiPipelinePromise : undefined;
+  if (lumiPipelineResults && lumiPipelineResults.size > 0) {
+    for (const [k, v] of lumiPipelineResults) {
+      console.log("[lumi]   module '%s': %d chars", k, v.content.length);
+    }
+  }
 
   let { messages } = pipeline;
   const { parameters: mergedParams, breakdown, activatedWorldInfo, deliberationHandledByMacro } = pipeline;

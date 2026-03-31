@@ -231,8 +231,8 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       {/* Group chat progress bar during nudge loop */}
       {isGroupChat && isNudgeLoopActive && <GroupChatProgressBar />}
 
-      {/* Streaming message bubble — shows tokens as they arrive (only for new messages, not regeneration) */}
-      {isStreaming && !regeneratingMessageId && (streamDisplay || !streamingError) && (() => {
+      {/* Streaming message bubble — shows tokens as they arrive (only for new messages, not regeneration or continue) */}
+      {isStreaming && !regeneratingMessageId && streamingGenerationType !== 'continue' && (streamDisplay || !streamingError) && (() => {
         const bubbleName = isImpersonateStream ? userName : streamDisplayName
         const bubbleStyleClass = isImpersonateStream ? bubbleStyles.user : bubbleStyles.character
         const nameStyleClass = isImpersonateStream ? bubbleStyles.nameUser : bubbleStyles.nameChar

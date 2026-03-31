@@ -1,5 +1,4 @@
 import sharp from "sharp";
-import { readFileSync } from "fs";
 import { extname } from "path";
 import { zipSync } from "fflate";
 import { getCharacter } from "./characters.service";
@@ -113,7 +112,7 @@ async function readImageBytes(userId: string, imageId: string): Promise<ImageByt
   const filepath = await getImageFilePath(userId, imageId);
   if (!filepath) return null;
 
-  const buffer = readFileSync(filepath);
+  const buffer = await Bun.file(filepath).arrayBuffer();
   const ext = extname(image.filename) || ".png";
   return {
     bytes: new Uint8Array(buffer),
@@ -251,7 +250,7 @@ export async function exportAsPng(userId: string, characterId: string): Promise<
   if (character.image_id) {
     const filepath = await getImageFilePath(userId, character.image_id);
     if (filepath) {
-      avatarBuffer = readFileSync(filepath) as Buffer;
+      avatarBuffer = Buffer.from(await Bun.file(filepath).arrayBuffer());
     }
   }
 

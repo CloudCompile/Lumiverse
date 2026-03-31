@@ -133,7 +133,7 @@ app.post("/scan", async (c) => {
     return c.json({ error: "Directory does not exist" }, 404);
   }
 
-  const counts = scanSTData(resolved);
+  const counts = await scanSTData(resolved);
   return c.json(counts);
 });
 

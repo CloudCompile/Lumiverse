@@ -186,7 +186,7 @@ export class WorkerHost {
   }
 
   async start(): Promise<void> {
-    const entryPath = managerSvc.getBackendEntryPath(this.manifest.identifier);
+    const entryPath = await managerSvc.getBackendEntryPath(this.manifest.identifier);
     if (!entryPath) {
       console.log(
         `[Spindle:${this.manifest.identifier}] No backend entry, skipping worker`
@@ -1982,8 +1982,8 @@ export class WorkerHost {
     return existing.length - kept.length;
   }
 
-  private getExtensionEphemeralMaxBytes(identifier: string): number {
-    const cfg = getEphemeralPoolConfig();
+  private async getExtensionEphemeralMaxBytes(identifier: string): Promise<number> {
+    const cfg = await getEphemeralPoolConfig();
     return cfg.extensionMaxOverrides[identifier] ?? cfg.extensionDefaultMaxBytes;
   }
 
@@ -2117,11 +2117,11 @@ export class WorkerHost {
     return { usedBytes, reservedBytes };
   }
 
-  private getGlobalEphemeralPoolUsage(): {
+  private async getGlobalEphemeralPoolUsage(): Promise<{
     usedBytes: number;
     reservedBytes: number;
-  } {
-    const extensions = managerSvc.list();
+  }> {
+    const extensions = await managerSvc.list();
     let usedBytes = 0;
     let reservedBytes = 0;
 
@@ -2155,18 +2155,18 @@ export class WorkerHost {
     return removed;
   }
 
-  private enforceEphemeralQuota(
+  private async enforceEphemeralQuota(
     pathKey: string,
     incomingSizeBytes: number,
     reservationId?: string
-  ): { reservedConsumptionBytes: number } {
+  ): Promise<{ reservedConsumptionBytes: number }> {
     this.clearExpiredEphemeralEntriesInternal();
     this.clearExpiredReservations();
 
     const usage = this.collectEphemeralUsage();
-    const global = this.getGlobalEphemeralPoolUsage();
-    const extensionMax = this.getExtensionEphemeralMaxBytes(this.manifest.identifier);
-    const globalMax = getEphemeralPoolConfig().globalMaxBytes;
+    const global = await this.getGlobalEphemeralPoolUsage();
+    const extensionMax = await this.getExtensionEphemeralMaxBytes(this.manifest.identifier);
+    const globalMax = (await getEphemeralPoolConfig()).globalMaxBytes;
 
     const existingSize = usage.filesByPath.get(pathKey)?.sizeBytes || 0;
     const isNewFile = !usage.filesByPath.has(pathKey);
@@ -2243,18 +2243,18 @@ export class WorkerHost {
     }
   }
 
-  private handleEphemeralWrite(
+  private async handleEphemeralWrite(
     requestId: string,
     path: string,
     data: string,
     ttlMs?: number,
     reservationId?: string
-  ): void {
+  ): Promise<void> {
     try {
       const fullPath = this.resolveEphemeralPath(path);
       const pathKey = this.getEphemeralPathKey(fullPath);
       const sizeBytes = Buffer.byteLength(data, "utf-8");
-      const quota = this.enforceEphemeralQuota(pathKey, sizeBytes, reservationId);
+      const quota = await this.enforceEphemeralQuota(pathKey, sizeBytes, reservationId);
       mkdirSync(resolve(fullPath, ".."), { recursive: true });
       writeFileSync(fullPath, data, "utf-8");
       this.upsertEphemeralIndex(pathKey, sizeBytes, ttlMs);
@@ -2285,17 +2285,17 @@ export class WorkerHost {
     }
   }
 
-  private handleEphemeralWriteBinary(
+  private async handleEphemeralWriteBinary(
     requestId: string,
     path: string,
     data: Uint8Array,
     ttlMs?: number,
     reservationId?: string
-  ): void {
+  ): Promise<void> {
     try {
       const fullPath = this.resolveEphemeralPath(path);
       const pathKey = this.getEphemeralPathKey(fullPath);
-      const quota = this.enforceEphemeralQuota(
+      const quota = await this.enforceEphemeralQuota(
         pathKey,
         data.byteLength,
         reservationId
@@ -2392,15 +2392,15 @@ export class WorkerHost {
     }
   }
 
-  private handleEphemeralPoolStatus(requestId: string): void {
+  private async handleEphemeralPoolStatus(requestId: string): Promise<void> {
     try {
       this.clearExpiredEphemeralEntriesInternal();
       this.clearExpiredReservations();
 
       const extensionUsage = this.collectEphemeralUsage();
-      const globalUsage = this.getGlobalEphemeralPoolUsage();
-      const extensionMax = this.getExtensionEphemeralMaxBytes(this.manifest.identifier);
-      const globalMax = getEphemeralPoolConfig().globalMaxBytes;
+      const globalUsage = await this.getGlobalEphemeralPoolUsage();
+      const extensionMax = await this.getExtensionEphemeralMaxBytes(this.manifest.identifier);
+      const globalMax = (await getEphemeralPoolConfig()).globalMaxBytes;
 
       this.postToWorker({
         type: "response",
@@ -2429,19 +2429,19 @@ export class WorkerHost {
     }
   }
 
-  private handleEphemeralRequestBlock(
+  private async handleEphemeralRequestBlock(
     requestId: string,
     sizeBytes: number,
     ttlMs?: number,
     reason?: string
-  ): void {
+  ): Promise<void> {
     try {
       if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
         throw new Error("sizeBytes must be a positive number");
       }
 
       const now = Date.now();
-      const cfg = getEphemeralPoolConfig();
+      const cfg = await getEphemeralPoolConfig();
       const effectiveTtlMs =
         ttlMs && ttlMs > 0 ? ttlMs : cfg.reservationTtlMs;
       const expiresAt = new Date(now + effectiveTtlMs).toISOString();
@@ -2450,8 +2450,8 @@ export class WorkerHost {
       this.clearExpiredReservations();
 
       const extensionUsage = this.collectEphemeralUsage();
-      const globalUsage = this.getGlobalEphemeralPoolUsage();
-      const extensionMax = this.getExtensionEphemeralMaxBytes(this.manifest.identifier);
+      const globalUsage = await this.getGlobalEphemeralPoolUsage();
+      const extensionMax = await this.getExtensionEphemeralMaxBytes(this.manifest.identifier);
       const globalMax = cfg.globalMaxBytes;
 
       const extensionAvailable =

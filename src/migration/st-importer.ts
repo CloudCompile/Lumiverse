@@ -149,7 +149,7 @@ export async function importWorldBooks(
   let failed = 0;
   let totalEntries = 0;
 
-  const worldBooks = readWorldBooksFromDisk(stDataDir, logger);
+  const worldBooks = await readWorldBooksFromDisk(stDataDir, logger);
   const total = worldBooks.length;
 
   for (let i = 0; i < worldBooks.length; i++) {
@@ -183,7 +183,7 @@ export async function importPersonas(
   let failed = 0;
   let avatarsUploaded = 0;
 
-  const personaPayloads = readPersonasFromDisk(stDataDir);
+  const personaPayloads = await readPersonasFromDisk(stDataDir);
   const total = personaPayloads.length;
 
   for (let i = 0; i < personaPayloads.length; i++) {
@@ -276,7 +276,7 @@ export async function importChats(
       continue;
     }
 
-    const chatPayloads = readChatsForCharacter(stDataDir, charDirName, personaNameToId, logger);
+    const chatPayloads = await readChatsForCharacter(stDataDir, charDirName, personaNameToId, logger);
 
     for (const chatData of chatPayloads) {
       try {
@@ -327,7 +327,7 @@ export async function importGroupChats(
   let skipped = 0;
   let totalMessages = 0;
 
-  const groupDefs = readGroupDefinitions(stDataDir);
+  const groupDefs = await readGroupDefinitions(stDataDir);
   if (groupDefs.length === 0) return { imported, failed, skipped, totalMessages };
 
   // Count total chat files for progress
@@ -354,7 +354,7 @@ export async function importGroupChats(
     }
 
     for (const chatId of group.chatIds) {
-      const chatData = readGroupChatFile(stDataDir, chatId, personaNameToId);
+      const chatData = await readGroupChatFile(stDataDir, chatId, personaNameToId);
 
       if (!chatData) {
         processedChats++;

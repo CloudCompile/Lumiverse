@@ -1,3 +1,5 @@
+import { mkdirSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { env } from "./env";
 import { initDatabase } from "./db/connection";
 import { runMigrations } from "./db/migrate";
@@ -5,6 +7,22 @@ import { startAllExtensions } from "./spindle/lifecycle";
 import { initIdentity } from "./crypto/init";
 import { initVapidKeys } from "./crypto/vapid";
 import { eventBus } from "./ws/bus";
+
+// Validate data directory is accessible and writable before any file operations.
+// This catches permission issues early (common on Termux/Android) instead of
+// letting them surface as cryptic failures in identity/credential file creation.
+mkdirSync(env.dataDir, { recursive: true });
+try {
+  const probe = join(env.dataDir, ".write-probe");
+  await Bun.write(probe, "ok");
+  try { unlinkSync(probe); } catch {}
+} catch (err) {
+  console.error(`[startup] Data directory is not writable: ${env.dataDir}`);
+  console.error(`[startup] ${err}`);
+  console.error("[startup] Ensure the directory exists and the current user has write permissions.");
+  process.exit(1);
+}
+console.log(`[startup] Data directory: ${env.dataDir}`);
 
 // Resolve encryption identity (file > env migration > generate)
 await initIdentity();
@@ -14,7 +32,7 @@ await initVapidKeys();
 
 // Initialize database and run migrations synchronously
 const db = initDatabase();
-runMigrations(db);
+await runMigrations(db);
 
 // Dynamic import: auth modules call getDb() at module level, so must load after initDatabase()
 const { seedOwner, backfillUserIds } = await import("./auth/seed");

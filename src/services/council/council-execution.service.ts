@@ -97,7 +97,7 @@ export async function executeCouncil(
 
   // Build available tools map
   const availableTools = new Map<string, CouncilToolDefinition>();
-  for (const t of getAvailableTools(input.userId)) {
+  for (const t of await getAvailableTools(input.userId)) {
     availableTools.set(t.name, t);
   }
 

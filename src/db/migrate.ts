@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
-import { readdirSync, readFileSync } from "fs";
-import { join } from "path";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
-export function runMigrations(db: Database, migrationsDir?: string): void {
+export async function runMigrations(db: Database, migrationsDir?: string): Promise<void> {
   const dir = migrationsDir || join(import.meta.dir, "migrations");
 
   db.run(`
@@ -24,7 +24,7 @@ export function runMigrations(db: Database, migrationsDir?: string): void {
   for (const file of files) {
     if (applied.has(file)) continue;
 
-    const sql = readFileSync(join(dir, file), "utf-8");
+    const sql = await Bun.file(join(dir, file)).text();
     console.log(`Applying migration: ${file}`);
 
     db.transaction(() => {

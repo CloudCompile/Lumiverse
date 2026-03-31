@@ -6,7 +6,7 @@
  * and the automated Docker migration.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { inflateSync } from "zlib";
 import { join, basename, extname } from "path";
 
@@ -87,9 +87,9 @@ export interface GroupDefinition {
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const CHARA_KEYWORDS = new Set(["chara", "ccv3"]);
 
-export function readPNGCharaName(filePath: string): PNGCharaInfo {
+export async function readPNGCharaName(filePath: string): Promise<PNGCharaInfo> {
   try {
-    const buf = readFileSync(filePath);
+    const buf = Buffer.from(await Bun.file(filePath).arrayBuffer());
 
     if (buf.length < 8 || !PNG_SIGNATURE.every((b, i) => buf[i] === b)) {
       return { embeddedName: null, hasCharaData: false, parseError: "not a valid PNG" };
@@ -206,7 +206,7 @@ export function parseMessageDate(msg: any): number {
 
 // ─── Directory scanners ─────────────────────────────────────────────────────
 
-export function scanSTData(stDataDir: string): STDataCounts {
+export async function scanSTData(stDataDir: string): Promise<STDataCounts> {
   const counts: STDataCounts = {
     characters: 0,
     chatDirs: 0,
@@ -260,7 +260,7 @@ export function scanSTData(stDataDir: string): STDataCounts {
   const settingsPath = join(stDataDir, "settings.json");
   if (existsSync(settingsPath)) {
     try {
-      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+      const settings = JSON.parse(await Bun.file(settingsPath).text());
       const pu = settings.power_user || {};
       const allKeys = new Set([
         ...Object.keys(pu.personas || {}),
@@ -273,7 +273,7 @@ export function scanSTData(stDataDir: string): STDataCounts {
   return counts;
 }
 
-export function scanCharacterPNGs(charsDir: string, logger?: MigrationLogger): ScanEntry[] {
+export async function scanCharacterPNGs(charsDir: string, logger?: MigrationLogger): Promise<ScanEntry[]> {
   const pngFiles = readdirSync(charsDir).filter((f) => {
     if (extname(f).toLowerCase() !== ".png") return false;
     try { return statSync(join(charsDir, f)).isFile(); } catch { return false; }
@@ -286,7 +286,7 @@ export function scanCharacterPNGs(charsDir: string, logger?: MigrationLogger): S
     logger?.progress("Scanning character files", i + 1, pngFiles.length);
     try {
       const sizeBytes = statSync(filePath).size;
-      const info = readPNGCharaName(filePath);
+      const info = await readPNGCharaName(filePath);
       results.push({
         filename,
         stem: basename(filename, ".png"),
@@ -310,7 +310,7 @@ export function scanCharacterPNGs(charsDir: string, logger?: MigrationLogger): S
 
 // ─── Data readers ───────────────────────────────────────────────────────────
 
-export function readWorldBooksFromDisk(stDataDir: string, logger?: MigrationLogger): WorldBookPayload[] {
+export async function readWorldBooksFromDisk(stDataDir: string, logger?: MigrationLogger): Promise<WorldBookPayload[]> {
   const worldsDir = join(stDataDir, "worlds");
   if (!existsSync(worldsDir)) return [];
 
@@ -323,7 +323,7 @@ export function readWorldBooksFromDisk(stDataDir: string, logger?: MigrationLogg
     const filePath = join(worldsDir, jsonFiles[i]);
     logger?.progress("Reading world books", i + 1, jsonFiles.length);
     try {
-      const data = JSON.parse(readFileSync(filePath, "utf-8"));
+      const data = JSON.parse(await Bun.file(filePath).text());
       results.push({
         name: data.name || data.originalName || basename(jsonFiles[i], ".json"),
         description: data.description || "",
@@ -337,14 +337,14 @@ export function readWorldBooksFromDisk(stDataDir: string, logger?: MigrationLogg
   return results;
 }
 
-export function readPersonasFromDisk(stDataDir: string): PersonaPayload[] {
+export async function readPersonasFromDisk(stDataDir: string): Promise<PersonaPayload[]> {
   const settingsPath = join(stDataDir, "settings.json");
   if (!existsSync(settingsPath)) return [];
 
   let personaNames: Record<string, string>;
   let personaDescriptions: Record<string, any>;
   try {
-    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    const settings = JSON.parse(await Bun.file(settingsPath).text());
     const pu = settings.power_user || {};
     personaNames = pu.personas || {};
     personaDescriptions = pu.persona_descriptions || {};
@@ -369,12 +369,12 @@ export function readPersonasFromDisk(stDataDir: string): PersonaPayload[] {
  * Read all JSONL chat files for a given character directory.
  * Parses ST chat metadata (line 0) and message lines.
  */
-export function readChatsForCharacter(
+export async function readChatsForCharacter(
   stDataDir: string,
   charDirName: string,
   personaNameToId: Map<string, string>,
   logger?: MigrationLogger,
-): ChatPayload[] {
+): Promise<ChatPayload[]> {
   const chatsDir = join(stDataDir, "chats", charDirName);
   if (!existsSync(chatsDir)) return [];
 
@@ -386,7 +386,7 @@ export function readChatsForCharacter(
   for (const chatFile of chatFiles) {
     const filePath = join(chatsDir, chatFile);
     try {
-      const raw = readFileSync(filePath, "utf-8");
+      const raw = await Bun.file(filePath).text();
       const lines = raw.split("\n").filter((l) => l.trim());
       if (lines.length === 0) continue;
 
@@ -456,7 +456,7 @@ export function readChatsForCharacter(
   return results;
 }
 
-export function readGroupDefinitions(stDataDir: string): GroupDefinition[] {
+export async function readGroupDefinitions(stDataDir: string): Promise<GroupDefinition[]> {
   const groupsDir = join(stDataDir, "groups");
   if (!existsSync(groupsDir)) return [];
 
@@ -467,7 +467,7 @@ export function readGroupDefinitions(stDataDir: string): GroupDefinition[] {
 
   for (const groupFile of groupFiles) {
     try {
-      const group = JSON.parse(readFileSync(join(groupsDir, groupFile), "utf-8"));
+      const group = JSON.parse(await Bun.file(join(groupsDir, groupFile)).text());
       results.push({
         name: group.name || "Imported Group Chat",
         members: group.members || [],
@@ -483,16 +483,16 @@ export function readGroupDefinitions(stDataDir: string): GroupDefinition[] {
 /**
  * Read a single group chat JSONL file.
  */
-export function readGroupChatFile(
+export async function readGroupChatFile(
   stDataDir: string,
   chatId: string,
   personaNameToId: Map<string, string>,
-): { messages: ChatMessage[]; createdAt?: number } | null {
+): Promise<{ messages: ChatMessage[]; createdAt?: number } | null> {
   const chatFilePath = join(stDataDir, "group chats", `${chatId}.jsonl`);
   if (!existsSync(chatFilePath)) return null;
 
   try {
-    const raw = readFileSync(chatFilePath, "utf-8");
+    const raw = await Bun.file(chatFilePath).text();
     const lines = raw.split("\n").filter((l) => l.trim());
     if (lines.length === 0) return null;
 

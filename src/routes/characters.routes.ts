@@ -14,6 +14,7 @@ import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/cha
 import { createAvatarResolverResponse } from "../utils/avatar-cache";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
+import { buildSlug } from "../lumihub/manifest";
 
 const app = new Hono();
 
@@ -86,7 +87,7 @@ function parseJannyUrl(url: string): string | null {
 // ─── Chub.ai character fetcher ────────────────────────────────────────────
 
 async function fetchChubCharacter(chubPath: string, userId: string) {
-  const apiUrl = `https://api.chub.ai/api/characters/${chubPath}?full=true`;
+  const apiUrl = `https://gateway.chub.ai/api/characters/${chubPath}?full=true`;
   const res = await safeFetch(apiUrl, {
     timeoutMs: 15_000,
     headers: { "Accept": "application/json", "User-Agent": "Lumiverse" },
@@ -159,6 +160,24 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
     }
   }
 
+  // Stamp install source so LumiHub manifest can track this card for updates
+  try {
+    const freshChar = svc.getCharacter(userId, character.id);
+    if (freshChar) {
+      const slug = buildSlug(freshChar.creator, freshChar.name);
+      svc.updateCharacter(userId, character.id, {
+        extensions: {
+          ...(freshChar.extensions || {}),
+          _lumiverse_install_source: "chub",
+          _lumiverse_install_slug: slug,
+          _lumiverse_chub_slug: chubPath.toLowerCase(),
+        },
+      });
+    }
+  } catch {
+    // Non-critical — manifest will still work via creator/name derivation
+  }
+
   return svc.getCharacter(userId, character.id)!;
 }
 
@@ -183,8 +202,13 @@ async function fetchJannyCharacter(uuid: string, userId: string) {
     throw new Error(result.error || "JannyAI download failed");
   }
 
-  // Download the PNG card from the provided URL
-  const pngRes = await safeFetch(result.downloadUrl, { timeoutMs: 15_000, maxBytes: 10 * 1024 * 1024 });
+  // Download the PNG card from the provided URL.
+  // Use plain fetch (not safeFetch) — the download URL is a CDN/presigned URL from
+  // JannyAI's own API. safeFetch's manual redirect handling breaks CDN redirects.
+  // This matches SillyTavern's approach.
+  const downloadUrl = new URL(result.downloadUrl);
+  await validateHost(downloadUrl.hostname);
+  const pngRes = await fetch(result.downloadUrl, { signal: AbortSignal.timeout(15_000) });
   if (!pngRes.ok) {
     throw new Error(`Failed to download JannyAI character image: ${pngRes.status}`);
   }
@@ -398,7 +422,7 @@ app.get("/:id/avatar", async (c) => {
   }
 
   if (info.avatar_path) {
-    const filepath = files.getAvatarPath(info.avatar_path);
+    const filepath = await files.getAvatarPath(info.avatar_path);
     if (filepath) {
       return createAvatarResolverResponse(
         filepath,
@@ -472,7 +496,7 @@ app.post("/:id/avatar", async (c) => {
 
   // Clean up old image if present
   if (char.image_id) images.deleteImage(userId, char.image_id);
-  if (char.avatar_path) files.deleteAvatar(char.avatar_path);
+  if (char.avatar_path) await files.deleteAvatar(char.avatar_path);
 
   const image = await images.uploadImage(userId, file);
   svc.setCharacterImage(userId, char.id, image.id);

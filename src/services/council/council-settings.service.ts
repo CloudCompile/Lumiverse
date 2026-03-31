@@ -67,13 +67,13 @@ export function putCouncilSettings(userId: string, partial: Partial<CouncilSetti
  * Return the full list of available council tools (extension + DLC + built-in).
  * Built-in tools take priority over DLC and extension tools with the same name.
  */
-export function getAvailableTools(userId: string): CouncilToolDefinition[] {
+export async function getAvailableTools(userId: string): Promise<CouncilToolDefinition[]> {
   const dlc = getDLCTools(userId);
 
   // Build extension ID → display name lookup
   const extNameMap = new Map<string, string>();
   try {
-    for (const ext of managerSvc.list()) {
+    for (const ext of await managerSvc.list()) {
       extNameMap.set(ext.id, ext.name);
     }
   } catch { /* spindle DB may not be ready */ }

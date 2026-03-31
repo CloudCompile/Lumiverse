@@ -39,7 +39,6 @@ import { deduplicateWorldInfoEntries } from "./world-info-dedup.service";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import { getCouncilSettings } from "./council/council-settings.service";
 import { getDb } from "../db/connection";
-import { readFileSync } from "fs";
 import * as memoryCortex from "./memory-cortex";
 import { buildEmotionalContext } from "./memory-cortex";
 import { getSidecarSettings } from "./sidecar-settings.service";
@@ -52,8 +51,8 @@ async function resolveAttachmentBase64(userId: string, imageId: string): Promise
   const filePath = await imagesSvc.getImageFilePath(userId, imageId);
   if (!filePath) return null;
   try {
-    const buffer = readFileSync(filePath);
-    return buffer.toString("base64");
+    const buffer = await Bun.file(filePath).arrayBuffer();
+    return Buffer.from(buffer).toString("base64");
   } catch {
     return null;
   }
@@ -292,6 +291,48 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     return await legacyAssembly(messages, ctx.generationType, character, persona, chat, connection, ctx.userId);
   }
 
+  // ---- Pre-flight: kick off cortex retrieval concurrently ----
+  // Start memory cortex as a non-blocking promise so it runs in parallel with
+  // WI activation and macro setup below. By the time we need the result, cortex
+  // has had several hundred milliseconds of concurrent execution time.
+  const cortexConfig = memoryCortex.getCortexConfig(ctx.userId);
+  let cortexPromise: Promise<memoryCortex.CortexResult | null> | null = null;
+  let cortexChatMemSettings: import("./embeddings.service").ChatMemorySettings | null = null;
+  let cortexPerChatOverrides: import("./embeddings.service").PerChatMemoryOverrides | null = null;
+
+  if (cortexConfig.enabled) {
+    const cmRaw = settingsSvc.getSetting(ctx.userId, "chatMemorySettings")?.value ?? null;
+    cortexChatMemSettings = cmRaw ? embeddingsSvc.normalizeChatMemorySettings(cmRaw) : null;
+    cortexPerChatOverrides = (chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null;
+
+    // Fire immediately — the async IIFE resolves settings then queries cortex.
+    // .catch() ensures failures never propagate; we fall back to vector search.
+    cortexPromise = (async () => {
+      const embCfg = await embeddingsSvc.getEmbeddingConfig(ctx.userId);
+      const effective = cortexChatMemSettings
+        ? embeddingsSvc.resolveEffectiveChatMemorySettings(cortexChatMemSettings, embCfg)
+        : embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS;
+
+      const recentContent = messages.slice(-6).map(m => m.content).join(" ");
+      const emotionalContext = buildEmotionalContext(recentContent);
+
+      return memoryCortex.queryCortex({
+        chatId: ctx.chatId,
+        userId: ctx.userId,
+        queryText: buildQueryText(messages, effective),
+        emotionalContext,
+        generationType: ctx.generationType,
+        topK: cortexPerChatOverrides?.retrievalTopK ?? effective.retrievalTopK,
+        includeConsolidations: cortexConfig.consolidation.enabled,
+        includeRelationships: cortexConfig.retrieval.relationshipInjection,
+        excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
+      }, cortexConfig);
+    })().catch(err => {
+      console.warn("[prompt-assembly] Cortex retrieval failed, will use vector fallback:", err);
+      return null;
+    });
+  }
+
   // ---- World Info activation ----
   const globalWorldBooks = (settingsSvc.getSetting(ctx.userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
   const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
@@ -409,9 +450,15 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // Populate Lumia / Loom / Council / OOC / Sovereign Hand context for macros
   populateLumiaLoomContext(macroEnv, ctx.userId, chat, ctx, settingsMap);
 
-  // Inject Lumi pipeline results into macroEnv (if present)
-  if (ctx.lumiPipelineResults && ctx.lumiPipelineResults.size > 0) {
-    const pipelineResults = ctx.lumiPipelineResults;
+  // Inject Lumi pipeline results into macroEnv.
+  // If the pipeline was fired as a non-blocking promise, await it here — by now it has
+  // had the full WI activation + macro setup duration to execute concurrently.
+  const lumiPipelineResults = ctx.lumiPipelinePromise
+    ? await ctx.lumiPipelinePromise
+    : ctx.lumiPipelineResults;
+
+  if (lumiPipelineResults && lumiPipelineResults.size > 0) {
+    const pipelineResults = lumiPipelineResults;
     const moduleNames = new Map<string, string>();
     const lumiMeta = preset?.metadata as any;
     if (lumiMeta?.pipelines) {
@@ -436,78 +483,69 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   }
 
   // ---- Pre-loop: retrieve chat vector memories ----
+  // Reuse settings resolved during cortex pre-flight (avoids duplicate DB reads).
+  // Fall back to batch-loaded settings for the non-cortex path.
   const chatMemSettingsRaw = settingsMap.get("chatMemorySettings") ?? null;
-  const chatMemSettings = chatMemSettingsRaw
+  const chatMemSettings = cortexChatMemSettings ?? (chatMemSettingsRaw
     ? embeddingsSvc.normalizeChatMemorySettings(chatMemSettingsRaw)
-    : null;
-  const perChatOverrides = (chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null;
+    : null);
+  const perChatOverrides = cortexPerChatOverrides ?? ((chat.metadata?.memory_settings as import("./embeddings.service").PerChatMemoryOverrides | undefined) ?? null);
 
-  // Memory Cortex: enhanced retrieval with entity graph, salience, and emotional resonance
-  const cortexConfig = memoryCortex.getCortexConfig(ctx.userId);
+  // Memory Cortex: await the pre-flighted concurrent retrieval (started before WI activation).
+  // By now cortex has had the full WI + macro setup duration to execute in the background.
   let cortexResult: memoryCortex.CortexResult | null = null;
 
   let memoryResult: Awaited<ReturnType<typeof collectChatVectorMemory>>;
 
-  if (cortexConfig.enabled) {
-    // Build emotional context from recent messages for associative recall
-    const recentContent = messages.slice(-6).map(m => m.content).join(" ");
-    const emotionalContext = buildEmotionalContext(recentContent);
+  if (cortexConfig.enabled && cortexPromise) {
+    cortexResult = await cortexPromise;
 
-    const effectiveSettings = chatMemSettings
-      ? embeddingsSvc.resolveEffectiveChatMemorySettings(chatMemSettings, await embeddingsSvc.getEmbeddingConfig(ctx.userId))
-      : embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS;
+    if (cortexResult && cortexResult.memories.length > 0) {
+      // Format cortex data using shadow prompt formatter
+      const shadowResult = memoryCortex.formatShadowPrompt(
+        cortexResult.memories,
+        cortexResult.entityContext,
+        cortexResult.activeRelationships,
+        cortexResult.arcContext,
+        {
+          mode: cortexConfig.formatterMode as any,
+          tokenBudget: cortexConfig.contextTokenBudget,
+          currentSpeakerName: character?.name,
+        },
+      );
 
-    cortexResult = await memoryCortex.queryCortex({
-      chatId: ctx.chatId,
-      userId: ctx.userId,
-      queryText: buildQueryText(messages, effectiveSettings),
-      emotionalContext,
-      generationType: ctx.generationType,
-      topK: perChatOverrides?.retrievalTopK ?? effectiveSettings.retrievalTopK,
-      includeConsolidations: cortexConfig.consolidation.enabled,
-      includeRelationships: cortexConfig.retrieval.relationshipInjection,
-      excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
-    }, cortexConfig);
+      // Map to existing MemoryRetrievalResult for backwards compat
+      memoryResult = {
+        chunks: cortexResult.memories.map((m) => ({
+          content: m.content,
+          score: m.finalScore,
+          metadata: { components: m.components, entityNames: m.entityNames },
+        })),
+        formatted: shadowResult.text,
+        count: cortexResult.memories.length,
+        enabled: true,
+        queryPreview: "",
+        settingsSource: "global" as const,
+        chunksAvailable: 0,
+        chunksPending: 0,
+      };
 
-    // Format cortex data using shadow prompt formatter
-    const shadowResult = memoryCortex.formatShadowPrompt(
-      cortexResult.memories,
-      cortexResult.entityContext,
-      cortexResult.activeRelationships,
-      cortexResult.arcContext,
-      {
-        mode: cortexConfig.formatterMode as any,
-        tokenBudget: cortexConfig.contextTokenBudget,
-        currentSpeakerName: character?.name,
-      },
-    );
-
-    // Map to existing MemoryRetrievalResult for backwards compat
-    memoryResult = {
-      chunks: cortexResult.memories.map((m) => ({
-        content: m.content,
-        score: m.finalScore,
-        metadata: { components: m.components, entityNames: m.entityNames },
-      })),
-      formatted: shadowResult.text,
-      count: cortexResult.memories.length,
-      enabled: true,
-      queryPreview: "",
-      settingsSource: "global" as const,
-      chunksAvailable: 0,
-      chunksPending: 0,
-    };
-
-    // Populate macro env with cortex data (including character color map)
-    const colorMapText = memoryCortex.formatColorMapForPrompt(ctx.chatId);
-    macroEnv.extra.cortex = {
-      memories: cortexResult.memories,
-      entityContext: cortexResult.entityContext,
-      activeRelationships: cortexResult.activeRelationships,
-      arcContext: cortexResult.arcContext,
-      formatted: colorMapText ? shadowResult.text + "\n\n" + colorMapText : shadowResult.text,
-      colorMap: colorMapText,
-    };
+      // Populate macro env with cortex data (including character color map)
+      const colorMapText = memoryCortex.formatColorMapForPrompt(ctx.chatId);
+      macroEnv.extra.cortex = {
+        memories: cortexResult.memories,
+        entityContext: cortexResult.entityContext,
+        activeRelationships: cortexResult.activeRelationships,
+        arcContext: cortexResult.arcContext,
+        formatted: colorMapText ? shadowResult.text + "\n\n" + colorMapText : shadowResult.text,
+        colorMap: colorMapText,
+      };
+    } else {
+      // Cortex returned no results or failed — fall back to pure vector retrieval
+      memoryResult = await collectChatVectorMemory(
+        ctx.userId, ctx.chatId, messages, chatMemSettings, perChatOverrides, ctx.excludeMessageId,
+      );
+    }
   } else {
     // Existing path: pure vector retrieval
     memoryResult = await collectChatVectorMemory(
@@ -615,6 +653,10 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         historyCount++;
       }
       breakdown.push({ type: "chat_history", name: "Chat History", messageCount: historyCount, firstMessageIndex: firstChatIdx, content: historyParts.join("\n") });
+
+      // Merge consecutive user messages (queued messages) into single LLM turns
+      historyCount = mergeConsecutiveUserMessages(result, firstChatIdx, historyCount);
+
       chatHistoryInserted = true;
       chatHistoryCount = historyCount;
 
@@ -2852,6 +2894,52 @@ function applyAppendGroup(
 }
 
 /**
+ * Merge consecutive user messages in the chat history range into single messages,
+ * joining their text content with double newlines. This collapses "queued" user
+ * messages into one LLM turn so providers that disallow consecutive same-role
+ * messages don't reject the request.
+ *
+ * Mutates `result` in-place and returns the new history count (may be smaller
+ * than the original if merges occurred).
+ */
+function mergeConsecutiveUserMessages(
+  result: LlmMessage[],
+  startIdx: number,
+  count: number,
+): number {
+  let remaining = count;
+  let i = startIdx;
+  while (i < startIdx + remaining - 1) {
+    if (result[i].role === "user" && result[i + 1]?.role === "user") {
+      const a = result[i].content;
+      const b = result[i + 1].content;
+
+      // Extract text from each message (string or multipart)
+      const aText = typeof a === "string" ? a : a.filter((p): p is import("../llm/types").LlmTextPart => p.type === "text").map((p) => p.text).join("");
+      const bText = typeof b === "string" ? b : b.filter((p): p is import("../llm/types").LlmTextPart => p.type === "text").map((p) => p.text).join("");
+      const mergedText = aText + "\n\n" + bText;
+
+      // Collect non-text parts (images, audio) from both messages
+      const aParts = typeof a === "string" ? [] : a.filter((p) => p.type !== "text");
+      const bParts = typeof b === "string" ? [] : b.filter((p) => p.type !== "text");
+      const allParts = [...aParts, ...bParts];
+
+      if (allParts.length > 0) {
+        result[i] = { role: "user", content: [{ type: "text" as const, text: mergedText }, ...allParts] };
+      } else {
+        result[i] = { role: "user", content: mergedText };
+      }
+      result.splice(i + 1, 1);
+      remaining--;
+      // Don't increment — next element slid into i+1, check again
+    } else {
+      i++;
+    }
+  }
+  return remaining;
+}
+
+/**
  * Strip reasoning tags (and surrounding whitespace) from older assistant messages
  * in the chat history range based on reasoningSettings.keepInHistory.
  *
@@ -3505,6 +3593,9 @@ async function legacyAssembly(
     legacyHistoryCount++;
   }
   breakdown.push({ type: "chat_history", name: "Chat History (legacy)", messageCount: legacyHistoryCount, content: legacyHistoryParts.join("\n") });
+
+  // Merge consecutive user messages (queued messages) into single LLM turns
+  legacyHistoryCount = mergeConsecutiveUserMessages(llmMessages, legacyFirstChatIdx, legacyHistoryCount);
 
   // Strip reasoning from older chat history messages based on keepInHistory
   let reasoningVal: { apiReasoning?: boolean; reasoningEffort?: string } | null = null;

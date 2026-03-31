@@ -95,6 +95,17 @@ export function useWebSocket() {
       wsClient.on(EventType.MESSAGE_EDITED, (payload: MessageEditedPayload) => {
         const state = store.getState()
         if (payload.chatId === state.activeChatId) {
+          // During a continue, the backend updates the target message with combined
+          // content right before GENERATION_ENDED. Skip the update while streaming
+          // to avoid a brief content duplication frame — reconciliation after
+          // GENERATION_ENDED will pick up the final state.
+          if (state.isStreaming && state.streamingGenerationType === 'continue') {
+            const msgs = state.messages
+            const lastAssistant = msgs.length > 0 ? msgs[msgs.length - 1] : null
+            if (lastAssistant && !lastAssistant.is_user && lastAssistant.id === payload.message.id) {
+              return
+            }
+          }
           state.updateMessage(payload.message.id, payload.message)
         }
       }),

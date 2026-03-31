@@ -50,6 +50,35 @@ export default function MigrationSettings() {
     }
   }, [migrationId, migrationResult, migrationError])
 
+  // Poll /status as fallback in case WS events are missed or delayed
+  useEffect(() => {
+    if (step !== 'progress' || migrationResult || migrationError) return
+
+    const poll = async () => {
+      try {
+        const status = await stMigrationApi.status()
+        if (status.status === 'completed' && status.results) {
+          useStore.getState().setMigrationCompleted({ migrationId: status.migrationId!, durationMs: 0, results: status.results })
+        } else if (status.status === 'failed' && status.error) {
+          useStore.getState().setMigrationFailed({ error: status.error })
+        } else if (status.status === 'running' && status.phase) {
+          // Only update phase if the backend is ahead of our current state
+          const current = useStore.getState().migrationPhase
+          if (current === 'starting' || current === 'scanning') {
+            if (status.phase !== 'starting' && status.phase !== 'scanning') {
+              useStore.getState().setMigrationProgress({ phase: status.phase, label: status.phase, current: 0, total: 0 })
+            }
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    }
+
+    const interval = setInterval(poll, 3000)
+    return () => clearInterval(interval)
+  }, [step, migrationResult, migrationError])
+
   // Auto-scroll logs
   useEffect(() => {
     if (logPanelRef.current) {
@@ -409,6 +438,7 @@ export default function MigrationSettings() {
     const phase = migrationPhase || 'starting'
     const phaseLabels: Record<string, string> = {
       starting: 'Starting...',
+      scanning: 'Scanning data...',
       characters: 'Characters',
       worldBooks: 'World Books',
       personas: 'Personas',

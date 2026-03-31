@@ -9,8 +9,8 @@
  *   OWNER_USERNAME, OWNER_PASSWORD, PORT, SPINDLE_EPHEMERAL_GLOBAL_MAX_BYTES
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { createInterface } from "readline";
 import { hashPassword } from "../src/crypto/password";
 import { createIdentityFile, bytesToHex } from "../src/crypto/identity";
@@ -196,7 +196,7 @@ async function main() {
 
   // Hash password and write credentials file
   const passwordHash = await hashPassword(password);
-  writeOwnerCredentials(credentialsPath, username, passwordHash);
+  await writeOwnerCredentials(credentialsPath, username, passwordHash);
 
   // Build .env content (no plaintext credentials!)
   const envLines = [

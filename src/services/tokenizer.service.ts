@@ -35,7 +35,9 @@ function getConfig(id: string): TokenizerConfig | null {
 
 function getAllPatterns(): TokenizerModelPattern[] {
   const db = getDb();
-  const rows = db.query("SELECT * FROM tokenizer_model_patterns ORDER BY priority DESC").all();
+  // Sort: highest priority first. Within the same priority tier, custom (non-built-in)
+  // patterns come before built-in ones so user patterns always beat the .* catchall.
+  const rows = db.query("SELECT * FROM tokenizer_model_patterns ORDER BY priority DESC, is_built_in ASC, created_at DESC").all();
   return rows.map((r: any) => ({ ...r, is_built_in: !!r.is_built_in }));
 }
 

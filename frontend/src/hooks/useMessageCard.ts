@@ -59,16 +59,23 @@ export function useMessageCard(message: Message, chatId: string) {
   const streamingReasoning = useStore((s) => s.streamingReasoning)
   const streamingReasoningDuration = useStore((s) => s.streamingReasoningDuration)
   const regeneratingMessageId = useStore((s) => s.regeneratingMessageId)
+  const streamingGenerationType = useStore((s) => s.streamingGenerationType)
 
   const isUser = message.is_user
   const isLastMessage = messages.length > 0 && messages[messages.length - 1].id === message.id
   const isRegenerating = isStreaming && regeneratingMessageId === message.id
-  const isActivelyStreaming = isRegenerating || (isStreaming && isLastMessage && !isUser && !regeneratingMessageId)
+  const isContinuing = isStreaming && streamingGenerationType === 'continue' && isLastMessage && !isUser
+  const isActivelyStreaming = isRegenerating || isContinuing || (isStreaming && isLastMessage && !isUser && !regeneratingMessageId)
   // When this message is being regenerated, show streaming content in-place
   // instead of the saved (blank) swipe content.
+  // When continuing, append streaming content to the existing message content.
   // For non-regeneration streaming (normal generation), the streaming bubble
   // in MessageList handles display to avoid race conditions with MESSAGE_SENT.
-  const rawContent = isRegenerating ? (streamingContent || message.content) : message.content
+  const rawContent = isRegenerating
+    ? (streamingContent || message.content)
+    : isContinuing
+      ? message.content + (streamingContent || '')
+      : message.content
 
   // Auto-parse: strip thinking tags from assistant messages and extract as reasoning
   const { displayContent, parsedReasoning } = useMemo(() => {
@@ -82,7 +89,9 @@ export function useMessageCard(message: Message, chatId: string) {
   const apiReasoning = message.extra?.reasoning as string | undefined
   const reasoning = isRegenerating
     ? (streamingReasoning || parsedReasoning || undefined)
-    : (apiReasoning || parsedReasoning || undefined)
+    : isContinuing
+      ? (streamingReasoning || apiReasoning || parsedReasoning || undefined)
+      : (apiReasoning || parsedReasoning || undefined)
   const reasoningDuration = isActivelyStreaming
     ? (streamingReasoningDuration ?? undefined)
     : (message.extra?.reasoningDuration as number | undefined)

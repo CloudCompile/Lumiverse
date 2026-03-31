@@ -110,7 +110,7 @@ export const wsHandler = upgradeWebSocket((c) => {
         console.error("[WS] onOpen error:", err);
       }
     },
-    onMessage(event, ws) {
+    async onMessage(event, ws) {
       try {
         const data = JSON.parse(event.data as string);
         if (data.type === "ping") {
@@ -141,7 +141,7 @@ export const wsHandler = upgradeWebSocket((c) => {
           if (!extensionId) return;
           if (!userId) return;
 
-          const ext = managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
           if (!ext) {
             return;
           }
@@ -169,7 +169,7 @@ export const wsHandler = upgradeWebSocket((c) => {
           const commandId = typeof data.commandId === "string" ? data.commandId : null;
           if (!extensionId || !commandId || !userId) return;
 
-          const ext = managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
           if (!ext) return;
 
           const host = getWorkerHost(extensionId);

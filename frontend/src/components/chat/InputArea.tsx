@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, type KeyboardEvent } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
 import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
@@ -41,6 +41,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const sendingRef = useRef(false)
   const generationNonceRef = useRef(0)
+  const queueLockRef = useRef(false)
+  const touchTimerRef = useRef<number>(0)
   const isStreaming = useStore((s) => s.isStreaming)
   const activeGenerationId = useStore((s) => s.activeGenerationId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -323,6 +325,61 @@ export default function InputArea({ chatId }: InputAreaProps) {
     setPendingAttachments((prev) => prev.filter((a) => a.image_id !== imageId))
   }, [])
 
+  // Detect trailing consecutive user messages (queued messages awaiting generation)
+  const hasQueuedMessages = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].extra?.hidden) continue
+      return messages[i].is_user
+    }
+    return false
+  }, [messages])
+
+  const handleQueueMessage = useCallback(async () => {
+    if (sendingRef.current || isStreaming) return
+    const content = text.trim()
+    const attachments = pendingAttachments.length > 0
+      ? pendingAttachments.map(({ previewUrl: _, ...a }) => a)
+      : undefined
+    if (!content && !attachments) return
+
+    sendingRef.current = true
+    setText('')
+    setPendingAttachments([])
+    if (saveDraftInput) {
+      try { localStorage.removeItem(DRAFT_KEY_PREFIX + chatId) } catch {}
+    }
+
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto'
+        textareaRef.current.focus()
+      }
+    })
+
+    try {
+      const effectivePersonaId = sendPersonaId || activePersonaId
+      const effectivePersonaName = personas.find((p) => p.id === effectivePersonaId)?.name || 'User'
+      const extra: Record<string, any> = {}
+      if (effectivePersonaId) extra.persona_id = effectivePersonaId
+      if (attachments) extra.attachments = attachments
+
+      const msg = await messagesApi.create(chatId, {
+        is_user: true,
+        name: effectivePersonaName,
+        content: content || '(attached)',
+        extra: Object.keys(extra).length > 0 ? extra : undefined,
+      })
+      addMessage(msg)
+      if (sendPersonaId) setSendPersonaId(null)
+      toast.info('Message queued', { duration: 1500 })
+    } catch (err: any) {
+      console.error('[InputArea] Failed to queue message:', err)
+      toast.error(err?.body?.error || err?.message || 'Failed to queue message')
+    } finally {
+      sendingRef.current = false
+    }
+  }, [text, chatId, isStreaming, activePersonaId, personas, sendPersonaId, pendingAttachments, addMessage, saveDraftInput])
+
   const handleSend = useCallback(async () => {
     if (sendingRef.current || isStreaming) return
     const content = text.trim()
@@ -381,9 +438,16 @@ export default function InputArea({ chatId }: InputAreaProps) {
         startStreaming(res.generationId)
         consumeOneshotGuides()
         if (sendPersonaId) setSendPersonaId(null)
-      } else {
-        // Empty send = silent continue (nudge AI to generate)
+      } else if (hasQueuedMessages) {
+        // Queued user messages waiting — trigger normal generation
         beginStreaming()
+        const res = await generateApi.start(genOpts)
+        if (generationNonceRef.current !== nonce) return
+        startStreaming(res.generationId)
+        consumeOneshotGuides()
+      } else {
+        // Empty send with no queued messages = silent continue (nudge)
+        beginStreaming(undefined, 'continue')
         const res = await generateApi.continueGeneration(genOpts)
         if (generationNonceRef.current !== nonce) return
         startStreaming(res.generationId)
@@ -398,7 +462,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput])
+  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages])
 
   const doRegenerate = useCallback(async (feedback?: string | null) => {
     if (isStreaming) return
@@ -485,7 +549,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const handleContinue = useCallback(async () => {
     if (isStreaming) return
     const nonce = ++generationNonceRef.current
-    beginStreaming()
+    beginStreaming(undefined, 'continue')
     try {
       const res = await generateApi.continueGeneration({
         chat_id: chatId,
@@ -609,13 +673,46 @@ export default function InputArea({ chatId }: InputAreaProps) {
         } else {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault()
-            handleSend()
+            if (e.shiftKey) {
+              handleQueueMessage()
+            } else {
+              handleSend()
+            }
           }
         }
       }
     },
-    [enterToSend, handleSend]
+    [enterToSend, handleSend, handleQueueMessage]
   )
+
+  // Send button: shift+click queues, normal click sends
+  const handleSendClick = useCallback((e: React.MouseEvent) => {
+    if (queueLockRef.current) {
+      queueLockRef.current = false
+      return
+    }
+    if (e.shiftKey && (text.trim() || pendingAttachments.length > 0)) {
+      handleQueueMessage()
+    } else {
+      handleSend()
+    }
+  }, [text, pendingAttachments, handleQueueMessage, handleSend])
+
+  // Long-press on send button (mobile, 2s) queues the message
+  const handleSendTouchStart = useCallback(() => {
+    if (!text.trim() && pendingAttachments.length === 0) return
+    touchTimerRef.current = window.setTimeout(() => {
+      queueLockRef.current = true
+      handleQueueMessage()
+    }, 2000)
+  }, [text, pendingAttachments, handleQueueMessage])
+
+  const handleSendTouchEnd = useCallback(() => {
+    if (touchTimerRef.current) {
+      clearTimeout(touchTimerRef.current)
+      touchTimerRef.current = 0
+    }
+  }, [])
 
   // Auto-resize textarea
   const handleInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1175,9 +1272,24 @@ export default function InputArea({ chatId }: InputAreaProps) {
           <button
             type="button"
             className={styles.sendBtn}
-            onClick={handleSend}
-            title={text.trim() || pendingAttachments.length > 0 ? 'Send message' : 'Silent continue (nudge)'}
-            aria-label={text.trim() || pendingAttachments.length > 0 ? 'Send message' : 'Silent continue'}
+            onClick={handleSendClick}
+            onTouchStart={handleSendTouchStart}
+            onTouchEnd={handleSendTouchEnd}
+            onTouchCancel={handleSendTouchEnd}
+            title={
+              text.trim() || pendingAttachments.length > 0
+                ? 'Send message (Shift+click to queue)'
+                : hasQueuedMessages
+                  ? 'Send queued messages'
+                  : 'Silent continue (nudge)'
+            }
+            aria-label={
+              text.trim() || pendingAttachments.length > 0
+                ? 'Send message'
+                : hasQueuedMessages
+                  ? 'Send queued messages'
+                  : 'Silent continue'
+            }
           >
             <Send size={16} />
           </button>

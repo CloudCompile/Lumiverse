@@ -1,5 +1,5 @@
-import { join, resolve } from "path";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { join, resolve } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { hashPassword } from "../crypto/password";
 import { getDb } from "../db/connection";
 import { env } from "../env";
@@ -107,7 +107,7 @@ async function migrateOwnerPassword(credentialsPath: string): Promise<boolean> {
   const envPath = resolve(process.cwd(), ".env");
 
   // Already migrated — just clean up .env if the key is still lingering
-  if (ownerCredentialsExist(credentialsPath)) {
+  if (await ownerCredentialsExist(credentialsPath)) {
     if (stripEnvKey(envPath, "OWNER_PASSWORD")) {
       console.log("[Auth] Removed lingering OWNER_PASSWORD from .env (already migrated).");
     }
@@ -116,7 +116,7 @@ async function migrateOwnerPassword(credentialsPath: string): Promise<boolean> {
 
   console.log("[Auth] Migrating OWNER_PASSWORD to owner.credentials...");
   const hash = await hashPassword(env.ownerPassword);
-  writeOwnerCredentials(credentialsPath, env.ownerUsername, hash);
+  await writeOwnerCredentials(credentialsPath, env.ownerUsername, hash);
 
   if (stripEnvKey(envPath, "OWNER_PASSWORD")) {
     console.log("[Auth] Removed OWNER_PASSWORD from .env file.");
@@ -169,7 +169,7 @@ export async function seedOwner(): Promise<void> {
     // Users exist — skip initial seed but still enforce the owner role below.
   } else {
     // First run: create the owner account from the credentials file.
-    if (!ownerCredentialsExist(credentialsPath)) {
+    if (!(await ownerCredentialsExist(credentialsPath))) {
       console.error("");
       console.error("[Auth] No owner credentials found and no users exist.");
       console.error(`[Auth] Expected credentials at: ${credentialsPath}`);
@@ -182,7 +182,7 @@ export async function seedOwner(): Promise<void> {
 
     let creds;
     try {
-      creds = readOwnerCredentials(credentialsPath);
+      creds = await readOwnerCredentials(credentialsPath);
     } catch (err) {
       console.error(`[Auth] Credentials file exists but could not be read: ${err}`);
       console.error("[Auth] The file may be corrupted. Run: bun run reset-password");
@@ -210,8 +210,8 @@ export async function seedOwner(): Promise<void> {
   //   3. First-created user (user 0) — guaranteed owner for single-user installs
   type UserRow = { id: string; role: string; username: string };
 
-  const ownerUsername = ownerCredentialsExist(credentialsPath)
-    ? readOwnerCredentials(credentialsPath).username
+  const ownerUsername = (await ownerCredentialsExist(credentialsPath))
+    ? (await readOwnerCredentials(credentialsPath)).username
     : env.ownerUsername;
 
   let owner: UserRow | null = db
