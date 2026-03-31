@@ -165,3 +165,33 @@ export function applyProfileToBlocks(
     }
   }
 }
+
+export function normalizeCategoryBlockStates(
+  blocks: PromptBlock[]
+): void {
+  let currentCategoryMode: PromptBlock["categoryMode"] = null;
+  let currentChildren: PromptBlock[] = [];
+
+  const normalizeCurrentGroup = () => {
+    if (currentCategoryMode !== "radio") return;
+    const enabledChildren = currentChildren.filter((block) => block.enabled);
+    if (enabledChildren.length <= 1) return;
+
+    const keepId = enabledChildren[0].id;
+    for (const block of currentChildren) {
+      block.enabled = block.id === keepId;
+    }
+  };
+
+  for (const block of blocks) {
+    if (block.marker === "category") {
+      normalizeCurrentGroup();
+      currentCategoryMode = block.categoryMode ?? null;
+      currentChildren = [];
+      continue;
+    }
+    currentChildren.push(block);
+  }
+
+  normalizeCurrentGroup();
+}

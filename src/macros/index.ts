@@ -23,7 +23,6 @@ import { registerStateMacros } from "./definitions/runtime";
 import { registerReasoningMacros } from "./definitions/cot";
 import { registerLumiaMacros } from "./definitions/lumia";
 import { registerLoomMacros } from "./definitions/loom";
-import { registerLumiEngineMacros } from "./definitions/lumi-engine";
 import { registerMemoryMacros } from "./definitions/memory";
 import { registerCortexMacros } from "./definitions/cortex";
 import { registerStringMacros } from "./definitions/strings";
@@ -53,7 +52,6 @@ export function initMacros(): void {
   registerReasoningMacros();
   registerLumiaMacros();
   registerLoomMacros();
-  registerLumiEngineMacros();
   registerMemoryMacros();
   registerCortexMacros();
   registerStringMacros();

@@ -15,7 +15,6 @@ import MessageSelectBar from './MessageSelectBar'
 import InputArea from './InputArea'
 import ScrollToBottom from './ScrollToBottom'
 import CouncilPill from './CouncilPill'
-import LumiPill from './LumiPill'
 import PortraitPanel from './PortraitPanel'
 import ExpressionDisplay from './expressions/ExpressionDisplay'
 import FloatingAvatarViewer from './FloatingAvatarViewer'
@@ -357,7 +356,6 @@ export default function ChatView() {
             </div>
             <MessageList messages={messages} chatId={chatId} isStreaming={isStreaming} />
             <ScrollToBottom />
-            <LumiPill />
             <CouncilPill />
             {messageSelectMode && <MessageSelectBar chatId={chatId} />}
             <InputArea chatId={chatId} />

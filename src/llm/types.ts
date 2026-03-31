@@ -121,10 +121,6 @@ export interface AssemblyContext {
   /** Pre-computed vector-activated world info entries from the generation pipeline.
    *  When provided, assembly reuses these instead of re-running vector retrieval. */
   precomputedVectorEntries?: import("../services/prompt-assembly.service").VectorActivatedEntry[];
-  /** Pipeline results from Lumi sidecar execution (resolved or in-flight promise). */
-  lumiPipelineResults?: import("../types/lumi-engine").LumiPipelineResult;
-  /** In-flight Lumi pipeline promise — awaited inside assembly when results are needed. */
-  lumiPipelinePromise?: Promise<import("../types/lumi-engine").LumiPipelineResult | undefined>;
   /** User-provided feedback text for regeneration guidance. */
   regenFeedback?: string;
   /** Where to inject regen feedback: 'system' (last system msg) or 'user' (last user msg). */

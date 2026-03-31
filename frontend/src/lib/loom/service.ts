@@ -41,6 +41,7 @@ export function createBlock(overrides: Partial<PromptBlock> = {}): PromptBlock {
     isLocked: false,
     color: null,
     injectionTrigger: [],
+    categoryMode: null,
     ...overrides,
   }
 }
@@ -74,9 +75,78 @@ function migratePreset(preset: LoomPreset): LoomPreset {
       if (!Array.isArray(block.injectionTrigger)) {
         block.injectionTrigger = []
       }
+      block.categoryMode = block.marker === 'category'
+        ? coerceCategoryMode(block.categoryMode)
+        : null
     }
   }
+  preset.blocks = normalizeCategoryBlockState(preset.blocks || [])
   return preset
+}
+
+function coerceCategoryMode(mode: unknown): PromptBlock['categoryMode'] {
+  return mode === 'radio' || mode === 'checkbox' ? mode : null
+}
+
+export function normalizeCategoryBlockState(
+  blocks: PromptBlock[],
+  preferredBlockIdByCategory?: Map<string, string>,
+): PromptBlock[] {
+  const normalizedBlocks = blocks.map((block) => ({
+    ...block,
+    categoryMode: block.marker === 'category'
+      ? coerceCategoryMode(block.categoryMode)
+      : null,
+  }))
+
+  for (const group of computeGroups(normalizedBlocks)) {
+    if (!group.categoryBlock || group.categoryBlock.categoryMode !== 'radio') continue
+
+    const enabledChildren = group.children.filter((block) => block.enabled)
+    if (enabledChildren.length <= 1) continue
+
+    const preferredId = preferredBlockIdByCategory?.get(group.categoryBlock.id)
+    const keepId = preferredId && enabledChildren.some((block) => block.id === preferredId)
+      ? preferredId
+      : enabledChildren[0].id
+
+    for (let index = 0; index < normalizedBlocks.length; index += 1) {
+      const block = normalizedBlocks[index]
+      if (
+        block.id !== keepId &&
+        group.children.some((child) => child.id === block.id) &&
+        block.enabled
+      ) {
+        normalizedBlocks[index] = { ...block, enabled: false }
+      }
+    }
+  }
+
+  return normalizedBlocks
+}
+
+export function toggleBlockWithCategoryRules(
+  blocks: PromptBlock[],
+  blockId: string,
+): PromptBlock[] {
+  const target = blocks.find((block) => block.id === blockId)
+  if (!target) return blocks
+
+  const categoryGroup = computeGroups(blocks).find((group) => (
+    group.categoryBlock?.categoryMode === 'radio' &&
+    group.children.some((child) => child.id === blockId)
+  ))
+
+  if (!categoryGroup?.categoryBlock) {
+    return blocks.map((block) => (
+      block.id === blockId ? { ...block, enabled: !block.enabled } : block
+    ))
+  }
+
+  return blocks.map((block) => {
+    if (!categoryGroup.children.some((child) => child.id === block.id)) return block
+    return { ...block, enabled: block.id === blockId }
+  })
 }
 
 // ============================================================================
@@ -84,6 +154,7 @@ function migratePreset(preset: LoomPreset): LoomPreset {
 // ============================================================================
 
 export function marshalPreset(loom: LoomPreset): CreatePresetInput {
+  const blocks = normalizeCategoryBlockState(loom.blocks)
   return {
     name: loom.name,
     provider: 'loom',
@@ -91,7 +162,7 @@ export function marshalPreset(loom: LoomPreset): CreatePresetInput {
       samplerOverrides: loom.samplerOverrides,
       customBody: loom.customBody,
     },
-    prompt_order: loom.blocks,
+    prompt_order: blocks,
     prompts: {
       promptBehavior: loom.promptBehavior,
       completionSettings: loom.completionSettings,
@@ -136,13 +207,14 @@ export function unmarshalPreset(preset: Preset): LoomPreset {
 }
 
 export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
+  const blocks = normalizeCategoryBlockState(loom.blocks)
   return {
     name: loom.name,
     parameters: {
       samplerOverrides: loom.samplerOverrides,
       customBody: loom.customBody,
     },
-    prompt_order: loom.blocks,
+    prompt_order: blocks,
     prompts: {
       promptBehavior: loom.promptBehavior,
       completionSettings: loom.completionSettings,
