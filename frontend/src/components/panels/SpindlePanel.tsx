@@ -43,6 +43,7 @@ export default function SpindlePanel() {
   const spindlePrivileged = useStore((s) => s.spindlePrivileged)
 
   const extensionOperationStatus = useStore((s) => s.extensionOperationStatus)
+  const setOperationStatus = useStore((s) => s.setExtensionOperationStatus)
 
   const isPrivileged = spindlePrivileged || user?.role === 'owner' || user?.role === 'admin'
 
@@ -51,6 +52,7 @@ export default function SpindlePanel() {
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState<string | null>(null)
   const [loadingAction, setLoadingAction] = useState<string | null>(null)
+
   const [importingLocal, setImportingLocal] = useState(false)
   const [importSummary, setImportSummary] = useState<string | null>(null)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
@@ -72,6 +74,13 @@ export default function SpindlePanel() {
   })
   const addMenuRef = useRef<HTMLDivElement | null>(null)
   const addMenuButtonRef = useRef<HTMLButtonElement | null>(null)
+
+  /** True when any operation (local or WS-driven) is in progress for this extension */
+  const isExtBusy = useCallback((id: string) =>
+    loadingAction === id ||
+    (extensionOperationStatus?.extensionId === id && extensionOperationStatus.operation.endsWith('ing')),
+    [loadingAction, extensionOperationStatus]
+  )
 
   useEffect(() => {
     loadExtensions()
@@ -180,15 +189,17 @@ export default function SpindlePanel() {
   }, [enableExtension, disableExtension])
 
   const handleUpdate = useCallback(async (ext: ExtensionInfo) => {
-    setLoadingAction(ext.id)
+    // Set status optimistically — don't wait for the WS round-trip from the
+    // backend, which may be blocked by heavy git/npm work on the event loop.
+    setOperationStatus(ext.id, 'updating', ext.name)
     try {
       await updateExtension(ext.id)
+      setOperationStatus(ext.id, 'updated', ext.name)
     } catch (err: any) {
       console.error('[Spindle] Update failed:', err)
-    } finally {
-      setLoadingAction(null)
+      setOperationStatus(ext.id, 'failed', ext.name)
     }
-  }, [updateExtension])
+  }, [updateExtension, setOperationStatus])
 
   const handleRestart = useCallback(async (ext: ExtensionInfo) => {
     setLoadingAction(ext.id)
@@ -379,7 +390,7 @@ export default function SpindlePanel() {
                       ext.enabled ? styles.toggleOn : styles.toggleOff
                     )}
                     onClick={() => handleToggle(ext)}
-                    disabled={loadingAction === ext.id || !canManage}
+                    disabled={isExtBusy(ext.id) || !canManage}
                     title={canManage ? (ext.enabled ? 'Disable' : 'Enable') : 'Managed by operator'}
                   />
                 </div>
@@ -438,18 +449,18 @@ export default function SpindlePanel() {
                 <Button
                   size="icon" variant="ghost"
                   onClick={() => handleUpdate(ext)}
-                  disabled={loadingAction === ext.id || !canManage}
+                  disabled={isExtBusy(ext.id) || !canManage}
                   title={canManage ? 'Update' : 'Managed by operator'}
-                  icon={loadingAction === ext.id && extensionOperationStatus?.operation === 'updating'
+                  icon={extensionOperationStatus?.extensionId === ext.id && extensionOperationStatus.operation === 'updating'
                     ? <Spinner size={14} fast />
                     : <RefreshCw size={14} />}
                 />
                 <Button
                   size="icon" variant="ghost"
                   onClick={() => handleRestart(ext)}
-                  disabled={loadingAction === ext.id || !ext.enabled}
+                  disabled={isExtBusy(ext.id) || !ext.enabled}
                   title={ext.enabled ? 'Restart extension' : 'Extension is not enabled'}
-                  icon={loadingAction === ext.id && extensionOperationStatus?.operation === 'restarting'
+                  icon={extensionOperationStatus?.extensionId === ext.id && extensionOperationStatus.operation === 'restarting'
                     ? <Spinner size={14} fast />
                     : <RotateCw size={14} />}
                 />
@@ -469,7 +480,7 @@ export default function SpindlePanel() {
                     size="icon" variant="ghost"
                     className={clsx(branchMenuExtId === ext.id && styles.actionBtnActive)}
                     onClick={() => handleOpenBranchMenu(ext)}
-                    disabled={loadingAction === ext.id}
+                    disabled={isExtBusy(ext.id)}
                     title="Switch branch"
                     icon={<IconVersions size={14} />}
                   />
@@ -484,7 +495,7 @@ export default function SpindlePanel() {
                 <Button
                   size="icon" variant="danger-ghost"
                   onClick={() => handleRemove(ext)}
-                  disabled={loadingAction === ext.id || !canManage}
+                  disabled={isExtBusy(ext.id) || !canManage}
                   title={canManage ? 'Remove' : 'Managed by operator'}
                   icon={<Trash2 size={14} />}
                 />
@@ -506,7 +517,7 @@ export default function SpindlePanel() {
                           b === branchMenuCurrent && styles.branchMenuItemCurrent
                         )}
                         onClick={() => b !== branchMenuCurrent && handleSwitchBranch(ext, b)}
-                        disabled={b === branchMenuCurrent || loadingAction === ext.id}
+                        disabled={b === branchMenuCurrent || isExtBusy(ext.id)}
                       >
                         <IconVersions size={12} />
                         {b}

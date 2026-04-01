@@ -28,6 +28,7 @@ const NAME_VAR_KEYS = ['--char-name-dark', '--char-name-light']
 
 export function useCharacterTheme() {
   const characterAware = useStore((s) => (s.theme as ThemeConfig | null)?.characterAware === true)
+  const hasExtensionOverrides = useStore((s) => Object.keys(s.extensionThemeOverrides).length > 0)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const characters = useStore((s) => s.characters)
@@ -46,11 +47,14 @@ export function useCharacterTheme() {
   const appliedAvatarKeyRef = useRef<string | null>(null)
   const nameAppliedAvatarKeyRef = useRef<string | null>(null)
 
-  // ── 1. Character name colors (always active) ──
+  // ── 1. Character name colors (always active, unless extension overrides) ──
   useEffect(() => {
     const root = document.documentElement
 
-    if (!activeCharacterId || !avatarUrl || !avatarCacheKey) {
+    // When extension theme overrides are active, remove character-derived name
+    // colors so the CSS fallback (--lumiverse-primary-text) applies instead —
+    // that variable IS controlled by the extension's theme.
+    if (hasExtensionOverrides || !activeCharacterId || !avatarUrl || !avatarCacheKey) {
       NAME_VAR_KEYS.forEach((k) => root.style.removeProperty(k))
       nameAppliedAvatarKeyRef.current = null
       return
@@ -82,11 +86,13 @@ export function useCharacterTheme() {
 
     apply()
     return () => { cancelled = true }
-  }, [activeCharacterId, avatarUrl, avatarCacheKey])
+  }, [hasExtensionOverrides, activeCharacterId, avatarUrl, avatarCacheKey])
 
   // ── 2. Character-aware theme overlay (opt-in) ──
+  // Suppressed when extension theme overrides are active — extensions take full
+  // control of the palette, so character-derived accent/baseColors must yield.
   useEffect(() => {
-    if (!characterAware) {
+    if (!characterAware || hasExtensionOverrides) {
       appliedAvatarKeyRef.current = null
       return
     }
@@ -131,7 +137,7 @@ export function useCharacterTheme() {
 
     apply()
     return () => { cancelled = true }
-  }, [characterAware, activeCharacterId, avatarUrl, avatarCacheKey])
+  }, [characterAware, hasExtensionOverrides, activeCharacterId, avatarUrl, avatarCacheKey])
 
   // ── 3. React to CHARACTER_AVATAR_CHANGED — force resample ──
   useEffect(() => {

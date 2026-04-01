@@ -19,6 +19,7 @@ import styles from './InputArea.module.css'
 import clsx from 'clsx'
 import InputBarExtensionActions from './InputBarExtensionActions'
 import { unlockNotificationAudio } from '@/lib/notificationAudio'
+import { unlockTTSAudio } from '@/lib/ttsAudio'
 
 interface InputAreaProps {
   chatId: string
@@ -688,6 +689,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   // Send button: ctrl+click queues, normal click sends
   const handleSendClick = useCallback((e: React.MouseEvent) => {
     unlockNotificationAudio()
+    unlockTTSAudio()
     if (queueLockRef.current) {
       queueLockRef.current = false
       return

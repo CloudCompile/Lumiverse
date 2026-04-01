@@ -99,6 +99,91 @@
   gap: 12px;
 }
 
+.dbInfoGrid {
+  display: grid;
+  gap: 10px;
+}
+
+.dbInfoBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dbMono {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  word-break: break-all;
+}
+
+.dbInlineText {
+  font-size: 12px;
+  color: var(--lumiverse-text-muted);
+}
+
+.tuningGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.fieldGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fieldLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+
+.fieldInput {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  font-size: 12px;
+}
+
+.fieldInput:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fieldHint {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+  line-height: 1.45;
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.toggleGrid {
+  display: grid;
+  gap: 10px;
+}
+
+.toggleRowCompact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-fill-subtle);
+}
+
 /* ── Controls ────────────────────────────────────────────────────────────── */
 
 .controls {
@@ -281,6 +366,16 @@
   border: 1px solid rgba(100, 181, 246, 0.2);
   font-size: 13px;
   color: #64b5f6;
+}
+
+.warningBanner {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 183, 77, 0.28);
+  background: rgba(255, 183, 77, 0.08);
+  color: #ffb74d;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .disabledHint {

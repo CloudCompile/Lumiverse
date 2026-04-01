@@ -3,14 +3,15 @@ import {
   Brain, Users, Network, ChevronDown, ChevronRight, ChevronLeft, RefreshCw,
   MapPin, Swords, Package, Landmark, Lightbulb, Calendar,
   Heart, Shield, Zap, BookOpen, BarChart3, Search, ArrowRight,
-  Palette, Trash2, AlertTriangle, FileQuestion, Clock,
+  Palette, Trash2, AlertTriangle, FileQuestion, Clock, Link2,
 } from "lucide-react";
 import { useStore } from "@/store";
 import { memoryCortexApi, type CortexEntity, type CortexRelation, type CortexUsageStats } from "@/api/memory-cortex";
+import CortexLinksTab from "./CortexLinksTab";
 import styles from "./MemoryCortexPanel.module.css";
 import clsx from "clsx";
 
-type ViewTab = "entities" | "colors" | "stats";
+type ViewTab = "entities" | "colors" | "stats" | "links";
 
 const ENTITY_ICONS: Record<string, typeof Brain> = {
   character: Users,
@@ -31,6 +32,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 export default function MemoryCortexPanel() {
   const activeChatId = useStore((s) => s.activeChatId);
+  const totalChatLength = useStore((s) => s.totalChatLength);
   const addToast = useStore((s) => s.addToast);
 
   const [tab, setTab] = useState<ViewTab>("entities");
@@ -97,6 +99,7 @@ export default function MemoryCortexPanel() {
 
   // Get unique entity types for filter
   const entityTypes = [...new Set(entities.map((e) => e.entityType))];
+  const showLowActivityNotice = totalChatLength > 0 && totalChatLength < 6;
 
   if (!activeChatId) {
     return (
@@ -124,10 +127,27 @@ export default function MemoryCortexPanel() {
           <BarChart3 size={13} />
           Stats
         </button>
+        <button className={clsx(styles.tab, tab === "links" && styles.tabActive)} onClick={() => setTab("links")}>
+          <Link2 size={13} />
+          Links
+        </button>
         <button className={styles.refreshBtn} onClick={() => { loadEntities(); loadStats(); }} title="Refresh">
           <RefreshCw size={13} />
         </button>
       </div>
+
+      {showLowActivityNotice && (
+        <div className={styles.noticeBanner}>
+          <AlertTriangle size={14} className={styles.noticeIcon} />
+          <div>
+            <div className={styles.noticeTitle}>Memory Cortex is still warming up</div>
+            <p className={styles.noticeText}>
+              This chat only has {totalChatLength} message{totalChatLength === 1 ? "" : "s"} so far.
+              Cortex mappings, relationships, and recall context will have more to surface once the conversation has a few more turns.
+            </p>
+          </div>
+        </div>
+      )}
 
       {tab === "entities" && (
         <>
@@ -200,6 +220,10 @@ export default function MemoryCortexPanel() {
 
       {tab === "stats" && (
         <StatsView stats={stats} chatId={activeChatId} />
+      )}
+
+      {tab === "links" && (
+        <CortexLinksTab activeChatId={activeChatId} />
       )}
     </div>
   );

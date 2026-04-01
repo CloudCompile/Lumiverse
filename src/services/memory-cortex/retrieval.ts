@@ -397,6 +397,9 @@ async function searchChatChunksScoped(
     queryVector,
     excludeIds,
     limit,
+    undefined,
+    undefined,
+    candidateChunkIds,
   );
 
   // Filter to candidate set if we have one

@@ -9,15 +9,15 @@ import {
   Upload,
   X,
   KeyRound,
-  CloudCog,
   LogOut,
 } from 'lucide-react'
+import { IconBrandGoogleDrive, IconBrandDropbox } from '@tabler/icons-react'
 import { Spinner } from '@/components/shared/Spinner'
-import { stMigrationApi, googleDriveApi } from '@/api/st-migration'
+import { stMigrationApi, googleDriveApi, dropboxApi } from '@/api/st-migration'
 import type { FileConnectionConfig, SFTPConnectionConfig, SMBConnectionConfig } from '@/api/st-migration'
 import styles from './ConnectionPicker.module.css'
 
-type ConnectionType = 'local' | 'sftp' | 'smb' | 'google-drive'
+type ConnectionType = 'local' | 'sftp' | 'smb' | 'google-drive' | 'dropbox'
 type SFTPAuthMode = 'password' | 'key'
 
 interface ConnectionPickerProps {
@@ -34,8 +34,20 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
     value.type === 'sftp' && value.privateKey ? 'key' : 'password'
   )
   const [availableTypes, setAvailableTypes] = useState<ConnectionType[]>(['local'])
-  const [gdriveStatus, setGdriveStatus] = useState<{ configured: boolean; authorized: boolean } | null>(null)
+  const [gdriveStatus, setGdriveStatus] = useState<{
+    configured: boolean; hasCustomCredentials: boolean; hasClientSecret: boolean; authorized: boolean
+  } | null>(null)
   const [gdriveLoading, setGdriveLoading] = useState(false)
+  const [gdriveClientId, setGdriveClientId] = useState('')
+  const [gdriveClientSecret, setGdriveClientSecret] = useState('')
+  const [gdriveSaving, setGdriveSaving] = useState(false)
+  const [dbxStatus, setDbxStatus] = useState<{ configured: boolean; hasCustomAppKey: boolean; authorized: boolean } | null>(null)
+  const [dbxLoading, setDbxLoading] = useState(false)
+  const [dbxAppKey, setDbxAppKey] = useState('')
+  const [dbxSaving, setDbxSaving] = useState(false)
+  const [dbxAuthUrl, setDbxAuthUrl] = useState('')
+  const [dbxSessionToken, setDbxSessionToken] = useState('')
+  const [dbxCode, setDbxCode] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Probe which connection types the server actually supports
@@ -45,6 +57,9 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       .catch(() => setAvailableTypes(['local']))
     googleDriveApi.getStatus()
       .then(setGdriveStatus)
+      .catch(() => {})
+    dropboxApi.getStatus()
+      .then(setDbxStatus)
       .catch(() => {})
   }, [])
 
@@ -64,11 +79,16 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       onChange({ type: 'smb', host: '', share: '' })
       onConnected?.(false)
     } else if (type === 'google-drive') {
-      // Google Drive uses OAuth — if already authorized, fetch token and connect
       onChange({ type: 'google-drive', accessToken: '' })
       onConnected?.(false)
       if (gdriveStatus?.authorized) {
         handleGdriveConnect()
+      }
+    } else if (type === 'dropbox') {
+      onChange({ type: 'dropbox', accessToken: '' })
+      onConnected?.(false)
+      if (dbxStatus?.authorized) {
+        handleDbxConnect()
       }
     }
   }
@@ -147,7 +167,8 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
 
         try {
           await googleDriveApi.completeAuth(session_token, event.data.code)
-          setGdriveStatus({ configured: true, authorized: true })
+          const status = await googleDriveApi.getStatus()
+          setGdriveStatus(status)
           await handleGdriveConnect()
         } catch (err: any) {
           setTestState('fail')
@@ -185,13 +206,122 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
     }
   }
 
+  const handleGdriveSaveCredentials = async () => {
+    if (!gdriveClientId.trim()) return
+    setGdriveSaving(true)
+    try {
+      await googleDriveApi.saveCredentials(gdriveClientId.trim(), gdriveClientSecret.trim() || undefined)
+      const status = await googleDriveApi.getStatus()
+      setGdriveStatus(status)
+      setGdriveClientId('')
+      setGdriveClientSecret('')
+    } catch { /* ignore */ }
+    setGdriveSaving(false)
+  }
+
   const handleGdriveRevoke = async () => {
     try {
       await googleDriveApi.revoke()
-      setGdriveStatus({ configured: gdriveStatus?.configured ?? false, authorized: false })
+      const status = await googleDriveApi.getStatus()
+      setGdriveStatus(status)
       setTestState('idle')
       onConnected?.(false)
       onChange({ type: 'google-drive', accessToken: '' })
+    } catch { /* ignore */ }
+  }
+
+  const handleGdriveClearCredentials = async () => {
+    try {
+      await googleDriveApi.clearCredentials()
+      const status = await googleDriveApi.getStatus()
+      setGdriveStatus(status)
+      setTestState('idle')
+      onConnected?.(false)
+      onChange({ type: 'google-drive', accessToken: '' })
+    } catch { /* ignore */ }
+  }
+
+  // ─── Dropbox handlers ───────────────────────────────────────────────
+
+  const handleDbxSaveKey = async () => {
+    if (!dbxAppKey.trim()) return
+    setDbxSaving(true)
+    try {
+      await dropboxApi.saveCredentials(dbxAppKey.trim())
+      const status = await dropboxApi.getStatus()
+      setDbxStatus(status)
+      setDbxAppKey('')
+    } catch { /* ignore */ }
+    setDbxSaving(false)
+  }
+
+  const handleDbxAuth = async () => {
+    setDbxLoading(true)
+    setTestState('idle')
+    setTestError('')
+    try {
+      const { auth_url, session_token } = await dropboxApi.initiateAuth()
+      setDbxAuthUrl(auth_url)
+      setDbxSessionToken(session_token)
+      setDbxCode('')
+      // Open Dropbox auth in a new tab — they'll see the code there
+      window.open(auth_url, '_blank')
+    } catch (err: any) {
+      setTestState('fail')
+      setTestError(err?.body?.error || err?.message || 'Failed to initiate auth')
+    }
+    setDbxLoading(false)
+  }
+
+  const handleDbxSubmitCode = async () => {
+    if (!dbxCode.trim() || !dbxSessionToken) return
+    setDbxLoading(true)
+    try {
+      await dropboxApi.completeAuth(dbxSessionToken, dbxCode.trim())
+      const status = await dropboxApi.getStatus()
+      setDbxStatus(status)
+      setDbxAuthUrl('')
+      setDbxSessionToken('')
+      setDbxCode('')
+      await handleDbxConnect()
+    } catch (err: any) {
+      setTestState('fail')
+      setTestError(err?.body?.error || err?.message || 'Authorization failed')
+    }
+    setDbxLoading(false)
+  }
+
+  const handleDbxConnect = async () => {
+    try {
+      const { access_token } = await dropboxApi.getAccessToken()
+      onChange({ type: 'dropbox', accessToken: access_token })
+      setTestState('ok')
+      onConnected?.(true)
+    } catch (err: any) {
+      setTestState('fail')
+      setTestError(err?.body?.error || err?.message || 'Failed to get access token')
+    }
+  }
+
+  const handleDbxRevoke = async () => {
+    try {
+      await dropboxApi.revoke()
+      const status = await dropboxApi.getStatus()
+      setDbxStatus(status)
+      setTestState('idle')
+      onConnected?.(false)
+      onChange({ type: 'dropbox', accessToken: '' })
+    } catch { /* ignore */ }
+  }
+
+  const handleDbxClearCredentials = async () => {
+    try {
+      await dropboxApi.clearCredentials()
+      const status = await dropboxApi.getStatus()
+      setDbxStatus(status)
+      setTestState('idle')
+      onConnected?.(false)
+      onChange({ type: 'dropbox', accessToken: '' })
     } catch { /* ignore */ }
   }
 
@@ -243,8 +373,18 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
             className={activeType === 'google-drive' ? styles.tabActive : styles.tab}
             onClick={() => switchType('google-drive')}
           >
-            <CloudCog size={13} className={styles.tabIcon} />
+            <IconBrandGoogleDrive size={13} className={styles.tabIcon} />
             Google Drive
+          </button>
+        )}
+        {availableTypes.includes('dropbox') && (
+          <button
+            type="button"
+            className={activeType === 'dropbox' ? styles.tabActive : styles.tab}
+            onClick={() => switchType('dropbox')}
+          >
+            <IconBrandDropbox size={13} className={styles.tabIcon} />
+            Dropbox
           </button>
         )}
       </div>
@@ -482,14 +622,51 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       {/* ─── Google Drive config ─────────────────────────────────────── */}
       {activeType === 'google-drive' && (
         <div className={styles.configForm}>
-          {!gdriveStatus?.configured ? (
+          {/* Credentials setup — show when no credentials exist */}
+          {!gdriveStatus?.configured && (
             <>
               <p className={styles.hint}>
-                Google Drive requires a Client ID to be configured in Settings before you can connect.
-                Create a Desktop application credential in the Google Cloud Console with the Drive API enabled.
+                Connect to Google Drive using OAuth. Create a credential in the
+                Google Cloud Console (APIs &amp; Services &gt; Credentials) with the Drive API enabled,
+                then enter your Client ID below. A Client Secret is required for Web application credentials.
               </p>
+              <div className={styles.field}>
+                <label className={styles.label}>Client ID</label>
+                <input
+                  className={styles.inputMono}
+                  type="text"
+                  placeholder="123456789-abcdefg.apps.googleusercontent.com"
+                  value={gdriveClientId}
+                  onChange={(e) => setGdriveClientId(e.target.value)}
+                />
+              </div>
+              <div className={styles.field}>
+                <label className={styles.label}>Client Secret (required for Web app credentials)</label>
+                <input
+                  className={styles.input}
+                  type="password"
+                  placeholder="GOCSPX-..."
+                  value={gdriveClientSecret}
+                  onChange={(e) => setGdriveClientSecret(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              <div className={styles.testRow}>
+                <button
+                  type="button"
+                  className={styles.testBtn}
+                  onClick={handleGdriveSaveCredentials}
+                  disabled={!gdriveClientId.trim() || gdriveSaving}
+                >
+                  {gdriveSaving ? <Spinner size={11} /> : <KeyRound size={11} />}
+                  Save Credentials
+                </button>
+              </div>
             </>
-          ) : gdriveStatus?.authorized ? (
+          )}
+
+          {/* Authorized — ready to use */}
+          {gdriveStatus?.configured && gdriveStatus?.authorized && (
             <>
               <div className={styles.testRow}>
                 <span className={styles.testOk}>
@@ -512,16 +689,27 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                   )}
                 </div>
               )}
+              {gdriveStatus.hasCustomCredentials && (
+                <button type="button" className={styles.testBtn} onClick={handleGdriveClearCredentials}>
+                  <X size={11} /> Remove credentials
+                </button>
+              )}
             </>
-          ) : (
+          )}
+
+          {/* Configured but not yet authorized — show authorize button */}
+          {gdriveStatus?.configured && !gdriveStatus?.authorized && (
             <>
               <p className={styles.hint}>
-                Authorize Lumiverse to read files from your Google Drive. A popup will open for you to sign in with Google.
+                Credentials saved. Click below to authorize Lumiverse to read your Google Drive files.
               </p>
               <div className={styles.testRow}>
                 <button type="button" className={styles.testBtn} onClick={handleGdriveAuth} disabled={gdriveLoading}>
-                  {gdriveLoading ? <Spinner size={11} /> : <CloudCog size={11} />}
+                  {gdriveLoading ? <Spinner size={11} /> : <IconBrandGoogleDrive size={11} />}
                   Authorize Google Drive
+                </button>
+                <button type="button" className={styles.testBtn} onClick={handleGdriveClearCredentials}>
+                  <X size={11} /> Remove credentials
                 </button>
                 {testState === 'fail' && (
                   <span className={styles.testFail}>
@@ -529,6 +717,130 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                   </span>
                 )}
               </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ─── Dropbox config ──────────────────────────────────────────── */}
+      {activeType === 'dropbox' && (
+        <div className={styles.configForm}>
+          {!dbxStatus?.configured && (
+            <>
+              <p className={styles.hint}>
+                Connect to Dropbox. Create an app at dropbox.com/developers and enter your App Key below.
+                No App Secret is needed.
+              </p>
+              <div className={styles.field}>
+                <label className={styles.label}>App Key</label>
+                <input
+                  className={styles.inputMono}
+                  type="text"
+                  placeholder="e.g. owdjktek8mg5ren"
+                  value={dbxAppKey}
+                  onChange={(e) => setDbxAppKey(e.target.value)}
+                />
+              </div>
+              <div className={styles.testRow}>
+                <button
+                  type="button"
+                  className={styles.testBtn}
+                  onClick={handleDbxSaveKey}
+                  disabled={!dbxAppKey.trim() || dbxSaving}
+                >
+                  {dbxSaving ? <Spinner size={11} /> : <KeyRound size={11} />}
+                  Save App Key
+                </button>
+              </div>
+            </>
+          )}
+
+          {dbxStatus?.configured && dbxStatus?.authorized && (
+            <>
+              <div className={styles.testRow}>
+                <span className={styles.testOk}>
+                  <CheckCircle size={12} /> Dropbox authorized
+                </span>
+                <button type="button" className={styles.testBtn} onClick={handleDbxRevoke}>
+                  <LogOut size={11} /> Disconnect
+                </button>
+              </div>
+              {testState !== 'ok' && (
+                <div className={styles.testRow}>
+                  <button type="button" className={styles.testBtn} onClick={handleDbxConnect} disabled={dbxLoading}>
+                    {dbxLoading ? <Spinner size={11} /> : <Plug size={11} />}
+                    Connect
+                  </button>
+                  {testState === 'fail' && (
+                    <span className={styles.testFail}>
+                      <XCircle size={12} /> {testError}
+                    </span>
+                  )}
+                </div>
+              )}
+              {dbxStatus.hasCustomAppKey && (
+                <button type="button" className={styles.testBtn} onClick={handleDbxClearCredentials}>
+                  <X size={11} /> Remove App Key
+                </button>
+              )}
+            </>
+          )}
+
+          {dbxStatus?.configured && !dbxStatus?.authorized && (
+            <>
+              {!dbxAuthUrl ? (
+                <>
+                  <p className={styles.hint}>
+                    Click below to open Dropbox authorization. You'll receive a code to paste back here.
+                  </p>
+                  <div className={styles.testRow}>
+                    <button type="button" className={styles.testBtn} onClick={handleDbxAuth} disabled={dbxLoading}>
+                      {dbxLoading ? <Spinner size={11} /> : <IconBrandDropbox size={11} />}
+                      Authorize Dropbox
+                    </button>
+                    <button type="button" className={styles.testBtn} onClick={handleDbxClearCredentials}>
+                      <X size={11} /> Remove App Key
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className={styles.hint}>
+                    A new tab has opened. Sign in to Dropbox, authorize the app, then paste the code below.
+                  </p>
+                  <div className={styles.field}>
+                    <label className={styles.label}>Authorization Code</label>
+                    <input
+                      className={styles.inputMono}
+                      type="text"
+                      placeholder="Paste the code from Dropbox here"
+                      value={dbxCode}
+                      onChange={(e) => setDbxCode(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleDbxSubmitCode() }}
+                      autoFocus
+                    />
+                  </div>
+                  <div className={styles.testRow}>
+                    <button
+                      type="button"
+                      className={styles.testBtn}
+                      onClick={handleDbxSubmitCode}
+                      disabled={!dbxCode.trim() || dbxLoading}
+                    >
+                      {dbxLoading ? <Spinner size={11} /> : <CheckCircle size={11} />}
+                      Submit Code
+                    </button>
+                    <button type="button" className={styles.testBtn} onClick={() => { setDbxAuthUrl(''); setDbxSessionToken(''); setDbxCode('') }}>
+                      <X size={11} /> Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+              {testState === 'fail' && (
+                <span className={styles.testFail}>
+                  <XCircle size={12} /> {testError}
+                </span>
+              )}
             </>
           )}
         </div>

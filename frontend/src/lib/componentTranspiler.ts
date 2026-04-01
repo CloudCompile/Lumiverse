@@ -109,7 +109,11 @@ export function transpileComponent(source: string): TranspileResult {
     wrapped += `\n__exports.default = ${funcMatch[1]};`
   }
 
-  wrapped = `"use strict";\nvar __exports = {};\n${wrapped}\nreturn __exports;`
+  // NOTE: "use strict" is inside an IIFE, not at the top level, because
+  // SCOPE_KEYS includes "eval" (shadowed to undefined for security).
+  // Strict mode forbids "eval" as a parameter name, but the outer sloppy-mode
+  // function can accept it — the inner IIFE still inherits the shadow.
+  wrapped = `var __exports = {};\n;(function(){"use strict";\n${wrapped}\n})();\nreturn __exports;`
 
   // ── Step 3: Evaluate in sandboxed scope ──
   try {

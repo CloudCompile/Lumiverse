@@ -321,11 +321,11 @@ export function useLoomBuilder() {
       setActiveLoomPreset(created.id)
       setActivePreset(newLoom)
 
-      // Import embedded regex scripts if present
+      // Import embedded regex scripts if present, filed under the preset name
       const embeddedRegex = stData.extensions?.regex_scripts
       if (Array.isArray(embeddedRegex) && embeddedRegex.length > 0) {
         try {
-          const regexResult = await regexApi.importScripts(embeddedRegex)
+          const regexResult = await regexApi.importScripts({ scripts: embeddedRegex, folder: name })
           if (regexResult.imported > 0) {
             const { loadRegexScripts } = useStore.getState() as any
             if (loadRegexScripts) await loadRegexScripts()

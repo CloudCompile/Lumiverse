@@ -15,6 +15,7 @@ import CharacterBrowser from '@/components/panels/CharacterBrowser'
 import PersonaManager from '@/components/panels/PersonaManager'
 import ConnectionManager from '@/components/panels/ConnectionManager'
 import ImageGenConnectionManager from '@/components/panels/image-gen-connections/ImageGenConnectionManager'
+import TTSConnectionManager from '@/components/panels/tts-connections/TTSConnectionManager'
 import PresetManager from '@/components/panels/PresetManager'
 import LoomBuilder from '@/components/panels/LoomBuilder'
 import DreamWeaverPanel from '@/components/panels/DreamWeaverPanel'
@@ -107,6 +108,10 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
         <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--lumiverse-border)' }}>
           <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>Image Generation</h3>
           <ImageGenConnectionManager />
+        </div>
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--lumiverse-border)' }}>
+          <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>Text-to-Speech</h3>
+          <TTSConnectionManager />
         </div>
       </>
     ),

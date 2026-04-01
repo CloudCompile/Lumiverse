@@ -95,10 +95,17 @@ export interface GoogleDriveConnectionConfig {
   accessToken: string;
 }
 
+export interface DropboxConnectionConfig {
+  type: "dropbox";
+  /** OAuth access token */
+  accessToken: string;
+}
+
 export type FileConnectionConfig =
   | LocalConnectionConfig
   | SFTPConnectionConfig
   | SMBConnectionConfig
-  | GoogleDriveConnectionConfig;
+  | GoogleDriveConnectionConfig
+  | DropboxConnectionConfig;
 
 export type FileConnectionType = FileConnectionConfig["type"];

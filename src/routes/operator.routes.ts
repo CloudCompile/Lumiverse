@@ -1,8 +1,10 @@
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
 import { operatorService, OperationConflictError } from "../services/operator.service";
+import { InsufficientDiskSpaceError } from "../db/maintenance";
 
 const app = new Hono();
+const CHECKPOINT_MODES = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
 
 // All operator routes require owner role
 app.use("*", requireOwner);
@@ -12,6 +14,42 @@ app.use("*", requireOwner);
 app.get("/status", async (c) => {
   const status = await operatorService.getFullStatus();
   return c.json(status);
+});
+
+app.get("/database", async (c) => {
+  const userId = c.get("userId");
+  return c.json(await operatorService.getDatabaseStatus(userId));
+});
+
+app.post("/database/maintenance", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const checkpointMode = typeof body?.checkpointMode === "string"
+    ? body.checkpointMode.toUpperCase()
+    : "TRUNCATE";
+
+  if (body?.checkpointMode != null && !CHECKPOINT_MODES.has(checkpointMode)) {
+    return c.json({ error: "checkpointMode must be one of PASSIVE, FULL, RESTART, TRUNCATE" }, 400);
+  }
+
+  try {
+    const result = await operatorService.maintainDatabase(userId, {
+      optimize: body?.optimize !== false,
+      analyze: body?.analyze === true,
+      vacuum: body?.vacuum === true,
+      refreshTuning: body?.refreshTuning !== false,
+      checkpointMode,
+    });
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof OperationConflictError) {
+      return c.json({ error: err.message }, 409);
+    }
+    if (err instanceof InsufficientDiskSpaceError) {
+      return c.json({ error: err.message }, 409);
+    }
+    return c.json({ error: err instanceof Error ? err.message : "Unknown error" }, 500);
+  }
 });
 
 // ── Logs ────────────────────────────────────────────────────────────────────

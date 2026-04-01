@@ -36,6 +36,7 @@ import * as worldBooksSvc from "../services/world-books.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
 import * as colorExtractionSvc from "../services/color-extraction.service";
+import { generateThemeVariables as generateThemeVariablesFn } from "../utils/theme-engine";
 import * as promptAssemblySvc from "../services/prompt-assembly.service";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
@@ -127,6 +128,40 @@ function requestWithAddressFamily(
 }
 
 export class WorkerHost {
+  private static readonly FULL_THEME_SENTINEL_KEYS = [
+    "--lumiverse-primary",
+    "--lumiverse-bg",
+    "--lumiverse-text",
+    "--lumiverse-border",
+    "--lumiverse-fill",
+    "--lcs-glass-bg",
+  ] as const;
+  private static readonly FULL_THEME_MIN_KEYS = 40;
+
+  /** Keys that represent user preferences, not theme colors.
+   *  applyPalette strips these so it only changes colors — glass, radii,
+   *  fonts, scale, and transitions are always owned by the user's config. */
+  private static readonly USER_PREFERENCE_KEYS = new Set([
+    "--lcs-glass-blur",
+    "--lcs-glass-soft-blur",
+    "--lcs-glass-strong-blur",
+    "--lcs-radius",
+    "--lcs-radius-sm",
+    "--lcs-radius-xs",
+    "--lcs-transition",
+    "--lcs-transition-fast",
+    "--lumiverse-radius",
+    "--lumiverse-radius-sm",
+    "--lumiverse-radius-md",
+    "--lumiverse-radius-lg",
+    "--lumiverse-radius-xl",
+    "--lumiverse-font-family",
+    "--lumiverse-font-mono",
+    "--lumiverse-font-scale",
+    "--lumiverse-ui-scale",
+    "--lumiverse-transition",
+    "--lumiverse-transition-fast",
+  ]);
   private worker: Worker | null = null;
   private eventUnsubscribers = new Map<string, () => void>();
   private pendingRequests = new Map<
@@ -833,6 +868,9 @@ export class WorkerHost {
       case "confirm_open":
         this.handleConfirmOpen(msg.requestId, msg.title, msg.message, msg.variant, msg.confirmLabel, msg.cancelLabel, msg.userId);
         break;
+      case "input_prompt_open":
+        this.handleInputPromptOpen(msg.requestId, msg.title, msg.message, msg.placeholder, msg.defaultValue, msg.submitLabel, msg.cancelLabel, msg.multiline, msg.userId);
+        break;
       // ─── Macro Resolution (free tier — no permission needed) ────────────
       case "macros_resolve":
         this.handleMacrosResolve(msg.requestId, msg.template, msg.chatId, msg.characterId, msg.userId);
@@ -857,6 +895,9 @@ export class WorkerHost {
       case "theme_apply":
         this.handleThemeApply(msg.requestId, msg.overrides, msg.userId);
         break;
+      case "theme_apply_palette":
+        this.handleThemeApplyPalette((msg as any).requestId, (msg as any).palette, (msg as any).userId);
+        break;
       case "theme_clear":
         this.handleThemeClear(msg.requestId, msg.userId);
         break;
@@ -865,6 +906,20 @@ export class WorkerHost {
         break;
       case "color_extract":
         this.handleColorExtract(msg.requestId, msg.imageId, msg.userId);
+        break;
+      case "theme_generate_variables":
+        this.handleThemeGenerateVariables(msg.requestId, msg.config);
+        break;
+      default:
+        // Fail fast for unrecognized message types so the worker's
+        // await request(...) doesn't hang indefinitely.
+        if ((msg as any).requestId) {
+          this.postToWorker({
+            type: "response",
+            requestId: (msg as any).requestId,
+            error: `Unrecognized message type: "${(msg as any).type}"`,
+          });
+        }
         break;
     }
   }
@@ -4447,6 +4502,57 @@ export class WorkerHost {
     }
   }
 
+  private handleInputPromptOpen(
+    requestId: string,
+    title: string,
+    message?: string,
+    placeholder?: string,
+    defaultValue?: string,
+    submitLabel?: string,
+    cancelLabel?: string,
+    multiline?: boolean,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+
+      const promptRequestId = `spindle-input-prompt:${this.extensionId}:${requestId}`;
+
+      const unsub = eventBus.on(EventType.SPINDLE_INPUT_PROMPT_RESULT, (msg) => {
+        if (msg.payload?.requestId !== promptRequestId) return;
+        unsub();
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: {
+            value: msg.payload.cancelled ? null : (msg.payload.value ?? null),
+            cancelled: !!msg.payload.cancelled,
+          },
+        });
+      });
+
+      eventBus.emit(
+        EventType.SPINDLE_INPUT_PROMPT_OPEN,
+        {
+          requestId: promptRequestId,
+          extensionId: this.extensionId,
+          extensionName: this.manifest.name,
+          title,
+          message,
+          placeholder,
+          defaultValue,
+          submitLabel: submitLabel ?? "Submit",
+          cancelLabel: cancelLabel ?? "Cancel",
+          multiline: !!multiline,
+        },
+        resolvedUserId,
+      );
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
   // ─── Macro Resolution (free tier) ───────────────────────────────────
 
   private async handleMacrosResolve(
@@ -4604,33 +4710,102 @@ export class WorkerHost {
         }
       }
 
-      // Merge with existing overrides
-      const existingByMode = this.themeOverrides?.variablesByMode ?? {};
-      this.themeOverrides = {
-        variables: {
-          ...(this.themeOverrides?.variables ?? {}),
-          ...(overrides.variables ?? {}),
-        },
-        variablesByMode: (overrides.variablesByMode || existingByMode.dark || existingByMode.light) ? {
-          dark: { ...existingByMode.dark, ...overrides.variablesByMode?.dark },
-          light: { ...existingByMode.light, ...overrides.variablesByMode?.light },
-        } : undefined,
-      };
-
-      // Broadcast to frontend
-      eventBus.emit(
-        EventType.SPINDLE_THEME_OVERRIDES,
-        {
-          extensionId: this.extensionId,
-          extensionName: this.manifest.name,
-          overrides: this.themeOverrides,
-        },
-        this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
-      );
+      this.commitThemeOverrides(overrides);
 
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private shouldReplaceThemeScope(vars?: Record<string, string>): boolean {
+    if (!vars) return false;
+
+    const keys = Object.keys(vars);
+    if (keys.length >= WorkerHost.FULL_THEME_MIN_KEYS) {
+      return true;
+    }
+
+    return WorkerHost.FULL_THEME_SENTINEL_KEYS.every((key) => key in vars);
+  }
+
+  private commitThemeOverrides(overrides: ThemeOverrideDTO): void {
+    const existingByMode = this.themeOverrides?.variablesByMode ?? {};
+    const nextVariables = this.shouldReplaceThemeScope(overrides.variables)
+      ? { ...(overrides.variables ?? {}) }
+      : {
+          ...(this.themeOverrides?.variables ?? {}),
+          ...(overrides.variables ?? {}),
+        };
+    const nextDarkVars = overrides.variablesByMode?.dark
+      ? this.shouldReplaceThemeScope(overrides.variablesByMode.dark)
+        ? { ...overrides.variablesByMode.dark }
+        : { ...existingByMode.dark, ...overrides.variablesByMode.dark }
+      : existingByMode.dark;
+    const nextLightVars = overrides.variablesByMode?.light
+      ? this.shouldReplaceThemeScope(overrides.variablesByMode.light)
+        ? { ...overrides.variablesByMode.light }
+        : { ...existingByMode.light, ...overrides.variablesByMode.light }
+      : existingByMode.light;
+
+    this.themeOverrides = {
+      variables: nextVariables,
+      variablesByMode: (nextDarkVars || nextLightVars)
+        ? {
+            dark: nextDarkVars,
+            light: nextLightVars,
+          }
+        : undefined,
+    };
+
+    eventBus.emit(
+      EventType.SPINDLE_THEME_OVERRIDES,
+      {
+        extensionId: this.extensionId,
+        extensionName: this.manifest.name,
+        overrides: this.themeOverrides,
+      },
+      this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+    );
+  }
+
+  private handleThemeApplyPalette(
+    requestId: string,
+    palette: { accent?: { h?: number; s?: number; l?: number } } | null | undefined,
+    userId?: string,
+  ): void {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+      this.postToWorker({
+        type: "response",
+        requestId,
+        error: `${PERMISSION_DENIED_PREFIX} app_manipulation — Theme palette application requires the app_manipulation permission`,
+      });
+      return;
+    }
+
+    try {
+      if (!palette?.accent || typeof palette.accent.h !== "number" || typeof palette.accent.s !== "number" || typeof palette.accent.l !== "number") {
+        this.postToWorker({ type: "response", requestId, error: "palette.accent must be { h: number, s: number, l: number }" });
+        return;
+      }
+      const accent: { h: number; s: number; l: number } = {
+        h: palette.accent.h,
+        s: palette.accent.s,
+        l: palette.accent.l,
+      };
+
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) {
+        this.postToWorker({ type: "response", requestId, error: "userId is required for operator-scoped extensions" });
+        return;
+      }
+      this.enforceScopedUser(resolvedUserId);
+
+      this.emitPaletteColorOverrides(accent);
+
+      this.postToWorker({ type: "response", requestId, result: true });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message || "Theme palette application failed" });
     }
   }
 
@@ -4661,6 +4836,49 @@ export class WorkerHost {
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  /**
+   * Generate color-only theme variables from an accent and emit per-user.
+   *
+   * Each user's `enableGlass` is read so color variables that encode
+   * glass-dependent alpha (--lumiverse-bg, --lcs-glass-bg, etc.) get the
+   * correct opacity. User preference keys (blur, radii, fonts, scale,
+   * transitions) are stripped — applyPalette only changes colors.
+   */
+  private emitPaletteColorOverrides(accent: { h: number; s: number; l: number }): void {
+    const strip = (vars: Record<string, string>) => {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(vars)) {
+        if (!WorkerHost.USER_PREFERENCE_KEYS.has(k)) out[k] = v;
+      }
+      return out;
+    };
+
+    const connectedUserIds = this.installScope === "operator"
+      ? eventBus.getConnectedUserIds()
+      : (this.installedByUserId ? [this.installedByUserId] : []);
+
+    for (const uid of connectedUserIds) {
+      const themeSetting = settingsSvc.getSetting(uid, "theme");
+      const enableGlass = typeof themeSetting?.value?.enableGlass === "boolean"
+        ? themeSetting.value.enableGlass : true;
+
+      const base = { accent, enableGlass };
+      const overrides = {
+        paletteAccent: accent,
+        variablesByMode: {
+          dark: strip(generateThemeVariablesFn({ ...base, mode: "dark" })),
+          light: strip(generateThemeVariablesFn({ ...base, mode: "light" })),
+        },
+      } as ThemeOverrideDTO & { paletteAccent: { h: number; s: number; l: number } };
+
+      eventBus.emit(
+        EventType.SPINDLE_THEME_OVERRIDES,
+        { extensionId: this.extensionId, extensionName: this.manifest.name, overrides },
+        uid,
+      );
     }
   }
 
@@ -4722,6 +4940,37 @@ export class WorkerHost {
       this.postToWorker({ type: "response", requestId, result });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message || "Color extraction failed" });
+    }
+  }
+
+  private handleThemeGenerateVariables(requestId: string, config: any): void {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+      this.postToWorker({
+        type: "response",
+        requestId,
+        error: `${PERMISSION_DENIED_PREFIX} app_manipulation — Theme variable generation requires the app_manipulation permission`,
+      });
+      return;
+    }
+
+    try {
+      if (!config || typeof config !== "object") {
+        this.postToWorker({ type: "response", requestId, error: "config is required" });
+        return;
+      }
+      if (!config.accent || typeof config.accent.h !== "number" || typeof config.accent.s !== "number" || typeof config.accent.l !== "number") {
+        this.postToWorker({ type: "response", requestId, error: "config.accent must be { h: number, s: number, l: number }" });
+        return;
+      }
+      if (config.mode !== "dark" && config.mode !== "light") {
+        this.postToWorker({ type: "response", requestId, error: 'config.mode must be "dark" or "light"' });
+        return;
+      }
+
+      const vars = generateThemeVariablesFn(config);
+      this.postToWorker({ type: "response", requestId, result: vars });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message || "Variable generation failed" });
     }
   }
 

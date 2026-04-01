@@ -11,7 +11,6 @@
 
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { getSetting } from "../services/settings.service";
 import { getSecret, putSecret, deleteSecret } from "../services/secrets.service";
 import { env } from "../env";
 
@@ -24,16 +23,24 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
-/**
- * Default Client ID for Lumiverse's Google Cloud project (Desktop app type).
- * Safe to embed — Client IDs are public by design and the PKCE flow has no
- * secret. Self-hosters can override this via the `googleDriveClientId` setting.
- */
-const DEFAULT_CLIENT_ID = "1083077474028-k16f4h3f7b4fdl26eojfdslnu2rtl51s.apps.googleusercontent.com";
+/** Secret keys for Google Drive OAuth credentials */
+const GDRIVE_CLIENT_ID_KEY = "google_drive_client_id";
+const GDRIVE_CLIENT_SECRET_KEY = "google_drive_client_secret";
 
-function getClientId(userId: string): string | null {
-  const setting = getSetting(userId, "googleDriveClientId");
-  return (setting?.value as string) || DEFAULT_CLIENT_ID || null;
+/**
+ * Default Client ID for Lumiverse's Google Cloud project.
+ * Safe to embed — Client IDs are public by design.
+ * Self-hosters can override by storing their own via the secrets API.
+ */
+const DEFAULT_CLIENT_ID = "";
+
+async function getClientId(userId: string): Promise<string | null> {
+  const stored = await getSecret(userId, GDRIVE_CLIENT_ID_KEY);
+  return stored || DEFAULT_CLIENT_ID || null;
+}
+
+async function getClientSecret(userId: string): Promise<string | null> {
+  return getSecret(userId, GDRIVE_CLIENT_SECRET_KEY);
 }
 
 // ─── PKCE helpers ───────────────────────────────────────────────────────────
@@ -89,7 +96,7 @@ app.use("/*", async (c, next) => {
 // Query: ?callback_url=<url>  — the frontend's origin-relative landing URL
 app.get("/auth", async (c) => {
   const userId = c.get("userId");
-  const clientId = getClientId(userId);
+  const clientId = await getClientId(userId);
   if (!clientId) {
     return c.json({ error: "Google Drive Client ID not configured. Set it in Settings." }, 400);
   }
@@ -191,22 +198,30 @@ app.post("/auth/callback", async (c) => {
 
   pendingSessions.delete(session_token);
 
-  const clientId = getClientId(userId);
+  const clientId = await getClientId(userId);
   if (!clientId) {
     return c.json({ error: "Google Drive Client ID not configured" }, 400);
   }
 
   // Exchange authorization code for tokens
+  const tokenParams: Record<string, string> = {
+    client_id: clientId,
+    code,
+    code_verifier: session.codeVerifier,
+    grant_type: "authorization_code",
+    redirect_uri: session.redirectUri,
+  };
+
+  // Web application credentials require client_secret; Desktop credentials don't.
+  const clientSecret = await getClientSecret(userId);
+  if (clientSecret) {
+    tokenParams.client_secret = clientSecret;
+  }
+
   const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      code,
-      code_verifier: session.codeVerifier,
-      grant_type: "authorization_code",
-      redirect_uri: session.redirectUri,
-    }),
+    body: new URLSearchParams(tokenParams),
   });
 
   if (!tokenRes.ok) {
@@ -232,13 +247,50 @@ app.post("/auth/callback", async (c) => {
 // GET /auth/status — check if user has valid Google Drive auth
 app.get("/auth/status", async (c) => {
   const userId = c.get("userId");
-  const clientId = getClientId(userId);
+  const clientId = await getClientId(userId);
+  const customClientId = await getSecret(userId, GDRIVE_CLIENT_ID_KEY);
+  const customSecret = await getSecret(userId, GDRIVE_CLIENT_SECRET_KEY);
   const refreshToken = await getSecret(userId, REFRESH_TOKEN_KEY);
 
   return c.json({
     configured: !!clientId,
+    hasCustomCredentials: !!customClientId,
+    hasClientSecret: !!customSecret,
     authorized: !!refreshToken,
   });
+});
+
+// PUT /auth/credentials — store custom OAuth credentials (encrypted)
+app.put("/auth/credentials", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+  const { clientId, clientSecret } = body;
+
+  if (clientId) {
+    await putSecret(userId, GDRIVE_CLIENT_ID_KEY, clientId);
+  }
+  if (clientSecret) {
+    await putSecret(userId, GDRIVE_CLIENT_SECRET_KEY, clientSecret);
+  }
+
+  // Clear any existing tokens since credentials changed
+  deleteSecret(userId, REFRESH_TOKEN_KEY);
+  deleteSecret(userId, ACCESS_TOKEN_KEY);
+  deleteSecret(userId, ACCESS_TOKEN_EXPIRY_KEY);
+
+  return c.json({ success: true });
+});
+
+// DELETE /auth/credentials — remove custom credentials, revert to default
+app.delete("/auth/credentials", async (c) => {
+  const userId = c.get("userId");
+  deleteSecret(userId, GDRIVE_CLIENT_ID_KEY);
+  deleteSecret(userId, GDRIVE_CLIENT_SECRET_KEY);
+  deleteSecret(userId, REFRESH_TOKEN_KEY);
+  deleteSecret(userId, ACCESS_TOKEN_KEY);
+  deleteSecret(userId, ACCESS_TOKEN_EXPIRY_KEY);
+
+  return c.json({ success: true });
 });
 
 // POST /auth/revoke — revoke and delete stored tokens
@@ -267,7 +319,7 @@ app.post("/auth/revoke", async (c) => {
 // Used internally by the migration flow to construct the FileSystem config
 app.get("/access-token", async (c) => {
   const userId = c.get("userId");
-  const clientId = getClientId(userId);
+  const clientId = await getClientId(userId);
   if (!clientId) {
     return c.json({ error: "Google Drive Client ID not configured" }, 400);
   }

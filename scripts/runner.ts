@@ -25,6 +25,13 @@ import { checkForUpdates } from "./runner/git-ops.js";
 import { readEnvConfig } from "./runner/env-config.js";
 import { getCurrentBranch } from "./runner/lib/git.js";
 import { UPDATE_CHECK_INTERVAL_MS } from "./runner/lib/constants.js";
+import { goodbyeLines } from "./runner/goodbye-lines.js";
+
+function pickRandomGoodbyeLine(lines: string[]): string {
+  if (lines.length === 0) return "Goodbye.";
+  const index = Math.floor(Math.random() * lines.length);
+  return lines[index] ?? "Goodbye.";
+}
 
 // ─── Parse arguments ────────────────────────────────────────────────────────
 
@@ -130,7 +137,7 @@ async function shutdown(): Promise<void> {
   clearInterval(updateCheckInterval);
   await stopServer();
 
-  console.log(`${C.dim}[runner]${C.reset} Goodbye.`);
+  console.log(`${C.dim}[runner]${C.reset} ${pickRandomGoodbyeLine(goodbyeLines)}`);
   process.exit(0);
 }
 

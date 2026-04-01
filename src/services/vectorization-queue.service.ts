@@ -116,16 +116,18 @@ class VectorizationQueue {
       const vectors = await embeddingsSvc.embedTexts(jobs[0].userId, texts);
       const refreshedChats = new Set<string>();
 
-      for (let i = 0; i < chunks.length; i++) {
-        await embeddingsSvc.upsertChunkVector(
-          jobs[0].userId,
-          chunks[i].chatId,
-          chunks[i].id,
-          vectors[i],
-          chunks[i].content
-        );
+      // Batch upsert all vectors in a single LanceDB mergeInsert call
+      // to avoid creating one fragment per chunk (main cause of slow queries).
+      const batchItems = chunks.map((chunk, i) => ({
+        chatId: chunk.chatId,
+        chunkId: chunk.id,
+        vector: vectors[i],
+        content: chunk.content,
+      }));
+      await embeddingsSvc.batchUpsertChunkVectors(jobs[0].userId, batchItems);
 
-        const now = Math.floor(Date.now() / 1000);
+      const now = Math.floor(Date.now() / 1000);
+      for (let i = 0; i < chunks.length; i++) {
         db.query(
           "UPDATE chat_chunks SET vectorized_at = ?, vector_model = ? WHERE id = ?"
         ).run(now, cfg.model, chunks[i].id);

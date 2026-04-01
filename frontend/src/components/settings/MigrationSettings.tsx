@@ -206,7 +206,9 @@ export default function MigrationSettings() {
       ? `SFTP (${(connection as any).host || '...'})`
       : connection.type === 'smb'
         ? `SMB (\\\\${(connection as any).host || '...'}\\${(connection as any).share || '...'})`
-        : 'Google Drive'
+        : connection.type === 'google-drive'
+          ? 'Google Drive'
+          : 'Dropbox'
 
   // Step rendering
   const renderStepIndicator = () => {

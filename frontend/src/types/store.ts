@@ -335,6 +335,8 @@ export interface SettingsSlice {
   chatHeadsOpacity: number
   customCSS: CustomCSSSettings
   componentOverrides: Record<string, import('@/lib/componentOverrides').ComponentOverride>
+  voiceSettings: VoiceSettings
+  setVoiceSettings: (partial: Partial<VoiceSettings>) => void
   setWallpaper: (settings: Partial<WallpaperSettings>) => void
   setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K]) => void
   setTheme: (theme: ThemeConfig | null) => void
@@ -551,6 +553,19 @@ export type SpindleModalItem =
   | { type: 'heading'; content: string }
   | { type: 'card'; items: SpindleModalItem[] }
 
+export interface PendingInputPromptRequest {
+  requestId: string
+  extensionId: string
+  extensionName: string
+  title: string
+  message?: string
+  placeholder?: string
+  defaultValue?: string
+  submitLabel?: string
+  cancelLabel?: string
+  multiline?: boolean
+}
+
 export interface PendingConfirmRequest {
   requestId: string
   extensionId: string
@@ -581,6 +596,11 @@ export interface PendingContextMenuItem {
 export interface ExtensionThemeOverride {
   extensionId: string
   extensionName: string
+  paletteAccent?: {
+    h: number
+    s: number
+    l: number
+  }
   variables: Record<string, string>
   variablesByMode?: {
     dark?: Record<string, string>
@@ -605,6 +625,7 @@ export interface SpindleSlice {
   pendingTextEditor: PendingTextEditorRequest | null
   pendingModal: PendingModalRequest | null
   pendingConfirm: PendingConfirmRequest | null
+  pendingInputPrompt: PendingInputPromptRequest | null
   pendingContextMenu: PendingContextMenuRequest | null
   loadExtensions: () => Promise<void>
   installExtension: (githubUrl: string, branch?: string | null) => Promise<void>
@@ -624,6 +645,8 @@ export interface SpindleSlice {
   closeSpindleModal: (requestId: string, dismissedBy: 'user' | 'extension' | 'cleanup') => void
   openSpindleConfirm: (request: PendingConfirmRequest) => void
   closeSpindleConfirm: (requestId: string, confirmed: boolean) => void
+  openInputPrompt: (request: PendingInputPromptRequest) => void
+  closeInputPrompt: (requestId: string, value: string | null) => void
   openContextMenu: (request: PendingContextMenuRequest) => void
   closeContextMenu: (requestId: string, selectedKey: string | null) => void
   setExtensionThemeOverride: (override: ExtensionThemeOverride) => void
@@ -849,6 +872,39 @@ export interface ImageGenConnectionsSlice {
   setImageGenProviders: (providers: ImageGenProviderInfo[]) => void
 }
 
+// ---- TTS Connections Slice ----
+export interface TtsConnectionsSlice {
+  ttsProfiles: import('@/types/api').TtsConnectionProfile[]
+  ttsProviders: import('@/types/api').TtsProviderInfo[]
+
+  setTtsProfiles: (profiles: import('@/types/api').TtsConnectionProfile[]) => void
+  addTtsProfile: (profile: import('@/types/api').TtsConnectionProfile) => void
+  updateTtsProfile: (id: string, updates: Partial<import('@/types/api').TtsConnectionProfile>) => void
+  removeTtsProfile: (id: string) => void
+  setTtsProviders: (providers: import('@/types/api').TtsProviderInfo[]) => void
+}
+
+// ---- Voice Settings ----
+export interface SpeechDetectionRules {
+  asterisked: 'skip' | 'narration'
+  quoted: 'speech' | 'narration' | 'skip'
+  undecorated: 'narration' | 'speech' | 'skip'
+}
+
+export interface VoiceSettings {
+  sttProvider: 'webspeech' | 'openai'
+  sttLanguage: string
+  sttContinuous: boolean
+  sttInterimResults: boolean
+  sttConnectionId: string | null
+  ttsEnabled: boolean
+  ttsConnectionId: string | null
+  ttsAutoPlay: boolean
+  ttsSpeed: number
+  ttsVolume: number
+  speechDetectionRules: SpeechDetectionRules
+}
+
 // ---- Loadouts Slice ----
 export interface LoadoutsSlice {
   loadouts: import('@/api/loadouts').Loadout[]
@@ -958,6 +1014,7 @@ export type AppStore = ChatSlice &
   RegexSlice &
   ExpressionSlice &
   ImageGenConnectionsSlice &
+  TtsConnectionsSlice &
   LoadoutsSlice &
   MigrationSlice &
   OperatorSlice &

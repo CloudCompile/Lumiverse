@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router'
 import { X, EyeOff, Columns2, Rows2, Wrench, AlertTriangle } from 'lucide-react'
@@ -46,6 +46,12 @@ export default function ChatHeads() {
   const dragStartPos = useRef({ x: 0, y: 0 })
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // ── Gravitational trail refs ──
+  const posRef = useRef({ x: -1, y: -1 })
+  const headOffsetsRef = useRef<{ x: number; y: number }[]>([])
+  const gravityLastPosRef = useRef({ x: 0, y: 0 })
+  const gravityRafRef = useRef(0)
+
   const reconcileChatHeads = useStore((s) => s.reconcileChatHeads)
 
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
@@ -55,6 +61,43 @@ export default function ChatHeads() {
 
   // Filter out the chat the user is currently viewing
   const visible = chatHeads.filter((h) => h.chatId !== activeChatId)
+
+  // ── Exit animation: keep departing heads rendered until animation finishes ──
+  const [exitingHeads, setExitingHeads] = useState<ChatHeadEntry[]>([])
+  const prevVisibleRef = useRef<ChatHeadEntry[]>([])
+  const exitTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  useLayoutEffect(() => {
+    const currIds = new Set(visible.map((h) => h.chatId))
+    const exitIds = new Set(exitingHeads.map((h) => h.chatId))
+    const newlyExiting = prevVisibleRef.current.filter(
+      (h) => !currIds.has(h.chatId) && !exitIds.has(h.chatId)
+    )
+    if (newlyExiting.length > 0) {
+      setExitingHeads((prev) => [...prev, ...newlyExiting])
+      for (const head of newlyExiting) {
+        const timer = setTimeout(() => {
+          exitTimersRef.current.delete(head.chatId)
+          setExitingHeads((prev) => prev.filter((h) => h.chatId !== head.chatId))
+        }, 260) // headExit animation is 240ms + buffer
+        exitTimersRef.current.set(head.chatId, timer)
+      }
+    }
+    prevVisibleRef.current = [...visible]
+  }, [visible]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => () => {
+    for (const timer of exitTimersRef.current.values()) clearTimeout(timer)
+  }, [])
+
+  const displayed = useMemo(() => {
+    let gi = 0
+    const exiting = exitingHeads.filter((e) => !visible.some((v) => v.chatId === e.chatId))
+    return [
+      ...visible.map((h) => ({ head: h, gravityIndex: gi++, isExiting: false })),
+      ...exiting.map((h) => ({ head: h, gravityIndex: -1, isExiting: true })),
+    ]
+  }, [visible, exitingHeads])
 
   // Estimate container size for clamping
   const getContainerSize = useCallback(() => {
@@ -125,6 +168,77 @@ export default function ChatHeads() {
     [setChatHeadsPosition]
   )
 
+  // Sync posRef with state for gravity calculations
+  useEffect(() => { posRef.current = pos }, [pos.x, pos.y]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Gravitational chain-following effect ──
+  const startGravity = useCallback(() => {
+    if (gravityRafRef.current) return
+    gravityLastPosRef.current = { ...posRef.current }
+
+    const tick = () => {
+      const currentPos = posRef.current
+      const delta = {
+        x: currentPos.x - gravityLastPosRef.current.x,
+        y: currentPos.y - gravityLastPosRef.current.y,
+      }
+      gravityLastPosRef.current = { ...currentPos }
+
+      const offsets = headOffsetsRef.current
+      const container = containerRef.current
+      if (!container) { gravityRafRef.current = 0; return }
+
+      const heads = container.querySelectorAll<HTMLElement>('[data-head-idx]')
+      while (offsets.length < heads.length) offsets.push({ x: 0, y: 0 })
+      if (offsets.length > heads.length) offsets.length = heads.length
+
+      if (offsets.length <= 1) {
+        gravityRafRef.current = isDragging.current ? requestAnimationFrame(tick) : 0
+        return
+      }
+
+      const SPRING = 0.25
+      const EPSILON = 0.5
+
+      offsets[0] = { x: 0, y: 0 }
+
+      let moving = false
+      for (let i = 1; i < offsets.length; i++) {
+        // Counteract container movement — this head hasn't caught up yet
+        offsets[i].x -= delta.x
+        offsets[i].y -= delta.y
+
+        // Chain spring: each head follows the one before it
+        const target = offsets[i - 1]
+        offsets[i].x += (target.x - offsets[i].x) * SPRING
+        offsets[i].y += (target.y - offsets[i].y) * SPRING
+
+        if (Math.abs(offsets[i].x) > EPSILON || Math.abs(offsets[i].y) > EPSILON) {
+          moving = true
+        }
+      }
+
+      // Apply CSS transforms directly to DOM
+      heads.forEach((el) => {
+        const idx = parseInt(el.dataset.headIdx || '0', 10)
+        if (idx > 0 && offsets[idx]) {
+          el.style.transform = `translate(${offsets[idx].x}px, ${offsets[idx].y}px)`
+        }
+      })
+
+      if (isDragging.current || moving) {
+        gravityRafRef.current = requestAnimationFrame(tick)
+      } else {
+        heads.forEach((el) => { el.style.transform = '' })
+        gravityRafRef.current = 0
+      }
+    }
+
+    gravityRafRef.current = requestAnimationFrame(tick)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => () => { if (gravityRafRef.current) cancelAnimationFrame(gravityRafRef.current) }, [])
+
   // ── Drag handlers ──
 
   const handlePointerDown = useCallback(
@@ -160,11 +274,17 @@ export default function ChatHeads() {
         isDragging.current = true
         // Cancel long-press if dragging
         if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null }
+        // Start gravitational following for trailing heads
+        const headEls = containerRef.current?.querySelectorAll('[data-head-idx]')
+        headOffsetsRef.current = Array.from({ length: headEls?.length || 0 }, () => ({ x: 0, y: 0 }))
+        startGravity()
       }
       const raw = { x: e.clientX - offset.current.x, y: e.clientY - offset.current.y }
-      setPos(clampPos(raw.x, raw.y))
+      const clamped = clampPos(raw.x, raw.y)
+      posRef.current = clamped
+      setPos(clamped)
     },
-    [clampPos]
+    [clampPos, startGravity]
   )
 
   const handlePointerUp = useCallback(
@@ -263,7 +383,7 @@ export default function ChatHeads() {
     },
   ], [direction, headSize, opacity, setSetting])
 
-  if (!enabled || visible.length === 0) return null
+  if (!enabled || displayed.length === 0) return null
 
   const containerClass = [
     styles.container,
@@ -288,8 +408,8 @@ export default function ChatHeads() {
         onPointerUp={handlePointerUp}
         onContextMenu={handleContextMenu}
       >
-        {visible.map((head) => (
-          <ChatHeadBubble key={head.chatId} head={head} size={headSize} />
+        {displayed.map((item) => (
+          <ChatHeadBubble key={item.head.chatId} head={item.head} size={headSize} index={item.gravityIndex} isExiting={item.isExiting} />
         ))}
       </div>
       <ContextMenu
@@ -304,7 +424,7 @@ export default function ChatHeads() {
 
 // ── Individual chat head ──
 
-function ChatHeadBubble({ head, size }: { head: ChatHeadEntry; size: number }) {
+function ChatHeadBubble({ head, size, index, isExiting }: { head: ChatHeadEntry; size: number; index: number; isExiting?: boolean }) {
   const isActive =
     head.status === 'assembling' ||
     head.status === 'council' ||
@@ -314,14 +434,14 @@ function ChatHeadBubble({ head, size }: { head: ChatHeadEntry; size: number }) {
   const isError = head.status === 'error'
   const avatarUrl = head.avatarUrl || getCharacterAvatarThumbUrlById(head.characterId)
 
-  const headClass = [styles.head, isActive ? styles.headActive : '']
+  const headClass = [styles.head, isActive ? styles.headActive : '', isExiting ? styles.headExiting : '']
     .filter(Boolean)
     .join(' ')
 
   const isDimmed = head.status === 'assembling'
 
   return (
-    <div className={headClass} data-chat-id={head.chatId} style={{ width: size, height: size }}>
+    <div className={headClass} data-chat-id={head.chatId} data-head-idx={index >= 0 ? index : undefined} style={{ width: size, height: size, pointerEvents: isExiting ? 'none' : undefined }}>
       {avatarUrl ? (
         <img
           src={avatarUrl}

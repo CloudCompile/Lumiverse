@@ -3,6 +3,20 @@ import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { env } from "../env";
 import type { LogEntry, OperatorStatus, IPCMessage } from "../types/operator";
+import { getDatabasePath, getDb } from "../db/connection";
+import {
+  collectDatabaseStats,
+  getDatabaseMaintenanceSettingKey,
+  getDatabaseMaintenanceStateSettingKey,
+  getDatabaseTuningSettingKey,
+  readDatabaseMaintenanceSettings,
+  readDatabaseMaintenanceState,
+  readDatabaseTuningSettings,
+  resolveDatabaseTuning,
+  runDatabaseMaintenance,
+  type WalCheckpointMode,
+} from "../db/maintenance";
+import { getAutomaticDatabaseMaintenanceStatus } from "../db/maintenance-scheduler";
 
 // ─── Git helpers (sync, lightweight) ────────────────────────────────────────
 
@@ -160,6 +174,57 @@ class OperatorService {
       }
     }
     return { ...local, updateAvailable: false, commitsBehind: 0, latestUpdateMessage: "" };
+  }
+
+  async getDatabaseStatus(userId: string) {
+    const db = getDb();
+    const dbPath = getDatabasePath();
+    const stats = collectDatabaseStats(db, dbPath);
+    const configuredSettings = readDatabaseTuningSettings(db, userId);
+    const maintenanceSettings = readDatabaseMaintenanceSettings(db, userId);
+    const maintenanceState = readDatabaseMaintenanceState(db, userId);
+    const effectiveTuning = resolveDatabaseTuning(stats, db, userId);
+    const automaticMaintenance = await getAutomaticDatabaseMaintenanceStatus(db, userId, dbPath, this.busy);
+
+    return {
+      settingsKey: getDatabaseTuningSettingKey(),
+      maintenanceSettingsKey: getDatabaseMaintenanceSettingKey(),
+      maintenanceStateKey: getDatabaseMaintenanceStateSettingKey(),
+      configuredSettings,
+      maintenanceSettings,
+      maintenanceState,
+      effectiveTuning,
+      stats,
+      recommendation: {
+        cacheMemoryPercent: effectiveTuning.cacheMemoryPercent,
+        cacheBytes: effectiveTuning.cacheBytes,
+        mmapSizeBytes: effectiveTuning.mmapSizeBytes,
+      },
+      automaticMaintenance,
+    };
+  }
+
+  async maintainDatabase(
+    userId: string,
+    options: {
+      optimize?: boolean;
+      analyze?: boolean;
+      vacuum?: boolean;
+      refreshTuning?: boolean;
+      checkpointMode?: WalCheckpointMode | null;
+    }
+  ) {
+    return this.runOperation("database-maintenance", async () => {
+      return runDatabaseMaintenance(getDb(), {
+        dbPath: getDatabasePath(),
+        userId,
+        optimize: options.optimize,
+        analyze: options.analyze,
+        vacuum: options.vacuum,
+        refreshTuning: options.refreshTuning,
+        checkpointMode: options.checkpointMode,
+      });
+    });
   }
 
   // ── IPC bridge ────────────────────────────────────────────────────────

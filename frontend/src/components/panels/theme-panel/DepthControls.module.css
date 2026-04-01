@@ -26,11 +26,14 @@
 .slider::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 3px;
+  background: var(--slider-fill, var(--lumiverse-fill-medium));
 }
 
 .slider::-moz-range-track {
   height: 6px;
   border-radius: 3px;
+  background: var(--slider-fill, var(--lumiverse-fill-medium));
+  border: none;
 }
 
 .value {

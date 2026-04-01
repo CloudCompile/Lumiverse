@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
-import { Shield, Palette, Sliders, MessageSquare, Users, PanelRight, Compass, Reply, HardDrive, RefreshCw, Puzzle, Database, Hash, Activity, Globe, Bell, Import, Brain, Terminal } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
 import { Toggle } from '@/components/shared/Toggle'
@@ -10,10 +10,8 @@ import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import { embeddingsApi } from '@/api/embeddings'
 import { imagesApi } from '@/api/images'
-import { PRESETS, DEFAULT_THEME } from '@/theme/presets'
 import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
-import ModeSelector from '@/components/panels/theme-panel/ModeSelector'
 import UserManagement from '@/components/settings/UserManagement'
 import MigrationSettings from '@/components/settings/MigrationSettings'
 import TokenizerManager from '@/components/settings/TokenizerManager'
@@ -21,7 +19,9 @@ import Diagnostics from '@/components/settings/Diagnostics'
 import NotificationSettings from '@/components/settings/NotificationSettings'
 import MemoryCortexSettings from '@/components/settings/MemoryCortexSettings'
 import OperatorPanel from '@/components/settings/OperatorPanel'
+import VoiceSettings from '@/components/settings/VoiceSettings'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
+import { getVisibleSettingsTabs } from '@/lib/settings-tab-registry'
 import styles from './SettingsModal.module.css'
 import clsx from 'clsx'
 
@@ -29,39 +29,12 @@ interface SettingsModalProps {
   onClose: () => void
 }
 
-const BASE_VIEWS = [
-  { id: 'display', icon: PanelRight, label: 'Display' },
-  { id: 'chat', icon: MessageSquare, label: 'Chat' },
-  { id: 'extensions', icon: Puzzle, label: 'Extensions' },
-  { id: 'guided', icon: Compass, label: 'Guided Gen' },
-  { id: 'quickReplies', icon: Reply, label: 'Quick Replies' },
-  { id: 'extensionPools', icon: HardDrive, label: 'Extension Pools' },
-  { id: 'embeddings', icon: Database, label: 'Embeddings' },
-  { id: 'memoryCortex', icon: Brain, label: 'Memory Cortex' },
-  { id: 'appearance', icon: Palette, label: 'Appearance' },
-  { id: 'notifications', icon: Bell, label: 'Notifications' },
-  { id: 'advanced', icon: Sliders, label: 'Advanced' },
-  { id: 'lumihub', icon: Globe, label: 'LumiHub' },
-  { id: 'danger', icon: Shield, label: 'Danger Zone' },
-  { id: 'diagnostics', icon: Activity, label: 'Diagnostics' },
-] as const
-
 export default function SettingsModal({ onClose }: SettingsModalProps) {
   const settingsActiveView = useStore((s) => s.settingsActiveView)
   const user = useStore((s) => s.user)
   const [activeView, setActiveView] = useState(settingsActiveView || 'display')
 
-  const isOwner = user?.role === 'owner'
-  const isAdmin = isOwner || user?.role === 'admin'
-  const VIEWS = isAdmin
-    ? [
-        ...BASE_VIEWS,
-        ...(isOwner ? [{ id: 'operator' as const, icon: Terminal, label: 'Operator' }] : []),
-        { id: 'tokenizers' as const, icon: Hash, label: 'Tokenizers' },
-        { id: 'users' as const, icon: Users, label: 'Users' },
-        { id: 'migration' as const, icon: Import, label: 'Migration' },
-      ]
-    : [...BASE_VIEWS]
+  const VIEWS = useMemo(() => getVisibleSettingsTabs(user?.role), [user?.role])
 
   return createPortal(
     <div className={styles.overlay} onClick={onClose}>
@@ -80,17 +53,17 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
         <div className={styles.body}>
           <nav className={styles.sidebar}>
-            {VIEWS.map((view) => {
-              const Icon = view.icon
+            {VIEWS.map((tab) => {
+              const Icon = tab.tabIcon
               return (
                 <button
-                  key={view.id}
+                  key={tab.id}
                   type="button"
-                  className={clsx(styles.navBtn, activeView === view.id && styles.navBtnActive)}
-                  onClick={() => setActiveView(view.id)}
+                  className={clsx(styles.navBtn, activeView === tab.id && styles.navBtnActive)}
+                  onClick={() => setActiveView(tab.id)}
                 >
                   <Icon size={14} />
-                  <span>{view.label}</span>
+                  <span>{tab.shortName}</span>
                 </button>
               )
             })}
@@ -122,8 +95,6 @@ function SettingsView({ view }: { view: string }) {
       return <ChatSettings />
     case 'extensions':
       return <ExtensionSettingsView />
-    case 'appearance':
-      return <AppearanceSettings />
     case 'guided':
       return <GuidedGenerationSettings />
     case 'quickReplies':
@@ -136,8 +107,6 @@ function SettingsView({ view }: { view: string }) {
       return <EmbeddingsSettings />
     case 'lumihub':
       return <LumiHubSettings />
-    case 'danger':
-      return <DangerZone />
     case 'tokenizers':
       return <TokenizerManager />
     case 'users':
@@ -146,6 +115,8 @@ function SettingsView({ view }: { view: string }) {
       return <MemoryCortexSettings />
     case 'notifications':
       return <NotificationSettings />
+    case 'voice':
+      return <VoiceSettings />
     case 'diagnostics':
       return <Diagnostics />
     case 'migration':
@@ -1338,75 +1309,6 @@ function ExtensionPoolSettings() {
   )
 }
 
-function AppearanceSettings() {
-  const theme = useStore((s) => s.theme) as import('@/types/theme').ThemeConfig | null
-  const setTheme = useStore((s) => s.setTheme)
-  const openDrawer = useStore((s) => s.openDrawer)
-  const closeSettings = useStore((s) => s.closeSettings)
-
-  const current = theme ?? DEFAULT_THEME
-  const presetName = PRESETS.find((p) => p.id === current.id)?.name ?? 'Custom'
-
-  return (
-    <div className={styles.settingsSection}>
-      <h3 className={styles.sectionTitle}>Appearance</h3>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Mode</label>
-        <ModeSelector value={current.mode} onChange={(mode) => {
-          const next = { ...current, mode }
-          if (!next.characterAware) next.id = 'custom'
-          setTheme(next)
-        }} />
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Preset</label>
-        <select
-          className={styles.select}
-          value={current.id}
-          onChange={(e) => {
-            const preset = PRESETS.find((p) => p.id === e.target.value)
-            if (preset) setTheme(preset)
-          }}
-        >
-          {PRESETS.map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-          {!PRESETS.some((p) => p.id === current.id) && (
-            <option value={current.id}>Custom</option>
-          )}
-        </select>
-      </div>
-
-      <div className={styles.field}>
-        <button
-          type="button"
-          className={styles.select}
-          style={{ cursor: 'pointer', textAlign: 'left' }}
-          onClick={() => {
-            closeSettings()
-            openDrawer('theme')
-          }}
-        >
-          Open Theme Panel
-        </button>
-      </div>
-
-      <div className={styles.field}>
-        <button
-          type="button"
-          className={styles.select}
-          style={{ cursor: 'pointer', textAlign: 'left' }}
-          onClick={() => setTheme(null)}
-        >
-          Reset to Default
-        </button>
-      </div>
-    </div>
-  )
-}
-
 function EmbeddingsSettings() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -2376,79 +2278,3 @@ function LumiHubSettings() {
   )
 }
 
-function DangerZone() {
-  const [resetting, setResetting] = useState(false)
-  const [confirmReset, setConfirmReset] = useState(false)
-  const [resetResult, setResetResult] = useState<string | null>(null)
-
-  const handleForceResetLanceDB = async () => {
-    if (!confirmReset) {
-      setConfirmReset(true)
-      return
-    }
-    setResetting(true)
-    setResetResult(null)
-    setConfirmReset(false)
-    try {
-      const res = await embeddingsApi.forceReset()
-      setResetResult(
-        res.deleted
-          ? 'LanceDB vector store deleted and reset. It will reinitialize on next use.'
-          : 'No LanceDB directory found — nothing to delete. SQLite flags reset.'
-      )
-    } catch (err: any) {
-      setResetResult(`Reset failed: ${err.body?.error || err.message || 'Unknown error'}`)
-    } finally {
-      setResetting(false)
-    }
-  }
-
-  return (
-    <div className={styles.settingsSection}>
-      <h3 className={clsx(styles.sectionTitle, styles.danger)}>Danger Zone</h3>
-
-      <div className={styles.field}>
-        <span className={styles.fieldLabel}>Force Reset LanceDB Vector Store</span>
-        <p style={{ fontSize: 12, color: 'var(--lumiverse-text-dim)', margin: 0 }}>
-          Completely wipes the LanceDB directory, clears all cached embeddings, and resets vectorization
-          flags. Useful for recovering from corruption (e.g. &quot;vector not divisible by 8&quot; errors).
-          The vector store will reinitialize automatically on next use.
-        </p>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-          <Button
-            variant="danger"
-            size="sm"
-            onClick={handleForceResetLanceDB}
-            disabled={resetting}
-            loading={resetting}
-          >
-            {resetting
-              ? 'Resetting...'
-              : confirmReset
-              ? 'Are you sure? Click again to confirm'
-              : 'Reset LanceDB'}
-          </Button>
-          {confirmReset && (
-            <Button
-              size="sm"
-              onClick={() => setConfirmReset(false)}
-            >
-              Cancel
-            </Button>
-          )}
-        </div>
-        {resetResult && (
-          <p style={{
-            fontSize: 12,
-            color: resetResult.startsWith('Reset failed')
-              ? 'var(--lumiverse-error)'
-              : 'var(--lumiverse-success, #4ade80)',
-            margin: 0,
-          }}>
-            {resetResult}
-          </p>
-        )}
-      </div>
-    </div>
-  )
-}

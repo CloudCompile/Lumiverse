@@ -1,8 +1,10 @@
 import { mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { env } from "./env";
-import { initDatabase } from "./db/connection";
+import { getDatabasePath, initDatabase } from "./db/connection";
 import { runMigrations } from "./db/migrate";
+import { runStartupDatabaseMaintenance, startDatabaseMonitor, stopDatabaseMonitor } from "./db/maintenance";
+import { startAutomaticDatabaseMaintenance, stopAutomaticDatabaseMaintenance } from "./db/maintenance-scheduler";
 import { startAllExtensions } from "./spindle/lifecycle";
 import { initIdentity } from "./crypto/init";
 import { initVapidKeys } from "./crypto/vapid";
@@ -35,9 +37,19 @@ const db = initDatabase();
 await runMigrations(db);
 
 // Dynamic import: auth modules call getDb() at module level, so must load after initDatabase()
-const { seedOwner, backfillUserIds } = await import("./auth/seed");
+const { seedOwner, backfillUserIds, getFirstUserId } = await import("./auth/seed");
+const { operatorService } = await import("./services/operator.service");
 await seedOwner();
 backfillUserIds();
+runStartupDatabaseMaintenance(db, getDatabasePath(), getFirstUserId());
+startDatabaseMonitor(() => db, getDatabasePath());
+startAutomaticDatabaseMaintenance(
+  () => db,
+  () => getFirstUserId(),
+  () => getDatabasePath(),
+  () => operatorService.busy,
+  (name, fn) => operatorService.runOperation(name, fn),
+);
 
 // One-time SillyTavern migration for Docker environments
 if (env.stMigrate) {
@@ -51,6 +63,11 @@ seedTokenizers();
 
 // Pre-warm tokenizers for configured connection models (fire-and-forget)
 import("./services/tokenizer.service").then(({ prewarm }) => prewarm()).catch(() => {});
+
+// LanceDB startup maintenance: compact fragments, migrate old HNSW_PQ → IVF_PQ (fire-and-forget)
+import("./services/embeddings.service").then(({ runStartupVectorMaintenance }) =>
+  runStartupVectorMaintenance()
+).catch(() => {});
 
 // Import app after database is ready (auth config needs getDb())
 const { default: app, websocket } = await import("./app");
@@ -143,8 +160,11 @@ async function gracefulShutdown(signal: string) {
   clearStmtCache();
 
   // 7. Cleanup operator service
-  const { operatorService } = await import("./services/operator.service");
   operatorService.cleanup();
+
+  // 7.5 Stop DB stats monitor
+  stopDatabaseMonitor();
+  stopAutomaticDatabaseMaintenance();
 
   // 8. Close database (triggers WAL checkpoint)
   const { closeDatabase } = await import("./db/connection");

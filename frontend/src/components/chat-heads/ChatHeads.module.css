@@ -9,10 +9,7 @@
   flex-direction: column;
   gap: 8px;
   padding: 6px;
-  border-radius: 28px;
-  background: rgba(20, 17, 28, 0.88);
-  border: 1px solid rgba(147, 112, 219, 0.08);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  overflow: visible;
   transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
   cursor: grab;
 }
@@ -32,7 +29,8 @@
   border-radius: 50%;
   cursor: pointer;
   flex-shrink: 0;
-  animation: headEnter 320ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  will-change: transform;
+  animation: headEnter 320ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
 }
 
 .headExiting {

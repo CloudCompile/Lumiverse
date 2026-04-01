@@ -1,4 +1,4 @@
-import { get, post } from './client'
+import { get, post, put, del } from './client'
 
 // ─── Connection config types ────────────────────────────────────────────────
 
@@ -31,11 +31,17 @@ export interface GoogleDriveConnectionConfig {
   accessToken: string
 }
 
+export interface DropboxConnectionConfig {
+  type: 'dropbox'
+  accessToken: string
+}
+
 export type FileConnectionConfig =
   | LocalConnectionConfig
   | SFTPConnectionConfig
   | SMBConnectionConfig
   | GoogleDriveConnectionConfig
+  | DropboxConnectionConfig
 
 // ─── API result types ───────────────────────────────────────────────────────
 
@@ -158,7 +164,23 @@ export const googleDriveApi = {
   },
 
   getStatus() {
-    return get<{ configured: boolean; authorized: boolean }>('/google-drive/auth/status')
+    return get<{
+      configured: boolean
+      hasCustomCredentials: boolean
+      hasClientSecret: boolean
+      authorized: boolean
+    }>('/google-drive/auth/status')
+  },
+
+  saveCredentials(clientId: string, clientSecret?: string) {
+    return put<{ success: boolean }>('/google-drive/auth/credentials', {
+      clientId,
+      clientSecret: clientSecret || undefined,
+    })
+  },
+
+  clearCredentials() {
+    return del<{ success: boolean }>('/google-drive/auth/credentials')
   },
 
   revoke() {
@@ -167,5 +189,40 @@ export const googleDriveApi = {
 
   getAccessToken() {
     return get<{ access_token: string }>('/google-drive/access-token')
+  },
+}
+
+// ─── Dropbox API ────────────────────────────────────────────────────────────
+
+export const dropboxApi = {
+  initiateAuth() {
+    return get<{ auth_url: string; session_token: string }>('/dropbox/auth')
+  },
+
+  completeAuth(sessionToken: string, code: string) {
+    return post<{ success: boolean }>('/dropbox/auth/callback', {
+      session_token: sessionToken,
+      code,
+    })
+  },
+
+  getStatus() {
+    return get<{ configured: boolean; hasCustomAppKey: boolean; authorized: boolean }>('/dropbox/auth/status')
+  },
+
+  saveCredentials(appKey: string) {
+    return put<{ success: boolean }>('/dropbox/auth/credentials', { appKey })
+  },
+
+  clearCredentials() {
+    return del<{ success: boolean }>('/dropbox/auth/credentials')
+  },
+
+  revoke() {
+    return post<{ success: boolean }>('/dropbox/auth/revoke')
+  },
+
+  getAccessToken() {
+    return get<{ access_token: string }>('/dropbox/access-token')
   },
 }

@@ -53,4 +53,23 @@ export const embeddingsApi = {
       LONG,
     )
   },
+
+  getHealth() {
+    return get<VectorStoreHealth>('/embeddings/health')
+  },
+
+  optimize() {
+    return post<{ success: boolean }>('/embeddings/optimize', {}, LONG)
+  },
+}
+
+export interface VectorStoreHealth {
+  exists: boolean
+  rowCount: number
+  vectorIndexReady: boolean
+  scalarIndexReady: boolean
+  ftsIndexReady: boolean
+  unindexedRowEstimate: number
+  lastIndexRebuildAt: number
+  indexes: Array<{ name: string; type?: string }>
 }

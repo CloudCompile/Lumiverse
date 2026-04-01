@@ -1,4 +1,4 @@
-import { get, put, post, del } from "./client";
+import { get, put, post, del, patch } from "./client";
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -200,6 +200,38 @@ export interface CortexHealthReport {
   checks: CortexHealthCheck[];
 }
 
+// ─── Vault & Interlink Types ──────────────────────────────────
+
+export interface CortexVault {
+  id: string;
+  userId: string;
+  sourceChatId: string | null;
+  sourceChatName: string | null;
+  name: string;
+  description: string;
+  entityCount: number;
+  relationCount: number;
+  createdAt: number;
+}
+
+export interface CortexChatLink {
+  id: string;
+  userId: string;
+  chatId: string;
+  linkType: "vault" | "interlink";
+  vaultId: string | null;
+  vaultName: string | null;
+  vaultEntityCount: number | null;
+  vaultRelationCount: number | null;
+  targetChatId: string | null;
+  targetChatName: string | null;
+  targetChatExists: boolean;
+  label: string;
+  enabled: boolean;
+  priority: number;
+  createdAt: number;
+}
+
 // ─── API ───────────────────────────────────────────────────────
 
 const BASE = "/memory-cortex";
@@ -263,4 +295,32 @@ export const memoryCortexApi = {
     post<{ status: string; chatId: string }>(`${BASE}/chats/${chatId}/rebuild`),
   getRebuildStatus: (chatId: string) =>
     get<{ status: string; current?: number; total?: number; percent?: number; result?: any; error?: string }>(`${BASE}/chats/${chatId}/rebuild-status`),
+
+  // Vaults
+  createVault: (chatId: string, name: string, description?: string) =>
+    post<CortexVault>(`${BASE}/vaults`, { chatId, name, description }),
+  listVaults: () =>
+    get<{ data: CortexVault[] }>(`${BASE}/vaults`),
+  getVault: (vaultId: string) =>
+    get<{ vault: CortexVault; entities: any[]; relations: any[] }>(`${BASE}/vaults/${vaultId}`),
+  renameVault: (vaultId: string, name: string) =>
+    put<{ success: boolean }>(`${BASE}/vaults/${vaultId}`, { name }),
+  deleteVault: (vaultId: string) =>
+    del<{ success: boolean }>(`${BASE}/vaults/${vaultId}`),
+
+  // Chat Links
+  getChatLinks: (chatId: string) =>
+    get<{ data: CortexChatLink[] }>(`${BASE}/chats/${chatId}/links`),
+  attachLink: (chatId: string, body: {
+    linkType: "vault" | "interlink";
+    vaultId?: string;
+    targetChatId?: string;
+    label?: string;
+    bidirectional?: boolean;
+  }) =>
+    post<{ data: CortexChatLink[] }>(`${BASE}/chats/${chatId}/links`, body),
+  toggleLink: (chatId: string, linkId: string, enabled: boolean) =>
+    patch<{ success: boolean }>(`${BASE}/chats/${chatId}/links/${linkId}`, { enabled }),
+  removeLink: (chatId: string, linkId: string) =>
+    del<{ success: boolean }>(`${BASE}/chats/${chatId}/links/${linkId}`),
 };

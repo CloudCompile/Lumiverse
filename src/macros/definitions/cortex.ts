@@ -2,13 +2,14 @@
  * Memory Cortex — Macro definitions.
  *
  * Provides prompt-injectable macros for cortex-enhanced memory data:
- *   {{entities}}        — Active entity snapshots with facts and relationships
- *   {{entityFacts}}     — Facts about a specific entity: {{entityFacts::Kael}}
- *   {{relationships}}   — Active relationship edges between entities
- *   {{arc}}             — Current narrative arc summary
- *   {{memorySalience}}  — Highest-salience memory in retrieved set
- *   {{cortexActive}}    — "yes" if cortex is enabled and produced results
- *   {{entityCount}}     — Number of entities in the current context
+ *   {{entities}}          — Active entity snapshots with facts and relationships
+ *   {{entityFacts}}       — Facts about a specific entity: {{entityFacts::Kael}}
+ *   {{relationships}}     — Active relationship edges between entities
+ *   {{arc}}               — Current narrative arc summary
+ *   {{memorySalience}}    — Highest-salience memory in retrieved set
+ *   {{cortexActive}}      — "yes" if cortex is enabled and produced results
+ *   {{entityCount}}       — Number of entities in the current context
+ *   {{characterColors}}   — Font color attributions per character (speech, thoughts, narration)
  */
 
 import { registry } from "../MacroRegistry";
@@ -142,6 +143,21 @@ export function registerCortexMacros(): void {
     handler(ctx: MacroExecContext): string {
       const cortex = getCortex(ctx);
       return String(cortex?.entityContext?.length ?? 0);
+    },
+  });
+
+  // {{characterColors}} — Font color attributions per character
+  registry.registerMacro({
+    name: "characterColors",
+    category: "memory",
+    description:
+      "Font color attributions per character from the Memory Cortex. " +
+      "Lists each character with their speech, thought, and narration colors. " +
+      "Use in presets to avoid manually specifying color instructions.",
+    builtIn: true,
+    handler(ctx: MacroExecContext): string {
+      const cortex = getCortex(ctx);
+      return (cortex as any)?.colorMap ?? "";
     },
   });
 }

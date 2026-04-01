@@ -429,6 +429,29 @@ export interface CortexResult {
   stats: CortexStats;
 }
 
+// ─── Vault & Interlink Types ──────────────────────────────────
+
+/** Vault entity/relation data formatted for prompt assembly */
+export interface VaultCortexData {
+  vaultId: string;
+  vaultName: string;
+  entities: EntitySnapshot[];
+  relations: RelationEdge[];
+}
+
+/** Interlink live cortex data with provenance */
+export interface InterlinkCortexData {
+  targetChatId: string;
+  targetChatName: string;
+  result: CortexResult;
+}
+
+/** Combined linked cortex data for a chat */
+export interface LinkedCortexResult {
+  vaults: VaultCortexData[];
+  interlinks: InterlinkCortexData[];
+}
+
 // ─── Ingestion Pipeline Types ──────────────────────────────────
 
 /** Data produced during chunk ingestion for cortex processing */

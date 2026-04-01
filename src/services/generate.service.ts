@@ -1568,6 +1568,10 @@ export function getActiveChatGeneration(userId: string, chatId: string): string 
   return activeChatGenerations.get(`${userId}:${chatId}`);
 }
 
+export function getActiveGenerationCount(): number {
+  return activeGenerations.size;
+}
+
 // Periodically abort generations that have been running too long (provider hung, broken stream)
 const GENERATION_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
 let _generationSweepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {

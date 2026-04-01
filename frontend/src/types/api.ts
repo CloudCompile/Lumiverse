@@ -302,6 +302,93 @@ export interface ImageGenProviderInfo {
   capabilities: ImageGenProviderCapabilities;
 }
 
+// ---- TTS Connection ----
+export interface TtsConnectionProfile {
+  id: string;
+  name: string;
+  provider: string;
+  api_url: string;
+  model: string;
+  voice: string;
+  is_default: boolean;
+  has_api_key: boolean;
+  default_parameters: Record<string, any>;
+  metadata: Record<string, any>;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CreateTtsConnectionInput {
+  name: string;
+  provider: string;
+  api_url?: string;
+  model?: string;
+  voice?: string;
+  is_default?: boolean;
+  default_parameters?: Record<string, any>;
+  metadata?: Record<string, any>;
+  api_key?: string;
+}
+
+export type UpdateTtsConnectionInput = Partial<CreateTtsConnectionInput>;
+
+export interface TtsConnectionTestResult {
+  success: boolean;
+  message: string;
+  provider: string;
+}
+
+export interface TtsConnectionModelsResult {
+  models: Array<{ id: string; label: string }>;
+  provider: string;
+  error?: string;
+}
+
+export interface TtsVoice {
+  id: string;
+  name: string;
+  language?: string;
+  gender?: string;
+  previewUrl?: string;
+}
+
+export interface TtsConnectionVoicesResult {
+  voices: TtsVoice[];
+  provider: string;
+  error?: string;
+}
+
+export interface TtsParameterSchema {
+  type: 'number' | 'integer' | 'boolean' | 'string' | 'select';
+  default?: any;
+  min?: number;
+  max?: number;
+  step?: number;
+  description: string;
+  required?: boolean;
+  options?: Array<{ id: string; label: string }>;
+  group?: string;
+}
+
+export interface TtsProviderCapabilities {
+  parameters: Record<string, TtsParameterSchema>;
+  apiKeyRequired: boolean;
+  voiceListStyle: 'static' | 'dynamic';
+  staticVoices?: TtsVoice[];
+  modelListStyle: 'static' | 'dynamic';
+  staticModels?: Array<{ id: string; label: string }>;
+  supportsStreaming: boolean;
+  supportedFormats: string[];
+  defaultUrl: string;
+  defaultFormat: string;
+}
+
+export interface TtsProviderInfo {
+  id: string;
+  name: string;
+  capabilities: TtsProviderCapabilities;
+}
+
 // ---- Persona ----
 export interface PersonaAddon {
   id: string

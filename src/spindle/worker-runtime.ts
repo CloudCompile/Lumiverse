@@ -627,6 +627,10 @@ const spindleApi: SpindleAPI = {
       const requestId = crypto.randomUUID();
       await request({ type: "theme_apply", requestId, overrides });
     },
+    async applyPalette(palette, userId?: string): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "theme_apply_palette", requestId, palette, userId });
+    },
     async clear(): Promise<void> {
       const requestId = crypto.randomUUID();
       await request({ type: "theme_clear", requestId });
@@ -644,6 +648,34 @@ const spindleApi: SpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "color_extract", requestId, imageId, userId });
       return result;
+    },
+    async generateVariables(config: {
+      accent: { h: number; s: number; l: number };
+      mode: "dark" | "light";
+      enableGlass?: boolean;
+      radiusScale?: number;
+      fontScale?: number;
+      uiScale?: number;
+      baseColors?: {
+        primary?: string;
+        secondary?: string;
+        background?: string;
+        text?: string;
+        danger?: string;
+        success?: string;
+        warning?: string;
+        speech?: string;
+        thoughts?: string;
+      };
+      statusColors?: {
+        danger?: string;
+        success?: string;
+        warning?: string;
+      };
+    }): Promise<Record<string, string>> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "theme_generate_variables", requestId, config });
+      return result as Record<string, string>;
     },
   },
 
@@ -1138,6 +1170,34 @@ const spindleApi: SpindleAPI = {
         userId: options.userId,
       } as any);
       return result as { confirmed: boolean };
+    },
+  },
+
+  prompt: {
+    async input(options: {
+      title: string;
+      message?: string;
+      placeholder?: string;
+      defaultValue?: string;
+      submitLabel?: string;
+      cancelLabel?: string;
+      multiline?: boolean;
+      userId?: string;
+    }): Promise<{ value: string | null; cancelled: boolean }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "input_prompt_open",
+        requestId,
+        title: options.title,
+        message: options.message,
+        placeholder: options.placeholder,
+        defaultValue: options.defaultValue,
+        submitLabel: options.submitLabel,
+        cancelLabel: options.cancelLabel,
+        multiline: options.multiline,
+        userId: options.userId,
+      } as any);
+      return result as { value: string | null; cancelled: boolean };
     },
   },
 

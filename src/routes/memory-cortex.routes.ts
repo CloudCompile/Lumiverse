@@ -913,4 +913,129 @@ app.get("/chats/:chatId/entities/needs-facts", (c) => {
   return c.json({ data: entities, total: entities.length });
 });
 
+// ─── Vaults ──────────────────────────────────────────────────
+
+/** POST /vaults — Create a vault by snapshotting a chat's cortex state */
+app.post("/vaults", async (c) => {
+  const userId = c.get("userId");
+  const { chatId, name, description } = await c.req.json();
+  if (!chatId || !name) {
+    return c.json({ error: "chatId and name are required" }, 400);
+  }
+  const chat = getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Chat not found" }, 404);
+
+  try {
+    const vault = memoryCortex.createVault(userId, chatId, name, description);
+    eventBus.emit(EventType.CORTEX_VAULT_CREATED, {
+      vaultId: vault.id, name: vault.name,
+      entityCount: vault.entityCount, relationCount: vault.relationCount,
+    }, userId);
+    return c.json(vault, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/** GET /vaults — List all vaults owned by the user */
+app.get("/vaults", (c) => {
+  const userId = c.get("userId");
+  return c.json({ data: memoryCortex.listVaults(userId) });
+});
+
+/** GET /vaults/:id — Get vault with entities and relations */
+app.get("/vaults/:id", (c) => {
+  const vaultId = c.req.param("id");
+  const data = memoryCortex.getVault(vaultId);
+  if (!data) return c.json({ error: "Vault not found" }, 404);
+  return c.json(data);
+});
+
+/** PUT /vaults/:id — Rename a vault */
+app.put("/vaults/:id", async (c) => {
+  const userId = c.get("userId");
+  const vaultId = c.req.param("id");
+  const { name } = await c.req.json();
+  if (!name) return c.json({ error: "name is required" }, 400);
+  const ok = memoryCortex.renameVault(userId, vaultId, name);
+  if (!ok) return c.json({ error: "Vault not found or not owned" }, 404);
+  return c.json({ success: true });
+});
+
+/** DELETE /vaults/:id — Delete a vault and all associated data */
+app.delete("/vaults/:id", (c) => {
+  const userId = c.get("userId");
+  const vaultId = c.req.param("id");
+  const ok = memoryCortex.deleteVault(userId, vaultId);
+  if (!ok) return c.json({ error: "Vault not found or not owned" }, 404);
+  return c.json({ success: true });
+});
+
+// ─── Chat Links ──────────────────────────────────────────────
+
+/** POST /chats/:chatId/links — Attach a vault or interlink to a chat */
+app.post("/chats/:chatId/links", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const chat = getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Chat not found" }, 404);
+
+  const { linkType, vaultId, targetChatId, label, bidirectional } = await c.req.json();
+  if (!linkType || !["vault", "interlink"].includes(linkType)) {
+    return c.json({ error: "linkType must be 'vault' or 'interlink'" }, 400);
+  }
+
+  try {
+    const links = memoryCortex.attachLink(userId, chatId, linkType, {
+      vaultId, targetChatId, label, bidirectional,
+    });
+    for (const link of links) {
+      eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
+        chatId: link.chatId, linkId: link.id, action: "attached",
+      }, userId);
+    }
+    return c.json({ data: links }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/** GET /chats/:chatId/links — List links for a chat */
+app.get("/chats/:chatId/links", (c) => {
+  const chatId = c.req.param("chatId");
+  return c.json({ data: memoryCortex.getChatLinks(chatId) });
+});
+
+/** PATCH /chats/:chatId/links/:linkId — Toggle link enabled state */
+app.patch("/chats/:chatId/links/:linkId", async (c) => {
+  const userId = c.get("userId");
+  const linkId = c.req.param("linkId");
+  const chatId = c.req.param("chatId");
+  const { enabled } = await c.req.json();
+  if (typeof enabled !== "boolean") {
+    return c.json({ error: "enabled (boolean) is required" }, 400);
+  }
+  const ok = memoryCortex.toggleLink(userId, linkId, enabled);
+  if (!ok) return c.json({ error: "Link not found or not owned" }, 404);
+  memoryCortex.invalidateLinkedCortexCache(chatId);
+  eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
+    chatId, linkId, action: "toggled",
+  }, userId);
+  return c.json({ success: true });
+});
+
+/** DELETE /chats/:chatId/links/:linkId — Remove a link */
+app.delete("/chats/:chatId/links/:linkId", (c) => {
+  const userId = c.get("userId");
+  const linkId = c.req.param("linkId");
+  const chatId = c.req.param("chatId");
+  const ok = memoryCortex.removeLink(userId, linkId);
+  if (!ok) return c.json({ error: "Link not found or not owned" }, 404);
+  memoryCortex.invalidateLinkedCortexCache(chatId);
+  eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
+    chatId, linkId, action: "removed",
+  }, userId);
+  return c.json({ success: true });
+});
+
 export { app as memoryCortexRoutes };

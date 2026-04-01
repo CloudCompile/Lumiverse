@@ -21,6 +21,7 @@ import { createPromptBreakdownSlice } from './slices/prompt-breakdown'
 import { createRegexSlice } from './slices/regex'
 import { createExpressionSlice } from './slices/expressions'
 import { createImageGenConnectionsSlice } from './slices/image-gen-connections'
+import { createTtsConnectionsSlice } from './slices/tts-connections'
 import { createLoadoutsSlice } from './slices/loadouts'
 import { createMigrationSlice } from './slices/migration'
 import { createOperatorSlice } from './slices/operator'
@@ -49,6 +50,7 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createRegexSlice(...a),
   ...createExpressionSlice(...a),
   ...createImageGenConnectionsSlice(...a),
+  ...createTtsConnectionsSlice(...a),
   ...createLoadoutsSlice(...a),
   ...createMigrationSlice(...a),
   ...createOperatorSlice(...a),

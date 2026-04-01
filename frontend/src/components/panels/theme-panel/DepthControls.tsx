@@ -13,11 +13,11 @@ interface DepthControlsProps {
   onUiScaleChange: (v: number) => void
 }
 
-function trackFill(value: number, min: number, max: number) {
+function trackFill(value: number, min: number, max: number): React.CSSProperties {
   const pct = ((value - min) / (max - min)) * 100
   return {
-    background: `linear-gradient(to right, var(--lumiverse-primary) ${pct}%, var(--lumiverse-fill-medium) ${pct}%)`,
-  }
+    '--slider-fill': `linear-gradient(to right, var(--lumiverse-primary) ${pct}%, var(--lumiverse-fill-medium) ${pct}%)`,
+  } as React.CSSProperties
 }
 
 /** Commit the current value from the range input's DOM node. */

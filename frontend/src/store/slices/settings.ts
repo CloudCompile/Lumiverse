@@ -101,6 +101,7 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'chatHeadsSize',
   'chatHeadsDirection',
   'chatHeadsOpacity',
+  'voiceSettings',
 ])
 
 // ── Debounced batch persistence ──────────────────────────────────────────
@@ -250,6 +251,33 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   chatHeadsOpacity: 1,
   customCSS: { css: '', enabled: false, revision: 0 },
   componentOverrides: {},
+  voiceSettings: {
+    sttProvider: 'webspeech' as const,
+    sttLanguage: 'en-US',
+    sttContinuous: false,
+    sttInterimResults: true,
+    sttConnectionId: null,
+    ttsEnabled: false,
+    ttsConnectionId: null,
+    ttsAutoPlay: false,
+    ttsSpeed: 1.0,
+    ttsVolume: 0.8,
+    speechDetectionRules: {
+      asterisked: 'skip' as const,
+      quoted: 'speech' as const,
+      undecorated: 'narration' as const,
+    },
+  },
+
+  setVoiceSettings: (partial) =>
+    set((state) => {
+      const voiceSettings = { ...state.voiceSettings, ...partial }
+      if (partial.speechDetectionRules) {
+        voiceSettings.speechDetectionRules = { ...state.voiceSettings.speechDetectionRules, ...partial.speechDetectionRules }
+      }
+      persistKey('voiceSettings', voiceSettings)
+      return { voiceSettings }
+    }),
 
   setWallpaper: (partial) =>
     set((state) => {

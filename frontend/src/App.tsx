@@ -16,6 +16,7 @@ import ToastContainer from '@/components/shared/ToastContainer'
 import ChatHeads from '@/components/chat-heads/ChatHeads'
 import useIsMobile from '@/hooks/useIsMobile'
 import { useBadging } from '@/hooks/useBadging'
+import { useTTSAutoPlay } from '@/hooks/useTTSAutoPlay'
 import styles from './App.module.css'
 
 export default function App() {
@@ -25,6 +26,7 @@ export default function App() {
   useCustomCSSApplicator()
   useAppInit()
   useBadging()
+  useTTSAutoPlay()
 
   const isMobile = useIsMobile()
   const dockPanels = useStore((s) => s.dockPanels)

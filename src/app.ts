@@ -36,6 +36,7 @@ import { systemRoutes } from "./routes/system.routes";
 import { migrateRoutes } from "./routes/migrate.routes";
 import { stMigrationRoutes } from "./routes/st-migration.routes";
 import { googleDriveRoutes } from "./routes/google-drive.routes";
+import { dropboxRoutes } from "./routes/dropbox.routes";
 import { presetProfilesRoutes } from "./routes/preset-profiles.routes";
 import { loadoutsRoutes } from "./routes/loadouts.routes";
 import { regexScriptsRoutes } from "./routes/regex-scripts.routes";
@@ -44,6 +45,9 @@ import { pushRoutes } from "./routes/push.routes";
 import { memoryCortexRoutes } from "./routes/memory-cortex.routes";
 import { operatorRoutes } from "./routes/operator.routes";
 import { openrouterRoutes } from "./routes/openrouter.routes";
+import { ttsConnectionsRoutes } from "./routes/tts-connections.routes";
+import { ttsRoutes } from "./routes/tts.routes";
+import { sttRoutes } from "./routes/stt.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -57,7 +61,7 @@ app.use("*", compress());
 // (512 MB in index.ts) covers them.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip")) {
+  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip") || path === "/api/v1/stt/transcribe") {
     return next();
   }
   return bodyLimit({
@@ -187,6 +191,7 @@ app.route("/api/v1/system", systemRoutes);
 app.route("/api/v1/migrate", migrateRoutes);
 app.route("/api/v1/st-migration", stMigrationRoutes);
 app.route("/api/v1/google-drive", googleDriveRoutes);
+app.route("/api/v1/dropbox", dropboxRoutes);
 app.route("/api/v1/preset-profiles", presetProfilesRoutes);
 app.route("/api/v1/loadouts", loadoutsRoutes);
 app.route("/api/v1/regex-scripts", regexScriptsRoutes);
@@ -195,6 +200,9 @@ app.route("/api/v1/push", pushRoutes);
 app.route("/api/v1/lumihub", lumihubRoutes);
 app.route("/api/v1/memory-cortex", memoryCortexRoutes);
 app.route("/api/v1/operator", operatorRoutes);
+app.route("/api/v1/tts-connections", ttsConnectionsRoutes);
+app.route("/api/v1/tts", ttsRoutes);
+app.route("/api/v1/stt", sttRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

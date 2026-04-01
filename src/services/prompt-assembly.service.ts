@@ -333,6 +333,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     })().catch(err => {
       console.warn("[prompt-assembly] Background cortex query failed:", err);
     });
+
+    // Also fire linked cortex queries (vaults + interlinks) in background
+    void memoryCortex.queryLinkedCortex(ctx.chatId, ctx.userId, cortexConfig)
+      .catch(err => {
+        console.warn("[prompt-assembly] Background linked cortex query failed:", err);
+      });
   }
 
   // ---- World Info activation ----
@@ -501,10 +507,27 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     );
   }
 
+  // Merge linked cortex data (vaults + interlinks) if available
+  const linkedCortexResult = memoryCortex.getCachedLinkedCortexResult(ctx.chatId);
+  let linkedMemoryText = "";
+  if (linkedCortexResult && (linkedCortexResult.vaults.length > 0 || linkedCortexResult.interlinks.length > 0)) {
+    const linkedBudget = Math.floor(cortexConfig.contextTokenBudget * 0.3);
+    const linkedFormatted = memoryCortex.formatLinkedCortexSection(
+      linkedCortexResult.vaults,
+      linkedCortexResult.interlinks,
+      { mode: cortexConfig.formatterMode, tokenBudget: linkedBudget, currentSpeakerName: character?.name },
+    );
+    linkedMemoryText = linkedFormatted.text;
+  }
+
   // Store in macroEnv for {{memories}} macro access
+  const combinedFormatted = linkedMemoryText
+    ? (memoryResult.formatted ? memoryResult.formatted + "\n\n" + linkedMemoryText : linkedMemoryText)
+    : memoryResult.formatted;
+
   macroEnv.extra.memory = {
     chunks: memoryResult.chunks,
-    formatted: memoryResult.formatted,
+    formatted: combinedFormatted,
     count: memoryResult.count,
     enabled: memoryResult.enabled,
     settings: chatMemSettings ?? embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS,

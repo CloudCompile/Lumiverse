@@ -158,6 +158,15 @@ app.post("/optimize", async (c) => {
   }
 });
 
+app.get("/health", async (c) => {
+  try {
+    const health = await embeddingsSvc.getVectorStoreHealth();
+    return c.json(health);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Health check failed" }, 500);
+  }
+});
+
 app.post("/chats/:chatId/recompile", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");

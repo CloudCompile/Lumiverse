@@ -13,6 +13,7 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   pendingTextEditor: null,
   pendingModal: null,
   pendingConfirm: null,
+  pendingInputPrompt: null,
   pendingContextMenu: null,
 
   loadExtensions: async () => {
@@ -182,6 +183,20 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
         detail: { requestId, confirmed },
       })
     )
+  },
+
+  openInputPrompt: (request) => {
+    set({ pendingInputPrompt: request })
+  },
+
+  closeInputPrompt: (requestId: string, value: string | null) => {
+    set({ pendingInputPrompt: null })
+    wsClient.send({
+      type: 'SPINDLE_INPUT_PROMPT_RESULT',
+      requestId,
+      value,
+      cancelled: value === null,
+    })
   },
 
   openContextMenu: (request: PendingContextMenuRequest) => {

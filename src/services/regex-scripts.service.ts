@@ -557,6 +557,12 @@ export function importRegexScripts(
   let imported = 0;
   let skipped = 0;
 
+  // Extract top-level folder override (e.g. preset name)
+  const folderOverride: string | undefined =
+    typeof payload?.folder === "string" && payload.folder.trim()
+      ? payload.folder.trim()
+      : undefined;
+
   // Normalize input: accept array, { scripts: [] }, or single object
   let scripts: any[];
   if (Array.isArray(payload)) {
@@ -618,6 +624,11 @@ export function importRegexScripts(
       errors.push(`Script ${i}: missing name or find_regex`);
       skipped++;
       continue;
+    }
+
+    // Apply folder override if script doesn't already have one
+    if (folderOverride && !item.folder) {
+      item.folder = folderOverride;
     }
 
     const result = createRegexScript(userId, item);

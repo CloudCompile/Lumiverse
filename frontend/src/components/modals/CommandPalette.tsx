@@ -5,7 +5,7 @@ import { Search, X } from 'lucide-react'
 import { useNavigate, useLocation } from 'react-router'
 import clsx from 'clsx'
 import { useStore } from '@/store'
-import { COMMANDS, GROUP_ORDER, type Command, type CommandScope } from '@/lib/commands'
+import { buildCommands, GROUP_ORDER, type Command, type CommandScope } from '@/lib/commands'
 import { extensionTabsToCommands, extensionCommandsToCommands } from '@/lib/drawer-tab-registry'
 import styles from './CommandPalette.module.css'
 
@@ -29,6 +29,7 @@ function highlightMatch(text: string, query: string): ReactNode {
 export default function CommandPalette() {
   const isOpen = useStore((s) => s.commandPaletteOpen)
   const close = useStore((s) => s.closeCommandPalette)
+  const userRole = useStore((s) => s.user?.role)
   const drawerTabs = useStore((s) => s.drawerTabs)
   const extensionCommands = useStore((s) => s.extensionCommands)
   const activeChatId = useStore((s) => s.activeChatId)
@@ -70,7 +71,7 @@ export default function CommandPalette() {
   }, [location.pathname, streaming, messageCount])
 
   const { grouped, orderedFlat, flatIndexMap } = useMemo(() => {
-    const allCommands = [...COMMANDS, ...extensionTabsToCommands(drawerTabs), ...extensionCommandsToCommands(extensionCommands)]
+    const allCommands = [...buildCommands(userRole), ...extensionTabsToCommands(drawerTabs), ...extensionCommandsToCommands(extensionCommands)]
     
     let filtered = allCommands.filter((cmd) => {
       const isVisible = activeScopes.has(cmd.scope || 'global')
@@ -118,7 +119,7 @@ export default function CommandPalette() {
     }
 
     return { grouped: groups, orderedFlat: flat, flatIndexMap: idxMap }
-  }, [query, drawerTabs, extensionCommands, activeScopes, location.pathname])
+  }, [query, userRole, drawerTabs, extensionCommands, activeScopes, location.pathname])
 
   // Clamp active index when filtered list shrinks
   useEffect(() => {

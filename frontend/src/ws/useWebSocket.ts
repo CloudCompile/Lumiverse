@@ -167,11 +167,13 @@ export function useWebSocket() {
             state.appendStreamToken(payload.token)
           }
         }
-        // Update chat head status to distinguish reasoning from content streaming
+        // Update chat head status only on actual transitions (not every token)
         if (payload.generationId) {
-          state.updateChatHead(payload.generationId, {
-            status: payload.type === 'reasoning' ? 'reasoning' : 'streaming',
-          })
+          const newStatus = payload.type === 'reasoning' ? 'reasoning' as const : 'streaming' as const
+          const head = state.chatHeads.find((h) => h.generationId === payload.generationId)
+          if (head && head.status !== newStatus) {
+            state.updateChatHead(payload.generationId, { status: newStatus })
+          }
         }
       }),
 
@@ -488,6 +490,10 @@ export function useWebSocket() {
         store.getState().openSpindleConfirm(payload)
       }),
 
+      wsClient.on(EventType.SPINDLE_INPUT_PROMPT_OPEN, (payload: any) => {
+        store.getState().openInputPrompt(payload)
+      }),
+
       wsClient.on(EventType.SPINDLE_TOAST, (payload: { extensionId: string; extensionName: string; type: 'success' | 'warning' | 'error' | 'info'; message: string; title?: string; duration?: number }) => {
         const toastFn = toast[payload.type]
         if (!toastFn) return
@@ -497,16 +503,17 @@ export function useWebSocket() {
         toastFn(payload.message, { title: attributedTitle, duration: payload.duration })
       }),
 
-      wsClient.on(EventType.SPINDLE_THEME_OVERRIDES, (payload: { extensionId: string; extensionName: string; overrides: { variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } } | null }) => {
+      wsClient.on(EventType.SPINDLE_THEME_OVERRIDES, (payload: { extensionId: string; extensionName: string; overrides: { paletteAccent?: { h: number; s: number; l: number }; variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } } | null }) => {
         const hasVars = payload.overrides?.variables && Object.keys(payload.overrides.variables).length > 0
         const hasModeVars = payload.overrides?.variablesByMode && (
           Object.keys(payload.overrides.variablesByMode.dark ?? {}).length > 0 ||
           Object.keys(payload.overrides.variablesByMode.light ?? {}).length > 0
         )
-        if (hasVars || hasModeVars) {
+        if (hasVars || hasModeVars || payload.overrides?.paletteAccent) {
           store.getState().setExtensionThemeOverride({
             extensionId: payload.extensionId,
             extensionName: payload.extensionName,
+            paletteAccent: payload.overrides?.paletteAccent,
             variables: payload.overrides!.variables ?? {},
             variablesByMode: payload.overrides!.variablesByMode,
           })

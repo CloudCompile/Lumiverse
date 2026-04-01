@@ -20,6 +20,8 @@ import type {
   CortexMemory,
   EntitySnapshot,
   RelationEdge,
+  VaultCortexData,
+  InterlinkCortexData,
 } from "./types";
 import { formatEntitySnapshots as formatEntitySnapshotsClinical, formatRelationships as formatRelationshipsClinical } from "./entity-context";
 
@@ -283,4 +285,105 @@ function formatClinical(
       (_, i) => !![entText, relText, memText, arcContext][i],
     ),
   };
+}
+
+// ─── Linked Cortex Formatter ──────────────────────────────────
+
+export interface LinkedFormatResult {
+  text: string;
+  tokensUsed: number;
+}
+
+/**
+ * Format linked cortex data (vaults + interlinks) with provenance headers.
+ * Uses the same mode as the main formatter. Budget is for the entire linked section.
+ */
+export function formatLinkedCortexSection(
+  vaults: VaultCortexData[],
+  interlinks: InterlinkCortexData[],
+  options: FormatOptions,
+): LinkedFormatResult {
+  const totalSources = vaults.length + interlinks.length;
+  if (totalSources === 0) return { text: "", tokensUsed: 0 };
+
+  const { mode, tokenBudget } = options;
+  const perSourceBudget = Math.floor(tokenBudget / totalSources);
+  const sections: string[] = [];
+
+  // Format vault data
+  for (const vault of vaults) {
+    const budget = perSourceBudget;
+    const header = `[Knowledge from vault "${vault.vaultName}"]`;
+    let sectionParts: string[] = [header];
+    let remaining = budget - estimateTokens(header);
+
+    if (mode === "clinical") {
+      const entText = formatEntitySnapshotsClinical(vault.entities);
+      const relText = formatRelationshipsClinical(vault.relations);
+      const combined = [entText, relText].filter(Boolean).join("\n");
+      sectionParts.push(combined.slice(0, Math.floor(remaining * 3.8)));
+    } else {
+      // Entity budget: 60%, Relationship budget: 40%
+      const entBudget = Math.floor(remaining * 0.6);
+      const relBudget = Math.floor(remaining * 0.4);
+
+      const entSection = formatEntitiesShadow(vault.entities, entBudget);
+      if (entSection) sectionParts.push(entSection);
+
+      const relSection = formatRelationshipsShadow(vault.relations, relBudget);
+      if (relSection) sectionParts.push(relSection);
+    }
+
+    const block = sectionParts.join("\n");
+    if (estimateTokens(block) > estimateTokens(header) + 5) {
+      sections.push(block);
+    }
+  }
+
+  // Format interlink data
+  for (const interlink of interlinks) {
+    const budget = perSourceBudget;
+    const header = `[Shared memories from "${interlink.targetChatName}"]`;
+    let sectionParts: string[] = [header];
+    let remaining = budget - estimateTokens(header);
+
+    const { memories, entityContext, activeRelationships, arcContext } = interlink.result;
+
+    if (mode === "clinical") {
+      const entText = formatEntitySnapshotsClinical(entityContext);
+      const relText = formatRelationshipsClinical(activeRelationships);
+      const memText = memories.map((m) => m.content).join("\n---\n");
+      const combined = [entText, relText, memText].filter(Boolean).join("\n");
+      sectionParts.push(combined.slice(0, Math.floor(remaining * 3.8)));
+    } else if (mode === "minimal") {
+      const memSection = formatMemoriesAttributed(memories, remaining, options.currentSpeakerName);
+      if (memSection) sectionParts.push(memSection);
+    } else {
+      // Same proportions as main formatter
+      const memBudget = Math.floor(remaining * 0.45);
+      const entBudget = Math.floor(remaining * 0.30);
+      const relBudget = Math.floor(remaining * 0.15);
+      const arcBudget = Math.floor(remaining * 0.10);
+
+      const memSection = formatMemoriesAttributed(memories, memBudget, options.currentSpeakerName);
+      if (memSection) sectionParts.push(memSection);
+
+      const entSection = formatEntitiesShadow(entityContext, entBudget);
+      if (entSection) sectionParts.push(entSection);
+
+      const relSection = formatRelationshipsShadow(activeRelationships, relBudget);
+      if (relSection) sectionParts.push(relSection);
+
+      const arcSection = formatArcShadow(arcContext, arcBudget);
+      if (arcSection) sectionParts.push(arcSection);
+    }
+
+    const block = sectionParts.join("\n");
+    if (estimateTokens(block) > estimateTokens(header) + 5) {
+      sections.push(block);
+    }
+  }
+
+  const text = sections.join("\n\n");
+  return { text, tokensUsed: estimateTokens(text) };
 }

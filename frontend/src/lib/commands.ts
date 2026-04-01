@@ -1,16 +1,16 @@
 import type { NavigateFunction } from 'react-router'
 import type { ComponentType } from 'react'
 import {
-  Settings, PanelRight, MessageSquare, Compass, Reply, Sliders,
   Plus, RotateCw, CornerDownLeft, Trash2, Edit3, Copy,
   Eye, EyeOff, Columns, FolderOpen, ClipboardCopy, Upload, Search,
-  GitBranch, Palette,
+  GitBranch,
 } from 'lucide-react'
 import { useStore } from '@/store'
 import { chatsApi, messagesApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
 import { charactersApi } from '@/api/characters'
 import { DRAWER_TABS, registryToCommands } from '@/lib/drawer-tab-registry'
+import { getVisibleSettingsTabs, settingsRegistryToCommands } from '@/lib/settings-tab-registry'
 
 export type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character'
 
@@ -26,10 +26,6 @@ export interface Command {
 }
 
 export const GROUP_ORDER: Command['group'][] = ['Actions', 'Panels', 'Settings', 'Extensions']
-
-function openSettingsView(view: string) {
-  useStore.getState().openSettings(view)
-}
 
 export const COMMANDS: Command[] = [
 
@@ -373,68 +369,10 @@ export const COMMANDS: Command[] = [
   // Panels — auto-generated from the drawer tab registry
   ...registryToCommands(DRAWER_TABS),
 
-  // Settings
-  {
-    id: 'settings-general',
-    label: 'General Settings',
-    description: 'Application preferences and defaults',
-    icon: Settings,
-    keywords: ['settings', 'general', 'preferences', 'defaults', 'landing page'],
-    group: 'Settings',
-    run: () => openSettingsView('general'),
-  },
-  {
-    id: 'settings-display',
-    label: 'Display & Layout',
-    description: 'Panel width, sidebar position, and layout options',
-    icon: PanelRight,
-    keywords: ['display', 'layout', 'sidebar', 'drawer', 'width', 'panel', 'position'],
-    group: 'Settings',
-    run: () => openSettingsView('display'),
-  },
-  {
-    id: 'settings-chat',
-    label: 'Chat Behavior',
-    description: 'Message display mode, send key, and chat options',
-    icon: MessageSquare,
-    keywords: ['chat', 'behavior', 'enter to send', 'bubble', 'minimal', 'immersive'],
-    group: 'Settings',
-    run: () => openSettingsView('chat'),
-  },
-  {
-    id: 'settings-appearance',
-    label: 'Appearance',
-    description: 'Theme presets and advanced visual configuration',
-    icon: Palette,
-    keywords: ['appearance', 'theme', 'colors', 'font', 'visual', 'style'],
-    group: 'Settings',
-    run: () => openSettingsView('appearance'),
-  },
-  {
-    id: 'settings-guided',
-    label: 'Guided Generation',
-    description: 'Configure guided generation sequences and prompt biases',
-    icon: Compass,
-    keywords: ['guided', 'generation', 'sequences', 'bias', 'prompt', 'persistent'],
-    group: 'Settings',
-    run: () => openSettingsView('guided'),
-  },
-  {
-    id: 'settings-quickreplies',
-    label: 'Quick Replies',
-    description: 'Manage quick reply sets and message shortcuts',
-    icon: Reply,
-    keywords: ['quick replies', 'shortcuts', 'messages', 'macros', 'quick'],
-    group: 'Settings',
-    run: () => openSettingsView('quickReplies'),
-  },
-  {
-    id: 'settings-advanced',
-    label: 'Advanced Settings',
-    description: 'Advanced configuration and debug options',
-    icon: Sliders,
-    keywords: ['advanced', 'debug', 'config', 'technical', 'expert'],
-    group: 'Settings',
-    run: () => openSettingsView('advanced'),
-  },
 ]
+
+/** Build the full command list including role-aware settings entries. */
+export function buildCommands(userRole?: string): Command[] {
+  const settingsTabs = getVisibleSettingsTabs(userRole)
+  return [...COMMANDS, ...settingsRegistryToCommands(settingsTabs)]
+}

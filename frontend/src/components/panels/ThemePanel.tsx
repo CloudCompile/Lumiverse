@@ -15,6 +15,7 @@ import styles from './ThemePanel.module.css'
 export default function ThemePanel() {
   const theme = useStore((s) => s.theme) as ThemeConfig | null
   const setTheme = useStore((s) => s.setTheme)
+  const hasExtensionOverrides = useStore((s) => Object.keys(s.extensionThemeOverrides).length > 0)
 
   const openModal = useStore((s) => s.openModal)
   const current = theme ?? DEFAULT_THEME
@@ -45,13 +46,17 @@ export default function ThemePanel() {
     [update]
   )
 
+  const clearAllExtensionThemeOverrides = useStore((s) => s.clearAllExtensionThemeOverrides)
+
   const handlePresetSelect = useCallback(
     (preset: ThemeConfig) => {
       // Preserve the user's current mode when selecting any preset
       const latest = getLatest()
+      // Clear extension theme overrides so the preset takes full control
+      clearAllExtensionThemeOverrides()
       setTheme({ ...preset, mode: latest.mode })
     },
-    [setTheme, getLatest]
+    [setTheme, getLatest, clearAllExtensionThemeOverrides]
   )
 
   const handleAccentChange = useCallback(
@@ -130,7 +135,7 @@ export default function ThemePanel() {
 
       <section className={styles.section}>
         <h4 className={styles.sectionLabel}>Presets</h4>
-        <PresetGrid activeId={current.id} onSelect={handlePresetSelect} />
+        <PresetGrid activeId={hasExtensionOverrides ? '' : current.id} onSelect={handlePresetSelect} />
       </section>
 
       <ExtensionThemes />

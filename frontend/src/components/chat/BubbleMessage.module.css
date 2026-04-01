@@ -252,11 +252,11 @@
 }
 
 :global([data-theme-mode='dark']) .nameChar {
-  color: var(--char-name-dark, #fff);
+  color: var(--char-name-dark, var(--lumiverse-primary-text));
 }
 
 :global([data-theme-mode='light']) .nameChar {
-  color: var(--char-name-light, var(--lumiverse-text));
+  color: var(--char-name-light, var(--lumiverse-primary-text));
 }
 
 /* ── Meta wrap ── */

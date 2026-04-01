@@ -31,6 +31,7 @@ import { processChunkFontColors, formatColorMapForPrompt, deleteColorMapForChat,
 import { extractRelationshipsHeuristic } from "./relationship-extractor";
 import { extractNPsFromChunk } from "./np-chunker";
 import { stripLoomTags, stripDetailsBlocks } from "../../utils/content-sanitizer";
+import { getLinkedCortexData } from "./vault";
 import type {
   ChunkIngestionData,
   CortexQuery,
@@ -40,13 +41,15 @@ import type {
   EntitySnapshot,
   SalienceResult,
   EmotionalTag,
+  LinkedCortexResult,
+  InterlinkCortexData,
 } from "./types";
 
 // Re-export public types and config
 export { getCortexConfig, putCortexConfig, applyCortexPreset } from "./config";
 export type { MemoryCortexConfig, CortexPresetMode } from "./config";
-export { formatShadowPrompt } from "./shadow-formatter";
-export type { FormatterMode, ShadowPromptResult } from "./shadow-formatter";
+export { formatShadowPrompt, formatLinkedCortexSection } from "./shadow-formatter";
+export type { FormatterMode, ShadowPromptResult, LinkedFormatResult } from "./shadow-formatter";
 export { getCortexUsageStats, runMaintenance, debouncedVectorize } from "./gc";
 export type { CortexUsageStats } from "./gc";
 export { formatColorMapForPrompt, getColorMap } from "./font-attribution";
@@ -83,6 +86,13 @@ export {
   getAllRelationsUnfiltered,
 } from "./entity-graph";
 export type { MigrationResult } from "./entity-graph";
+export {
+  createVault, listVaults, getVault, deleteVault, renameVault,
+  attachLink, getChatLinks, removeLink, toggleLink,
+  getVaultDataForAssembly, getLinkedCortexData,
+} from "./vault";
+export type { Vault, VaultEntity, VaultRelation, ChatLink } from "./vault";
+export type { LinkedCortexResult, VaultCortexData, InterlinkCortexData } from "./types";
 
 // ─── Result Cache ─────────────────────────────────────────────
 // Warm cache of cortex retrieval results per chat. Background queries
@@ -151,6 +161,77 @@ export function getCachedCortexResult(chatId: string): CortexResult | null {
 /** Invalidate cached cortex result for a chat (e.g. on rebuild or delete). */
 export function invalidateCortexCache(chatId: string): void {
   cortexResultCache.delete(chatId);
+}
+
+// ─── Linked Cortex Cache ──────────────────────────────────────
+
+interface CachedLinkedEntry {
+  result: LinkedCortexResult;
+  queriedAt: number;
+}
+
+const linkedCortexResultCache = new Map<string, CachedLinkedEntry>();
+
+export function getCachedLinkedCortexResult(chatId: string): LinkedCortexResult | null {
+  const entry = linkedCortexResultCache.get(chatId);
+  if (!entry) return null;
+  if (Date.now() - entry.queriedAt > CACHE_TTL_MS) {
+    linkedCortexResultCache.delete(chatId);
+    return null;
+  }
+  return entry.result;
+}
+
+export function invalidateLinkedCortexCache(chatId: string): void {
+  linkedCortexResultCache.delete(chatId);
+}
+
+/**
+ * Query all linked cortex data for a chat (vaults + interlinks).
+ * Vault data is read synchronously from SQLite. Interlink targets
+ * are queried via queryCortex() in parallel.
+ */
+export async function queryLinkedCortex(
+  chatId: string,
+  userId: string,
+  config?: MemoryCortexConfig,
+): Promise<LinkedCortexResult> {
+  const cfg = config ?? getCortexConfig(userId);
+  const linked = getLinkedCortexData(chatId);
+
+  // Vault data is already resolved (synchronous SQLite reads)
+  const vaults = linked.vaults;
+
+  // Fire interlink queries in parallel
+  const interlinkResults: InterlinkCortexData[] = [];
+  if (linked.interlinkTargetChatIds.length > 0) {
+    const promises = linked.interlinkTargetChatIds.map(async (target) => {
+      try {
+        const result = await queryCortex({
+          chatId: target.chatId,
+          userId,
+          queryText: "", // use empty query for broad retrieval
+          generationType: "normal",
+          topK: cfg.retrieval?.maxEntitySnapshots ?? 10,
+          includeConsolidations: false,
+          includeRelationships: cfg.retrieval?.relationshipInjection ?? true,
+        }, cfg);
+        return { targetChatId: target.chatId, targetChatName: target.chatName, result };
+      } catch (err) {
+        console.warn(`[cortex] Interlink query failed for chat ${target.chatId}:`, err);
+        return null;
+      }
+    });
+
+    const settled = await Promise.all(promises);
+    for (const r of settled) {
+      if (r) interlinkResults.push(r);
+    }
+  }
+
+  const result: LinkedCortexResult = { vaults, interlinks: interlinkResults };
+  linkedCortexResultCache.set(chatId, { result, queriedAt: Date.now() });
+  return result;
 }
 
 // ─── Retrieval ─────────────────────────────────────────────────

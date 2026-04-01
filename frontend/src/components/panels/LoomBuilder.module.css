@@ -698,6 +698,13 @@
   touch-action: none;
 }
 
+/* Invisible hit area — 44px min touch target (Apple HIG / WCAG 2.5.8) */
+.sliderTrack::before {
+  content: '';
+  position: absolute;
+  inset: -19px 0;
+}
+
 .sliderFill {
   position: absolute;
   top: 0;

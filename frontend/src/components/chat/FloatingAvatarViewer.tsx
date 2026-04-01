@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { useStore } from '@/store'
+import LazyImage from '@/components/shared/LazyImage'
 import styles from './FloatingAvatarViewer.module.css'
 
 const MIN_SIZE = 120
@@ -170,11 +171,13 @@ export default function FloatingAvatarViewer() {
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
       >
-        <img
+        <LazyImage
           src={floatingAvatar.imageUrl}
           alt={floatingAvatar.displayName}
           className={styles.avatarImg}
+          style={{ objectFit: 'contain' }}
           draggable={false}
+          spinnerSize={28}
         />
       </div>
 

@@ -117,6 +117,38 @@
   color: var(--lumiverse-text);
 }
 
+.noticeBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 10px 10px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 28%, var(--lumiverse-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, #f59e0b 10%, var(--lumiverse-fill-subtle));
+  color: var(--lumiverse-text);
+  flex-shrink: 0;
+}
+
+.noticeIcon {
+  color: #f59e0b;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.noticeTitle {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.noticeText {
+  margin: 3px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--lumiverse-text-dim);
+}
+
 /* ── Search bar ─────────────────────────────────────────────── */
 
 .searchBar {
@@ -1156,4 +1188,675 @@
   gap: 6px;
   padding: 4px 12px 6px;
   border-top: 1px solid color-mix(in srgb, var(--lumiverse-border) 40%, transparent);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Links Tab — Vault & Interlink management
+   ══════════════════════════════════════════════════════════════ */
+
+.linksContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  flex: 1;
+  -webkit-overflow-scrolling: touch;
+}
+
+.linksSection {
+  flex: 1;
+  min-height: 0;
+}
+
+.linksList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+
+/* ── Link card ─────────────────────────────────────────────── */
+
+.linkCard {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  border-left: 3px solid var(--lumiverse-border);
+  transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.linkCardVault {
+  border-left-color: #d97706;
+}
+
+.linkCardVault:hover {
+  border-color: color-mix(in srgb, #d97706 30%, var(--lumiverse-border));
+  border-left-color: #d97706;
+}
+
+.linkCardInterlink {
+  border-left-color: #06b6d4;
+}
+
+.linkCardInterlink:hover {
+  border-color: color-mix(in srgb, #06b6d4 30%, var(--lumiverse-border));
+  border-left-color: #06b6d4;
+}
+
+.linkCardDisabled {
+  opacity: 0.45;
+}
+
+.linkIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.linkCardVault .linkIcon {
+  background: color-mix(in srgb, #d97706 10%, transparent);
+  color: #d97706;
+}
+
+.linkCardInterlink .linkIcon {
+  background: color-mix(in srgb, #06b6d4 10%, transparent);
+  color: #06b6d4;
+}
+
+.linkInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.linkName {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linkMeta {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+  margin-top: 2px;
+}
+
+.linkBroken {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #d97706;
+}
+
+.linkLive {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.pulseDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #06b6d4;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.linkActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ── Toggle switch ─────────────────────────────────────────── */
+
+.linkToggle {
+  width: 30px;
+  height: 16px;
+  border-radius: 8px;
+  border: none;
+  background: color-mix(in srgb, var(--lumiverse-text-dim) 25%, transparent);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s ease;
+  padding: 0;
+}
+
+.linkToggleOn {
+  background: color-mix(in srgb, var(--lumiverse-primary) 65%, transparent);
+}
+
+.linkToggleThumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease;
+}
+
+.linkToggleOn .linkToggleThumb {
+  transform: translateX(14px);
+}
+
+.linkDeleteBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.linkDeleteBtn:hover {
+  background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 12%, transparent);
+  color: var(--lumiverse-danger, #e53e3e);
+}
+
+/* ── Delete confirmation ───────────────────────────────────── */
+
+.linkConfirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  font-size: 11.5px;
+  color: var(--lumiverse-text-muted);
+}
+
+.linkConfirmActions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.linkConfirmYes {
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 40%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 8%, transparent);
+  color: var(--lumiverse-danger, #e53e3e);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.linkConfirmYes:hover {
+  background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 15%, transparent);
+}
+
+.linkConfirmNo {
+  padding: 3px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.linkConfirmNo:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+
+/* ── Action buttons ────────────────────────────────────────── */
+
+.linksActions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--lumiverse-border);
+  flex-shrink: 0;
+}
+
+.linksActionBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.linksActionBtn:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  border-color: color-mix(in srgb, var(--lumiverse-primary) 25%, var(--lumiverse-border));
+}
+
+/* ── Inline form (create vault, add link) ──────────────────── */
+
+.linksInlineForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--lumiverse-border);
+  background: color-mix(in srgb, var(--lumiverse-fill-subtle) 50%, transparent);
+  flex-shrink: 0;
+}
+
+.linksFormHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+
+.linksFormIcon {
+  color: var(--lumiverse-text-dim);
+}
+
+.linksFormClose {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.linksFormClose:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+}
+
+.linksFormInput {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 6px;
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.linksFormInput:focus {
+  border-color: var(--lumiverse-primary);
+}
+
+.linksFormTextarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 6px;
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  outline: none;
+  resize: vertical;
+  min-height: 36px;
+  font-family: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.linksFormTextarea:focus {
+  border-color: var(--lumiverse-primary);
+}
+
+.linksFormSubmit {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--lumiverse-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.linksFormSubmit:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.linksFormSubmit:not(:disabled):hover {
+  opacity: 0.85;
+}
+
+/* ── Link type picker cards ────────────────────────────────── */
+
+.linkTypeCards {
+  display: flex;
+  gap: 6px;
+}
+
+.linkTypeCard {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.linkTypeCard:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+
+.linkTypeCardVault {
+  border-left: 3px solid #d97706;
+}
+
+.linkTypeCardVault:hover {
+  border-color: color-mix(in srgb, #d97706 30%, var(--lumiverse-border));
+  border-left-color: #d97706;
+}
+
+.linkTypeCardVault svg {
+  color: #d97706;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.linkTypeCardInterlink {
+  border-left: 3px solid #06b6d4;
+}
+
+.linkTypeCardInterlink:hover {
+  border-color: color-mix(in srgb, #06b6d4 30%, var(--lumiverse-border));
+  border-left-color: #06b6d4;
+}
+
+.linkTypeCardInterlink svg {
+  color: #06b6d4;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.linkTypeCardTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+
+.linkTypeCardDesc {
+  font-size: 10.5px;
+  color: var(--lumiverse-text-dim);
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+/* ── Picker list (vault/chat selection) ────────────────────── */
+
+.linksPickerList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.linksPickerEmpty {
+  padding: 16px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--lumiverse-text-dim);
+}
+
+.linksPickerItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  width: 100%;
+}
+
+.linksPickerItem:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+
+.linksPickerItemInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.linksPickerItemName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linksPickerItemMeta {
+  font-size: 10.5px;
+  color: var(--lumiverse-text-dim);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linksPickerItemAction {
+  color: var(--lumiverse-text-dim);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.linksPickerItem:hover .linksPickerItemAction {
+  color: var(--lumiverse-primary);
+}
+
+/* ── Bidirectional checkbox ────────────────────────────────── */
+
+.linksBidirectionalRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--lumiverse-border);
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+}
+
+.linksBidirectionalRow input[type="checkbox"] {
+  accent-color: var(--lumiverse-primary);
+}
+
+/* ── Vault library (collapsible) ───────────────────────────── */
+
+.linksLibrary {
+  border-top: 1px solid var(--lumiverse-border);
+  flex-shrink: 0;
+}
+
+.linksLibraryHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.linksLibraryHeader:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+
+.linksLibraryList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 10px 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.linksLibraryItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 6px;
+  border-left: 3px solid #d97706;
+}
+
+.linksLibraryItemInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.linksLibraryItemName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linksLibraryItemMeta {
+  font-size: 10.5px;
+  color: var(--lumiverse-text-dim);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linkDimText {
+  color: var(--lumiverse-text-dim);
+  font-style: italic;
+}
+
+.linksLibraryItemActions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.linksLibraryBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.linksLibraryBtn:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+}
+
+.linksLibraryBtnDanger:hover {
+  background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 12%, transparent);
+  color: var(--lumiverse-danger, #e53e3e);
+}
+
+/* ── Rename inline row ─────────────────────────────────────── */
+
+.linksRenameRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.linksRenameRow .linksFormInput {
+  flex: 1;
+}
+
+.linksRenameConfirm,
+.linksRenameCancel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.linksRenameConfirm {
+  color: #4caf50;
+}
+
+.linksRenameConfirm:hover {
+  background: color-mix(in srgb, #4caf50 12%, transparent);
+}
+
+.linksRenameCancel {
+  color: var(--lumiverse-text-dim);
+}
+
+.linksRenameCancel:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
 }

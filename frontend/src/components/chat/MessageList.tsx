@@ -128,7 +128,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       return
     }
 
-    const threshold = 150
+    const threshold = 30
     isNearBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < threshold
   }, [])

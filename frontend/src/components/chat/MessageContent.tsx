@@ -363,6 +363,52 @@ function extractHtmlIslands(
   return { content: output.join('\n'), islands }
 }
 
+/**
+ * Convert markdown syntax within HTML island text content to rendered HTML.
+ * Preserves <style> blocks and HTML tag structure while processing text nodes
+ * through marked, so captured content ($1, $2 etc.) renders correctly in Shadow DOM.
+ */
+function processMarkdownInIsland(html: string): string {
+  // Protect <style> blocks — CSS selectors can contain '>' which breaks tag splitting
+  const styleBlocks: string[] = []
+  const shielded = html.replace(/<style[\s>][\s\S]*?<\/style\s*>/gi, (m) => {
+    styleBlocks.push(m)
+    return `<!--ISLAND_STYLE_${styleBlocks.length - 1}-->`
+  })
+
+  // Split into HTML tags (odd indices) and text content (even indices)
+  const parts = shielded.split(/(<[^>]*>)/)
+  let skipDepth = 0
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+
+    // HTML tags — track elements whose content should not be processed
+    if (i % 2 === 1) {
+      if (/^<(pre|code|script)\b/i.test(part)) skipDepth++
+      else if (/^<\/(pre|code|script)\b/i.test(part)) skipDepth = Math.max(0, skipDepth - 1)
+      continue
+    }
+
+    // Text content — skip if empty, inside skip element, a style placeholder, or plain text
+    if (!part.trim() || skipDepth > 0) continue
+    if (/^<!--ISLAND_STYLE_\d+-->$/.test(part.trim())) continue
+    if (!/[*_`~\[#\-]/.test(part)) continue
+
+    let processed = (marked.parse(part, { async: false }) as string).replace(/\n$/, '')
+    parts[i] = processed
+  }
+
+  let result = parts.join('')
+
+  // Restore <style> blocks
+  for (let i = 0; i < styleBlocks.length; i++) {
+    result = result.replace(`<!--ISLAND_STYLE_${i}-->`, styleBlocks[i])
+  }
+
+  return result
+}
+
 interface ContentPiece {
   type: 'markup' | 'island'
   content: string
@@ -385,7 +431,7 @@ function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] 
     const before = html.slice(lastIdx, m.index!)
     if (before.trim()) pieces.push({ type: 'markup', content: before })
     const idx = parseInt(m[1], 10)
-    if (islands[idx] != null) pieces.push({ type: 'island', content: islands[idx] })
+    if (islands[idx] != null) pieces.push({ type: 'island', content: processMarkdownInIsland(islands[idx]) })
     lastIdx = m.index! + m[0].length
   }
 

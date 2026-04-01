@@ -297,7 +297,7 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
 let connPromise: Promise<Connection> | null = null;
 let vectorIndexReady = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
-const OPTIMIZE_DEBOUNCE_MS = 30_000; // 30 seconds after last write
+const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
 const worldBookVectorVersionChecked = new Set<string>();
 
 // Periodically clear the version-check cache so it doesn't grow unbounded.
@@ -485,9 +485,22 @@ async function getOrCreateTable(seedRows?: EmbeddingRow[]): Promise<Table> {
   return table;
 }
 
-const MIN_ROWS_FOR_VECTOR_INDEX = 10_000;
+const MIN_ROWS_FOR_VECTOR_INDEX = 5_000;
 let scalarIndexReady = false;
 let ftsIndexReady = false;
+const MAX_LANCE_SOURCE_FILTER_IDS = 250;
+const OPTIMIZE_MAX_WAIT_MS = 2 * 60_000; // 2 minutes (reduced from 5 min to prevent fragment buildup)
+let optimizeQueuedAt: number | null = null;
+
+// ---------------------------------------------------------------------------
+// Index health tracking — detect when indexes need rebuilding
+// ---------------------------------------------------------------------------
+let lastIndexRebuildAt = 0;
+let unindexedRowEstimate = 0;
+const INDEX_REBUILD_COOLDOWN_MS = 10 * 60_000; // Don't rebuild more than once per 10 min
+const UNINDEXED_ROW_THRESHOLD = 2_000; // Rebuild when this many rows are unindexed
+const INDEX_HEALTH_CHECK_INTERVAL_MS = 2 * 60_000; // Check index health every 2 min
+let indexHealthTimer: ReturnType<typeof setInterval> | null = null;
 
 function getWorldBookVectorVersionCacheKey(userId: string): string {
   return `${userId}:${WORLD_BOOK_VECTOR_VERSION}`;
@@ -605,22 +618,28 @@ async function ensureVectorIndex(table: Table): Promise<void> {
       vectorIndexReady = true;
       return;
     }
+    // IVF_PQ handles metadata-filtered workloads (every query uses .where())
+    // much better than HNSW_PQ, which suffers latency fluctuation with filters.
+    const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
     await table.createIndex("vector", {
-      config: Index.hnswPq({
+      config: Index.ivfPq({
         distanceType: "cosine",
-        m: 20,
-        efConstruction: 300,
+        numPartitions,
       }),
     } as any);
   } catch {
     // Index may already exist - that's fine
   }
   vectorIndexReady = true;
+  lastIndexRebuildAt = Date.now();
+  startIndexHealthMonitor(table);
 }
 
 /**
  * Ensure scalar indexes exist on filter columns for fast prefiltering.
- * BTree for high-cardinality (user_id, owner_id), Bitmap for low-cardinality (source_type).
+ * BTree for high-cardinality (user_id, owner_id, id), Bitmap for low-cardinality (source_type).
+ * The `id` BTree is critical for mergeInsert performance — without it, every upsert
+ * does a full table scan to find matching rows.
  */
 async function ensureScalarIndexes(table: Table): Promise<void> {
   if (scalarIndexReady) return;
@@ -638,8 +657,10 @@ async function ensureScalarIndexes(table: Table): Promise<void> {
       // Index may already exist
     }
   };
+  await create("id"); // Critical for mergeInsert("id") join performance
   await create("user_id");
   await create("owner_id");
+  await create("source_id");
   await create("source_type", Index.bitmap());
   scalarIndexReady = true;
 }
@@ -664,6 +685,136 @@ async function ensureFtsIndex(table: Table): Promise<void> {
   ftsIndexReady = true;
 }
 
+/**
+ * Periodic index health monitor. Checks unindexed row count and triggers
+ * a vector index rebuild when too many rows have drifted out of the index
+ * (which happens naturally with mergeInsert updates).
+ */
+function startIndexHealthMonitor(table: Table): void {
+  if (indexHealthTimer) return;
+  indexHealthTimer = setInterval(async () => {
+    try {
+      await checkAndRebuildIndexes(table);
+    } catch (err) {
+      console.warn("[embeddings] Index health check failed:", err);
+    }
+  }, INDEX_HEALTH_CHECK_INTERVAL_MS);
+}
+
+export function stopIndexHealthMonitor(): void {
+  if (indexHealthTimer) {
+    clearInterval(indexHealthTimer);
+    indexHealthTimer = null;
+  }
+}
+
+async function checkAndRebuildIndexes(table: Table): Promise<void> {
+  const now = Date.now();
+  if (now - lastIndexRebuildAt < INDEX_REBUILD_COOLDOWN_MS) return;
+
+  try {
+    const indices = await table.listIndices();
+    const vectorIdx = indices.find((i: any) => {
+      const name = i.name || i.indexName || "";
+      return name.includes("vector");
+    });
+    if (!vectorIdx) return;
+
+    const idxName = vectorIdx.name || (vectorIdx as any).indexName;
+    let unindexed = 0;
+    try {
+      const stats = await (table as any).indexStats(idxName);
+      if (stats) {
+        unindexed = (stats as any).num_unindexed_rows ?? (stats as any).numUnindexedRows ?? 0;
+      }
+    } catch {
+      // indexStats may not be supported for this index type — fall back to
+      // heuristic: rebuild if enough time has passed since last rebuild and
+      // we've been writing (optimizeQueuedAt !== null indicates recent writes).
+      if (optimizeQueuedAt !== null && now - lastIndexRebuildAt > INDEX_REBUILD_COOLDOWN_MS * 3) {
+        unindexed = UNINDEXED_ROW_THRESHOLD; // Force rebuild
+      }
+    }
+    unindexedRowEstimate = unindexed;
+
+    if (unindexed >= UNINDEXED_ROW_THRESHOLD) {
+      console.info(`[embeddings] ${unindexed} unindexed rows detected, rebuilding vector index...`);
+      const rowCount = await table.countRows();
+      const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+      await table.createIndex("vector", {
+        config: Index.ivfPq({
+          distanceType: "cosine",
+          numPartitions,
+        }),
+        replace: true,
+      } as any);
+      lastIndexRebuildAt = Date.now();
+      unindexedRowEstimate = 0;
+      console.info(`[embeddings] Vector index rebuilt (${rowCount} rows, ${numPartitions} partitions)`);
+    }
+  } catch (err) {
+    // Non-fatal — index health checks are best-effort
+    console.warn("[embeddings] Index health check error:", err);
+  }
+}
+
+/**
+ * One-time startup migration: detect old HNSW_PQ vector index and replace it
+ * with IVF_PQ (better for filtered workloads). Also compacts fragments.
+ * Safe to call every startup — skips quickly if no table exists or index is
+ * already the correct type.
+ */
+export async function runStartupVectorMaintenance(): Promise<void> {
+  const conn = await getConnection();
+  const exists = await tableExists(conn, EMBEDDINGS_TABLE);
+  if (!exists) return;
+
+  const table = await conn.openTable(EMBEDDINGS_TABLE);
+  const indices = await table.listIndices();
+  const vectorIdx = indices.find((i: any) => {
+    const name = i.name || i.indexName || "";
+    return name.includes("vector");
+  });
+
+  // Check if the existing index is the old HNSW_PQ type that needs migration
+  const idxType = vectorIdx ? ((vectorIdx as any).indexType || (vectorIdx as any).type || "") : "";
+  const needsMigration = vectorIdx && /hnsw/i.test(idxType);
+
+  // Also compact fragments regardless of index type
+  try {
+    console.info("[embeddings] Running startup compaction...");
+    await table.optimize({ cleanupOlderThan: new Date() });
+  } catch (err) {
+    console.warn("[embeddings] Startup compaction failed:", err);
+  }
+
+  if (needsMigration) {
+    const rowCount = await table.countRows();
+    if (rowCount >= MIN_ROWS_FOR_VECTOR_INDEX) {
+      console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
+      const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+      try {
+        await table.createIndex("vector", {
+          config: Index.ivfPq({
+            distanceType: "cosine",
+            numPartitions,
+          }),
+          replace: true,
+        } as any);
+        vectorIndexReady = true;
+        lastIndexRebuildAt = Date.now();
+        console.info(`[embeddings] Vector index migrated successfully (${numPartitions} partitions)`);
+      } catch (err) {
+        console.warn("[embeddings] Vector index migration failed (will retry on next query):", err);
+      }
+    }
+  }
+
+  // Ensure scalar indexes include the `id` column (may be missing from older installs)
+  await ensureScalarIndexes(table);
+  startIndexHealthMonitor(table);
+}
+
 export async function optimizeTable(): Promise<void> {
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
@@ -675,16 +826,70 @@ export async function optimizeTable(): Promise<void> {
   });
 }
 
+/**
+ * Get LanceDB table health diagnostics for the embeddings table.
+ */
+export async function getVectorStoreHealth(): Promise<{
+  exists: boolean;
+  rowCount: number;
+  vectorIndexReady: boolean;
+  scalarIndexReady: boolean;
+  ftsIndexReady: boolean;
+  unindexedRowEstimate: number;
+  lastIndexRebuildAt: number;
+  indexes: Array<{ name: string; type?: string }>;
+}> {
+  const conn = await getConnection();
+  const exists = await tableExists(conn, EMBEDDINGS_TABLE);
+  if (!exists) {
+    return {
+      exists: false,
+      rowCount: 0,
+      vectorIndexReady,
+      scalarIndexReady,
+      ftsIndexReady,
+      unindexedRowEstimate: 0,
+      lastIndexRebuildAt: 0,
+      indexes: [],
+    };
+  }
+
+  const table = await conn.openTable(EMBEDDINGS_TABLE);
+  const rowCount = await table.countRows();
+  const indices = await table.listIndices();
+
+  return {
+    exists: true,
+    rowCount,
+    vectorIndexReady,
+    scalarIndexReady,
+    ftsIndexReady,
+    unindexedRowEstimate,
+    lastIndexRebuildAt,
+    indexes: indices.map((i: any) => ({
+      name: i.name || i.indexName || "unknown",
+      type: i.indexType || i.type || undefined,
+    })),
+  };
+}
+
 function scheduleOptimize(): void {
+  const now = Date.now();
+  if (optimizeQueuedAt == null) optimizeQueuedAt = now;
   if (optimizeTimer) clearTimeout(optimizeTimer);
+  const elapsed = now - optimizeQueuedAt;
+  const delay = elapsed >= OPTIMIZE_MAX_WAIT_MS
+    ? 0
+    : Math.min(OPTIMIZE_DEBOUNCE_MS, OPTIMIZE_MAX_WAIT_MS - elapsed);
   optimizeTimer = setTimeout(async () => {
     optimizeTimer = null;
+    optimizeQueuedAt = null;
     try {
       await optimizeTable();
     } catch (err) {
       console.warn("[embeddings] Deferred optimize failed:", err);
     }
-  }, OPTIMIZE_DEBOUNCE_MS);
+  }, delay);
 }
 
 export function getProviderDefaults(provider: EmbeddingProvider) {
@@ -1180,9 +1385,16 @@ export async function reindexWorldBookEntries(
     }
   }
 
-  // Compact all fragments into fewer files and prune old versions
+  // Compact all fragments into fewer files, prune old versions, and
+  // rebuild vector index so freshly-upserted rows are fully indexed.
   try {
     await optimizeTable();
+    // After bulk reindex, force a vector index rebuild to absorb all new rows
+    const table = await getTableIfExists();
+    if (table) {
+      vectorIndexReady = false;
+      await ensureVectorIndex(table);
+    }
   } catch (err) {
     console.warn("[embeddings] Post-reindex optimize failed:", err);
   }
@@ -1229,13 +1441,15 @@ export async function searchWorldBookEntriesHybridWithVector(
   const filter = `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND owner_id = ${sqlValue(worldBookId)}`;
   const effectiveLimit = Math.max(1, Math.min(limit, 100));
 
-  const vectorRows = await table
+  const query = table
     .query()
     .nearestTo(vector)
     .where(filter)
     .select(["source_id", "content", "_distance", "metadata_json"])
-    .limit(effectiveLimit)
-    .toArray();
+    .limit(effectiveLimit) as any;
+  // Refine with full vectors after PQ approximate search for better accuracy
+  if (vectorIndexReady) query.refineFactor(5);
+  const vectorRows = await query.toArray();
 
   const merged = new Map<string, WorldBookSearchCandidate>();
 
@@ -1352,6 +1566,9 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
   vectorIndexReady = false;
   scalarIndexReady = false;
   ftsIndexReady = false;
+  lastIndexRebuildAt = 0;
+  unindexedRowEstimate = 0;
+  stopIndexHealthMonitor();
 }
 
 /**
@@ -1361,11 +1578,13 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
  * recovering from corruption (e.g. "vector not divisible by 8" errors).
  */
 export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: string }> {
-  // 1. Cancel any pending optimize
+  // 1. Cancel any pending optimize and index health monitor
   if (optimizeTimer) {
     clearTimeout(optimizeTimer);
     optimizeTimer = null;
   }
+  optimizeQueuedAt = null;
+  stopIndexHealthMonitor();
 
   // 2. Clear in-memory caches
   embeddingCache.clear();
@@ -1375,6 +1594,8 @@ export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: str
   vectorIndexReady = false;
   scalarIndexReady = false;
   ftsIndexReady = false;
+  lastIndexRebuildAt = 0;
+  unindexedRowEstimate = 0;
 
   // 4. Delete the entire LanceDB directory from disk
   const deleted = existsSync(LANCEDB_PATH);
@@ -1464,6 +1685,45 @@ export async function syncChatChunkEmbedding(
 
   console.info(`[embeddings] Vectorized chat chunk ${chunkId} for chat ${chatId}`);
 
+  scheduleOptimize();
+}
+
+/**
+ * Batch upsert multiple chunk vectors in a single mergeInsert call.
+ * Avoids creating one Lance fragment per chunk (the main cause of slow queries
+ * after accumulating tens of thousands of embeddings via individual upserts).
+ */
+export async function batchUpsertChunkVectors(
+  userId: string,
+  chunks: Array<{ chatId: string; chunkId: string; vector: number[]; content: string; metadata?: Record<string, any> }>,
+): Promise<void> {
+  if (chunks.length === 0) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const rows: EmbeddingRow[] = chunks.map((c) => ({
+    id: rowId(userId, "chat_chunk", c.chunkId, 0),
+    user_id: userId,
+    source_type: "chat_chunk",
+    source_id: c.chunkId,
+    owner_id: c.chatId,
+    chunk_index: 0,
+    content: c.content.trim(),
+    vector: c.vector,
+    metadata_json: JSON.stringify(c.metadata || {}),
+    updated_at: now,
+  }));
+
+  const table = await getOrCreateTable(rows);
+  await ensureVectorIndex(table);
+  await ensureScalarIndexes(table);
+  await ensureFtsIndex(table);
+  await table
+    .mergeInsert("id")
+    .whenMatchedUpdateAll()
+    .whenNotMatchedInsertAll()
+    .execute(asLanceRows(rows));
+
+  console.info(`[embeddings] Batch-vectorized ${rows.length} chat chunk(s)`);
   scheduleOptimize();
 }
 
@@ -1573,45 +1833,50 @@ export async function searchChatChunks(
   limit = 8,
   queryText?: string,
   hybridWeightMode?: "keyword_first" | "balanced" | "vector_first",
+  allowedChunkIds?: Set<string>,
 ): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
   const table = await getTableIfExists();
   if (!table) return [];
 
-  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
+  const baseFilter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
+  const sourceFilter = buildAllowedChunkFilter(allowedChunkIds);
+  const filter = sourceFilter ? `${baseFilter} AND ${sourceFilter}` : baseFilter;
   const fetchLimit = Math.max(1, Math.min(limit + 50, 150));
 
   // Try hybrid search when query text is available
   let rows: any[];
+  // Refine with full vectors after PQ approximate search for better accuracy
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady) q.refineFactor(5); return q; };
   if (queryText?.trim() && hybridWeightMode !== "vector_first") {
     try {
       const reranker = await rerankers.RRFReranker.create();
-      rows = await table
+      const q = table
         .query()
         .nearestTo(vector)
         .fullTextSearch(queryText.trim())
         .where(filter)
         .rerank(reranker)
         .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json", "vector"])
-        .limit(fetchLimit)
-        .toArray();
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
     } catch {
       // FTS index may not exist yet — fall back to vector-only
-      rows = await table
+      const q = table
         .query()
         .nearestTo(vector)
         .where(filter)
         .select(["source_id", "content", "_distance", "metadata_json", "vector"])
-        .limit(fetchLimit)
-        .toArray();
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
     }
   } else {
-    rows = await table
+    const q = table
       .query()
       .nearestTo(vector)
       .where(filter)
       .select(["source_id", "content", "_distance", "metadata_json", "vector"])
-      .limit(fetchLimit)
-      .toArray();
+      .limit(fetchLimit);
+    rows = await applyRefineFactor(q).toArray();
   }
 
   // Parse and exclude
@@ -1677,6 +1942,13 @@ export async function searchChatChunks(
     content: c.content,
     metadata: c.metadata,
   }));
+}
+
+function buildAllowedChunkFilter(allowedChunkIds?: Set<string>): string | null {
+  if (!allowedChunkIds || allowedChunkIds.size === 0) return null;
+  if (allowedChunkIds.size > MAX_LANCE_SOURCE_FILTER_IDS) return null;
+  const values = [...allowedChunkIds].map((id) => sqlValue(id)).join(", ");
+  return `source_id IN (${values})`;
 }
 
 /**
