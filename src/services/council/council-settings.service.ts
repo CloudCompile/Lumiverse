@@ -3,6 +3,7 @@ import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS, SIDECAR_DEFAULTS } f
 import * as settingsSvc from "../settings.service";
 import { BUILTIN_COUNCIL_TOOLS, BUILTIN_TOOLS_MAP } from "./builtin-tools";
 import { getDLCTools } from "./dlc-tools";
+import { getMcpToolsAsCouncilTools } from "./mcp-tools";
 import { toolRegistry } from "../../spindle/tool-registry";
 import * as managerSvc from "../../spindle/manager.service";
 
@@ -90,9 +91,16 @@ export async function getAvailableTools(userId: string): Promise<CouncilToolDefi
       extensionName: extNameMap.get(reg.extension_id) || reg.extension_id,
     })
   );
+  // MCP tools from connected servers
+  const mcpTools = getMcpToolsAsCouncilTools(userId);
+
   const merged = new Map<string, CouncilToolDefinition>();
 
-  // Extension tools first (lowest priority)
+  // MCP tools first (lowest priority)
+  for (const tool of mcpTools) {
+    merged.set(tool.name, tool);
+  }
+  // Extension tools next
   for (const tool of extensionTools) {
     merged.set(tool.name, tool);
   }

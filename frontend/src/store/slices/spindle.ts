@@ -7,6 +7,7 @@ import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/lo
 export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
   extensionThemeOverrides: {},
+  mutedExtensionThemes: {},
   extensionOperationStatus: null,
   spindlePrivileged: false,
   pendingPermissionRequest: null,
@@ -230,6 +231,23 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   clearAllExtensionThemeOverrides: () => {
     set({ extensionThemeOverrides: {} })
+  },
+
+  muteExtensionTheme: (extensionId: string) => {
+    set((state) => {
+      const { [extensionId]: _, ...rest } = state.extensionThemeOverrides
+      return {
+        mutedExtensionThemes: { ...state.mutedExtensionThemes, [extensionId]: true },
+        extensionThemeOverrides: rest,
+      }
+    })
+  },
+
+  unmuteExtensionTheme: (extensionId: string) => {
+    set((state) => {
+      const { [extensionId]: _, ...rest } = state.mutedExtensionThemes
+      return { mutedExtensionThemes: rest }
+    })
   },
 
   setExtensionOperationStatus: (extensionId: string | null, operation: string, name: string | null) => {

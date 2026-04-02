@@ -640,19 +640,22 @@ async function ensureVectorIndex(table: Table): Promise<void> {
  * BTree for high-cardinality (user_id, owner_id, id), Bitmap for low-cardinality (source_type).
  * The `id` BTree is critical for mergeInsert performance — without it, every upsert
  * does a full table scan to find matching rows.
+ *
+ * When `force` is true, indexes are rebuilt with `replace: true` even if they already
+ * exist. This is needed after compaction cleanup, which can leave stale index files
+ * referencing deleted data versions (manifests as "Object not found" errors on Windows
+ * and other platforms).
  */
-async function ensureScalarIndexes(table: Table): Promise<void> {
-  if (scalarIndexReady) return;
+async function ensureScalarIndexes(table: Table, force = false): Promise<void> {
+  if (scalarIndexReady && !force) return;
   const indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
   const create = async (col: string, config?: any) => {
     // LanceDB names indexes as {col}_idx by convention
-    if (indexNames.has(`${col}_idx`)) return;
+    if (!force && indexNames.has(`${col}_idx`)) return;
     try {
-      if (config) {
-        await table.createIndex(col, { config });
-      } else {
-        await table.createIndex(col);
-      }
+      const opts: any = config ? { config } : {};
+      if (force && indexNames.has(`${col}_idx`)) opts.replace = true;
+      await table.createIndex(col, opts);
     } catch {
       // Index may already exist
     }
@@ -667,18 +670,19 @@ async function ensureScalarIndexes(table: Table): Promise<void> {
 
 /**
  * Ensure FTS index exists on the content column for hybrid search.
+ * When `force` is true, the index is rebuilt even if it already exists.
  */
-async function ensureFtsIndex(table: Table): Promise<void> {
-  if (ftsIndexReady) return;
+async function ensureFtsIndex(table: Table, force = false): Promise<void> {
+  if (ftsIndexReady && !force) return;
   const indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
-  if (indexNames.has("content_idx")) {
+  if (!force && indexNames.has("content_idx")) {
     ftsIndexReady = true;
     return;
   }
   try {
-    await table.createIndex("content", {
-      config: Index.fts(),
-    });
+    const opts: any = { config: Index.fts() };
+    if (force && indexNames.has("content_idx")) opts.replace = true;
+    await table.createIndex("content", opts);
   } catch {
     // Index may already exist
   }
@@ -810,8 +814,10 @@ export async function runStartupVectorMaintenance(): Promise<void> {
     }
   }
 
-  // Ensure scalar indexes include the `id` column (may be missing from older installs)
-  await ensureScalarIndexes(table);
+  // Force-rebuild scalar + FTS indexes after compaction cleanup to avoid stale
+  // index files referencing deleted data versions (causes "Object not found" errors).
+  await ensureScalarIndexes(table, true);
+  await ensureFtsIndex(table, true);
   startIndexHealthMonitor(table);
 }
 
@@ -824,6 +830,19 @@ export async function optimizeTable(): Promise<void> {
   await table.optimize({
     cleanupOlderThan: new Date(),
   });
+
+  // Rebuild scalar + FTS indexes after compaction cleanup.
+  // optimize() with cleanupOlderThan removes old data versions, which can
+  // orphan index files that referenced those versions. This manifests as
+  // "Object at location ... not found" errors when LanceDB tries to read
+  // stale index metadata. Force-rebuilding ensures indexes reference the
+  // current compacted data.
+  try {
+    await ensureScalarIndexes(table, true);
+    await ensureFtsIndex(table, true);
+  } catch (err) {
+    console.warn("[embeddings] Post-optimize index rebuild failed:", err);
+  }
 }
 
 /**

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { compress } from "hono/compress";
+import { compress } from "./middleware/compress";
 import { bodyLimit } from "hono/body-limit";
 import { serveStatic } from "hono/bun";
 import { websocket } from "hono/bun";
@@ -48,6 +48,7 @@ import { openrouterRoutes } from "./routes/openrouter.routes";
 import { ttsConnectionsRoutes } from "./routes/tts-connections.routes";
 import { ttsRoutes } from "./routes/tts.routes";
 import { sttRoutes } from "./routes/stt.routes";
+import { mcpServersRoutes } from "./routes/mcp-servers.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -203,6 +204,7 @@ app.route("/api/v1/operator", operatorRoutes);
 app.route("/api/v1/tts-connections", ttsConnectionsRoutes);
 app.route("/api/v1/tts", ttsRoutes);
 app.route("/api/v1/stt", sttRoutes);
+app.route("/api/v1/mcp-servers", mcpServersRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

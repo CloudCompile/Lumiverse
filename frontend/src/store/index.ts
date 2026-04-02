@@ -22,6 +22,7 @@ import { createRegexSlice } from './slices/regex'
 import { createExpressionSlice } from './slices/expressions'
 import { createImageGenConnectionsSlice } from './slices/image-gen-connections'
 import { createTtsConnectionsSlice } from './slices/tts-connections'
+import { createMcpServersSlice } from './slices/mcp-servers'
 import { createLoadoutsSlice } from './slices/loadouts'
 import { createMigrationSlice } from './slices/migration'
 import { createOperatorSlice } from './slices/operator'
@@ -51,6 +52,7 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createExpressionSlice(...a),
   ...createImageGenConnectionsSlice(...a),
   ...createTtsConnectionsSlice(...a),
+  ...createMcpServersSlice(...a),
   ...createLoadoutsSlice(...a),
   ...createMigrationSlice(...a),
   ...createOperatorSlice(...a),

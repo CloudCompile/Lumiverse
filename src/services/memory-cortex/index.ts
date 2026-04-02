@@ -330,7 +330,8 @@ export async function processChunk(
     connectionId: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
-  }) => Promise<{ content: string }>,
+    tools?: import("../../llm/types").ToolDefinition[];
+  }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   sidecarConnectionId?: string,
   /** Alias → canonical name. Built from character/persona descriptions and world books.
    *  Used to auto-associate nicknames from descriptions to their canonical entity. */
@@ -727,7 +728,8 @@ export async function rebuildCortex(
     connectionId: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
-  }) => Promise<{ content: string }>,
+    tools?: import("../../llm/types").ToolDefinition[];
+  }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   sidecarConnectionId?: string,
   onProgress?: (current: number, total: number) => void,
   descriptionAliases?: Map<string, string>,

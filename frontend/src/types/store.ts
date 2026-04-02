@@ -618,6 +618,8 @@ export interface SpindleSlice {
   extensions: ExtensionInfo[]
   /** Active theme overrides from Spindle extensions, keyed by extensionId */
   extensionThemeOverrides: Record<string, ExtensionThemeOverride>
+  /** Extension IDs whose theme overrides are suppressed by the user */
+  mutedExtensionThemes: Record<string, boolean>
   /** Real-time operation status from backend WS events */
   extensionOperationStatus: ExtensionOperationStatus | null
   spindlePrivileged: boolean
@@ -652,6 +654,8 @@ export interface SpindleSlice {
   setExtensionThemeOverride: (override: ExtensionThemeOverride) => void
   clearExtensionThemeOverride: (extensionId: string) => void
   clearAllExtensionThemeOverrides: () => void
+  muteExtensionTheme: (extensionId: string) => void
+  unmuteExtensionTheme: (extensionId: string) => void
   setExtensionOperationStatus: (extensionId: string | null, operation: string, name: string | null) => void
 }
 
@@ -872,6 +876,18 @@ export interface ImageGenConnectionsSlice {
   setImageGenProviders: (providers: ImageGenProviderInfo[]) => void
 }
 
+// ---- MCP Servers Slice ----
+export interface McpServersSlice {
+  mcpServers: import('@/api/mcp-servers').McpServerProfile[]
+  mcpServerStatuses: Record<string, import('@/api/mcp-servers').McpServerStatus>
+
+  setMcpServers: (servers: import('@/api/mcp-servers').McpServerProfile[]) => void
+  addMcpServer: (server: import('@/api/mcp-servers').McpServerProfile) => void
+  updateMcpServer: (id: string, updates: Partial<import('@/api/mcp-servers').McpServerProfile>) => void
+  removeMcpServer: (id: string) => void
+  setMcpServerStatus: (id: string, status: import('@/api/mcp-servers').McpServerStatus) => void
+}
+
 // ---- TTS Connections Slice ----
 export interface TtsConnectionsSlice {
   ttsProfiles: import('@/types/api').TtsConnectionProfile[]
@@ -1015,6 +1031,7 @@ export type AppStore = ChatSlice &
   ExpressionSlice &
   ImageGenConnectionsSlice &
   TtsConnectionsSlice &
+  McpServersSlice &
   LoadoutsSlice &
   MigrationSlice &
   OperatorSlice &

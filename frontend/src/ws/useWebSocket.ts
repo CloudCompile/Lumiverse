@@ -504,6 +504,9 @@ export function useWebSocket() {
       }),
 
       wsClient.on(EventType.SPINDLE_THEME_OVERRIDES, (payload: { extensionId: string; extensionName: string; overrides: { paletteAccent?: { h: number; s: number; l: number }; variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } } | null }) => {
+        // If the user has muted this extension's theme, silently drop the update
+        if (store.getState().mutedExtensionThemes[payload.extensionId]) return
+
         const hasVars = payload.overrides?.variables && Object.keys(payload.overrides.variables).length > 0
         const hasModeVars = payload.overrides?.variablesByMode && (
           Object.keys(payload.overrides.variablesByMode.dark ?? {}).length > 0 ||
@@ -605,6 +608,42 @@ export function useWebSocket() {
           store.getState().setOperatorBusy(
             status === 'complete' || status === 'error' ? null : payload.operation
           )
+        }
+      }),
+
+      // MCP Server events
+      wsClient.on(EventType.MCP_SERVER_CONNECTED, (payload: { id: string; name: string; toolCount: number; tools: any[] }) => {
+        store.getState().setMcpServerStatus(payload.id, {
+          id: payload.id,
+          connected: true,
+          tool_count: payload.toolCount,
+          tools: payload.tools,
+        })
+        toast.success(`Connected — ${payload.toolCount} tool(s) discovered`, { title: `MCP: ${payload.name}` })
+      }),
+      wsClient.on(EventType.MCP_SERVER_DISCONNECTED, (payload: { id: string; name: string }) => {
+        store.getState().setMcpServerStatus(payload.id, {
+          id: payload.id,
+          connected: false,
+          tool_count: 0,
+          tools: [],
+        })
+      }),
+      wsClient.on(EventType.MCP_SERVER_ERROR, (payload: { id: string; name: string; error: string }) => {
+        store.getState().setMcpServerStatus(payload.id, {
+          id: payload.id,
+          connected: false,
+          tool_count: 0,
+          tools: [],
+          error: payload.error,
+        })
+        toast.error(payload.error, { title: `MCP: ${payload.name}` })
+      }),
+      wsClient.on(EventType.MCP_SERVER_CHANGED, (payload: { id: string; profile?: any; deleted?: boolean }) => {
+        if (payload.deleted) {
+          store.getState().removeMcpServer(payload.id)
+        } else if (payload.profile) {
+          store.getState().updateMcpServer(payload.id, payload.profile)
         }
       }),
     ]

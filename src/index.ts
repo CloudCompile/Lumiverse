@@ -1,3 +1,12 @@
+// ── Bun version gate ────────────────────────────────────────────────────────
+// CompressionStream (Brotli) and other APIs we depend on require Bun >= 1.3.3.
+const [_bunMaj = 0, _bunMin = 0, _bunPat = 0] = Bun.version.split(".").map(Number);
+if (_bunMaj < 1 || (_bunMaj === 1 && (_bunMin < 3 || (_bunMin === 3 && _bunPat < 3)))) {
+  console.error(`[startup] Bun ${Bun.version} is too old — Lumiverse requires Bun >= 1.3.3.`);
+  console.error("[startup] Update Bun: curl -fsSL https://bun.sh/install | bash");
+  process.exit(1);
+}
+
 import { mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { env } from "./env";
@@ -108,6 +117,13 @@ import("./lumihub/client").then(({ autoConnect }) => {
   autoConnect().catch((err) => console.error("[LumiHub] Auto-connect failed:", err));
 });
 
+// Auto-connect MCP servers (fire-and-forget)
+import("./services/mcp-client-manager").then(({ getMcpClientManager }) => {
+  getMcpClientManager().autoConnectAll().catch((err) =>
+    console.error("[MCP] Auto-connect failed:", err)
+  );
+});
+
 // Log trusted origins so it's visible in the runner and easy to verify that LAN IPs were detected and applied automatically.
 if (env.trustAnyOrigin) {
   console.log("[Auth] Trusted origins: ALL (TRUST_ANY_ORIGIN enabled)");
@@ -135,6 +151,12 @@ async function gracefulShutdown(signal: string) {
   try {
     const { getLumiHubClient } = await import("./lumihub/client");
     getLumiHubClient().disconnect();
+  } catch {}
+
+  // 3.5 Disconnect all MCP servers
+  try {
+    const { getMcpClientManager } = await import("./services/mcp-client-manager");
+    await getMcpClientManager().disconnectAll();
   } catch {}
 
   // 4. Stop all Spindle extension workers

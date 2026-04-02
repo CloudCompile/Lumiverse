@@ -20,6 +20,8 @@ import { activateWorldInfo } from "../world-info-activation.service";
 import { getCharacterWorldBookIds } from "../../utils/character-world-books";
 import { getCouncilSettings, getAvailableTools } from "./council-settings.service";
 import { BUILTIN_TOOLS_MAP } from "./builtin-tools";
+import { parseMcpToolName } from "./mcp-tools";
+import { getMcpClientManager } from "../mcp-client-manager";
 import { toolRegistry } from "../../spindle/tool-registry";
 import { getWorkerHost } from "../../spindle/lifecycle";
 import { getExpressionLabels, hasExpressions } from "../expressions.service";
@@ -236,9 +238,24 @@ async function executeMemberTools(
     const extToolReg = toolRegistry.getTool(toolName);
     const isExtensionTool = !!extToolReg?.extension_id;
 
+    // Check if this is an MCP tool (route to connected MCP server)
+    const mcpMatch = !isExtensionTool ? parseMcpToolName(input.userId, toolName) : null;
+    const isMcpTool = !!mcpMatch;
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        if (isExtensionTool) {
+        if (isMcpTool) {
+          // Route to connected MCP server — the sidecar determines the arguments
+          // via function calling, but for council mode we pass an empty args object
+          // and let the MCP server handle the execution.
+          content = await getMcpClientManager().callTool(
+            input.userId,
+            mcpMatch!.serverId,
+            mcpMatch!.toolName,
+            {},
+            settings.toolsSettings.timeoutMs
+          );
+        } else if (isExtensionTool) {
           // Pass the bare tool name (not qualified) so extension handlers can
           // match easily, and forward the full chat context so tools can act on it.
           // Extension tools receive the exact same context as sidecar tools —
@@ -282,7 +299,7 @@ async function executeMemberTools(
         error = err.message;
         // Don't retry if the generation was aborted — bail out immediately
         if (input.signal?.aborted) break;
-        if (isExtensionTool) break;
+        if (isExtensionTool || isMcpTool) break;
         if (attempt < MAX_RETRIES - 1) {
           await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
         }

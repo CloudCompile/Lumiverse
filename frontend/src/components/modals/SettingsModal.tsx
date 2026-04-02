@@ -20,6 +20,7 @@ import NotificationSettings from '@/components/settings/NotificationSettings'
 import MemoryCortexSettings from '@/components/settings/MemoryCortexSettings'
 import OperatorPanel from '@/components/settings/OperatorPanel'
 import VoiceSettings from '@/components/settings/VoiceSettings'
+import McpServerSettings from '@/components/settings/mcp-servers/McpServerSettings'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import { getVisibleSettingsTabs } from '@/lib/settings-tab-registry'
 import styles from './SettingsModal.module.css'
@@ -117,6 +118,8 @@ function SettingsView({ view }: { view: string }) {
       return <NotificationSettings />
     case 'voice':
       return <VoiceSettings />
+    case 'mcpServers':
+      return <McpServerSettings />
     case 'diagnostics':
       return <Diagnostics />
     case 'migration':

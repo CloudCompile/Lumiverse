@@ -5,6 +5,7 @@
     "@lancedb/lancedb": "^0.26.2",
     "@lenml/tokenizer-claude": "^3.7.2",
     "@lenml/tokenizers": "^3.7.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@msgpack/msgpack": "^3.1.2",
     "@opentelemetry/api": "^1.9.1",
     "@pushforge/builder": "^2.0.1",

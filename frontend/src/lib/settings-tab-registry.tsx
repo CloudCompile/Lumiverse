@@ -2,7 +2,7 @@ import type { ComponentType, ReactNode } from 'react'
 import {
   Sliders, MessageSquare, Users, PanelRight,
   Compass, Reply, HardDrive, Puzzle, Database, Hash, Activity,
-  Globe, Bell, Import, Brain, Terminal, Volume2,
+  Globe, Bell, Import, Brain, Terminal, Volume2, Plug,
 } from 'lucide-react'
 import { useStore } from '@/store'
 import type { Command, CommandScope } from '@/lib/commands'
@@ -122,6 +122,15 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabDescription: 'Text-to-speech, speech-to-text, and voice settings',
     tabIcon: Volume2,
     keywords: ['voice', 'speech', 'tts', 'stt', 'text to speech', 'speech to text', 'microphone', 'audio', 'speak', 'whisper'],
+    component: INLINE_SENTINEL,
+  },
+  {
+    id: 'mcpServers',
+    shortName: 'MCP Servers',
+    tabName: 'MCP Servers',
+    tabDescription: 'Connect to external MCP tool servers for function calling',
+    tabIcon: Plug,
+    keywords: ['mcp', 'tools', 'servers', 'model context protocol', 'function calling', 'external'],
     component: INLINE_SENTINEL,
   },
   {

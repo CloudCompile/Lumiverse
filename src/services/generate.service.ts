@@ -16,7 +16,7 @@ import {
   type VectorActivatedEntry,
 } from "./prompt-assembly.service";
 import * as charactersSvc from "./characters.service";
-import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationResponse, type StreamChunk, type GenerationType, type ImpersonateMode, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
+import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationRequest, type GenerationResponse, type StreamChunk, type GenerationType, type ImpersonateMode, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition } from "../llm/types";
 import { interceptorPipeline } from "../spindle/interceptor-pipeline";
 import { contextHandlerChain } from "../spindle/context-handler";
 import { executeCouncil, collectWorldInfoForCouncil, formatDeliberation, type CouncilEnrichment } from "./council/council-execution.service";
@@ -1591,18 +1591,57 @@ export function stopGenerationSweep(): void {
   }
 }
 
+// --- Stream-to-response helper ---
+// Some providers (especially with tool calling) work better with streaming.
+// This helper consumes a stream and produces a full GenerationResponse,
+// properly accumulating tool call deltas.
+
+async function consumeStream(
+  stream: AsyncGenerator<StreamChunk, void, unknown>,
+): Promise<GenerationResponse> {
+  let content = "";
+  let reasoning = "";
+  let finishReason = "stop";
+  let toolCalls: import("../llm/types").ToolCallResult[] | undefined;
+  let usage: GenerationResponse["usage"];
+
+  for await (const chunk of stream) {
+    if (chunk.token) content += chunk.token;
+    if (chunk.reasoning) reasoning += chunk.reasoning;
+    if (chunk.usage) usage = chunk.usage;
+    if (chunk.finish_reason) finishReason = chunk.finish_reason;
+    if (chunk.tool_calls) toolCalls = chunk.tool_calls;
+  }
+
+  return {
+    content,
+    reasoning: reasoning || undefined,
+    finish_reason: finishReason,
+    tool_calls: toolCalls,
+    usage,
+  };
+}
+
 // --- Extension generation (stateless, synchronous, no WS events) ---
 
 export async function rawGenerate(userId: string, input: RawGenerateInput & { signal?: AbortSignal }): Promise<GenerationResponse> {
   const { provider, apiKey, apiUrl } = await resolveRawProviderAndKey(userId, input);
-  return provider.generate(apiKey, apiUrl, {
+  const request: GenerationRequest = {
     messages: input.messages,
     model: input.model,
     parameters: input.parameters,
     tools: input.tools,
-    stream: false,
     signal: input.signal,
-  });
+  };
+
+  // Use streaming when tools are present — some providers only emit tool call
+  // deltas correctly via the streaming path. Consume the stream internally to
+  // produce a complete response.
+  if (input.tools && input.tools.length > 0) {
+    return consumeStream(provider.generateStream(apiKey, apiUrl, { ...request, stream: true }));
+  }
+
+  return provider.generate(apiKey, apiUrl, { ...request, stream: false });
 }
 
 export async function quietGenerate(userId: string, input: QuietGenerateInput): Promise<GenerationResponse> {
@@ -1637,13 +1676,20 @@ export async function quietGenerate(userId: string, input: QuietGenerateInput): 
     mergedParams._openrouter = connection.metadata.openrouter;
   }
 
-  return provider.generate(apiKey, apiUrl, {
+  const request: GenerationRequest = {
     messages: input.messages,
     model: connection.model,
     parameters: mergedParams,
     tools: input.tools,
-    stream: false,
-  });
+  };
+
+  // Use streaming when tools are present — some providers only emit tool call
+  // deltas correctly via the streaming path.
+  if (input.tools && input.tools.length > 0) {
+    return consumeStream(provider.generateStream(apiKey, apiUrl, { ...request, stream: true }));
+  }
+
+  return provider.generate(apiKey, apiUrl, { ...request, stream: false });
 }
 
 /**
@@ -1691,13 +1737,20 @@ export async function summarizeGenerate(userId: string, input: QuietGenerateInpu
     mergedParams._openrouter = connection.metadata.openrouter;
   }
 
-  return provider.generate(apiKey, apiUrl, {
+  const request: GenerationRequest = {
     messages: input.messages,
     model: sidecarModel || connection.model,
     parameters: mergedParams,
     tools: input.tools,
-    stream: false,
-  });
+  };
+
+  // Use streaming when tools are present — some providers only emit tool call
+  // deltas correctly via the streaming path.
+  if (input.tools && input.tools.length > 0) {
+    return consumeStream(provider.generateStream(apiKey, apiUrl, { ...request, stream: true }));
+  }
+
+  return provider.generate(apiKey, apiUrl, { ...request, stream: false });
 }
 
 /**
