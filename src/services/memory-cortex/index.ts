@@ -331,6 +331,7 @@ export async function processChunk(
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
+    signal?: AbortSignal;
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   sidecarConnectionId?: string,
   /** Alias → canonical name. Built from character/persona descriptions and world books.
@@ -385,23 +386,35 @@ export async function processChunk(
       // also attribute colors. The LLM handles HTML tags gracefully.
       // Pass known entities with aliases so the LLM uses canonical names.
       const sidecarTimeout = config.sidecarTimeoutMs ?? 30000;
-      const extractionPromise = extractWithSidecar(
-        data.content,
-        generateRawFn,
-        sidecarConnectionId,
-        { characterNames, knownEntities: entityContext },
-      );
-      const extraction = sidecarTimeout > 0
-        ? await Promise.race([
-            extractionPromise,
-            new Promise<null>((resolve) =>
-              setTimeout(() => {
-                console.warn("[memory-cortex] Sidecar extraction timed out, falling back to heuristic");
-                resolve(null);
-              }, sidecarTimeout),
-            ),
-          ])
-        : await extractionPromise;
+      const ac = sidecarTimeout > 0 ? new AbortController() : null;
+      const timer = ac ? setTimeout(() => {
+        console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
+        ac.abort();
+      }, sidecarTimeout) : null;
+
+      // Wrap generateRawFn to inject the abort signal
+      const boundGenFn: typeof generateRawFn = ac
+        ? (opts) => generateRawFn({ ...opts, signal: ac.signal })
+        : generateRawFn;
+
+      let extraction: Awaited<ReturnType<typeof extractWithSidecar>> | null;
+      try {
+        extraction = await extractWithSidecar(
+          data.content,
+          boundGenFn,
+          sidecarConnectionId,
+          { characterNames, knownEntities: entityContext },
+        );
+      } catch (err: any) {
+        if (err?.name === "AbortError" || ac?.signal.aborted) {
+          console.warn("[memory-cortex] Sidecar extraction timed out, falling back to heuristic");
+          extraction = null;
+        } else {
+          throw err;
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
 
       if (extraction) {
         salienceResult = {
@@ -729,6 +742,7 @@ export async function rebuildCortex(
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
+    signal?: AbortSignal;
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   sidecarConnectionId?: string,
   onProgress?: (current: number, total: number) => void,

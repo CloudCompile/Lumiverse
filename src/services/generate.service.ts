@@ -105,6 +105,8 @@ export interface QuietGenerateInput {
   parameters?: GenerationParameters;
   /** Optional tool/function definitions for inline function calling. */
   tools?: ToolDefinition[];
+  /** Optional abort signal — when fired, cancels the in-flight HTTP request. */
+  signal?: AbortSignal;
 }
 
 export interface DryRunResult {
@@ -1681,6 +1683,7 @@ export async function quietGenerate(userId: string, input: QuietGenerateInput): 
     model: connection.model,
     parameters: mergedParams,
     tools: input.tools,
+    signal: input.signal,
   };
 
   // Use streaming when tools are present — some providers only emit tool call

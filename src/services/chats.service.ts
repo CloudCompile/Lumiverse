@@ -1304,7 +1304,7 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
       // responseMimeType + responseSchema) based on the provider so the LLM returns
       // valid JSON natively instead of relying on prompt engineering.
       const generateRawFn = sidecarConnectionId
-        ? async (opts: { connectionId: string; messages: Array<{ role: string; content: string }>; parameters: Record<string, any>; tools?: any[] }) => {
+        ? async (opts: { connectionId: string; messages: Array<{ role: string; content: string }>; parameters: Record<string, any>; tools?: any[]; signal?: AbortSignal }) => {
             const { quietGenerate } = await import("./generate.service");
             // Inject tool_choice to force the model to use tools
             const toolChoiceParams = sidecarProvider
@@ -1325,6 +1325,7 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
               messages: opts.messages as any,
               parameters: sidecarParams,
               tools: opts.tools,
+              signal: opts.signal,
             });
             return {
               content: typeof result.content === "string" ? result.content : "",

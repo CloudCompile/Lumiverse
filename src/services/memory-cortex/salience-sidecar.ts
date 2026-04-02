@@ -258,6 +258,7 @@ export type SidecarGenerateFn = (opts: {
   messages: Array<{ role: string; content: string }>;
   parameters: Record<string, any>;
   tools?: ToolDefinition[];
+  signal?: AbortSignal;
 }) => Promise<{
   content: string;
   tool_calls?: Array<{ name: string; args: Record<string, unknown> }>;

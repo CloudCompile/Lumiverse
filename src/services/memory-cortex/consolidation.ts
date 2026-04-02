@@ -95,6 +95,7 @@ export async function maybeConsolidate(
     connectionId: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
+    signal?: AbortSignal;
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
   sidecarTimeoutMs?: number,
@@ -125,21 +126,34 @@ export async function maybeConsolidate(
   if (config.useSidecar && generateRawFn && sidecarConnectionId) {
     // Time-bound the sidecar call to prevent hanging promises during consolidation.
     // Timeout is user-configurable to accommodate thinking models.
+    // Uses AbortController so the underlying HTTP request is cancelled on timeout.
     const timeoutMs = sidecarTimeoutMs ?? 30_000;
-    const summaryPromise = generateConsolidationSummary(
-      batch, generateRawFn, sidecarConnectionId, config.maxTokensPerSummary,
-    );
-    const result = timeoutMs > 0
-      ? await Promise.race([
-          summaryPromise,
-          new Promise<null>((resolve) =>
-            setTimeout(() => {
-              console.warn(`[memory-cortex] Consolidation sidecar timed out after ${timeoutMs}ms, using extractive fallback`);
-              resolve(null);
-            }, timeoutMs),
-          ),
-        ])
-      : await summaryPromise;
+    const ac = timeoutMs > 0 ? new AbortController() : null;
+    const timer = ac ? setTimeout(() => {
+      console.warn(`[memory-cortex] Consolidation sidecar timed out after ${timeoutMs}ms, aborting LLM call`);
+      ac.abort();
+    }, timeoutMs) : null;
+
+    const boundGenFn: typeof generateRawFn = ac
+      ? (opts) => generateRawFn({ ...opts, signal: ac.signal })
+      : generateRawFn;
+
+    let result: { summary: string; title: string | null } | null;
+    try {
+      result = await generateConsolidationSummary(
+        batch, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary,
+      );
+    } catch (err: any) {
+      if (err?.name === "AbortError" || ac?.signal.aborted) {
+        console.warn(`[memory-cortex] Consolidation sidecar timed out after ${timeoutMs}ms, using extractive fallback`);
+        result = null;
+      } else {
+        throw err;
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
     if (result) {
       summary = result.summary;
       title = result.title;
@@ -221,6 +235,7 @@ async function maybeConsolidateArcs(
     connectionId: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
+    signal?: AbortSignal;
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
   sidecarTimeoutMs?: number,
@@ -252,20 +267,32 @@ async function maybeConsolidateArcs(
   if (config.useSidecar && generateRawFn && sidecarConnectionId) {
     const combined = summaries.join("\n\n---\n\n");
     const timeoutMs = sidecarTimeoutMs ?? 30_000;
-    const arcPromise = generateArcSummary(
-      combined, generateRawFn, sidecarConnectionId, config.maxTokensPerSummary,
-    );
-    const result = timeoutMs > 0
-      ? await Promise.race([
-          arcPromise,
-          new Promise<null>((resolve) =>
-            setTimeout(() => {
-              console.warn(`[memory-cortex] Arc consolidation sidecar timed out after ${timeoutMs}ms, using join fallback`);
-              resolve(null);
-            }, timeoutMs),
-          ),
-        ])
-      : await arcPromise;
+    const ac = timeoutMs > 0 ? new AbortController() : null;
+    const timer = ac ? setTimeout(() => {
+      console.warn(`[memory-cortex] Arc consolidation sidecar timed out after ${timeoutMs}ms, aborting LLM call`);
+      ac.abort();
+    }, timeoutMs) : null;
+
+    const boundGenFn: typeof generateRawFn = ac
+      ? (opts) => generateRawFn({ ...opts, signal: ac.signal })
+      : generateRawFn;
+
+    let result: { summary: string; title: string | null } | null;
+    try {
+      result = await generateArcSummary(
+        combined, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary,
+      );
+    } catch (err: any) {
+      if (err?.name === "AbortError" || ac?.signal.aborted) {
+        console.warn(`[memory-cortex] Arc consolidation sidecar timed out after ${timeoutMs}ms, using join fallback`);
+        result = null;
+      } else {
+        throw err;
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
     if (result) {
       arcSummary = result.summary;
       arcTitle = result.title;
