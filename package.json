@@ -1,11 +1,12 @@
 {
   "name": "lumiverse-backend",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "dependencies": {
     "@lancedb/lancedb": "^0.26.2",
     "@lenml/tokenizer-claude": "^3.7.2",
     "@lenml/tokenizers": "^3.7.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@mozilla/readability": "^0.6.0",
     "@msgpack/msgpack": "^3.1.2",
     "@opentelemetry/api": "^1.9.1",
     "@pushforge/builder": "^2.0.1",
@@ -15,11 +16,13 @@
     "gpt-tokenizer": "^2.8.1",
     "hono": "^4.7.0",
     "js-tiktoken": "^1.0.16",
-    "lumiverse-spindle-types": "0.4.11",
+    "jsdom": "^29.0.1",
+    "lumiverse-spindle-types": "0.4.13",
     "sharp": "^0.34.5",
     "ssh2-sftp-client": "^12.1.1"
   },
   "devDependencies": {
+    "@types/jsdom": "^28.0.1",
     "@types/ssh2-sftp-client": "^9.0.6",
     "bun-types": "^1.3.10"
   },

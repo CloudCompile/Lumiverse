@@ -32,44 +32,70 @@ const ENTITY_BLOCKLIST = new Set([
 
 // ─── System Prompt ─────────────────────────────────────────────
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a narrative data extractor for a roleplay memory system. Extract structured facts from the passage with precision.
+const EXTRACTION_SYSTEM_PROMPT = `You are a narrative data extractor for a roleplay memory system. You will be given a passage of roleplay text. Your job is to call ALL four provided tools to extract structured data from it.
 
-STRICT RULES — violations corrupt the memory database:
+## YOUR WORKFLOW
 
-WHAT TO EXTRACT:
-1. ONLY extract entities with explicit proper names — unique identifiers for specific people, places, things, or groups (e.g. "Melina", "Dustwell", "Sixth Street", "Dark Brotherhood").
-2. CANONICAL NAMES: When known entities are listed below with aliases, ALWAYS output the canonical (primary) name, never a nickname or shorthand. "Pul" → use "Pulchra Fellini". For NEW entities not in the known list, use the exact name from the passage.
+1. **score_salience** — Rate the passage's narrative importance and tag emotional tones and story events.
+2. **extract_entities** — Identify every named person, place, thing, faction, or event that appears by proper name.
+3. **extract_relationships** — For each pair of named entities that interact in this passage, record their relationship.
+4. **extract_font_colors** — If HTML color tags are present, map each color to the character who speaks/narrates in it.
 
-WHAT TO NEVER EXTRACT:
-3. NEVER extract common English words as entities, even if capitalized. Words are often capitalized at sentence starts, after em-dashes, or in dialogue — that does NOT make them proper nouns.
-   BAD: "Barely", "Personal", "Cost", "Strange", "Silence", "Perhaps", "Several", "Enough"
-   GOOD: "Melina", "Thornhaven", "Sixth Street", "PubSec"
-4. NEVER extract verbs, adjectives, adverbs, or sentence fragments: "Having climbed", "Slurred", "I'll go", "Turned away" are NOT entities.
-5. NEVER extract ALL-CAPS words — these are emphasis/shouting in roleplay, not proper nouns: "STOP", "HELP", "COST".
-6. NEVER extract meta-references: User, You, AI, Player, Narrator, Character, Assistant, System, Bot, Human, NPC, OOC, or any pronoun.
-7. NEVER invent entities. If a character is referred to only by pronoun ("she", "he"), do NOT create an entity for them.
+You MUST call every tool exactly once. Use empty arrays when a tool has nothing to report.
 
-OTHER RULES:
-8. Relationships require TWO DIFFERENT named entities that BOTH appear in the passage. Never create relationships between aliases of the same entity. No relationships with pronouns or meta-references.
-9. Score importance by lasting narrative consequence (deaths, promises, discoveries) — NOT by dramatic prose style or emotional intensity of the writing.
-10. Key facts must be concrete and verifiable from the text: names learned, items acquired, locations visited, promises made. Not impressions or moods.
-11. For font color tags: if the passage contains <font color=...> or <span style="color:..."> HTML, identify which named character owns each color.
-12. When uncertain whether something is a proper noun, DO NOT extract it. Missing an entity is acceptable; extracting garbage corrupts the database.
+## ENTITY EXTRACTION RULES
 
-Call ALL provided tools with data extracted strictly from the passage text.`;
+An entity is a **proper name** — a unique identifier for a specific person, place, thing, or group.
+- GOOD: "Melina", "Thornhaven", "Sixth Street", "Dark Brotherhood", "Excalibur"
+- BAD: "Barely", "Personal", "Cost", "Strange", "STOP", "Having climbed"
+
+When known entities are listed below with aliases, ALWAYS use the canonical (primary) name, never a nickname. For NEW entities not in the known list, use the exact name from the passage.
+
+Do NOT extract:
+- Common English words, even if capitalized (sentence starts, after em-dashes, dialogue)
+- Verbs, adjectives, adverbs, or sentence fragments
+- ALL-CAPS words (emphasis/shouting in roleplay, not proper nouns)
+- Meta-references: User, You, AI, Player, Narrator, Character, Assistant, System, Bot, Human, NPC, OOC
+- Pronouns or pronoun-only references — if someone is only called "she" or "he", skip them
+- When uncertain, skip it. Missing an entity is fine; extracting garbage corrupts the database.
+
+## RELATIONSHIP RULES
+
+Both source and target must be proper names that appear in the passage. Never create relationships between aliases of the same entity, or with pronouns/meta-references.
+
+## SCORING RULES
+
+Score importance by **lasting narrative consequence** (deaths, promises, discoveries, revelations) — NOT by dramatic prose style or emotional intensity of the writing. Key facts must be concrete and verifiable: names learned, items acquired, locations visited, promises made.`;
 
 // ─── Tool Definitions ──────────────────────────────────────────
 
 const TOOL_SALIENCE: ToolDefinition = {
   name: "score_salience",
-  description: "Score narrative importance and detect emotional/story signals. Base score on lasting consequences, not writing style.",
+  description: "Rate the passage's narrative importance and identify emotional tones and story signals.",
   parameters: {
     type: "object",
     properties: {
-      importance: { type: "integer", description: "0=mundane filler/small talk, 2=routine interaction, 4=notable but forgettable, 6=significant development, 8=major plot point, 10=story-defining moment (death, betrayal, transformation)" },
-      emotional_tones: { type: "array", items: { type: "string" }, description: "Up to 3 that are clearly expressed (not just implied by dramatic prose). Options: grief, joy, tension, dread, intimacy, betrayal, revelation, resolve, humor, melancholy, awe, fury" },
-      narrative_flags: { type: "array", items: { type: "string" }, description: "ONLY if genuinely applicable: first_meeting, death, promise, confession, departure, transformation, battle, discovery, reunion, loss" },
-      key_facts: { type: "array", items: { type: "string" }, description: "Concrete facts: 'Melina promised to return', 'The sword was broken', 'They arrived at Dustwell'. Not vibes or impressions." },
+      importance: {
+        type: "integer",
+        minimum: 0,
+        maximum: 10,
+        description: "Narrative importance based on lasting consequences. 0=mundane filler, 2=routine interaction, 4=notable but forgettable, 6=significant development, 8=major plot point, 10=story-defining moment (death, betrayal, transformation)",
+      },
+      emotional_tones: {
+        type: "array",
+        items: { type: "string", enum: ["grief", "joy", "tension", "dread", "intimacy", "betrayal", "revelation", "resolve", "humor", "melancholy", "awe", "fury"] },
+        description: "Up to 3 emotional tones clearly expressed in the passage (not merely implied by dramatic prose).",
+      },
+      narrative_flags: {
+        type: "array",
+        items: { type: "string", enum: ["first_meeting", "death", "promise", "confession", "departure", "transformation", "battle", "discovery", "reunion", "loss"] },
+        description: "Story events that actually occur in this passage. Only include flags that genuinely apply.",
+      },
+      key_facts: {
+        type: "array",
+        items: { type: "string" },
+        description: "Concrete, verifiable facts from the text. Examples: 'Melina promised to return', 'The sword was broken', 'They arrived at Dustwell'. Not vibes or impressions.",
+      },
     },
     required: ["importance", "emotional_tones"],
   },
@@ -77,7 +103,7 @@ const TOOL_SALIENCE: ToolDefinition = {
 
 const TOOL_ENTITIES: ToolDefinition = {
   name: "extract_entities",
-  description: "Extract ONLY entities with unique proper names from the passage. A proper name is a SPECIFIC IDENTIFIER for a person, place, thing, or group (e.g. 'Melina', 'New York', 'Dark Brotherhood'). Do NOT extract common words (even if capitalized), verbs, adjectives, adverbs, pronouns, sentence fragments, ALL-CAPS emphasis, or meta-terms. When uncertain, prefer an empty array over dubious entities.",
+  description: "Extract named entities (people, places, things, factions) that appear by proper name in the passage. Return an empty array if no proper nouns appear.",
   parameters: {
     type: "object",
     properties: {
@@ -86,23 +112,36 @@ const TOOL_ENTITIES: ToolDefinition = {
         items: {
           type: "object",
           properties: {
-            name: { type: "string", description: "Exact proper name from the text. Must be a unique identifier, not a common word. WRONG: 'Barely', 'Personal', 'COST', 'Having climbed', 'Slurred'. RIGHT: 'Melina', 'Thornhaven', 'Excalibur', 'PubSec'." },
-            type: { type: "string", description: "character = named person or creature (e.g. 'Melina', 'the Captain'). location = named place, geographic feature, or address (e.g. 'New York', 'Sixth Street', 'Dustwell'). item = named specific object, weapon, or vehicle (e.g. 'Excalibur', 'The Black Pearl'). faction = named group, organization, or company (e.g. 'Dark Brotherhood', 'PubSec'). event = named historical occurrence (e.g. 'The Great War'). concept = named doctrine, theory, or prophecy ONLY — this is the RAREST type. If uncertain between concept and another type, choose the other type." },
-            role: { type: "string", description: "subject (acts), object (acted upon), present (in scene), or referenced (mentioned but absent)" },
+            name: { type: "string", description: "The entity's proper name exactly as it appears in the text." },
+            type: {
+              type: "string",
+              enum: ["character", "location", "item", "faction", "event", "concept"],
+              description: "character=named person/creature, location=named place/address, item=named object/weapon/vehicle, faction=named group/org, event=named historical occurrence, concept=named doctrine/prophecy (rarest — prefer other types when uncertain).",
+            },
+            role: {
+              type: "string",
+              enum: ["subject", "object", "present", "referenced"],
+              description: "subject=acts in scene, object=acted upon, present=in scene but passive, referenced=mentioned but absent.",
+            },
           },
           required: ["name", "type"],
         },
-        description: "Named entities found. Empty array [] if no proper nouns appear. Prefer empty over garbage.",
+        description: "Named entities found in the passage.",
       },
       status_changes: {
         type: "array",
         items: {
           type: "object",
           properties: {
-            entity: { type: "string", description: "Proper name of the entity whose status changed" },
-            change: { type: "string", description: "injured, healed, died, transformed, betrayed, allied, departed, arrived" },
-            detail: { type: "string", description: "Brief description of what happened" },
+            entity: { type: "string", description: "Proper name of the entity whose status changed." },
+            change: {
+              type: "string",
+              enum: ["injured", "healed", "died", "transformed", "betrayed", "allied", "departed", "arrived"],
+              description: "What happened to this entity.",
+            },
+            detail: { type: "string", description: "Brief description of the change." },
           },
+          required: ["entity", "change"],
         },
         description: "Status changes that explicitly occurred in this passage. Empty array if none.",
       },
@@ -113,7 +152,7 @@ const TOOL_ENTITIES: ToolDefinition = {
 
 const TOOL_RELATIONSHIPS: ToolDefinition = {
   name: "extract_relationships",
-  description: "Extract relationships between TWO named entities that BOTH appear in the passage. Both source and target must be proper names from the text. Empty array if fewer than 2 named entities appear.",
+  description: "Extract relationships between pairs of named entities that both appear in the passage. Both source and target must be proper names from the text. Return an empty array if fewer than 2 named entities appear.",
   parameters: {
     type: "object",
     properties: {
@@ -122,15 +161,19 @@ const TOOL_RELATIONSHIPS: ToolDefinition = {
         items: {
           type: "object",
           properties: {
-            source: { type: "string", description: "Proper name of source entity (must appear in passage)" },
-            target: { type: "string", description: "Proper name of target entity (must appear in passage)" },
-            type: { type: "string", description: "ally, enemy, lover, parent, child, sibling, mentor, rival, owns, member_of, located_in, fears, serves, or custom" },
-            label: { type: "string", description: "Brief descriptor: 'childhood friends', 'sworn enemies'" },
-            sentiment: { type: "number", description: "-1.0 (hostile) to 1.0 (warm)" },
+            source: { type: "string", description: "Proper name of the first entity (must appear in passage)." },
+            target: { type: "string", description: "Proper name of the second entity (must appear in passage)." },
+            type: {
+              type: "string",
+              enum: ["ally", "enemy", "lover", "parent", "child", "sibling", "mentor", "rival", "owns", "member_of", "located_in", "fears", "serves", "custom"],
+              description: "The kind of relationship between these two entities.",
+            },
+            label: { type: "string", description: "Brief human-readable descriptor, e.g. 'childhood friends', 'sworn enemies'." },
+            sentiment: { type: "number", minimum: -1, maximum: 1, description: "Emotional valence: -1.0 (hostile) to 1.0 (warm)." },
           },
           required: ["source", "target", "type"],
         },
-        description: "Relationships between named entities. Empty array [] if fewer than 2 named entities.",
+        description: "Relationships between named entities in the passage.",
       },
     },
     required: ["relationships"],
@@ -139,7 +182,7 @@ const TOOL_RELATIONSHIPS: ToolDefinition = {
 
 const TOOL_FONT_COLORS: ToolDefinition = {
   name: "extract_font_colors",
-  description: "If HTML <font color=...> or <span style='color:...'> tags appear in the passage, identify which named character speaks or narrates in each color. Empty array if no color tags present.",
+  description: "Map HTML color tags to characters. If the passage contains <font color=...> or <span style='color:...'> tags, identify which named character speaks or narrates in each color. Return an empty array if no color tags are present.",
   parameters: {
     type: "object",
     properties: {
@@ -148,13 +191,17 @@ const TOOL_FONT_COLORS: ToolDefinition = {
         items: {
           type: "object",
           properties: {
-            hex_color: { type: "string", description: "The hex color value (e.g. #ff9999, #E6E6FA)" },
-            character_name: { type: "string", description: "Proper name of the character using this color" },
-            usage_type: { type: "string", description: "speech (quoted dialogue in this color), thought (internal/italic), or narration (descriptive text)" },
+            hex_color: { type: "string", description: "The hex color value, e.g. '#ff9999' or '#E6E6FA'." },
+            character_name: { type: "string", description: "Proper name of the character who uses this color." },
+            usage_type: {
+              type: "string",
+              enum: ["speech", "thought", "narration"],
+              description: "speech=quoted dialogue, thought=internal/italic text, narration=descriptive text.",
+            },
           },
           required: ["hex_color", "character_name", "usage_type"],
         },
-        description: "Color-to-character mappings. Empty array [] if no HTML color tags found.",
+        description: "Color-to-character mappings found in the passage.",
       },
     },
     required: ["color_attributions"],
@@ -369,7 +416,7 @@ export async function extractWithSidecar(
         },
         {
           role: "user",
-          content: `Extract structured data from this roleplay passage. Call ALL tools.${entityHint}\n\n<passage>\n${content}\n</passage>`,
+          content: `Analyze this roleplay passage by calling all four tools: score_salience, extract_entities, extract_relationships, and extract_font_colors. Use empty arrays for tools with nothing to report.${entityHint}\n\n<passage>\n${content}\n</passage>`,
         },
       ],
       parameters: { temperature: 0.1 },

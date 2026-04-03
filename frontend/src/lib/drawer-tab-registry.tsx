@@ -3,7 +3,7 @@ import {
   User, Wand2, GitFork, Link2, Package, Zap,
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
-  GitBranch, Globe, Wallpaper, Replace, Library, Sparkles,
+  GitBranch, Globe, Wallpaper, Replace, Library, Sparkles, Database,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -35,6 +35,7 @@ import WallpaperPanel from '@/components/panels/WallpaperPanel'
 import BranchTreePanel from '@/components/panels/BranchTreePanel'
 import RegexPanel from '@/components/panels/RegexPanel'
 import MemoryCortexPanel from '@/components/panels/memory-cortex/MemoryCortexPanel'
+import DatabankPanel from '@/components/panels/databank/DatabankPanel'
 
 export interface DrawerTabEntry {
   id: string
@@ -164,6 +165,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabHeaderTitle: 'Memory',
     keywords: ['memory', 'cortex', 'embeddings', 'recall', 'brain', 'entities', 'relationships', 'salience', 'vector', 'long term', 'ltcm', 'facts'],
     component: () => <MemoryCortexPanel />,
+  },
+  {
+    id: 'databank',
+    shortName: 'Data',
+    tabName: 'Databank',
+    tabDescription: 'Upload and manage reference documents for AI context',
+    tabIcon: Database,
+    tabHeaderTitle: 'Databank',
+    keywords: ['databank', 'knowledge', 'documents', 'upload', 'files', 'bank', 'reference', 'data', 'rag'],
+    component: () => <DatabankPanel />,
   },
   {
     id: 'create',

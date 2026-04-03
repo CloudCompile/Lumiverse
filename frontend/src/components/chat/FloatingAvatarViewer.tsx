@@ -25,6 +25,7 @@ export default function FloatingAvatarViewer() {
   const dragStartPos = useRef({ x: 0, y: 0 })
   const resizing = useRef(false)
   const resizeStart = useRef({ x: 0, y: 0, w: 0, h: 0 })
+  const aspectRatio = useRef(1)
 
   // Sync size from store
   useEffect(() => {
@@ -45,6 +46,43 @@ export default function FloatingAvatarViewer() {
     y = Math.max(PAD, Math.min(y, window.innerHeight - floatingAvatar.height - DRAG_BAR_H - PAD))
     setPos({ x, y })
   }, [floatingAvatar?.imageUrl]) // re-center when a new image opens
+
+  // Detect image aspect ratio and adjust container size
+  useEffect(() => {
+    if (!floatingAvatar?.imageUrl) return
+    const img = new Image()
+    img.onload = () => {
+      const ratio = img.naturalWidth / img.naturalHeight
+      if (!isFinite(ratio) || ratio <= 0) return
+      aspectRatio.current = ratio
+
+      const BASE = 280
+      let w: number, h: number
+      if (ratio >= 1) {
+        w = BASE
+        h = Math.round(BASE / ratio)
+      } else {
+        h = BASE
+        w = Math.round(BASE * ratio)
+      }
+      w = Math.max(MIN_SIZE, Math.min(MAX_SIZE, w))
+      h = Math.max(MIN_SIZE, Math.min(MAX_SIZE, h))
+
+      setSize({ width: w, height: h })
+
+      const cx = Math.max(PAD, Math.min(
+        Math.round((window.innerWidth - w) / 2),
+        window.innerWidth - w - PAD
+      ))
+      const cy = Math.max(PAD, Math.min(
+        Math.round((window.innerHeight - h - DRAG_BAR_H) / 2),
+        window.innerHeight - h - DRAG_BAR_H - PAD
+      ))
+      setPos({ x: cx, y: cy })
+      updateFloatingAvatar({ width: w, height: h, x: cx, y: cy })
+    }
+    img.src = floatingAvatar.imageUrl
+  }, [floatingAvatar?.imageUrl, updateFloatingAvatar])
 
   // Re-clamp on window resize
   useEffect(() => {
@@ -121,8 +159,20 @@ export default function FloatingAvatarViewer() {
     const dx = e.clientX - resizeStart.current.x
     const dy = e.clientY - resizeStart.current.y
     const delta = Math.max(dx, dy)
-    const newWidth = Math.max(MIN_SIZE, Math.min(MAX_SIZE, resizeStart.current.w + delta))
-    const newHeight = Math.max(MIN_SIZE, Math.min(MAX_SIZE, resizeStart.current.h + delta))
+    const ratio = aspectRatio.current
+
+    let newWidth = resizeStart.current.w + delta
+    newWidth = Math.max(MIN_SIZE, Math.min(MAX_SIZE, newWidth))
+    let newHeight = Math.round(newWidth / ratio)
+
+    if (newHeight > MAX_SIZE) {
+      newHeight = MAX_SIZE
+      newWidth = Math.round(newHeight * ratio)
+    } else if (newHeight < MIN_SIZE) {
+      newHeight = MIN_SIZE
+      newWidth = Math.round(newHeight * ratio)
+    }
+
     setSize({ width: newWidth, height: newHeight })
   }, [])
 

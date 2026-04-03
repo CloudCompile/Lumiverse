@@ -354,18 +354,22 @@ async function invokeSidecarTool(
   member: CouncilMember,
   identityMsg: string,
   contextMessages: LlmMessage[],
-  toolsSettings: { maxWordsPerTool: number; timeoutMs: number },
+  toolsSettings: { maxWordsPerTool: number; timeoutMs: number; allowUserControl?: boolean },
   signal?: AbortSignal,
   enrichment?: CouncilEnrichment
 ): Promise<string> {
   const brevityNote =
     toolsSettings.maxWordsPerTool > 0
-      ? `\n\nIMPORTANT: Keep your response under ${toolsSettings.maxWordsPerTool} words.`
+      ? `\n\nIMPORTANT — BREVITY REQUIREMENT: Keep each tool response field under ${toolsSettings.maxWordsPerTool} words. Be direct, specific, and actionable. No preamble, filler, or repetition. Every word must earn its place.`
       : "";
 
   const roleNote = member.role
-    ? `\nYour role on the council is: ${member.role}`
+    ? `\nYour role on the council is: ${member.role}\nWhen using your tools, consider how your role influences your perspective and recommendations. Draw upon your expertise as ${member.role} to provide valuable insights.`
     : "";
+
+  const userControlNote = toolsSettings.allowUserControl
+    ? `\n\n### User Character Guidance ###\nYou may plan and suggest actions, dialogue, thoughts, and development for ALL characters in the story, including the user's character. Treat all participants — including the user — as characters whose arcs, actions, and dialogue you can direct and shape.`
+    : `\n\n### User Character Guidance ###\nIMPORTANT: Do NOT plan actions, dialogue, thoughts, or decisions for the user's character. Focus exclusively on how the story's non-player characters should react, behave, and develop in response to the user's input. Your suggestions should only concern the characters, world, and narrative elements — never dictate what the user's character does, says, thinks, or feels.`;
 
   // Dynamic enrichment for expression detector — inject available labels
   let dynamicSuffix = "";
@@ -383,12 +387,12 @@ You are being asked to use the following analysis tool. Respond with your analys
 ## Tool: ${tool.displayName}
 ${tool.description}
 
-${tool.prompt}${dynamicSuffix}${brevityNote}`;
+${tool.prompt}${dynamicSuffix}${brevityNote}${userControlNote}`;
 
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },
     ...contextMessages,
-    { role: "user", content: `Please perform your ${tool.displayName} analysis on the story context provided above. Respond directly with your findings.` },
+    { role: "user", content: `Review the story context above. Provide specific, actionable input from your unique perspective as ${member.itemName}. Filter every contribution through your personality, biases, and worldview.` },
   ];
 
   // Resolve the connection to get the provider name
@@ -517,12 +521,12 @@ function buildMemberIdentity(userId: string, member: CouncilMember): string {
     const item = packsSvc.getLumiaItem(userId, member.itemId);
     if (item) {
       const parts: string[] = [];
-      if (item.definition) parts.push(`Definition: ${item.definition}`);
-      if (item.personality) parts.push(`Personality: ${item.personality}`);
-      if (item.behavior) parts.push(`Behavior: ${item.behavior}`);
+      if (item.definition) parts.push(`### Your Physical Identity ###\n${item.definition}`);
+      if (item.personality) parts.push(`### Your Personality ###\n${item.personality}`);
+      if (item.behavior) parts.push(`### Your Behavioral Patterns ###\n${item.behavior}`);
       if (parts.length > 0) {
-        identity += `\n\n## WHO YOU ARE\n${parts.join("\n\n")}`;
-        identity += `\n\nYou MUST analyze everything through the lens of this identity. Your perspective is shaped by who you are. Be biased toward your nature.`;
+        identity += `\n\n### WHO YOU ARE ###\n\n${parts.join("\n\n")}`;
+        identity += `\n\n### INSTRUCTION ###\nYou MUST answer ALL tool calls and contributions through the lens of your personality, behavior, and identity described above. Your biases, quirks, speech patterns, and perspective should color every observation and suggestion you make. Do NOT provide generic or neutral responses—filter everything through who you are. Your unique voice and worldview must be evident in every contribution.`;
       }
     }
   } catch {

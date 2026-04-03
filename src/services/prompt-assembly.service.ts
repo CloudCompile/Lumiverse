@@ -41,6 +41,8 @@ import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import { getCouncilSettings } from "./council/council-settings.service";
 import * as memoryCortex from "./memory-cortex";
 import { buildEmotionalContext } from "./memory-cortex";
+import * as databankSvc from "./databank";
+import { getCharacterDatabankIds } from "../utils/character-databanks";
 import { getSidecarSettings } from "./sidecar-settings.service";
 
 // ---------------------------------------------------------------------------
@@ -341,6 +343,25 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       });
   }
 
+  // ---- Pre-flight: kick off databank retrieval ----
+  const databankCrossRefs = {
+    characterDatabankIds: getCharacterDatabankIds(character?.extensions),
+    chatDatabankIds: (chat.metadata?.chat_databank_ids as string[] | undefined) ?? [],
+  };
+  {
+    const dbIds = databankSvc.resolveActiveDatabankIds(ctx.userId, ctx.chatId, character?.id ? [character.id] : [], databankCrossRefs);
+    if (dbIds.length > 0) {
+      void (async () => {
+        const embCfg = pf?.embeddingConfig ?? await embeddingsSvc.getEmbeddingConfig(ctx.userId);
+        if (!embCfg.enabled) return;
+        const queryText = messages.slice(-6).map(m => m.content).join(" ");
+        await databankSvc.searchDatabanks(ctx.userId, ctx.chatId, dbIds, queryText, 4);
+      })().catch(err => {
+        console.warn("[prompt-assembly] Background databank query failed:", err);
+      });
+    }
+  }
+
   // ---- World Info activation ----
   const globalWorldBooks = (pf?.allSettings.get("globalWorldBooks") ?? settingsSvc.getSetting(ctx.userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
   const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
@@ -533,10 +554,69 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     settings: chatMemSettings ?? embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS,
   };
 
+  // ---- Databank retrieval ----
+  // Use the warm-cache pattern: check if a previous generation cached results.
+  // The background pre-flight fires alongside cortex (added below).
+  const databankResult = databankSvc.getCachedDatabankResult(ctx.chatId);
+  const activeDatabankIds = databankSvc.resolveActiveDatabankIds(
+    ctx.userId,
+    ctx.chatId,
+    character?.id ? [character.id] : [],
+    databankCrossRefs,
+  );
+  macroEnv.extra.databank = {
+    chunks: databankResult?.chunks ?? [],
+    formatted: databankResult?.formatted ?? "",
+    count: databankResult?.count ?? 0,
+    enabled: activeDatabankIds.length > 0,
+  };
+
   // Detect if any enabled block uses the {{memories}} macro
   const macroHandlesMemory = blocks.some(b =>
     b.enabled && b.content && /\{\{memories(\b|::|\}\})/.test(b.content)
   );
+
+  // Detect if any enabled block uses the {{databank}} macro
+  const macroHandlesDatabank = blocks.some(b =>
+    b.enabled && b.content && /\{\{databank(\b|::|\}\})/.test(b.content)
+  );
+
+  // ---- Resolve #mentions in user messages ----
+  // 1. Strip #tags from ALL user messages so raw tags never reach the LLM.
+  // 2. Resolve + build the document appendix only from the LAST user message's tags.
+  // This handles queued messages, regen, swipe, and dry-run correctly.
+  let databankMentionAppendix = "";
+  {
+    const charIds = character?.id ? [character.id] : [];
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].is_user) { lastUserIdx = i; break; }
+    }
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (!msg.is_user || !msg.content.includes("#")) continue;
+      try {
+        const isLast = i === lastUserIdx;
+        const mentionResult = await databankSvc.resolveMentions(
+          ctx.userId,
+          msg.content,
+          ctx.chatId,
+          charIds,
+          isLast ? messages.slice(-6).map(m => m.content).join(" ") : undefined,
+        );
+        // Always strip tags from the in-memory content
+        if (mentionResult.cleanedContent !== msg.content) {
+          msg.content = mentionResult.cleanedContent;
+        }
+        // Only build appendix from the last user message
+        if (isLast && mentionResult.resolvedDocuments.length > 0) {
+          databankMentionAppendix = databankSvc.formatMentionsAsAppendix(mentionResult.resolvedDocuments);
+        }
+      } catch (err) {
+        console.warn("[prompt-assembly] Databank mention resolution failed:", err);
+      }
+    }
+  }
 
   // ---- Assembly loop ----
   const result: LlmMessage[] = [];
@@ -569,6 +649,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         const memoryContent = memoryResult.formatted;
         result.push({ role: "system", content: memoryContent });
         breakdown.push({ type: "long_term_memory", name: "Long-Term Memory", role: "system", content: memoryContent });
+      }
+
+      // Inject databank content as system message ONLY if no macro handles it
+      if (!macroHandlesDatabank && macroEnv.extra.databank?.count > 0) {
+        const databankContent = macroEnv.extra.databank.formatted;
+        result.push({ role: "system", content: databankContent });
+        breakdown.push({ type: "databank", name: "Databank", role: "system", content: databankContent });
       }
 
       // Insert new-chat separator if configured
@@ -642,6 +729,18 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         historyCount++;
       }
       breakdown.push({ type: "chat_history", name: "Chat History", messageCount: historyCount, firstMessageIndex: firstChatIdx, content: historyParts.join("\n") });
+
+      // Append databank #mention context to the last user message
+      if (databankMentionAppendix) {
+        for (let i = result.length - 1; i >= firstChatIdx; i--) {
+          if (result[i].role === "user") {
+            const existing = typeof result[i].content === "string" ? result[i].content : "";
+            result[i] = { ...result[i], content: existing + databankMentionAppendix };
+            breakdown.push({ type: "databank_mention", name: "Databank Reference", role: "user", content: databankMentionAppendix });
+            break;
+          }
+        }
+      }
 
       // Merge consecutive user messages (queued messages) into single LLM turns
       historyCount = mergeConsecutiveUserMessages(result, firstChatIdx, historyCount);

@@ -1009,6 +1009,25 @@ export interface ChatHeadsSlice {
   reconcileChatHeads: () => Promise<void>
 }
 
+export interface DatabankSlice {
+  databanks: import('@/api/databank').Databank[]
+  databankDocuments: import('@/api/databank').DatabankDocument[]
+  selectedDatabankId: string | null
+  databankScopeFilter: 'global' | 'character' | 'chat'
+  databankScopeCharacterId: string | null
+  setDatabanks: (banks: import('@/api/databank').Databank[]) => void
+  addDatabank: (bank: import('@/api/databank').Databank) => void
+  updateDatabank: (id: string, updates: Partial<import('@/api/databank').Databank>) => void
+  removeDatabank: (id: string) => void
+  setSelectedDatabankId: (id: string | null) => void
+  setDatabankScopeFilter: (scope: 'global' | 'character' | 'chat') => void
+  setDatabankScopeCharacterId: (id: string | null) => void
+  setDatabankDocuments: (docs: import('@/api/databank').DatabankDocument[]) => void
+  addDatabankDocument: (doc: import('@/api/databank').DatabankDocument) => void
+  updateDatabankDocument: (id: string, updates: Partial<import('@/api/databank').DatabankDocument>) => void
+  removeDatabankDocument: (id: string) => void
+}
+
 // ---- Combined Store ----
 export type AppStore = ChatSlice &
   CharactersSlice &
@@ -1037,4 +1056,5 @@ export type AppStore = ChatSlice &
   MigrationSlice &
   OperatorSlice &
   FloatingAvatarSlice &
-  ChatHeadsSlice
+  ChatHeadsSlice &
+  DatabankSlice

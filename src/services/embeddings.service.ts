@@ -648,7 +648,16 @@ async function ensureVectorIndex(table: Table): Promise<void> {
  */
 async function ensureScalarIndexes(table: Table, force = false): Promise<void> {
   if (scalarIndexReady && !force) return;
-  const indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+
+  let indexNames: Set<string>;
+  try {
+    indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+  } catch {
+    // listIndices can fail if index files are orphaned from a previous compaction.
+    // Treat as empty so every index gets (re)created below.
+    indexNames = new Set();
+  }
+
   const create = async (col: string, config?: any) => {
     // LanceDB names indexes as {col}_idx by convention
     if (!force && indexNames.has(`${col}_idx`)) return;
@@ -656,8 +665,17 @@ async function ensureScalarIndexes(table: Table, force = false): Promise<void> {
       const opts: any = config ? { config } : {};
       if (force && indexNames.has(`${col}_idx`)) opts.replace = true;
       await table.createIndex(col, opts);
-    } catch {
-      // Index may already exist
+    } catch (err) {
+      // replace: true can fail when the old index references orphaned files.
+      // Fall back to a plain create (LanceDB overwrites by column name).
+      if (force) {
+        try {
+          const opts: any = config ? { config } : {};
+          await table.createIndex(col, opts);
+        } catch {
+          // Index may already exist in a usable state
+        }
+      }
     }
   };
   await create("id"); // Critical for mergeInsert("id") join performance
@@ -674,7 +692,14 @@ async function ensureScalarIndexes(table: Table, force = false): Promise<void> {
  */
 async function ensureFtsIndex(table: Table, force = false): Promise<void> {
   if (ftsIndexReady && !force) return;
-  const indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+
+  let indexNames: Set<string>;
+  try {
+    indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+  } catch {
+    indexNames = new Set();
+  }
+
   if (!force && indexNames.has("content_idx")) {
     ftsIndexReady = true;
     return;
@@ -684,7 +709,13 @@ async function ensureFtsIndex(table: Table, force = false): Promise<void> {
     if (force && indexNames.has("content_idx")) opts.replace = true;
     await table.createIndex("content", opts);
   } catch {
-    // Index may already exist
+    if (force) {
+      try {
+        await table.createIndex("content", { config: Index.fts() });
+      } catch {
+        // Index may already exist in a usable state
+      }
+    }
   }
   ftsIndexReady = true;
 }
@@ -774,7 +805,15 @@ export async function runStartupVectorMaintenance(): Promise<void> {
   if (!exists) return;
 
   const table = await conn.openTable(EMBEDDINGS_TABLE);
-  const indices = await table.listIndices();
+
+  let indices: any[];
+  try {
+    indices = await table.listIndices();
+  } catch {
+    // Index metadata may reference orphaned files — proceed with compaction
+    // and rebuild which will fix this.
+    indices = [];
+  }
   const vectorIdx = indices.find((i: any) => {
     const name = i.name || i.indexName || "";
     return name.includes("vector");
@@ -876,7 +915,21 @@ export async function getVectorStoreHealth(): Promise<{
 
   const table = await conn.openTable(EMBEDDINGS_TABLE);
   const rowCount = await table.countRows();
-  const indices = await table.listIndices();
+
+  let indices: any[];
+  try {
+    indices = await table.listIndices();
+  } catch {
+    // Index metadata may reference orphaned files from a previous compaction
+    // that didn't complete its rebuild pass. Force-rebuild and retry.
+    try {
+      await ensureScalarIndexes(table, true);
+      await ensureFtsIndex(table, true);
+      indices = await table.listIndices();
+    } catch {
+      indices = [];
+    }
+  }
 
   return {
     exists: true,
@@ -2092,4 +2145,162 @@ export async function deleteChunkVector(userId: string, chunkId: string): Promis
 
   const id = rowId(userId, "chat_chunk", chunkId, 0);
   await table.delete(`id = ${sqlValue(id)}`);
+}
+
+// ─── Databank Vector Operations ─────────────────────────────────
+
+/**
+ * Batch upsert databank chunk vectors into LanceDB.
+ * Uses source_type "databank" and owner_id = databankId for scope filtering.
+ */
+export async function batchUpsertDatabankVectors(
+  userId: string,
+  chunks: Array<{ chatId: string; chunkId: string; vector: number[]; content: string; metadata?: Record<string, any> }>,
+): Promise<void> {
+  if (chunks.length === 0) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const rows: EmbeddingRow[] = chunks.map((c) => ({
+    id: rowId(userId, "databank", c.chunkId, 0),
+    user_id: userId,
+    source_type: "databank",
+    source_id: c.chunkId,
+    owner_id: c.chatId, // owner_id = databankId for databank chunks
+    chunk_index: 0,
+    content: c.content.trim(),
+    vector: c.vector,
+    metadata_json: JSON.stringify(c.metadata || {}),
+    updated_at: now,
+  }));
+
+  const table = await getOrCreateTable(rows);
+  await ensureVectorIndex(table);
+  await ensureScalarIndexes(table);
+  await ensureFtsIndex(table);
+  await table
+    .mergeInsert("id")
+    .whenMatchedUpdateAll()
+    .whenNotMatchedInsertAll()
+    .execute(asLanceRows(rows));
+
+  console.info(`[embeddings] Batch-vectorized ${rows.length} databank chunk(s)`);
+  scheduleOptimize();
+}
+
+/**
+ * Delete all databank embeddings for a specific bank from LanceDB.
+ * Uses owner_id = databankId for efficient filtering.
+ * For per-document deletion, use deleteDatabankChunksByIds() instead.
+ */
+export async function deleteDatabankEmbeddings(
+  userId: string,
+  databankId: string,
+): Promise<void> {
+  const table = await getTableIfExists();
+  if (!table) return;
+
+  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND owner_id = ${sqlValue(databankId)}`;
+  await table.delete(filter);
+  scheduleOptimize();
+}
+
+/**
+ * Delete specific databank chunk vectors by their chunk IDs.
+ * More precise than filtering by owner_id — avoids deleting unrelated documents.
+ */
+export async function deleteDatabankChunksByIds(userId: string, chunkIds: string[]): Promise<void> {
+  if (chunkIds.length === 0) return;
+  const table = await getTableIfExists();
+  if (!table) return;
+
+  // Delete in batches to avoid overly long filter expressions
+  const BATCH = 100;
+  for (let i = 0; i < chunkIds.length; i += BATCH) {
+    const batch = chunkIds.slice(i, i + BATCH);
+    const ids = batch.map((id) => rowId(userId, "databank", id, 0));
+    const filter = ids.map((id) => `id = ${sqlValue(id)}`).join(" OR ");
+    await table.delete(filter);
+  }
+  scheduleOptimize();
+}
+
+/**
+ * Search databank chunks in LanceDB by vector similarity.
+ * Filters by source_type="databank" and owner_id IN (databankIds).
+ */
+export async function searchDatabankChunks(
+  userId: string,
+  databankIds: string[],
+  vector: number[],
+  limit = 4,
+  queryText?: string,
+): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+  if (databankIds.length === 0) return [];
+
+  const table = await getTableIfExists();
+  if (!table) return [];
+
+  const ownerFilter = databankIds.map((id) => `owner_id = ${sqlValue(id)}`).join(" OR ");
+  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND (${ownerFilter})`;
+  const fetchLimit = Math.max(1, Math.min(limit + 20, 100));
+
+  let rows: any[];
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady) q.refineFactor(5); return q; };
+
+  if (queryText?.trim()) {
+    try {
+      const { rerankers } = await import("@lancedb/lancedb");
+      const reranker = await rerankers.RRFReranker.create();
+      const q = table
+        .query()
+        .nearestTo(vector)
+        .fullTextSearch(queryText.trim())
+        .where(filter)
+        .rerank(reranker)
+        .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json"])
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
+    } catch {
+      const q = table
+        .query()
+        .nearestTo(vector)
+        .where(filter)
+        .select(["source_id", "content", "_distance", "metadata_json"])
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
+    }
+  } else {
+    const q = table
+      .query()
+      .nearestTo(vector)
+      .where(filter)
+      .select(["source_id", "content", "_distance", "metadata_json"])
+      .limit(fetchLimit);
+    rows = await applyRefineFactor(q).toArray();
+  }
+
+  const results: Array<{ chunk_id: string; score: number; content: string; metadata: any }> = [];
+
+  for (const row of rows) {
+    let meta: any = {};
+    try {
+      const raw = row.metadata_json;
+      if (typeof raw === "string") meta = JSON.parse(raw);
+      else if (raw && typeof raw === "object") meta = raw;
+    } catch { /* empty */ }
+
+    const distance = typeof row._distance === "number" ? row._distance : 0;
+    const score = Math.max(0, 1 - distance);
+
+    results.push({
+      chunk_id: String(row.source_id),
+      score,
+      content: String(row.content || ""),
+      metadata: meta,
+    });
+  }
+
+  // Sort by score descending and take top N
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, limit);
 }

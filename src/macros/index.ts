@@ -31,6 +31,7 @@ import { registerLogicMacros } from "./definitions/logic";
 import { registerFormattingMacros } from "./definitions/formatting";
 import { registerChatUtilsMacros } from "./definitions/chat-utils";
 import { registerRegexRefMacros } from "./definitions/regex-ref";
+import { registerDatabankMacros } from "./definitions/databank";
 
 let initialized = false;
 
@@ -60,4 +61,5 @@ export function initMacros(): void {
   registerFormattingMacros();
   registerChatUtilsMacros();
   registerRegexRefMacros();
+  registerDatabankMacros();
 }

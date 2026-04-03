@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
@@ -15,6 +15,8 @@ import { toast } from '@/lib/toast'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import type { MessageAttachment, PersonaAddon } from '@/types/api'
 import AuthorsNotePanel from './AuthorsNotePanel'
+import { databankApi } from '@/api/databank'
+import type { AutocompleteResult } from '@/api/databank'
 import styles from './InputArea.module.css'
 import clsx from 'clsx'
 import InputBarExtensionActions from './InputBarExtensionActions'
@@ -25,13 +27,16 @@ interface InputAreaProps {
   chatId: string
 }
 
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+const queueModLabel = isMac ? 'Cmd' : 'Ctrl'
+
 export default function InputArea({ chatId }: InputAreaProps) {
   const navigate = useNavigate()
   const [text, setText] = useState('')
   const [dryRunning, setDryRunning] = useState(false)
   const [authorsNoteOpen, setAuthorsNoteOpen] = useState(false)
-  const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons'>(null)
-  const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons'>(null)
+  const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank'>(null)
+  const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank'>(null)
   const [popoverClosing, setPopoverClosing] = useState(false)
   const [sendPersonaId, setSendPersonaId] = useState<string | null>(null)
   const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; title: string; avatar_path: string | null; image_id: string | null }>>([])
@@ -40,6 +45,11 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [hashQuery, setHashQuery] = useState<string | null>(null)
+  const [hashStartIndex, setHashStartIndex] = useState(0)
+  const [databankResults, setDatabankResults] = useState<AutocompleteResult[]>([])
+  const [databankActiveIdx, setDatabankActiveIdx] = useState(0)
+  const databankDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const sendingRef = useRef(false)
   const generationNonceRef = useRef(0)
@@ -233,6 +243,36 @@ export default function InputArea({ chatId }: InputAreaProps) {
     return () => clearTimeout(timer)
   }, [openPopover, renderPopover])
 
+  // Databank # autocomplete — search when hash query changes
+  useEffect(() => {
+    if (databankDebounceRef.current) clearTimeout(databankDebounceRef.current)
+    if (hashQuery === null || hashQuery.length === 0) {
+      if (openPopover === 'databank') setOpenPopover(null)
+      setDatabankResults([])
+      return
+    }
+    databankDebounceRef.current = setTimeout(async () => {
+      try {
+        const params: { q: string; chatId?: string; characterId?: string } = { q: hashQuery }
+        if (chatId) params.chatId = chatId
+        if (activeCharacterId) params.characterId = activeCharacterId
+        const res = await databankApi.autocomplete(params)
+        const results = res.data || []
+        setDatabankResults(results)
+        setDatabankActiveIdx(0)
+        if (results.length > 0) {
+          setOpenPopover('databank')
+        } else if (openPopover === 'databank') {
+          setOpenPopover(null)
+        }
+      } catch {
+        setDatabankResults([])
+      }
+    }, 200)
+    return () => { if (databankDebounceRef.current) clearTimeout(databankDebounceRef.current) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hashQuery, chatId, activeCharacterId])
+
   // ResizeObserver — set --lcs-input-safe-zone on parent so scroll padding stays in sync
   useEffect(() => {
     const el = containerRef.current
@@ -323,6 +363,16 @@ export default function InputArea({ chatId }: InputAreaProps) {
     charactersApi.get(activeCharacterId).then((c) => setCharacterName(c.name)).catch(() => {})
   }, [activeCharacterId])
 
+  const DOCUMENT_EXTENSIONS = new Set([
+    '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.xml',
+    '.html', '.htm', '.yaml', '.yml', '.log', '.rst', '.rtf',
+  ])
+
+  const isDocumentFile = useCallback((file: File) => {
+    const ext = file.name.lastIndexOf('.') >= 0 ? file.name.slice(file.name.lastIndexOf('.')).toLowerCase() : ''
+    return DOCUMENT_EXTENSIONS.has(ext)
+  }, [DOCUMENT_EXTENSIONS])
+
   const handleAttachFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
     setUploading(true)
@@ -330,10 +380,27 @@ export default function InputArea({ chatId }: InputAreaProps) {
       for (const file of Array.from(files)) {
         const isImage = file.type.startsWith('image/')
         const isAudio = file.type.startsWith('audio/')
-        if (!isImage && !isAudio) {
-          toast.error(`Unsupported file type: ${file.type}`, { title: 'Upload Failed' })
+        const isDoc = isDocumentFile(file)
+
+        if (isDoc) {
+          // Document files → upload to chat databank for persistent reference
+          try {
+            const chatLabel = characterName ? `${characterName} Chat` : 'Chat Documents'
+            await databankApi.attachToChat(file, chatId, chatLabel)
+            const docName = file.name.replace(/\.[^.]+$/, '')
+            toast.success(`"${docName}" added to chat databank`, { duration: 3000 })
+          } catch (err: any) {
+            toast.error(err?.body?.error || err?.message || `Failed to upload ${file.name}`, { title: 'Upload Failed' })
+          }
           continue
         }
+
+        if (!isImage && !isAudio) {
+          toast.error(`Unsupported file type: ${file.name}`, { title: 'Upload Failed' })
+          continue
+        }
+
+        // Image/audio → inline attachment as before
         const image = await imagesApi.upload(file)
         const att: MessageAttachment & { previewUrl?: string } = {
           type: isImage ? 'image' : 'audio',
@@ -353,7 +420,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
-  }, [])
+  }, [isDocumentFile, chatId, characterName])
 
   const removeAttachment = useCallback((imageId: string) => {
     setPendingAttachments((prev) => prev.filter((a) => a.image_id !== imageId))
@@ -696,11 +763,30 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
   }, [chatId, dryRunning, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, openModal, setStreamingError])
 
+  const handleHashSelect = useCallback((result: { slug: string; name: string }) => {
+    const before = text.slice(0, hashStartIndex)
+    const afterCursor = text.slice(hashStartIndex + 1 + (hashQuery?.length ?? 0))
+    const newText = `${before}#${result.slug} ${afterCursor}`
+    setText(newText)
+    setHashQuery(null)
+    setOpenPopover(null)
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }, [text, hashStartIndex, hashQuery])
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      // Intercept keys when databank autocomplete popover is active
+      if (openPopover === 'databank' && databankResults.length > 0) {
+        if (e.key === 'ArrowUp') { e.preventDefault(); setDatabankActiveIdx((i) => Math.max(0, i - 1)); return }
+        if (e.key === 'ArrowDown') { e.preventDefault(); setDatabankActiveIdx((i) => Math.min(databankResults.length - 1, i + 1)); return }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleHashSelect(databankResults[databankActiveIdx]); return }
+        if (e.key === 'Escape') { e.preventDefault(); setHashQuery(null); setOpenPopover(null); return }
+      }
+
       if (e.key === 'Enter') {
+        const queueMod = isMac ? e.metaKey : e.ctrlKey
         if (enterToSend) {
-          if (e.ctrlKey || e.metaKey) {
+          if (queueMod) {
             e.preventDefault()
             handleQueueMessage()
           } else if (!e.shiftKey) {
@@ -708,17 +794,17 @@ export default function InputArea({ chatId }: InputAreaProps) {
             handleSend()
           }
         } else {
-          if (e.ctrlKey || e.metaKey) {
+          if (queueMod) {
             e.preventDefault()
             handleQueueMessage()
           }
         }
       }
     },
-    [enterToSend, handleSend, handleQueueMessage]
+    [enterToSend, handleSend, handleQueueMessage, openPopover, databankResults, databankActiveIdx, handleHashSelect]
   )
 
-  // Send button: ctrl+click queues, normal click sends
+  // Send button: cmd+click (mac) / ctrl+click (other) queues, normal click sends
   const handleSendClick = useCallback((e: React.MouseEvent) => {
     unlockNotificationAudio()
     unlockTTSAudio()
@@ -726,7 +812,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
       queueLockRef.current = false
       return
     }
-    if (e.ctrlKey && (text.trim() || pendingAttachments.length > 0)) {
+    const queueMod = isMac ? e.metaKey : e.ctrlKey
+    if (queueMod && (text.trim() || pendingAttachments.length > 0)) {
       handleQueueMessage()
     } else {
       handleSend()
@@ -751,10 +838,28 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
   // Auto-resize textarea
   const handleInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setText(e.target.value)
+    const val = e.target.value
+    setText(val)
     const ta = e.target
     ta.style.height = 'auto'
     ta.style.height = Math.min(ta.scrollHeight, 180) + 'px'
+
+    // Detect # trigger for databank autocomplete
+    const cursorPos = ta.selectionStart ?? val.length
+    const textBeforeCursor = val.slice(0, cursorPos)
+    const hashIdx = textBeforeCursor.lastIndexOf('#')
+    if (hashIdx >= 0) {
+      const charBefore = hashIdx > 0 ? textBeforeCursor[hashIdx - 1] : ' '
+      if (hashIdx === 0 || /\s/.test(charBefore)) {
+        const fragment = textBeforeCursor.slice(hashIdx + 1)
+        if (!fragment.includes(' ') && fragment.length > 0) {
+          setHashQuery(fragment)
+          setHashStartIndex(hashIdx)
+          return
+        }
+      }
+    }
+    setHashQuery(null)
   }, [])
 
   const toggleGuide = useCallback((id: string) => {
@@ -1234,6 +1339,30 @@ export default function InputArea({ chatId }: InputAreaProps) {
               ))}
             </div>
           )}
+
+          {renderPopover === 'databank' && (
+            <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
+              <div className={styles.quickSetName}>Documents</div>
+              {databankResults.length === 0 && <div className={styles.popEmpty}>No matching documents.</div>}
+              {databankResults.map((r, i) => (
+                <button
+                  key={`${r.databankId}-${r.slug}`}
+                  type="button"
+                  className={clsx(styles.popRowBtn, i === databankActiveIdx && styles.popRowBtnActive)}
+                  onMouseDown={(e) => { e.preventDefault(); handleHashSelect(r) }}
+                  onMouseEnter={() => setDatabankActiveIdx(i)}
+                >
+                  <span className={styles.personaMain}>
+                    <FileText size={13} style={{ opacity: 0.6 }} />
+                    <span className={styles.personaNameGroup}>
+                      <span>{r.name}</span>
+                      <span className={styles.personaTitle}>{r.databankName}</span>
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1264,7 +1393,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*,audio/*"
+        accept="image/*,audio/*,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.html,.htm,.yaml,.yml,.log,.rst,.rtf"
         multiple
         style={{ display: 'none' }}
         onChange={(e) => handleAttachFiles(e.target.files)}
@@ -1320,7 +1449,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
             onTouchCancel={handleSendTouchEnd}
             title={
               text.trim() || pendingAttachments.length > 0
-                ? 'Send message (Ctrl+click to queue)'
+                ? `Send message (${queueModLabel}+click to queue)`
                 : hasQueuedMessages
                   ? 'Send queued messages'
                   : 'Silent continue (nudge)'

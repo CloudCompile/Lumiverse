@@ -229,7 +229,7 @@ export interface AssemblyResult {
 }
 
 export interface AssemblyBreakdownEntry {
-  type: 'block' | 'chat_history' | 'separator' | 'utility' | 'world_info' | 'authors_note' | 'append' | 'long_term_memory' | 'sidecar';
+  type: 'block' | 'chat_history' | 'separator' | 'utility' | 'world_info' | 'authors_note' | 'append' | 'long_term_memory' | 'sidecar' | 'databank' | 'databank_mention';
   name: string;
   role?: string;
   content?: string;

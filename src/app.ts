@@ -49,6 +49,7 @@ import { ttsConnectionsRoutes } from "./routes/tts-connections.routes";
 import { ttsRoutes } from "./routes/tts.routes";
 import { sttRoutes } from "./routes/stt.routes";
 import { mcpServersRoutes } from "./routes/mcp-servers.routes";
+import { databankRoutes } from "./routes/databank.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -205,6 +206,7 @@ app.route("/api/v1/tts-connections", ttsConnectionsRoutes);
 app.route("/api/v1/tts", ttsRoutes);
 app.route("/api/v1/stt", sttRoutes);
 app.route("/api/v1/mcp-servers", mcpServersRoutes);
+app.route("/api/v1/databanks", databankRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

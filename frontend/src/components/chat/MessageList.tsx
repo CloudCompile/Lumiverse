@@ -56,7 +56,9 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const activePersonaId = useStore((s) => s.activePersonaId)
   const personas = useStore((s) => s.personas)
   const streamingGenerationType = useStore((s) => s.streamingGenerationType)
+  const bubbleUserAlign = useStore((s) => s.bubbleUserAlign)
   const isImpersonateStream = streamingGenerationType === 'impersonate'
+  const impersonateUserLeft = isImpersonateStream && bubbleUserAlign === 'left'
 
   // The store's appendStreamToken state machine already separates reasoning
   // from content during streaming. Skip the redundant per-frame regex scan
@@ -238,7 +240,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
         const bubbleStyleClass = isImpersonateStream ? bubbleStyles.user : bubbleStyles.character
         const nameStyleClass = isImpersonateStream ? bubbleStyles.nameUser : bubbleStyles.nameChar
         return (
-          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${bubbleStyles.streaming}`} data-in-viewport>
+          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${impersonateUserLeft ? bubbleStyles.userLeft : ''} ${bubbleStyles.streaming}`} data-in-viewport>
             <div className={bubbleStyles.bubble}>
               <div className={bubbleStyles.header}>
                 <div className={bubbleStyles.headerLeft}>
@@ -273,7 +275,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
                   reasoningStartedAt={streamingReasoningStartedAt}
                   isStreaming
                   variant="bubble"
-                  align={isImpersonateStream ? 'right' : undefined}
+                  align={isImpersonateStream && !impersonateUserLeft ? 'right' : undefined}
                 />
               )}
               <div className={bubbleStyles.content}>

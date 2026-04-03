@@ -569,23 +569,17 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
  * and flattens behavior/sampler settings to ST root-level fields.
  */
 export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
-  const prompts: STPrompt[] = []
+  const prompts: Array<Record<string, any>> = []
   const orderEntries: Array<{ identifier: string; enabled: boolean }> = []
-  let customIndex = 0
 
   for (const block of loom.blocks) {
-    // Determine ST identifier
-    let identifier: string
-    let isMarker = false
-
-    if (block.marker && block.marker !== 'category' && MARKER_TO_ST_IDENTIFIER[block.marker]) {
-      identifier = MARKER_TO_ST_IDENTIFIER[block.marker]
-      isMarker = STRUCTURAL_MARKERS.has(block.marker)
-    } else if (block.marker === 'category') {
-      identifier = `custom_${customIndex++}`
-    } else {
-      identifier = `custom_${customIndex++}`
-    }
+    // Determine ST identifier — well-known markers use their ST name,
+    // everything else (custom blocks, categories) uses the block's own UUID
+    const markerMapping = block.marker && block.marker !== 'category'
+      ? MARKER_TO_ST_IDENTIFIER[block.marker]
+      : undefined
+    const identifier = markerMapping ?? block.id
+    const isWellKnown = !!markerMapping
 
     // Map position → injection_position / injection_depth
     let injection_position = 0
@@ -604,18 +598,25 @@ export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
       : block.role
 
     // Build ST prompt entry
-    const stPrompt: STPrompt = {
+    const stPrompt: Record<string, any> = {
       identifier,
       name: block.marker === 'category' && !block.name.startsWith(CATEGORY_MARKER)
         ? `${CATEGORY_MARKER}${block.name}`
         : block.name,
-      system_prompt: role === 'system',
-      role,
       content: block.content || '',
+      role,
       enabled: block.enabled,
-      marker: isMarker,
+      system_prompt: false,
+      marker: isWellKnown,
       injection_position,
       injection_depth,
+      injection_order: 100,
+      forbid_overrides: false,
+    }
+
+    // Include injection_trigger for non-marker prompts (maps 1:1 with ST)
+    if (!isWellKnown) {
+      stPrompt.injection_trigger = block.injectionTrigger ?? []
     }
 
     prompts.push(stPrompt)
@@ -629,46 +630,59 @@ export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
   const advanced = loom.advancedSettings ?? DEFAULT_ADVANCED_SETTINGS
 
   return {
-    name: loom.name,
-    prompts,
-    prompt_order: {
-      '100': { order: orderEntries },
-    },
+    // Sampler params at root level (ST convention: these come first)
+    temperature: samplers.temperature ?? 1,
+    frequency_penalty: samplers.frequencyPenalty ?? 0,
+    presence_penalty: samplers.presencePenalty ?? 0,
+    top_p: samplers.topP ?? 1,
+    top_k: samplers.topK ?? 0,
+    top_a: 0,
+    min_p: samplers.minP ?? 0,
+    repetition_penalty: samplers.repetitionPenalty ?? 1,
+    max_context_unlocked: false,
+    openai_max_context: samplers.contextSize ?? 128000,
+    openai_max_tokens: samplers.maxTokens ?? 4096,
 
-    // Sampler overrides → ST root-level params
-    ...(samplers.temperature != null && { temperature: samplers.temperature }),
-    ...(samplers.topP != null && { top_p: samplers.topP }),
-    ...(samplers.topK != null && { top_k: samplers.topK }),
-    ...(samplers.minP != null && { min_p: samplers.minP }),
-    ...(samplers.maxTokens != null && { max_tokens: samplers.maxTokens, openai_max_tokens: samplers.maxTokens }),
-    ...(samplers.contextSize != null && { openai_max_context: samplers.contextSize }),
-    ...(samplers.frequencyPenalty != null && { frequency_penalty: samplers.frequencyPenalty }),
-    ...(samplers.presencePenalty != null && { presence_penalty: samplers.presencePenalty }),
-    ...(samplers.repetitionPenalty != null && { repetition_penalty: samplers.repetitionPenalty }),
-
-    // Prompt behavior → ST root-level
-    continue_nudge_prompt: behavior.continueNudge ?? '',
+    // Behavior prompts
+    names_behavior: completion.namesBehavior ?? 0,
+    send_if_empty: behavior.sendIfEmpty ?? '',
     impersonation_prompt: behavior.impersonationPrompt ?? '',
-    group_nudge_prompt: behavior.groupNudge ?? '',
     new_chat_prompt: behavior.newChatPrompt ?? '',
     new_group_chat_prompt: behavior.newGroupChatPrompt ?? '',
-    send_if_empty: behavior.sendIfEmpty ?? '',
+    new_example_chat_prompt: '',
+    continue_nudge_prompt: behavior.continueNudge ?? '',
+    group_nudge_prompt: behavior.groupNudge ?? '',
 
-    // Completion settings → ST root-level
+    // ST formatting defaults
+    bias_preset_selected: 'Default (none)',
+    wi_format: '{0}',
+    scenario_format: '{{scenario}}',
+    personality_format: '{{personality}}',
+
+    stream_openai: true,
+
+    // Prompt blocks + ordering
+    name: loom.name,
+    prompts,
+    prompt_order: [{ character_id: 100001, order: orderEntries }],
+
+    // Completion settings
     assistant_prefill: completion.assistantPrefill ?? '',
     assistant_impersonation: completion.assistantImpersonation ?? '',
+    use_sysprompt: completion.useSystemPrompt ?? true,
+    squash_system_messages: completion.squashSystemMessages ?? false,
     continue_prefill: completion.continuePrefill ?? false,
     continue_postfix: completion.continuePostfix ?? ' ',
-    squash_system_messages: completion.squashSystemMessages ?? false,
-    names_behavior: completion.namesBehavior ?? 0,
+    function_calling: completion.enableFunctionCalling ?? false,
+    enable_web_search: completion.enableWebSearch ?? false,
+    media_inlining: completion.sendInlineMedia ?? false,
 
-    // Advanced settings
+    // Advanced
     seed: advanced.seed ?? -1,
+    n: 1,
     ...(advanced.customStopStrings?.length && {
       custom_stopping_strings: JSON.stringify(advanced.customStopStrings),
     }),
-
-    stream_openai: true,
   }
 }
 
