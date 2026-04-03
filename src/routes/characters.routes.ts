@@ -173,7 +173,7 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
   const avatarUrl = node.max_res_url || node.avatar_url;
   if (avatarUrl) {
     try {
-      const imgRes = await safeFetch(avatarUrl, { timeoutMs: 15_000, maxBytes: 10 * 1024 * 1024 });
+      const imgRes = await safeFetch(avatarUrl, { timeoutMs: 15_000, maxBytes: 50 * 1024 * 1024 });
       if (imgRes.ok) {
         const buf = await imgRes.arrayBuffer();
         const contentType = imgRes.headers.get("content-type") || "image/png";
@@ -260,7 +260,7 @@ async function fetchJannyCharacter(uuid: string, userId: string) {
 // ─── Generic URL fetcher (PNG or JSON) ────────────────────────────────────
 
 async function fetchGenericCharacter(url: string, userId: string) {
-  const res = await safeFetch(url, { timeoutMs: 15_000, maxBytes: 10 * 1024 * 1024 });
+  const res = await safeFetch(url, { timeoutMs: 15_000, maxBytes: 100 * 1024 * 1024 });
   if (!res.ok) throw new Error(`Failed to fetch URL: ${res.status}`);
 
   const contentType = res.headers.get("content-type") || "";

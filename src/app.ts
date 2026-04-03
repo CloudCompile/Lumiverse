@@ -59,7 +59,7 @@ app.use("*", compress());
 
 // Body size limit — 10 MB default for API routes.
 // Import routes (migrate/*, characters/import, characters/import-bulk) are excluded
-// here to support charx uploads up to 50 MB; the Bun server-level maxRequestBodySize
+// here to support charx uploads up to 100 MB; the Bun server-level maxRequestBodySize
 // (512 MB in index.ts) covers them.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;

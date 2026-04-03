@@ -4,8 +4,8 @@ import type { CreateCharacterInput } from "../types/character";
 import type { CreateRegexScriptInput, RegexTarget } from "../types/regex-script";
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-const MAX_DECOMPRESSED_SIZE = 10 * 1024 * 1024; // 10 MB (PNG text chunks)
-const MAX_CHARX_SIZE = 50 * 1024 * 1024; // 50 MB
+const MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024; // 100 MB (PNG text chunks)
+const MAX_CHARX_SIZE = 100 * 1024 * 1024; // 100 MB
 
 /**
  * Reads PNG chunks and extracts the text value for a given keyword.

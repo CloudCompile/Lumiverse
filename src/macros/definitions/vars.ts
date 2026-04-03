@@ -10,9 +10,21 @@ export function registerVariableMacros(): void {
     description: "Get a local (chat-scoped) variable value",
     returnType: "string",
     args: [{ name: "key", description: "Variable name" }],
-    handler: (ctx) => {
+    handler: async (ctx) => {
       const key = (ctx.args[0] || "").trim();
-      return ctx.env.variables.local.get(key) ?? "";
+      // Explicit local variable takes priority
+      if (ctx.env.variables.local.has(key)) {
+        return ctx.env.variables.local.get(key)!;
+      }
+      // Fall back: try resolving as a registered/dynamic macro so that
+      // dot-prefix shorthands like {{.persona}} resolve to {{persona}}
+      // when no variable of that name has been set.
+      if (!key) return "";
+      const asMacro = `{{${key}}}`;
+      const resolved = await ctx.resolve(asMacro);
+      // If the evaluator couldn't resolve it (returned raw macro text), return empty
+      if (resolved === asMacro) return "";
+      return resolved;
     },
   });
 
@@ -125,9 +137,18 @@ export function registerVariableMacros(): void {
     returnType: "string",
     args: [{ name: "key", description: "Variable name" }],
     aliases: ["getglobalvar"],
-    handler: (ctx) => {
+    handler: async (ctx) => {
       const key = (ctx.args[0] || "").trim();
-      return ctx.env.variables.global.get(key) ?? "";
+      // Explicit global variable takes priority
+      if (ctx.env.variables.global.has(key)) {
+        return ctx.env.variables.global.get(key)!;
+      }
+      // Fall back: try resolving as a registered/dynamic macro
+      if (!key) return "";
+      const asMacro = `{{${key}}}`;
+      const resolved = await ctx.resolve(asMacro);
+      if (resolved === asMacro) return "";
+      return resolved;
     },
   });
 

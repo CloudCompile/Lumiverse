@@ -622,6 +622,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   const result: LlmMessage[] = [];
   const breakdown: AssemblyBreakdownEntry[] = [];
   const pendingAppends: PendingAppend[] = [];
+  const pendingDepthBlocks: { role: LlmMessage["role"]; depth: number; content: string; blockName: string; blockId: string; marker?: string }[] = [];
   let chatHistoryInserted = false;
   let chatHistoryCount = 0;
   let hasWiBefore = false;
@@ -823,11 +824,21 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     const resolved = rawResolved.trim();
     if (resolved) {
       const role: LlmMessage["role"] = block.position === "post_history" ? "assistant" : (block.role as LlmMessage["role"] || "system");
-      result.push({ role, content: resolved });
-      breakdown.push({
-        type: "block", name: block.name, role,
-        content: resolved, blockId: block.id, marker: block.marker ?? undefined,
-      });
+
+      // Blocks with position "in_history" and depth > 0 are deferred for
+      // depth-based insertion after WI and Author's Note.
+      if (block.position === "in_history" && block.depth > 0) {
+        pendingDepthBlocks.push({
+          role, depth: block.depth, content: resolved,
+          blockName: block.name, blockId: block.id, marker: block.marker ?? undefined,
+        });
+      } else {
+        result.push({ role, content: resolved });
+        breakdown.push({
+          type: "block", name: block.name, role,
+          content: resolved, blockId: block.id, marker: block.marker ?? undefined,
+        });
+      }
     }
   }
 
@@ -910,6 +921,18 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       result.splice(insertAt, 0, { role: authorsNote.role || "system", content: resolvedAN });
       breakdown.push({ type: "authors_note", name: "Author's Note", role: authorsNote.role, content: resolvedAN });
     }
+  }
+
+  // ---- Depth-based block injection ----
+  // Blocks with position "in_history" and depth > 0 are inserted N messages
+  // from the end, matching the same semantics as WI depth and Author's Note.
+  for (const depthBlock of pendingDepthBlocks) {
+    const insertAt = Math.max(0, result.length - depthBlock.depth);
+    result.splice(insertAt, 0, { role: depthBlock.role, content: depthBlock.content });
+    breakdown.push({
+      type: "block", name: depthBlock.blockName, role: depthBlock.role,
+      content: depthBlock.content, blockId: depthBlock.blockId, marker: depthBlock.marker,
+    });
   }
 
   // ---- Utility prompt injection ----

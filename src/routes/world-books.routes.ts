@@ -17,7 +17,7 @@ import type { WorldBookEntry } from "../types/world-book";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
 
-const MAX_IMPORT_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MB
+const MAX_IMPORT_RESPONSE_BYTES = 100 * 1024 * 1024; // 100 MB
 
 const app = new Hono();
 
