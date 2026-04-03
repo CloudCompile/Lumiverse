@@ -100,12 +100,15 @@ window.visualViewport?.addEventListener('scroll', scheduleViewportSync)
 
 // Utility: walk up the DOM to find the nearest ancestor that is currently
 // scrollable (has overflow AND content exceeds container). Used by the
-// overscroll prevention touch handler.
-function findScrollableAncestor(el: HTMLElement | null): HTMLElement | null {
+// overscroll prevention touch handler. Returns the element and whether it
+// scrolls horizontally (so the touch handler can let horizontal swipes through).
+function findScrollableAncestor(el: HTMLElement | null): { el: HTMLElement; horizontal: boolean } | null {
   while (el && el !== document.body && el !== document.documentElement) {
-    const { overflowY } = getComputedStyle(el)
-    if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
-      return el
+    const style = getComputedStyle(el)
+    const scrollableY = (style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight
+    const scrollableX = (style.overflowX === 'auto' || style.overflowX === 'scroll') && el.scrollWidth > el.clientWidth
+    if (scrollableY || scrollableX) {
+      return { el, horizontal: scrollableX && !scrollableY }
     }
     el = el.parentElement
   }
@@ -219,7 +222,7 @@ document.addEventListener('wheel', (e) => {
 if ((window.navigator as any).standalone === true && navigator.maxTouchPoints > 0) {
   let touchStartY = 0
   let touchStartX = 0
-  let scrollTarget: HTMLElement | null = null
+  let scrollTarget: { el: HTMLElement; horizontal: boolean } | null = null
 
   document.addEventListener('touchstart', (e) => {
     if (e.touches.length === 1) {
@@ -238,11 +241,15 @@ if ((window.navigator as any).standalone === true && navigator.maxTouchPoints > 
     // Don't interfere with horizontal scrolling (carousels, tab bars, sliders)
     if (Math.abs(deltaX) > Math.abs(deltaY) + 5) return
 
+    // Touch started inside a horizontal-only scroll container — let it through
+    if (scrollTarget?.horizontal) return
+
     if (scrollTarget) {
-      const atTop = scrollTarget.scrollTop <= 0 && deltaY < 0
+      const { el } = scrollTarget
+      const atTop = el.scrollTop <= 0 && deltaY < 0
       const atBottom =
-        scrollTarget.scrollTop + scrollTarget.clientHeight >=
-        scrollTarget.scrollHeight - 1 && deltaY > 0
+        el.scrollTop + el.clientHeight >=
+        el.scrollHeight - 1 && deltaY > 0
       if (atTop || atBottom) e.preventDefault()
     } else {
       e.preventDefault()
