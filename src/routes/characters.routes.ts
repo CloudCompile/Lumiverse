@@ -45,6 +45,34 @@ async function importRisuExpressionAssets(
   return Object.keys(config.mappings).length;
 }
 
+// ─── Auto-import embedded character book as world book ───────────────────
+
+function autoImportEmbeddedWorldbook(userId: string, characterId: string): void {
+  const character = svc.getCharacter(userId, characterId);
+  if (!character) return;
+
+  const charBook = character.extensions?.character_book;
+  const entries = Array.isArray(charBook?.entries)
+    ? charBook.entries
+    : Object.values(charBook?.entries || {});
+  if (entries.length === 0) return;
+
+  // Skip if world books are already linked (e.g. from Lumiverse modules)
+  const existingIds = getCharacterWorldBookIds(character.extensions);
+  if (existingIds.length > 0) return;
+
+  try {
+    const { worldBook } = wbSvc.importCharacterBook(userId, characterId, character.name, charBook);
+    const nextExtensions = setCharacterWorldBookIds(
+      { ...(character.extensions || {}) },
+      [...existingIds, worldBook.id],
+    );
+    svc.updateCharacter(userId, characterId, { extensions: nextExtensions });
+  } catch {
+    // Non-critical — character is still imported without the world book
+  }
+}
+
 // ─── URL parsing helpers ──────────────────────────────────────────────────
 
 const CHUB_DOMAINS = ["chub.ai", "www.chub.ai", "characterhub.org", "www.characterhub.org"];
@@ -178,6 +206,7 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
     // Non-critical — manifest will still work via creator/name derivation
   }
 
+  autoImportEmbeddedWorldbook(userId, character.id);
   return svc.getCharacter(userId, character.id)!;
 }
 
@@ -224,6 +253,7 @@ async function fetchJannyCharacter(uuid: string, userId: string) {
   svc.setCharacterImage(userId, character.id, image.id);
   svc.setCharacterAvatar(userId, character.id, image.filename);
 
+  autoImportEmbeddedWorldbook(userId, character.id);
   return svc.getCharacter(userId, character.id)!;
 }
 
@@ -245,6 +275,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
     svc.setCharacterImage(userId, character.id, image.id);
     svc.setCharacterAvatar(userId, character.id, image.filename);
 
+    autoImportEmbeddedWorldbook(userId, character.id);
     return svc.getCharacter(userId, character.id)!;
   }
 
@@ -270,6 +301,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
     importRisuModuleRegexScripts(userId, character.id, risuModule);
     await importRisuExpressionAssets(userId, character.id, expressionAssets);
 
+    autoImportEmbeddedWorldbook(userId, character.id);
     return svc.getCharacter(userId, character.id)!;
   }
 
@@ -284,6 +316,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
 
   const cardInput = cardSvc.parseCardJson(json);
   const character = svc.createCharacter(userId, cardInput);
+  autoImportEmbeddedWorldbook(userId, character.id);
   return svc.getCharacter(userId, character.id)!;
 }
 
@@ -597,6 +630,7 @@ app.post("/import-bulk", async (c) => {
 
         importRisuModuleRegexScripts(userId, character.id, risuModule);
         await importRisuExpressionAssets(userId, character.id, expressionAssets);
+        autoImportEmbeddedWorldbook(userId, character.id);
 
         const imported = svc.getCharacter(userId, character.id)!;
 
@@ -651,6 +685,7 @@ app.post("/import", async (c) => {
         const image = await images.uploadImage(userId, file);
         svc.setCharacterImage(userId, character.id, image.id);
         svc.setCharacterAvatar(userId, character.id, image.filename);
+        autoImportEmbeddedWorldbook(userId, character.id);
         const imported = svc.getCharacter(userId, character.id)!;
         return c.json({ character: imported }, 201);
       } else if (nameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed") {
@@ -767,6 +802,7 @@ app.post("/import", async (c) => {
 
         importRisuModuleRegexScripts(userId, character.id, risuModule);
         await importRisuExpressionAssets(userId, character.id, expressionAssets);
+        autoImportEmbeddedWorldbook(userId, character.id);
         const imported = svc.getCharacter(userId, character.id)!;
         return c.json({
           character: imported,
@@ -783,7 +819,9 @@ app.post("/import", async (c) => {
         }
         const cardInput = cardSvc.parseCardJson(json);
         const character = svc.createCharacter(userId, cardInput);
-        return c.json({ character }, 201);
+        autoImportEmbeddedWorldbook(userId, character.id);
+        const imported = svc.getCharacter(userId, character.id)!;
+        return c.json({ character: imported }, 201);
       }
     } else {
       // Raw JSON body — support both card-spec wrapper and flat input
@@ -791,7 +829,9 @@ app.post("/import", async (c) => {
       const input = (body.spec && body.data) ? cardSvc.parseCardJson(body) : body;
       if (!input.name) return c.json({ error: "name is required" }, 400);
       const character = svc.createCharacter(userId, input);
-      return c.json({ character }, 201);
+      autoImportEmbeddedWorldbook(userId, character.id);
+      const imported = svc.getCharacter(userId, character.id)!;
+      return c.json({ character: imported }, 201);
     }
   } catch (err: any) {
     return c.json({ error: err.message || "Failed to import character card" }, 400);
