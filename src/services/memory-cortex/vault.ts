@@ -579,6 +579,7 @@ export function getVaultDataForAssembly(vaultId: string): VaultCortexData | null
   return {
     vaultId: data.vault.id,
     vaultName: data.vault.name,
+    sourceChatId: data.vault.sourceChatId ?? undefined,
     entities: vaultEntitiesToSnapshots(data.entities),
     relations: vaultRelationsToEdges(data.relations),
   };

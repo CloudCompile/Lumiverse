@@ -21,6 +21,7 @@ export interface GenerateRequest {
   target_character_id?: string
   regen_feedback?: string
   regen_feedback_position?: 'system' | 'user'
+  retain_council?: boolean
 }
 
 export interface GenerateResponse {

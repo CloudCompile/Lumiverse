@@ -60,8 +60,8 @@ export default function ThemePanel() {
   )
 
   const handleAccentChange = useCallback(
-    (h: number, s: number) => update({ accent: { h, s, l: current.accent.l } }),
-    [current.accent.l, update]
+    (h: number, s: number, l: number) => update({ accent: { h, s, l } }),
+    [update]
   )
 
   const handleRadiusChange = useCallback(
@@ -145,6 +145,7 @@ export default function ThemePanel() {
         <AccentPicker
           hue={current.accent.h}
           saturation={current.accent.s}
+          luminance={current.accent.l}
           onChange={handleAccentChange}
         />
       </section>

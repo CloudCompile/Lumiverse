@@ -20,6 +20,7 @@ import RegexEditorModal from './RegexEditorModal'
 import RegexImportModal from './RegexImportModal'
 import RegenFeedbackModal from './RegenFeedbackModal'
 import PersonaAddonsModal from './PersonaAddonsModal'
+import GlobalAddonsLibraryModal from './GlobalAddonsLibraryModal'
 import GroupSettingsModal from './GroupSettingsModal'
 import CustomCSSModal from './CustomCSSModal'
 import DreamWeaverStudioModal from './DreamWeaverStudioModal'
@@ -103,6 +104,7 @@ export default function ModalContainer() {
       {activeModal === 'regexEditor' && <RegexEditorModal />}
       {activeModal === 'regexImport' && <RegexImportModal />}
       {activeModal === 'personaAddons' && <PersonaAddonsModal />}
+      {activeModal === 'globalAddonsLibrary' && <GlobalAddonsLibraryModal />}
       {activeModal === 'groupSettings' && <GroupSettingsModal />}
       {activeModal === 'memoryCortexDiagnostics' && (
         <MemoryCortexDiagnosticsModal
@@ -113,7 +115,9 @@ export default function ModalContainer() {
 
       {activeModal === 'regenFeedback' && (
         <RegenFeedbackModal
+          defaultValue={useStore.getState().lastRegenFeedback}
           onSubmit={(feedback) => {
+            useStore.getState().setLastRegenFeedback(feedback)
             modalProps.onSubmit?.(feedback)
             closeModal()
           }}

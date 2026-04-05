@@ -140,6 +140,7 @@ export function normalizeEntityName(name: string): string {
  *   2. Exact name match (case-insensitive)
  *   3. Alias lookup
  *   4. Normalized name fuzzy match (strip titles, lowercase)
+ *   5. Diminutive / prefix match (for character entities only)
  *
  * @returns Entity ID if resolved, null if genuinely new
  */
@@ -179,8 +180,8 @@ export function resolveCanonicalId(
   if (normalized.length < 2) return null;
 
   const allEntities = db
-    .query("SELECT id, name, aliases FROM memory_entities WHERE chat_id = ? ORDER BY mention_count DESC LIMIT 500")
-    .all(chatId) as Array<{ id: string; name: string; aliases: string }>;
+    .query("SELECT id, name, aliases, entity_type FROM memory_entities WHERE chat_id = ? ORDER BY mention_count DESC LIMIT 500")
+    .all(chatId) as Array<{ id: string; name: string; aliases: string; entity_type: string }>;
 
   for (const row of allEntities) {
     // Check if normalized stored name matches
@@ -198,6 +199,42 @@ export function resolveCanonicalId(
       const longer = storedNorm.length <= normalized.length ? normalized : storedNorm;
       if (longer.startsWith(shorter + " ") || longer.endsWith(" " + shorter)) {
         return row.id;
+      }
+    }
+  }
+
+  // 5. Diminutive / prefix match for character entities only.
+  //    Catches common nickname patterns like "Mel" → "Melina", "Liz" → "Elizabeth".
+  //    Requires: incoming is 3+ chars, is a prefix of the stored first name, and the
+  //    stored name is a character entity with at least 2 mentions (to avoid false positives).
+  if (normalized.length >= 3) {
+    for (const row of allEntities) {
+      if (row.entity_type !== "character") continue;
+
+      const storedNorm = normalizeEntityName(row.name);
+      const storedFirstName = storedNorm.split(/\s+/)[0];
+
+      // Incoming is a prefix of the stored first name (and at least 60% of it)
+      if (
+        storedFirstName.length >= 4 &&
+        storedFirstName.startsWith(normalized) &&
+        normalized.length >= storedFirstName.length * 0.6
+      ) {
+        return row.id;
+      }
+
+      // Also check aliases for diminutive prefix match
+      const aliases = safeJsonArray(row.aliases);
+      for (const alias of aliases) {
+        const aliasNorm = normalizeEntityName(alias);
+        const aliasFirst = aliasNorm.split(/\s+/)[0];
+        if (
+          aliasFirst.length >= 4 &&
+          aliasFirst.startsWith(normalized) &&
+          normalized.length >= aliasFirst.length * 0.6
+        ) {
+          return row.id;
+        }
       }
     }
   }
@@ -1170,6 +1207,10 @@ export function ingestChunkEntities(
   emotionalTags: string[],
   content: string,
   arcId?: string | null,
+  /** Aliases discovered in this chunk — pre-seeds the local ID map so relationship
+   *  writes using a brand-new nickname resolve to the canonical entity immediately,
+   *  before the alias is persisted to the database. */
+  discoveredAliases?: Array<{ canonicalName: string; alias: string }>,
 ): string[] {
   const db = getDb();
   const entityIdMap = new Map<string, string>(); // name → entity ID
@@ -1210,6 +1251,18 @@ export function ingestChunkEntities(
       }
     }
 
+    // Pre-seed discovered aliases into the local map so relationship writes
+    // using a new nickname resolve to the canonical entity in this same chunk.
+    if (discoveredAliases?.length) {
+      for (const da of discoveredAliases) {
+        const canonicalId = resolveCanonicalId(da.canonicalName, chatId)
+          ?? entityIdMap.get(da.canonicalName.toLowerCase());
+        if (canonicalId && !entityIdMap.has(da.alias.toLowerCase())) {
+          entityIdMap.set(da.alias.toLowerCase(), canonicalId);
+        }
+      }
+    }
+
     // 2. Upsert relationships — BUG 1 fix: resolve through canonical ID first
     for (const rel of extractedRelationships) {
       // Try canonical resolution first, then fall back to local map
@@ -1218,8 +1271,8 @@ export function ingestChunkEntities(
       const targetId = resolveCanonicalId(rel.target, chatId)
         ?? entityIdMap.get(rel.target.toLowerCase());
 
-      // Both entities must resolve
-      if (sourceId && targetId) {
+      // Both entities must resolve — and must not be the same entity (self-reference)
+      if (sourceId && targetId && sourceId !== targetId) {
         upsertRelation(chatId, rel, sourceId, targetId, chunkId, arcId);
       }
     }

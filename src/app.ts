@@ -50,6 +50,7 @@ import { ttsRoutes } from "./routes/tts.routes";
 import { sttRoutes } from "./routes/stt.routes";
 import { mcpServersRoutes } from "./routes/mcp-servers.routes";
 import { databankRoutes } from "./routes/databank.routes";
+import { globalAddonsRoutes } from "./routes/global-addons.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 
@@ -63,7 +64,7 @@ app.use("*", compress());
 // (512 MB in index.ts) covers them.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip") || path === "/api/v1/stt/transcribe") {
+  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path.startsWith("/api/v1/world-books/import") || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip") || path === "/api/v1/stt/transcribe") {
     return next();
   }
   return bodyLimit({
@@ -207,6 +208,7 @@ app.route("/api/v1/tts", ttsRoutes);
 app.route("/api/v1/stt", sttRoutes);
 app.route("/api/v1/mcp-servers", mcpServersRoutes);
 app.route("/api/v1/databanks", databankRoutes);
+app.route("/api/v1/global-addons", globalAddonsRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

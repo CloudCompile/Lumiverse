@@ -27,6 +27,7 @@ import {
 } from "../utils/content-sanitizer";
 import * as charactersSvc from "./characters.service";
 import * as personasSvc from "./personas.service";
+import * as globalAddonsSvc from "./global-addons.service";
 import * as connectionsSvc from "./connections.service";
 import * as presetsSvc from "./presets.service";
 import * as worldBooksSvc from "./world-books.service";
@@ -255,7 +256,17 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   const character = pf?.character ?? charactersSvc.getCharacter(ctx.userId, characterId);
   if (!character) throw new Error("Character not found");
 
-  const persona = pf?.persona !== undefined ? pf.persona : personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+  let persona = pf?.persona !== undefined ? pf.persona : personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+
+  // Resolve attached global add-ons for non-prefetched path
+  if (persona && !pf) {
+    const attachedRefs = (persona.metadata?.attached_global_addons as Array<{ id: string; enabled: boolean }>) ?? [];
+    const enabledIds = attachedRefs.filter(a => a.enabled).map(a => a.id);
+    if (enabledIds.length > 0) {
+      const resolved = globalAddonsSvc.getGlobalAddonsByIds(ctx.userId, enabledIds);
+      persona = { ...persona, metadata: { ...persona.metadata, _resolvedGlobalAddons: resolved } };
+    }
+  }
 
   // Resolve connection
   const connection = pf?.connection !== undefined ? pf.connection : (ctx.connectionId
@@ -312,19 +323,26 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
     // Fire cortex retrieval as best-effort warm-cache work for subsequent
     // generations. This must stay detached from the hot path.
+    // Build query text eagerly so it's available for both main + linked queries.
+    const embCfgPromise = pf?.embeddingConfig
+      ? Promise.resolve(pf.embeddingConfig)
+      : embeddingsSvc.getEmbeddingConfig(ctx.userId);
+
     void (async () => {
-      const embCfg = pf?.embeddingConfig ?? await embeddingsSvc.getEmbeddingConfig(ctx.userId);
+      const embCfg = await embCfgPromise;
       const effective = cortexChatMemSettings
         ? embeddingsSvc.resolveEffectiveChatMemorySettings(cortexChatMemSettings, embCfg)
         : embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS;
 
+      const cortexQueryText = buildQueryText(messages, effective);
       const recentContent = messages.slice(-6).map(m => m.content).join(" ");
       const emotionalContext = buildEmotionalContext(recentContent);
 
-      return memoryCortex.queryCortex({
+      // Fire main cortex query + linked cortex queries in parallel
+      const mainQuery = memoryCortex.queryCortex({
         chatId: ctx.chatId,
         userId: ctx.userId,
-        queryText: buildQueryText(messages, effective),
+        queryText: cortexQueryText,
         emotionalContext,
         generationType: ctx.generationType,
         topK: cortexPerChatOverrides?.retrievalTopK ?? effective.retrievalTopK,
@@ -332,15 +350,16 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         includeRelationships: cortexConfig.retrieval.relationshipInjection,
         excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
       }, cortexConfig);
+
+      // Linked cortex queries use the same queryText for semantic relevance
+      const linkedQuery = memoryCortex.queryLinkedCortex(
+        ctx.chatId, ctx.userId, cortexConfig, cortexQueryText,
+      );
+
+      await Promise.all([mainQuery, linkedQuery]);
     })().catch(err => {
       console.warn("[prompt-assembly] Background cortex query failed:", err);
     });
-
-    // Also fire linked cortex queries (vaults + interlinks) in background
-    void memoryCortex.queryLinkedCortex(ctx.chatId, ctx.userId, cortexConfig)
-      .catch(err => {
-        console.warn("[prompt-assembly] Background linked cortex query failed:", err);
-      });
   }
 
   // ---- Pre-flight: kick off databank retrieval ----

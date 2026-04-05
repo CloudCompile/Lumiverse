@@ -298,6 +298,45 @@ let connPromise: Promise<Connection> | null = null;
 let vectorIndexReady = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
 const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
+/** Grace period for version cleanup — keeps old versions alive long enough for
+ *  in-flight reads to complete. Without this, optimize() can delete manifests
+ *  that concurrent queries still reference, causing "Object not found" errors. */
+const CLEANUP_GRACE_PERIOD_MS = 2 * 60_000;
+
+// ---------------------------------------------------------------------------
+// Write serialization — prevents concurrent LanceDB mutations from racing.
+// LanceDB's internal conflict resolver panics when optimize() deletes version
+// manifests that in-flight mergeInsert() operations still reference.
+// Serializing all writes through a single async mutex eliminates this entirely.
+// ---------------------------------------------------------------------------
+const _writeLockQueue: Array<() => void> = [];
+let _writeLockHeld = false;
+
+async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (!_writeLockHeld) {
+    _writeLockHeld = true;
+  } else {
+    await new Promise<void>((resolve) => _writeLockQueue.push(resolve));
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = _writeLockQueue.shift();
+    if (next) next();
+    else _writeLockHeld = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Table handle cache — avoids repeated openTable() calls that each hit disk
+// to resolve the version manifest. Invalidated on reset/errors.
+// ---------------------------------------------------------------------------
+let tableHandle: Table | null = null;
+
+function invalidateTableHandle(): void {
+  tableHandle = null;
+}
+
 const worldBookVectorVersionChecked = new Set<string>();
 
 // Periodically clear the version-check cache so it doesn't grow unbounded.
@@ -464,25 +503,27 @@ async function tableExists(conn: Connection, name: string): Promise<boolean> {
 }
 
 async function getTableIfExists(): Promise<Table | null> {
+  if (tableHandle) return tableHandle;
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
-  if (exists) {
-    return conn.openTable(EMBEDDINGS_TABLE);
-  }
-  return null;
+  if (!exists) return null;
+  tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+  return tableHandle;
 }
 
 async function getOrCreateTable(seedRows?: EmbeddingRow[]): Promise<Table> {
+  if (tableHandle) return tableHandle;
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
   if (exists) {
-    return conn.openTable(EMBEDDINGS_TABLE);
+    tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+    return tableHandle;
   }
   if (!seedRows || seedRows.length === 0) {
     throw new Error("Cannot create embeddings table without initial seed rows to infer schema.");
   }
-  const table = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
-  return table;
+  tableHandle = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
+  return tableHandle;
 }
 
 const MIN_ROWS_FOR_VECTOR_INDEX = 5_000;
@@ -581,13 +622,15 @@ async function ensureWorldBookVectorVersion(userId: string): Promise<void> {
   }
 
   try {
-    const table = await getTableIfExists();
-    if (table) {
-      await table.delete(
-        `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry'`
-      );
-      scheduleOptimize();
-    }
+    await withWriteLock(async () => {
+      const table = await getTableIfExists();
+      if (table) {
+        await table.delete(
+          `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry'`
+        );
+      }
+    });
+    scheduleOptimize();
   } catch (err) {
     console.warn("[embeddings] Failed to invalidate legacy world-book vectors:", err);
   }
@@ -632,7 +675,7 @@ async function ensureVectorIndex(table: Table): Promise<void> {
   }
   vectorIndexReady = true;
   lastIndexRebuildAt = Date.now();
-  startIndexHealthMonitor(table);
+  startIndexHealthMonitor();
 }
 
 /**
@@ -725,11 +768,12 @@ async function ensureFtsIndex(table: Table, force = false): Promise<void> {
  * a vector index rebuild when too many rows have drifted out of the index
  * (which happens naturally with mergeInsert updates).
  */
-function startIndexHealthMonitor(table: Table): void {
+function startIndexHealthMonitor(): void {
   if (indexHealthTimer) return;
   indexHealthTimer = setInterval(async () => {
     try {
-      await checkAndRebuildIndexes(table);
+      const table = await getTableIfExists();
+      if (table) await checkAndRebuildIndexes(table);
     } catch (err) {
       console.warn("[embeddings] Index health check failed:", err);
     }
@@ -774,18 +818,22 @@ async function checkAndRebuildIndexes(table: Table): Promise<void> {
 
     if (unindexed >= UNINDEXED_ROW_THRESHOLD) {
       console.info(`[embeddings] ${unindexed} unindexed rows detected, rebuilding vector index...`);
-      const rowCount = await table.countRows();
-      const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
-      await table.createIndex("vector", {
-        config: Index.ivfPq({
-          distanceType: "cosine",
-          numPartitions,
-        }),
-        replace: true,
-      } as any);
-      lastIndexRebuildAt = Date.now();
-      unindexedRowEstimate = 0;
-      console.info(`[embeddings] Vector index rebuilt (${rowCount} rows, ${numPartitions} partitions)`);
+      await withWriteLock(async () => {
+        const t = await getTableIfExists();
+        if (!t) return;
+        const rowCount = await t.countRows();
+        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+        await t.createIndex("vector", {
+          config: Index.ivfPq({
+            distanceType: "cosine",
+            numPartitions,
+          }),
+          replace: true,
+        } as any);
+        lastIndexRebuildAt = Date.now();
+        unindexedRowEstimate = 0;
+        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows, ${numPartitions} partitions)`);
+      });
     }
   } catch (err) {
     // Non-fatal — index health checks are best-effort
@@ -804,85 +852,91 @@ export async function runStartupVectorMaintenance(): Promise<void> {
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
   if (!exists) return;
 
-  const table = await conn.openTable(EMBEDDINGS_TABLE);
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
 
-  let indices: any[];
-  try {
-    indices = await table.listIndices();
-  } catch {
-    // Index metadata may reference orphaned files — proceed with compaction
-    // and rebuild which will fix this.
-    indices = [];
-  }
-  const vectorIdx = indices.find((i: any) => {
-    const name = i.name || i.indexName || "";
-    return name.includes("vector");
-  });
+    let indices: any[];
+    try {
+      indices = await table.listIndices();
+    } catch {
+      // Index metadata may reference orphaned files — proceed with compaction
+      // and rebuild which will fix this.
+      indices = [];
+    }
+    const vectorIdx = indices.find((i: any) => {
+      const name = i.name || i.indexName || "";
+      return name.includes("vector");
+    });
 
-  // Check if the existing index is the old HNSW_PQ type that needs migration
-  const idxType = vectorIdx ? ((vectorIdx as any).indexType || (vectorIdx as any).type || "") : "";
-  const needsMigration = vectorIdx && /hnsw/i.test(idxType);
+    // Check if the existing index is the old HNSW_PQ type that needs migration
+    const idxType = vectorIdx ? ((vectorIdx as any).indexType || (vectorIdx as any).type || "") : "";
+    const needsMigration = vectorIdx && /hnsw/i.test(idxType);
 
-  // Also compact fragments regardless of index type
-  try {
-    console.info("[embeddings] Running startup compaction...");
-    await table.optimize({ cleanupOlderThan: new Date() });
-  } catch (err) {
-    console.warn("[embeddings] Startup compaction failed:", err);
-  }
+    // Compact fragments — use grace period to avoid deleting versions that
+    // in-flight reads might still reference (prevents "manifest not found" panics).
+    try {
+      console.info("[embeddings] Running startup compaction...");
+      await table.optimize({ cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS) });
+    } catch (err) {
+      console.warn("[embeddings] Startup compaction failed:", err);
+    }
 
-  if (needsMigration) {
-    const rowCount = await table.countRows();
-    if (rowCount >= MIN_ROWS_FOR_VECTOR_INDEX) {
-      console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
-      const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
-      try {
-        await table.createIndex("vector", {
-          config: Index.ivfPq({
-            distanceType: "cosine",
-            numPartitions,
-          }),
-          replace: true,
-        } as any);
-        vectorIndexReady = true;
-        lastIndexRebuildAt = Date.now();
-        console.info(`[embeddings] Vector index migrated successfully (${numPartitions} partitions)`);
-      } catch (err) {
-        console.warn("[embeddings] Vector index migration failed (will retry on next query):", err);
+    if (needsMigration) {
+      const rowCount = await table.countRows();
+      if (rowCount >= MIN_ROWS_FOR_VECTOR_INDEX) {
+        console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
+        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+        try {
+          await table.createIndex("vector", {
+            config: Index.ivfPq({
+              distanceType: "cosine",
+              numPartitions,
+            }),
+            replace: true,
+          } as any);
+          vectorIndexReady = true;
+          lastIndexRebuildAt = Date.now();
+          console.info(`[embeddings] Vector index migrated successfully (${numPartitions} partitions)`);
+        } catch (err) {
+          console.warn("[embeddings] Vector index migration failed (will retry on next query):", err);
+        }
       }
     }
-  }
 
-  // Force-rebuild scalar + FTS indexes after compaction cleanup to avoid stale
-  // index files referencing deleted data versions (causes "Object not found" errors).
-  await ensureScalarIndexes(table, true);
-  await ensureFtsIndex(table, true);
-  await ensureVectorIndex(table);
-  startIndexHealthMonitor(table);
+    // Force-rebuild scalar + FTS indexes after compaction cleanup to avoid stale
+    // index files referencing deleted data versions (causes "Object not found" errors).
+    await ensureScalarIndexes(table, true);
+    await ensureFtsIndex(table, true);
+    await ensureVectorIndex(table);
+  });
+
+  startIndexHealthMonitor();
 }
 
 export async function optimizeTable(): Promise<void> {
-  const conn = await getConnection();
-  const exists = await tableExists(conn, EMBEDDINGS_TABLE);
-  if (!exists) return;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
 
-  const table = await conn.openTable(EMBEDDINGS_TABLE);
-  await table.optimize({
-    cleanupOlderThan: new Date(),
+    // Use grace period to avoid deleting version manifests that in-flight reads
+    // might still reference. Without this, concurrent queries can hit
+    // "Object at location ... not found" errors for recently-cleaned versions.
+    await table.optimize({
+      cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS),
+    });
+
+    // Rebuild scalar + FTS indexes after compaction cleanup.
+    // optimize() with cleanupOlderThan removes old data versions, which can
+    // orphan index files that referenced those versions. Force-rebuilding
+    // ensures indexes reference the current compacted data.
+    try {
+      await ensureScalarIndexes(table, true);
+      await ensureFtsIndex(table, true);
+    } catch (err) {
+      console.warn("[embeddings] Post-optimize index rebuild failed:", err);
+    }
   });
-
-  // Rebuild scalar + FTS indexes after compaction cleanup.
-  // optimize() with cleanupOlderThan removes old data versions, which can
-  // orphan index files that referenced those versions. This manifests as
-  // "Object at location ... not found" errors when LanceDB tries to read
-  // stale index metadata. Force-rebuilding ensures indexes reference the
-  // current compacted data.
-  try {
-    await ensureScalarIndexes(table, true);
-    await ensureFtsIndex(table, true);
-  } catch (err) {
-    console.warn("[embeddings] Post-optimize index rebuild failed:", err);
-  }
 }
 
 /**
@@ -898,9 +952,8 @@ export async function getVectorStoreHealth(): Promise<{
   lastIndexRebuildAt: number;
   indexes: Array<{ name: string; type?: string }>;
 }> {
-  const conn = await getConnection();
-  const exists = await tableExists(conn, EMBEDDINGS_TABLE);
-  if (!exists) {
+  const table = await getTableIfExists();
+  if (!table) {
     return {
       exists: false,
       rowCount: 0,
@@ -912,8 +965,6 @@ export async function getVectorStoreHealth(): Promise<{
       indexes: [],
     };
   }
-
-  const table = await conn.openTable(EMBEDDINGS_TABLE);
   const rowCount = await table.countRows();
 
   let indices: any[];
@@ -923,8 +974,13 @@ export async function getVectorStoreHealth(): Promise<{
     // Index metadata may reference orphaned files from a previous compaction
     // that didn't complete its rebuild pass. Force-rebuild and retry.
     try {
-      await ensureScalarIndexes(table, true);
-      await ensureFtsIndex(table, true);
+      await withWriteLock(async () => {
+        const t = await getTableIfExists();
+        if (t) {
+          await ensureScalarIndexes(t, true);
+          await ensureFtsIndex(t, true);
+        }
+      });
       indices = await table.listIndices();
     } catch {
       indices = [];
@@ -1199,11 +1255,13 @@ export async function testEmbeddingConfig(
 }
 
 export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: string): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
-  await table.delete(
-    `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
-  );
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    await table.delete(
+      `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
+    );
+  });
   scheduleOptimize();
 }
 
@@ -1320,15 +1378,17 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
       updated_at: now,
     };
 
-    const table = await getOrCreateTable([row]);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows([row]));
+    await withWriteLock(async () => {
+      const table = await getOrCreateTable([row]);
+      await ensureVectorIndex(table);
+      await ensureScalarIndexes(table);
+      await ensureFtsIndex(table);
+      await table
+        .mergeInsert("id")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute(asLanceRows([row]));
+    });
 
     updateWorldBookEntryVectorState(entry.id, "indexed", now, null);
     scheduleOptimize();
@@ -1434,15 +1494,17 @@ export async function reindexWorldBookEntries(
         updated_at: now,
       }));
 
-      const table = await getOrCreateTable(rows);
-      await ensureVectorIndex(table);
-      await ensureScalarIndexes(table);
-      await ensureFtsIndex(table);
-      await table
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows(rows));
+      await withWriteLock(async () => {
+        const table = await getOrCreateTable(rows);
+        await ensureVectorIndex(table);
+        await ensureScalarIndexes(table);
+        await ensureFtsIndex(table);
+        await table
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
 
       updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "indexed", now, null);
       progress.indexed += batch.length;
@@ -1463,11 +1525,13 @@ export async function reindexWorldBookEntries(
   try {
     await optimizeTable();
     // After bulk reindex, force a vector index rebuild to absorb all new rows
-    const table = await getTableIfExists();
-    if (table) {
-      vectorIndexReady = false;
-      await ensureVectorIndex(table);
-    }
+    await withWriteLock(async () => {
+      const table = await getTableIfExists();
+      if (table) {
+        vectorIndexReady = false;
+        await ensureVectorIndex(table);
+      }
+    });
   } catch (err) {
     console.warn("[embeddings] Post-reindex optimize failed:", err);
   }
@@ -1610,11 +1674,13 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
   embeddingCache.clear();
 
   try {
-    const table = await getTableIfExists();
-    if (table) {
-      await table.delete(`user_id = ${sqlValue(userId)}`);
-      scheduleOptimize();
-    }
+    await withWriteLock(async () => {
+      const table = await getTableIfExists();
+      if (table) {
+        await table.delete(`user_id = ${sqlValue(userId)}`);
+      }
+    });
+    scheduleOptimize();
   } catch (err) {
     console.warn("[embeddings] Failed to delete LanceDB rows during invalidation:", err);
   }
@@ -1651,62 +1717,70 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
  * recovering from corruption (e.g. "vector not divisible by 8" errors).
  */
 export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: string }> {
-  // 1. Cancel any pending optimize and index health monitor
-  if (optimizeTimer) {
-    clearTimeout(optimizeTimer);
-    optimizeTimer = null;
-  }
-  optimizeQueuedAt = null;
-  stopIndexHealthMonitor();
+  // Acquire write lock to ensure no LanceDB operations are in-flight when we
+  // delete the directory. Without this, concurrent writes would panic trying
+  // to access files that no longer exist.
+  return withWriteLock(async () => {
+    // 1. Cancel any pending optimize and index health monitor
+    if (optimizeTimer) {
+      clearTimeout(optimizeTimer);
+      optimizeTimer = null;
+    }
+    optimizeQueuedAt = null;
+    stopIndexHealthMonitor();
 
-  // 2. Clear in-memory caches
-  embeddingCache.clear();
+    // 2. Clear in-memory caches
+    embeddingCache.clear();
 
-  // 3. Reset connection state so next access creates a fresh connection
-  connPromise = null;
-  vectorIndexReady = false;
-  scalarIndexReady = false;
-  ftsIndexReady = false;
-  lastIndexRebuildAt = 0;
-  unindexedRowEstimate = 0;
+    // 3. Reset connection + table state so next access creates fresh handles
+    connPromise = null;
+    tableHandle = null;
+    vectorIndexReady = false;
+    scalarIndexReady = false;
+    ftsIndexReady = false;
+    lastIndexRebuildAt = 0;
+    unindexedRowEstimate = 0;
 
-  // 4. Delete the entire LanceDB directory from disk
-  const deleted = existsSync(LANCEDB_PATH);
-  if (deleted) {
-    rmSync(LANCEDB_PATH, { recursive: true, force: true });
-    console.info(`[embeddings] Force-deleted LanceDB directory: ${LANCEDB_PATH}`);
-  }
+    // 4. Delete the entire LanceDB directory from disk
+    const deleted = existsSync(LANCEDB_PATH);
+    if (deleted) {
+      rmSync(LANCEDB_PATH, { recursive: true, force: true });
+      console.info(`[embeddings] Force-deleted LanceDB directory: ${LANCEDB_PATH}`);
+    }
 
-  // 5. Reset world book index state in SQLite while preserving semantic opt-in
-  try {
-    const db = getDb();
-    db.run(
-      `UPDATE world_book_entries
-       SET vector_index_status = CASE WHEN vectorized = 1 THEN 'pending' ELSE 'not_enabled' END,
-           vector_indexed_at = NULL,
-           vector_index_error = NULL`
-    );
-    db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
-    db.run(`DELETE FROM query_vector_cache`);
-    db.run(`DELETE FROM chat_memory_cache`);
-  } catch (err) {
-    console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
-  }
+    // 5. Reset world book index state in SQLite while preserving semantic opt-in
+    try {
+      const db = getDb();
+      db.run(
+        `UPDATE world_book_entries
+         SET vector_index_status = CASE WHEN vectorized = 1 THEN 'pending' ELSE 'not_enabled' END,
+             vector_indexed_at = NULL,
+             vector_index_error = NULL`
+      );
+      db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
+      db.run(`DELETE FROM query_vector_cache`);
+      db.run(`DELETE FROM chat_memory_cache`);
+    } catch (err) {
+      console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
+    }
 
-  console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
-  return { deleted, path: LANCEDB_PATH };
+    console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
+    return { deleted, path: LANCEDB_PATH };
+  });
 }
 
 // --- Chat Vectorization ---
 
 export async function deleteChatChunkEmbeddings(userId: string, chatId: string, chunkId?: string): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
   let filter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
   if (chunkId) {
     filter += ` AND source_id = ${sqlValue(chunkId)}`;
   }
-  await table.delete(filter);
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    await table.delete(filter);
+  });
   scheduleOptimize();
 }
 
@@ -1746,15 +1820,17 @@ export async function syncChatChunkEmbedding(
     updated_at: now,
   };
 
-  const table = await getOrCreateTable([row]);
-  await ensureVectorIndex(table);
-  await ensureScalarIndexes(table);
-  await ensureFtsIndex(table);
-  await table
-    .mergeInsert("id")
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute(asLanceRows([row]));
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable([row]);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows([row]));
+  });
 
   console.info(`[embeddings] Vectorized chat chunk ${chunkId} for chat ${chatId}`);
 
@@ -1786,15 +1862,17 @@ export async function batchUpsertChunkVectors(
     updated_at: now,
   }));
 
-  const table = await getOrCreateTable(rows);
-  await ensureVectorIndex(table);
-  await ensureScalarIndexes(table);
-  await ensureFtsIndex(table);
-  await table
-    .mergeInsert("id")
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute(asLanceRows(rows));
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable(rows);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows(rows));
+  });
 
   console.info(`[embeddings] Batch-vectorized ${rows.length} chat chunk(s)`);
   scheduleOptimize();
@@ -1877,15 +1955,17 @@ export async function reindexChatMessages(
         updated_at: now,
       }));
 
-      const table = await getOrCreateTable(rows);
-      await ensureVectorIndex(table);
-      await ensureScalarIndexes(table);
-      await ensureFtsIndex(table);
-      await table
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows(rows));
+      await withWriteLock(async () => {
+        const table = await getOrCreateTable(rows);
+        await ensureVectorIndex(table);
+        await ensureScalarIndexes(table);
+        await ensureFtsIndex(table);
+        await table
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
     } catch (err) {
       console.warn("[embeddings] Batch chat embedding failed:", err);
     }
@@ -2123,15 +2203,17 @@ export async function upsertChunkVector(
     updated_at: now,
   };
 
-  const table = await getOrCreateTable([row]);
-  await ensureVectorIndex(table);
-  await ensureScalarIndexes(table);
-  await ensureFtsIndex(table);
-  await table
-    .mergeInsert("id")
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute(asLanceRows([row]));
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable([row]);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows([row]));
+  });
 
   scheduleOptimize();
 }
@@ -2140,11 +2222,12 @@ export async function upsertChunkVector(
  * Delete a specific chunk's vector from LanceDB.
  */
 export async function deleteChunkVector(userId: string, chunkId: string): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
-
-  const id = rowId(userId, "chat_chunk", chunkId, 0);
-  await table.delete(`id = ${sqlValue(id)}`);
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    const id = rowId(userId, "chat_chunk", chunkId, 0);
+    await table.delete(`id = ${sqlValue(id)}`);
+  });
 }
 
 // ─── Databank Vector Operations ─────────────────────────────────
@@ -2173,15 +2256,17 @@ export async function batchUpsertDatabankVectors(
     updated_at: now,
   }));
 
-  const table = await getOrCreateTable(rows);
-  await ensureVectorIndex(table);
-  await ensureScalarIndexes(table);
-  await ensureFtsIndex(table);
-  await table
-    .mergeInsert("id")
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute(asLanceRows(rows));
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable(rows);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows(rows));
+  });
 
   console.info(`[embeddings] Batch-vectorized ${rows.length} databank chunk(s)`);
   scheduleOptimize();
@@ -2196,11 +2281,12 @@ export async function deleteDatabankEmbeddings(
   userId: string,
   databankId: string,
 ): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
-
-  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND owner_id = ${sqlValue(databankId)}`;
-  await table.delete(filter);
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND owner_id = ${sqlValue(databankId)}`;
+    await table.delete(filter);
+  });
   scheduleOptimize();
 }
 
@@ -2210,17 +2296,18 @@ export async function deleteDatabankEmbeddings(
  */
 export async function deleteDatabankChunksByIds(userId: string, chunkIds: string[]): Promise<void> {
   if (chunkIds.length === 0) return;
-  const table = await getTableIfExists();
-  if (!table) return;
-
-  // Delete in batches to avoid overly long filter expressions
-  const BATCH = 100;
-  for (let i = 0; i < chunkIds.length; i += BATCH) {
-    const batch = chunkIds.slice(i, i + BATCH);
-    const ids = batch.map((id) => rowId(userId, "databank", id, 0));
-    const filter = ids.map((id) => `id = ${sqlValue(id)}`).join(" OR ");
-    await table.delete(filter);
-  }
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    // Delete in batches to avoid overly long filter expressions
+    const BATCH = 100;
+    for (let i = 0; i < chunkIds.length; i += BATCH) {
+      const batch = chunkIds.slice(i, i + BATCH);
+      const ids = batch.map((id) => rowId(userId, "databank", id, 0));
+      const filter = ids.map((id) => `id = ${sqlValue(id)}`).join(" OR ");
+      await table.delete(filter);
+    }
+  });
   scheduleOptimize();
 }
 

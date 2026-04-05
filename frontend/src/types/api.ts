@@ -398,6 +398,21 @@ export interface PersonaAddon {
   sort_order: number
 }
 
+export interface GlobalAddon {
+  id: string
+  label: string
+  content: string
+  sort_order: number
+  metadata: Record<string, any>
+  created_at: number
+  updated_at: number
+}
+
+export interface AttachedGlobalAddon {
+  id: string
+  enabled: boolean
+}
+
 export interface Persona {
   id: string;
   name: string;

@@ -32,3 +32,22 @@ export interface CreatePersonaInput {
 }
 
 export type UpdatePersonaInput = Partial<CreatePersonaInput>;
+
+export interface GlobalAddon {
+  id: string;
+  label: string;
+  content: string;
+  sort_order: number;
+  metadata: Record<string, any>;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CreateGlobalAddonInput {
+  label: string;
+  content?: string;
+  sort_order?: number;
+  metadata?: Record<string, any>;
+}
+
+export type UpdateGlobalAddonInput = Partial<CreateGlobalAddonInput>;

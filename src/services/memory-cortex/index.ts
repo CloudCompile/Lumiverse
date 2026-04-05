@@ -19,7 +19,7 @@ import { getDb } from "../../db/connection";
 import { getCortexConfig, putCortexConfig, type MemoryCortexConfig } from "./config";
 import { scoreChunkHeuristic } from "./salience-heuristic";
 import { extractWithSidecar, extractBatchWithSidecar, getToolChoiceParams, getExtractionStructuredParams } from "./salience-sidecar";
-import { extractEntitiesHeuristic, extractMentionExcerpt } from "./entity-extractor";
+import { extractEntitiesHeuristic, extractMentionExcerpt, detectNicknameIntroductions } from "./entity-extractor";
 import * as entityGraph from "./entity-graph";
 import * as entityContext from "./entity-context";
 import * as consolidation from "./consolidation";
@@ -66,6 +66,7 @@ export type {
   MemoryEntity,
   MemoryRelation,
   MemoryConsolidation,
+  DiscoveredAlias,
 } from "./types";
 export { buildEmotionalContext } from "./emotional-context";
 export { formatEntitySnapshots, formatRelationships } from "./entity-context";
@@ -188,46 +189,83 @@ export function invalidateLinkedCortexCache(chatId: string): void {
 
 /**
  * Query all linked cortex data for a chat (vaults + interlinks).
- * Vault data is read synchronously from SQLite. Interlink targets
- * are queried via queryCortex() in parallel.
+ * Vault data is read synchronously from SQLite, then optionally enriched
+ * with memory retrieval from the source chat's embeddings.
+ * Interlink targets are queried via queryCortex() in parallel.
+ *
+ * @param queryText — The current chat's query context (from recent messages).
+ *   When provided, enables semantic vector search against linked chats'
+ *   embeddings so retrieved memories are relevant to the current conversation.
  */
 export async function queryLinkedCortex(
   chatId: string,
   userId: string,
   config?: MemoryCortexConfig,
+  queryText?: string,
 ): Promise<LinkedCortexResult> {
   const cfg = config ?? getCortexConfig(userId);
   const linked = getLinkedCortexData(chatId);
+  const topK = cfg.retrieval?.maxEntitySnapshots ?? 10;
+  const includeRelationships = cfg.retrieval?.relationshipInjection ?? true;
 
-  // Vault data is already resolved (synchronous SQLite reads)
+  // Fire all linked queries in parallel (vault memory enrichment + interlinks)
+  const promises: Promise<void>[] = [];
+
+  // Vault data is resolved from SQLite; optionally enrich with source chat memories
   const vaults = linked.vaults;
+  if (queryText) {
+    for (const vault of vaults) {
+      if (!vault.sourceChatId) continue;
+      const sourceChatId = vault.sourceChatId;
+      promises.push(
+        (async () => {
+          try {
+            const result = await queryCortex({
+              chatId: sourceChatId,
+              userId,
+              queryText,
+              generationType: "normal",
+              topK,
+              includeConsolidations: false,
+              includeRelationships,
+            }, cfg);
+            // Enrich vault with retrieved memories from source chat
+            vault.memories = result.memories;
+            vault.arcContext = result.arcContext;
+          } catch (err) {
+            console.warn(`[cortex] Vault memory enrichment failed for vault ${vault.vaultId} (source chat ${sourceChatId}):`, err);
+          }
+        })(),
+      );
+    }
+  }
 
   // Fire interlink queries in parallel
   const interlinkResults: InterlinkCortexData[] = [];
   if (linked.interlinkTargetChatIds.length > 0) {
-    const promises = linked.interlinkTargetChatIds.map(async (target) => {
-      try {
-        const result = await queryCortex({
-          chatId: target.chatId,
-          userId,
-          queryText: "", // use empty query for broad retrieval
-          generationType: "normal",
-          topK: cfg.retrieval?.maxEntitySnapshots ?? 10,
-          includeConsolidations: false,
-          includeRelationships: cfg.retrieval?.relationshipInjection ?? true,
-        }, cfg);
-        return { targetChatId: target.chatId, targetChatName: target.chatName, result };
-      } catch (err) {
-        console.warn(`[cortex] Interlink query failed for chat ${target.chatId}:`, err);
-        return null;
-      }
-    });
-
-    const settled = await Promise.all(promises);
-    for (const r of settled) {
-      if (r) interlinkResults.push(r);
+    for (const target of linked.interlinkTargetChatIds) {
+      promises.push(
+        (async () => {
+          try {
+            const result = await queryCortex({
+              chatId: target.chatId,
+              userId,
+              queryText: queryText || "",
+              generationType: "normal",
+              topK,
+              includeConsolidations: false,
+              includeRelationships,
+            }, cfg);
+            interlinkResults.push({ targetChatId: target.chatId, targetChatName: target.chatName, result });
+          } catch (err) {
+            console.warn(`[cortex] Interlink query failed for chat ${target.chatId}:`, err);
+          }
+        })(),
+      );
     }
   }
+
+  await Promise.all(promises);
 
   const result: LinkedCortexResult = { vaults, interlinks: interlinkResults };
   linkedCortexResultCache.set(chatId, { result, queriedAt: Date.now() });
@@ -348,6 +386,7 @@ export async function processChunk(
   let sidecarEntities: Array<{ name: string; type: string; role?: string }> = [];
   let sidecarRelationships: Array<{ source: string; target: string; type: string; label: string; sentiment: number }> = [];
   let sidecarFacts: string[] = [];
+  let sidecarDiscoveredAliases: Array<{ canonicalName: string; alias: string; evidence?: string }> = [];
 
   // ── Font Color Extraction (runs before everything else) ──
   // Must run first so the sidecar and heuristics both get clean content.
@@ -431,6 +470,7 @@ export async function processChunk(
         sidecarEntities = extraction.entitiesPresent;
         sidecarRelationships = extraction.relationshipsShown;
         sidecarFacts = extraction.keyFacts;
+        sidecarDiscoveredAliases = extraction.discoveredAliases;
 
         // LLM font color attributions override/supplement heuristic
         if (extraction.fontColors.length > 0) {
@@ -519,6 +559,11 @@ export async function processChunk(
     // Merge sidecar + heuristic relationships (sidecar takes priority for same pair+type)
     const allRelationships = mergeRelationships(heuristicRelationships, sidecarRelationships);
 
+    // Gather all discovered aliases (sidecar + heuristic) before ingestion so
+    // relationship writes can resolve brand-new nicknames in the same chunk.
+    const heuristicAliases = detectNicknameIntroductions(cleanContent, knownEntities, characterNames);
+    const allDiscoveredAliases = [...sidecarDiscoveredAliases, ...heuristicAliases];
+
     // Ingest into the entity graph (using font-stripped content)
     const entityIds = entityGraph.ingestChunkEntities(
       data.chatId,
@@ -529,6 +574,8 @@ export async function processChunk(
       salienceResult.score,
       salienceResult.emotionalTags,
       cleanContent,
+      undefined, // arcId
+      allDiscoveredAliases,
     );
 
     // Update denormalized entity_ids on chat_chunks
@@ -579,6 +626,34 @@ export async function processChunk(
           }
           // Add the status change as a fact
           entityGraph.addEntityFacts(entity.id, [`${change.change}: ${change.detail}`]);
+        }
+      }
+    }
+
+    // Persist discovered aliases (sidecar + heuristic) to the entity graph.
+    // These were already used during ingestChunkEntities for relationship resolution;
+    // now we persist them as actual alias records + facts for future chunks.
+    for (const discovered of allDiscoveredAliases) {
+      const canonicalEntity = entityGraph.findEntityByName(data.chatId, discovered.canonicalName);
+      if (canonicalEntity) {
+        // Register the alias on the canonical entity via upsert (mergeAliases handles dedup)
+        entityGraph.upsertEntity(data.chatId, {
+          name: canonicalEntity.name,
+          type: canonicalEntity.entityType,
+          aliases: [discovered.alias],
+          confidence: Number(canonicalEntity.confidence) || 0.9,
+        }, data.chunkId, data.createdAt);
+
+        // Record the alias discovery as a fact for traceability (sidecar aliases may have evidence)
+        const evidence = "evidence" in discovered ? (discovered as any).evidence : undefined;
+        if (evidence) {
+          entityGraph.addEntityFacts(canonicalEntity.id, [
+            `Also known as "${discovered.alias}" (${evidence})`,
+          ]);
+        } else {
+          entityGraph.addEntityFacts(canonicalEntity.id, [
+            `Also known as "${discovered.alias}"`,
+          ]);
         }
       }
     }
@@ -923,6 +998,11 @@ async function processChunkWithPrecomputedSidecar(
       args: {
         entities: sidecarResult.entitiesPresent.map((e) => ({
           name: e.name, type: e.type, role: e.role ?? "present",
+        })),
+        discovered_aliases: (sidecarResult.discoveredAliases || []).map((a) => ({
+          canonical_name: a.canonicalName,
+          alias: a.alias,
+          evidence: a.evidence,
         })),
         status_changes: sidecarResult.statusChanges,
       },

@@ -336,6 +336,13 @@ export interface SidecarFontColor {
   usageType: "speech" | "thought" | "narration";
 }
 
+/** An alias/nickname discovered by the sidecar LLM for an existing entity */
+export interface DiscoveredAlias {
+  canonicalName: string;
+  alias: string;
+  evidence?: string;
+}
+
 export interface SidecarExtractionResult {
   score: number;
   emotionalTags: EmotionalTag[];
@@ -345,6 +352,7 @@ export interface SidecarExtractionResult {
   entitiesPresent: ExtractedEntity[];
   relationshipsShown: ExtractedRelationship[];
   fontColors: SidecarFontColor[];
+  discoveredAliases: DiscoveredAlias[];
 }
 
 // ─── Retrieval Types ───────────────────────────────────────────
@@ -435,8 +443,12 @@ export interface CortexResult {
 export interface VaultCortexData {
   vaultId: string;
   vaultName: string;
+  sourceChatId?: string;
   entities: EntitySnapshot[];
   relations: RelationEdge[];
+  /** Retrieved memories from source chat's embeddings (when queryText provided) */
+  memories?: CortexMemory[];
+  arcContext?: string | null;
 }
 
 /** Interlink live cortex data with provenance */

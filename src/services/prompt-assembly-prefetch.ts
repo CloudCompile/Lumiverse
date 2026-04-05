@@ -16,6 +16,7 @@ import * as presetsSvc from "./presets.service";
 import * as settingsSvc from "./settings.service";
 import * as worldBooksSvc from "./world-books.service";
 import * as embeddingsSvc from "./embeddings.service";
+import * as globalAddonsSvc from "./global-addons.service";
 import { normalizeCortexConfig, DEFAULT_CORTEX_CONFIG } from "./memory-cortex/config";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import type { BookSource } from "./prompt-assembly.service";
@@ -66,7 +67,17 @@ export async function prefetchAssemblyData(ctx: AssemblyContext): Promise<Prefet
   const character = charactersSvc.getCharacter(ctx.userId, characterId);
   if (!character) throw new Error("Character not found");
 
-  const persona = personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+  let persona = personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+
+  // Resolve attached global add-ons for the persona
+  if (persona) {
+    const attachedRefs = (persona.metadata?.attached_global_addons as Array<{ id: string; enabled: boolean }>) ?? [];
+    const enabledIds = attachedRefs.filter(a => a.enabled).map(a => a.id);
+    if (enabledIds.length > 0) {
+      const resolved = globalAddonsSvc.getGlobalAddonsByIds(ctx.userId, enabledIds);
+      persona = { ...persona, metadata: { ...persona.metadata, _resolvedGlobalAddons: resolved } };
+    }
+  }
 
   const connection = ctx.connectionId
     ? connectionsSvc.getConnection(ctx.userId, ctx.connectionId)

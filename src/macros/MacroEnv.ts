@@ -142,15 +142,29 @@ export function resolveGroupCharacterNames(
 function buildPersonaWithAddons(persona: Persona | null): string {
   if (!persona) return "";
   const base = persona.description || "";
-  const addons = persona.metadata?.addons;
-  if (!Array.isArray(addons) || addons.length === 0) return base;
-  const enabledContent = addons
-    .filter((a: any) => a.enabled && a.content)
-    .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
-    .map((a: any) => a.content.trim())
-    .filter(Boolean);
-  if (enabledContent.length === 0) return base;
-  return base ? `${base}\n${enabledContent.join("\n")}` : enabledContent.join("\n");
+
+  // Persona-specific add-ons
+  const personaAddons = persona.metadata?.addons;
+  const enabledPersonaContent = Array.isArray(personaAddons)
+    ? personaAddons
+        .filter((a: any) => a.enabled && a.content)
+        .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+        .map((a: any) => a.content.trim())
+        .filter(Boolean)
+    : [];
+
+  // Global add-ons (resolved upstream in prompt assembly, injected into metadata)
+  const globalAddons = persona.metadata?._resolvedGlobalAddons;
+  const enabledGlobalContent = Array.isArray(globalAddons)
+    ? globalAddons
+        .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+        .map((a: any) => ((a.content as string) || "").trim())
+        .filter(Boolean)
+    : [];
+
+  const allContent = [...enabledPersonaContent, ...enabledGlobalContent];
+  if (allContent.length === 0) return base;
+  return base ? `${base}\n${allContent.join("\n")}` : allContent.join("\n");
 }
 
 function findLast(messages: Message[], predicate: (m: Message) => boolean): Message | null {

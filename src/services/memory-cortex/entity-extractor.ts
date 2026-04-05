@@ -712,3 +712,169 @@ export function extractMentionExcerpt(
 
   return excerpt;
 }
+
+// ─── Heuristic Nickname / Alias Detection ─────────────────────
+// Detects patterns in text where a character introduces a nickname,
+// shortened name, or alternate identity. These are common in roleplay:
+//   "Call me Mel"
+//   "People know me as The Iron Queen"
+//   "Melina — or Mel, as she preferred"
+
+/** Patterns that introduce a nickname for a known entity name */
+const NICKNAME_PATTERNS: Array<{
+  /** Regex with named groups: `canonical` and `alias` */
+  pattern: RegExp;
+  /** Which group is the alias (default: "alias") */
+  aliasGroup?: string;
+  /** Which group is the canonical name (default: "canonical") */
+  canonicalGroup?: string;
+}> = [
+  // "Call me X" / "You can call me X" / "Just call me X"
+  {
+    pattern: /\b(?:(?:you\s+can\s+|just\s+|please\s+)?call\s+(?:me|her|him|them)\s+)(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+  },
+  // "People call me X" / "Friends call me X" / "Everyone calls her X"
+  {
+    pattern: /\b(?:\w+\s+)?call(?:s|ed)?\s+(?:me|her|him|them)\s+(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+  },
+  // "Known as X" / "Also known as X" / "Better known as X"
+  {
+    pattern: /\b(?:also\s+|better\s+)?known\s+as\s+(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+  },
+  // "Goes by X" / "She goes by X"
+  {
+    pattern: /\bgoes?\s+by\s+(?:the\s+(?:name|alias|moniker)\s+(?:of\s+)?)?(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+  },
+  // "Nicknamed X" / "She was nicknamed X"
+  {
+    pattern: /\bnicknamed?\s+(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+  },
+  // "[Name] — or [Alias] as she preferred" / "[Name], or [Alias] to her friends"
+  {
+    pattern: /(?<canonical>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*[—–,]\s*(?:or\s+)?(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:as\s+(?:she|he|they)|to\s+(?:her|his|their|most|those))\b/i,
+  },
+  // "My name is X but everyone calls me Y"
+  {
+    pattern: /\bname\s+is\s+(?<canonical>[A-Z][a-z]+)\s+but\s+(?:everyone|they|people)\s+call(?:s)?\s+(?:me|her|him)\s+(?<alias>[A-Z][a-z]+)\b/i,
+  },
+  // "Prefer to be called X"
+  {
+    pattern: /\bprefer(?:s|red)?\s+(?:to\s+be\s+)?called\s+(?<alias>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+  },
+];
+
+/**
+ * Detect nickname introductions in text using heuristic patterns.
+ * Returns discovered alias → canonical name pairs.
+ *
+ * @param content - The passage text to scan
+ * @param knownEntities - Current entities in the graph (for matching canonical names)
+ * @param characterNames - Known character names from the chat
+ */
+export function detectNicknameIntroductions(
+  content: string,
+  knownEntities: MemoryEntity[],
+  characterNames: string[],
+): Array<{ canonicalName: string; alias: string }> {
+  const results: Array<{ canonicalName: string; alias: string }> = [];
+  const seenAliases = new Set<string>();
+
+  // Build lookup for known names (canonical + aliases)
+  const knownNameSet = new Set<string>();
+  const nameToCanonical = new Map<string, string>();
+  for (const entity of knownEntities) {
+    knownNameSet.add(entity.name.toLowerCase());
+    nameToCanonical.set(entity.name.toLowerCase(), entity.name);
+    for (const alias of entity.aliases) {
+      knownNameSet.add(alias.toLowerCase());
+      nameToCanonical.set(alias.toLowerCase(), entity.name);
+    }
+  }
+  for (const name of characterNames) {
+    if (!knownNameSet.has(name.toLowerCase())) {
+      knownNameSet.add(name.toLowerCase());
+      nameToCanonical.set(name.toLowerCase(), name);
+    }
+  }
+
+  for (const { pattern } of NICKNAME_PATTERNS) {
+    const match = pattern.exec(content);
+    if (!match?.groups) continue;
+
+    const aliasRaw = match.groups.alias?.trim();
+    if (!aliasRaw || aliasRaw.length < 2) continue;
+
+    // Skip if alias is already a known name (not a new discovery)
+    if (knownNameSet.has(aliasRaw.toLowerCase())) continue;
+    // Skip common words
+    if (COMMON_WORDS.has(aliasRaw.toLowerCase())) continue;
+
+    // Determine canonical name: either from the pattern's canonical group or from
+    // context (the closest known character name mentioned nearby in the text)
+    let canonical: string | null = match.groups.canonical?.trim() ?? null;
+    if (canonical) {
+      // The pattern captured a canonical name directly — verify it's a known entity
+      const resolved = nameToCanonical.get(canonical.toLowerCase());
+      if (resolved) canonical = resolved;
+      else continue; // Captured name isn't a known entity, skip
+    } else {
+      // Find the nearest known character name within ±200 chars of the match
+      canonical = findNearestKnownName(content, match.index, knownEntities, characterNames);
+      if (!canonical) continue;
+    }
+
+    // Don't add duplicate alias discoveries
+    const key = `${canonical.toLowerCase()}:${aliasRaw.toLowerCase()}`;
+    if (seenAliases.has(key)) continue;
+    seenAliases.add(key);
+
+    // Don't register alias that matches the canonical name
+    if (canonical.toLowerCase() === aliasRaw.toLowerCase()) continue;
+
+    results.push({ canonicalName: canonical, alias: aliasRaw });
+  }
+
+  return results;
+}
+
+/**
+ * Find the nearest known character name to a position in text.
+ * Scans ±200 characters for mentions of known entities.
+ */
+function findNearestKnownName(
+  content: string,
+  position: number,
+  knownEntities: MemoryEntity[],
+  characterNames: string[],
+): string | null {
+  const searchStart = Math.max(0, position - 200);
+  const searchEnd = Math.min(content.length, position + 200);
+  const window = content.slice(searchStart, searchEnd);
+
+  let bestMatch: { name: string; distance: number } | null = null;
+
+  // Check character names first (higher priority)
+  for (const name of characterNames) {
+    const idx = window.toLowerCase().indexOf(name.toLowerCase());
+    if (idx !== -1) {
+      const distance = Math.abs((searchStart + idx) - position);
+      if (!bestMatch || distance < bestMatch.distance) {
+        bestMatch = { name, distance };
+      }
+    }
+  }
+
+  // Check known entity names
+  for (const entity of knownEntities) {
+    if (entity.entityType !== "character") continue;
+    const idx = window.toLowerCase().indexOf(entity.name.toLowerCase());
+    if (idx !== -1) {
+      const distance = Math.abs((searchStart + idx) - position);
+      if (!bestMatch || distance < bestMatch.distance) {
+        bestMatch = { name: entity.name, distance };
+      }
+    }
+  }
+
+  return bestMatch?.name ?? null;
+}

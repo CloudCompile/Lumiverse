@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText, Braces, Globe } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
@@ -9,13 +9,15 @@ import { generateApi } from '@/api/generate'
 import { embeddingsApi } from '@/api/embeddings'
 import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
+import { globalAddonsApi } from '@/api/global-addons'
 import { imagesApi } from '@/api/images'
 import { getPersonaAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
-import type { MessageAttachment, PersonaAddon } from '@/types/api'
+import type { MessageAttachment, PersonaAddon, GlobalAddon, AttachedGlobalAddon } from '@/types/api'
 import AuthorsNotePanel from './AuthorsNotePanel'
 import { databankApi } from '@/api/databank'
+import { resolveMacros } from '@/api/macros'
 import type { AutocompleteResult } from '@/api/databank'
 import styles from './InputArea.module.css'
 import clsx from 'clsx'
@@ -34,6 +36,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const navigate = useNavigate()
   const [text, setText] = useState('')
   const [dryRunning, setDryRunning] = useState(false)
+  const [resolvingMacros, setResolvingMacros] = useState(false)
   const [authorsNoteOpen, setAuthorsNoteOpen] = useState(false)
   const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank'>(null)
   const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank'>(null)
@@ -64,6 +67,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const activePersonaId = useStore((s) => s.activePersonaId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
   const regenFeedback = useStore((s) => s.regenFeedback)
+  const retainCouncilForRegens = useStore((s) => s.councilSettings.toolsSettings.retainResultsForRegens)
   const guidedGenerations = useStore((s) => s.guidedGenerations)
   const quickReplySets = useStore((s) => s.quickReplySets)
   const personas = useStore((s) => s.personas)
@@ -133,16 +137,34 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
   // Track persona add-ons for the active persona
   const [personaAddons, setPersonaAddons] = useState<PersonaAddon[]>([])
-  const hasAddons = personaAddons.length > 0
+  // Track global add-ons attached to the active persona
+  const [attachedGlobalAddons, setAttachedGlobalAddons] = useState<(GlobalAddon & { enabled: boolean })[]>([])
+  const hasAddons = personaAddons.length > 0 || attachedGlobalAddons.length > 0
 
   useEffect(() => {
-    if (!activePersonaId) { setPersonaAddons([]); return }
+    if (!activePersonaId) { setPersonaAddons([]); setAttachedGlobalAddons([]); return }
     personasApi.get(activePersonaId)
-      .then((p) => {
+      .then(async (p) => {
         const raw = p.metadata?.addons
         setPersonaAddons(Array.isArray(raw) ? raw : [])
+        // Resolve attached global addons
+        const refs: AttachedGlobalAddon[] = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons : []
+        if (refs.length > 0) {
+          try {
+            const globalRes = await globalAddonsApi.list({ limit: 200, offset: 0 })
+            const refMap = new Map(refs.map(r => [r.id, r.enabled]))
+            const resolved = globalRes.data
+              .filter(g => refMap.has(g.id))
+              .map(g => ({ ...g, enabled: refMap.get(g.id)! }))
+            setAttachedGlobalAddons(resolved)
+          } catch {
+            setAttachedGlobalAddons([])
+          }
+        } else {
+          setAttachedGlobalAddons([])
+        }
       })
-      .catch(() => setPersonaAddons([]))
+      .catch(() => { setPersonaAddons([]); setAttachedGlobalAddons([]) })
   }, [activePersonaId])
 
   // Listen for persona changes via store to keep addons in sync
@@ -153,6 +175,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
     if (p) {
       const raw = p.metadata?.addons
       setPersonaAddons(Array.isArray(raw) ? raw : [])
+      // Update global addon enabled state from store
+      const refs: AttachedGlobalAddon[] = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons : []
+      setAttachedGlobalAddons(prev => {
+        const refMap = new Map(refs.map(r => [r.id, r.enabled]))
+        return prev
+          .filter(g => refMap.has(g.id))
+          .map(g => ({ ...g, enabled: refMap.get(g.id)! }))
+      })
     }
   }, [storePersonas, activePersonaId])
 
@@ -171,6 +201,23 @@ export default function InputArea({ chatId }: InputAreaProps) {
       toast.error('Failed to toggle add-on')
     }
   }, [activePersonaId, personaAddons])
+
+  const handleToggleGlobalAddon = useCallback(async (globalAddonId: string) => {
+    if (!activePersonaId) return
+    const nextAttached = attachedGlobalAddons.map((a) => a.id === globalAddonId ? { ...a, enabled: !a.enabled } : a)
+    setAttachedGlobalAddons(nextAttached)
+    try {
+      const p = await personasApi.get(activePersonaId)
+      const refs: AttachedGlobalAddon[] = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons : []
+      const nextRefs = refs.map((r) => r.id === globalAddonId ? { ...r, enabled: !r.enabled } : r)
+      const newMeta = { ...(p.metadata || {}), attached_global_addons: nextRefs }
+      const updated = await personasApi.update(activePersonaId, { metadata: newMeta })
+      useStore.getState().updatePersona(activePersonaId, updated)
+    } catch {
+      setAttachedGlobalAddons(attachedGlobalAddons)
+      toast.error('Failed to toggle global add-on')
+    }
+  }, [activePersonaId, attachedGlobalAddons])
 
   // iPhone-specific: match input bar bottom corners to device screen curvature
   const screenCornerRadius = useDeviceFrameRadius()
@@ -615,6 +662,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         persona_id: activePersonaId || undefined,
         preset_id: getActivePresetForGeneration() || undefined,
         generation_type: 'normal',
+        retain_council: retainCouncilForRegens || undefined,
       }
       if (feedback) {
         genOpts.regen_feedback = feedback
@@ -633,7 +681,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setStreamingError(msg)
       toast.error(msg, { title: 'Regeneration Failed' })
     }
-  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, getActivePresetForGeneration, regenFeedback.position, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, getActivePresetForGeneration, regenFeedback.position, retainCouncilForRegens, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleRegenerate = useCallback(() => {
     if (isStreaming) return
@@ -657,6 +705,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         preset_id: getActivePresetForGeneration() || undefined,
+        retain_council: retainCouncilForRegens || undefined,
       })
       if (generationNonceRef.current !== nonce) return
       startStreaming(res.generationId)
@@ -763,6 +812,43 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
   }, [chatId, dryRunning, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, openModal, setStreamingError])
 
+  const handleResolveMacros = useCallback(async () => {
+    if (resolvingMacros || isStreaming) return
+    const template = text.trim()
+    if (!template) {
+      toast.info('Nothing to resolve')
+      return
+    }
+    setResolvingMacros(true)
+    try {
+      const res = await resolveMacros({
+        template: text,
+        chat_id: chatId,
+        character_id: activeCharacterId || undefined,
+        persona_id: activePersonaId || undefined,
+        connection_id: activeProfileId || undefined,
+      })
+      if (res.text === text) {
+        toast.info('No macros found to resolve')
+      } else {
+        setText(res.text)
+        const warns = res.diagnostics.filter((d) => d.level === 'warning' || d.level === 'error')
+        if (warns.length > 0) {
+          toast.warning(`Macros resolved with ${warns.length} warning${warns.length !== 1 ? 's' : ''}`)
+        } else {
+          toast.success('Macros resolved')
+        }
+        requestAnimationFrame(() => textareaRef.current?.focus())
+      }
+    } catch (err: any) {
+      console.error('[InputArea] Macro resolution failed:', err)
+      const msg = err?.body?.error || err?.message || 'Failed to resolve macros'
+      toast.error(msg)
+    } finally {
+      setResolvingMacros(false)
+    }
+  }, [text, chatId, resolvingMacros, isStreaming, activeCharacterId, activePersonaId, activeProfileId])
+
   const handleHashSelect = useCallback((result: { slug: string; name: string }) => {
     const before = text.slice(0, hashStartIndex)
     const afterCursor = text.slice(hashStartIndex + 1 + (hashQuery?.length ?? 0))
@@ -783,6 +869,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
         if (e.key === 'Escape') { e.preventDefault(); setHashQuery(null); setOpenPopover(null); return }
       }
 
+      // Cmd+L (Mac) / Ctrl+L (other) — resolve macros in input
+      if (e.key === 'l' && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey) {
+        e.preventDefault()
+        handleResolveMacros()
+        return
+      }
+
       if (e.key === 'Enter') {
         const queueMod = isMac ? e.metaKey : e.ctrlKey
         if (enterToSend) {
@@ -801,7 +894,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         }
       }
     },
-    [enterToSend, handleSend, handleQueueMessage, openPopover, databankResults, databankActiveIdx, handleHashSelect]
+    [enterToSend, handleSend, handleQueueMessage, handleResolveMacros, openPopover, databankResults, databankActiveIdx, handleHashSelect]
   )
 
   // Send button: cmd+click (mac) / ctrl+click (other) queues, normal click sends
@@ -1270,7 +1363,28 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 >
                   <span className={styles.personaMain}>
                     <Eye size={14} />
-                    <span>Dry Run</span>
+                    <span className={styles.personaNameGroup}>
+                      <span>Dry Run</span>
+                      <span className={styles.personaTitle}>Preview the full prompt sent to the AI without generating</span>
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.popRowBtn}
+                  onClick={() => {
+                    setOpenPopover(null)
+                    handleResolveMacros()
+                  }}
+                  disabled={resolvingMacros}
+                  style={resolvingMacros ? { opacity: 0.5 } : undefined}
+                >
+                  <span className={styles.personaMain}>
+                    <Braces size={14} />
+                    <span className={styles.personaNameGroup}>
+                      <span>Resolve Macros</span>
+                      <span className={styles.personaTitle}>Replace macros in input text ({isMac ? '⌘' : 'Ctrl'}+L)</span>
+                    </span>
                   </span>
                 </button>
               </div>
@@ -1321,22 +1435,48 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
           {renderPopover === 'addons' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              <div className={styles.quickSetName}>Persona Add-Ons</div>
-              {personaAddons.length === 0 && <div className={styles.popEmpty}>No add-ons configured.</div>}
-              {personaAddons.map((addon) => (
-                <button
-                  key={addon.id}
-                  type="button"
-                  className={clsx(styles.popRowBtn, addon.enabled && styles.popRowBtnActive)}
-                  onClick={() => handleToggleAddon(addon.id)}
-                >
-                  <span className={styles.personaMain}>
-                    <IconPlaylistAdd size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-primary)' : undefined }} />
-                    <span>{addon.label || 'Untitled add-on'}</span>
-                  </span>
-                  <span className={styles.popMeta}>{addon.enabled ? 'ON' : 'OFF'}</span>
-                </button>
-              ))}
+              {personaAddons.length > 0 && (
+                <>
+                  <div className={styles.quickSetName}>Persona Add-Ons</div>
+                  {personaAddons.map((addon) => (
+                    <button
+                      key={addon.id}
+                      type="button"
+                      className={clsx(styles.popRowBtn, addon.enabled && styles.popRowBtnActive)}
+                      onClick={() => handleToggleAddon(addon.id)}
+                    >
+                      <span className={styles.personaMain}>
+                        <IconPlaylistAdd size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-primary)' : undefined }} />
+                        <span>{addon.label || 'Untitled add-on'}</span>
+                      </span>
+                      <span className={styles.popMeta}>{addon.enabled ? 'ON' : 'OFF'}</span>
+                    </button>
+                  ))}
+                </>
+              )}
+              {attachedGlobalAddons.length > 0 && (
+                <>
+                  {personaAddons.length > 0 && <div className={styles.popDivider} />}
+                  <div className={styles.quickSetName}>Global Add-Ons</div>
+                  {attachedGlobalAddons.map((addon) => (
+                    <button
+                      key={addon.id}
+                      type="button"
+                      className={clsx(styles.popRowBtn, addon.enabled && styles.popRowBtnActive)}
+                      onClick={() => handleToggleGlobalAddon(addon.id)}
+                    >
+                      <span className={styles.personaMain}>
+                        <Globe size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-info, #42a5f5)' : undefined }} />
+                        <span>{addon.label || 'Untitled global add-on'}</span>
+                      </span>
+                      <span className={styles.popMeta}>{addon.enabled ? 'ON' : 'OFF'}</span>
+                    </button>
+                  ))}
+                </>
+              )}
+              {personaAddons.length === 0 && attachedGlobalAddons.length === 0 && (
+                <div className={styles.popEmpty}>No add-ons configured.</div>
+              )}
             </div>
           )}
 

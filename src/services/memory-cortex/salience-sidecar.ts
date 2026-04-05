@@ -8,7 +8,7 @@
  * This is Tier 2 functionality: opt-in, async, never blocks generation.
  */
 
-import type { SidecarExtractionResult, SidecarFontColor, EmotionalTag, NarrativeFlag, StatusChange, ExtractedEntity, ExtractedRelationship } from "./types";
+import type { SidecarExtractionResult, SidecarFontColor, DiscoveredAlias, EmotionalTag, NarrativeFlag, StatusChange, ExtractedEntity, ExtractedRelationship } from "./types";
 import { scoreChunkHeuristic } from "./salience-heuristic";
 
 // ─── Tool-Based Structured Extraction ──────────────────────────
@@ -58,6 +58,16 @@ Do NOT extract:
 - Meta-references: User, You, AI, Player, Narrator, Character, Assistant, System, Bot, Human, NPC, OOC
 - Pronouns or pronoun-only references — if someone is only called "she" or "he", skip them
 - When uncertain, skip it. Missing an entity is fine; extracting garbage corrupts the database.
+
+## NICKNAME / ALIAS DISCOVERY
+
+Watch for moments where the text reveals that a name is a nickname, alias, or alternate form for a known entity. Common patterns:
+- "Call me X", "People call me X", "Known as X", "Friends call her X"
+- "X — or Y as she preferred", "X, nicknamed Y"
+- Shortened/diminutive forms used interchangeably with a full name in the same passage (e.g., "Mel" used for "Melina", "Liz" for "Elizabeth")
+- Titles or epithets used as names ("The Iron Queen" for "Seraphina")
+
+When you detect a nickname or alias, report it in the discovered_aliases array of the extract_entities tool. Use the CANONICAL name as canonical_name and the nickname as alias. This is critical for preventing duplicate entity records.
 
 ## RELATIONSHIP RULES
 
@@ -127,6 +137,19 @@ const TOOL_ENTITIES: ToolDefinition = {
           required: ["name", "type"],
         },
         description: "Named entities found in the passage.",
+      },
+      discovered_aliases: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            canonical_name: { type: "string", description: "The known/full/primary name of the entity (must match a known entity or be the longer form)." },
+            alias: { type: "string", description: "The nickname, shortened name, title, or alternate form discovered in this passage." },
+            evidence: { type: "string", description: "Brief quote or context showing the alias connection (e.g., 'Call me Mel')." },
+          },
+          required: ["canonical_name", "alias"],
+        },
+        description: "Nicknames, aliases, or alternate names discovered in this passage that refer to known entities. Report when the text reveals X is also known as Y. Empty array if none.",
       },
       status_changes: {
         type: "array",
@@ -246,6 +269,7 @@ export function parseToolCallResults(
   let statusChanges: Array<{ entity: string; change: string; detail: string }> = [];
   let relationships: Array<{ source: string; target: string; type: string; label: string; sentiment: number }> = [];
   let fontColors: SidecarFontColor[] = [];
+  let discoveredAliases: DiscoveredAlias[] = [];
 
   for (const call of toolCalls) {
     const args = call.args as any;
@@ -259,6 +283,7 @@ export function parseToolCallResults(
       case "extract_entities":
         entities = validateEntities(args.entities);
         statusChanges = validateStatusChanges(args.status_changes);
+        discoveredAliases = validateDiscoveredAliases(args.discovered_aliases);
         break;
       case "extract_relationships":
         relationships = validateRelationships(args.relationships);
@@ -275,6 +300,10 @@ export function parseToolCallResults(
     (r) => !ENTITY_BLOCKLIST.has(r.source.toLowerCase().trim()) && !ENTITY_BLOCKLIST.has(r.target.toLowerCase().trim()),
   );
   statusChanges = statusChanges.filter((s) => !ENTITY_BLOCKLIST.has(s.entity.toLowerCase().trim()));
+  // Filter blocklisted names from discovered aliases
+  discoveredAliases = discoveredAliases.filter(
+    (a) => !ENTITY_BLOCKLIST.has(a.canonicalName.toLowerCase().trim()) && !ENTITY_BLOCKLIST.has(a.alias.toLowerCase().trim()),
+  );
 
   return {
     score: Math.max(0, Math.min(1, importance / 10)),
@@ -285,6 +314,7 @@ export function parseToolCallResults(
     entitiesPresent: entities as any[],
     relationshipsShown: relationships as any[],
     fontColors,
+    discoveredAliases,
   };
 }
 
@@ -329,6 +359,16 @@ function resolveAliasesInResult(
     }
   }
 
+  // Also incorporate newly discovered aliases from THIS extraction —
+  // so relationships using a brand-new nickname resolve to the canonical entity
+  // even before the alias is persisted to the database.
+  for (const da of result.discoveredAliases) {
+    const canonicalResolved = aliasMap.get(da.canonicalName.toLowerCase()) || da.canonicalName;
+    if (da.alias && !aliasMap.has(da.alias.toLowerCase())) {
+      aliasMap.set(da.alias.toLowerCase(), canonicalResolved);
+    }
+  }
+
   const resolve = (name: string) => aliasMap.get(name.toLowerCase()) || name;
 
   // Resolve entity names and deduplicate (merge alias variants into canonical form)
@@ -363,12 +403,19 @@ function resolveAliasesInResult(
   const statusChanges = result.statusChanges.map((s) => ({ ...s, entity: resolve(s.entity) }));
   const fontColors = result.fontColors.map((fc) => ({ ...fc, characterName: resolve(fc.characterName) }));
 
+  // Resolve discovered aliases — map canonical names through alias resolution too
+  const discoveredAliases = result.discoveredAliases.map((a) => ({
+    ...a,
+    canonicalName: resolve(a.canonicalName),
+  })).filter((a) => a.canonicalName.toLowerCase() !== a.alias.toLowerCase());
+
   return {
     ...result,
     entitiesPresent: [...seenEntities.values()],
     relationshipsShown: relationships,
     statusChanges,
     fontColors,
+    discoveredAliases,
   };
 }
 
@@ -452,6 +499,7 @@ export async function extractWithSidecar(
       entitiesPresent: fbEntities,
       relationshipsShown: fbRelationships,
       fontColors: validateFontColors(json.color_attributions),
+      discoveredAliases: validateDiscoveredAliases(json.discovered_aliases),
     };
     if (options?.knownEntities?.length) {
       fbResult = resolveAliasesInResult(fbResult, options.knownEntities);
@@ -489,6 +537,7 @@ export async function scoreChunkWithSidecar(
     entitiesPresent: [],
     relationshipsShown: [],
     fontColors: [],
+    discoveredAliases: [],
   };
 }
 
@@ -806,5 +855,25 @@ function validateFontColors(raw: any): SidecarFontColor[] {
       hexColor: c.hex_color.toLowerCase().trim(),
       characterName: c.character_name.trim(),
       usageType: VALID_FONT_USAGE.has(c.usage_type) ? c.usage_type : "narration",
+    }));
+}
+
+function validateDiscoveredAliases(raw: any): DiscoveredAlias[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (a: any) =>
+        a &&
+        typeof a.canonical_name === "string" &&
+        typeof a.alias === "string" &&
+        a.canonical_name.trim().length > 0 &&
+        a.alias.trim().length > 0 &&
+        // Alias must differ from canonical name
+        a.canonical_name.trim().toLowerCase() !== a.alias.trim().toLowerCase(),
+    )
+    .map((a: any) => ({
+      canonicalName: a.canonical_name.trim(),
+      alias: a.alias.trim(),
+      evidence: typeof a.evidence === "string" ? a.evidence.trim() : undefined,
     }));
 }

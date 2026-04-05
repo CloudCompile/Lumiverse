@@ -210,6 +210,12 @@
   }
 }
 
+.popDivider {
+  height: 1px;
+  background: var(--lumiverse-border, rgba(147, 112, 219, 0.12));
+  margin: 4px 0;
+}
+
 .popEmpty {
   font-size: calc(12px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.4));

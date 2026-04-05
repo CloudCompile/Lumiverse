@@ -178,6 +178,10 @@ export interface UISlice {
   badgeCount: number
   incrementBadgeCount: () => void
   resetBadgeCount: () => void
+
+  // Regen feedback text retention
+  lastRegenFeedback: string
+  setLastRegenFeedback: (text: string) => void
 }
 
 // ---- OOC Style Type ----

@@ -310,20 +310,41 @@ export function formatLinkedCortexSection(
   const perSourceBudget = Math.floor(tokenBudget / totalSources);
   const sections: string[] = [];
 
-  // Format vault data
+  // Format vault data (entities/relations + optional source chat memories)
   for (const vault of vaults) {
     const budget = perSourceBudget;
     const header = `[Knowledge from vault "${vault.vaultName}"]`;
     let sectionParts: string[] = [header];
     let remaining = budget - estimateTokens(header);
 
+    const hasMemories = vault.memories && vault.memories.length > 0;
+
     if (mode === "clinical") {
       const entText = formatEntitySnapshotsClinical(vault.entities);
       const relText = formatRelationshipsClinical(vault.relations);
-      const combined = [entText, relText].filter(Boolean).join("\n");
+      const memText = hasMemories ? vault.memories!.map((m) => m.content).join("\n---\n") : "";
+      const combined = [entText, relText, memText].filter(Boolean).join("\n");
       sectionParts.push(combined.slice(0, Math.floor(remaining * 3.8)));
+    } else if (hasMemories) {
+      // With memories: use same proportions as interlink formatting
+      const memBudget = Math.floor(remaining * 0.35);
+      const entBudget = Math.floor(remaining * 0.35);
+      const relBudget = Math.floor(remaining * 0.20);
+      const arcBudget = Math.floor(remaining * 0.10);
+
+      const memSection = formatMemoriesAttributed(vault.memories!, memBudget, options.currentSpeakerName);
+      if (memSection) sectionParts.push(memSection);
+
+      const entSection = formatEntitiesShadow(vault.entities, entBudget);
+      if (entSection) sectionParts.push(entSection);
+
+      const relSection = formatRelationshipsShadow(vault.relations, relBudget);
+      if (relSection) sectionParts.push(relSection);
+
+      const arcSection = formatArcShadow(vault.arcContext ?? null, arcBudget);
+      if (arcSection) sectionParts.push(arcSection);
     } else {
-      // Entity budget: 60%, Relationship budget: 40%
+      // No memories: original entity/relation only proportions
       const entBudget = Math.floor(remaining * 0.6);
       const relBudget = Math.floor(remaining * 0.4);
 

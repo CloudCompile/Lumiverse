@@ -45,6 +45,7 @@ interface GenerateInput {
   target_character_id?: string;
   regen_feedback?: string;
   regen_feedback_position?: "system" | "user";
+  retain_council?: boolean;
 }
 
 /** Lifecycle context passed from startGeneration → runGeneration */
@@ -653,9 +654,9 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         if (inlineTools.length === 0) inlineTools = undefined;
       }
     } else {
-      // Check if we can reuse cached council results for regens/swipes
+      // Check if we can reuse cached council results for regens/swipes/continues
       const shouldRetain = councilSettings.toolsSettings.retainResultsForRegens
-        && (genType === "regenerate" || genType === "swipe");
+        && (genType === "regenerate" || genType === "swipe" || genType === "continue" || input.retain_council);
       const cached = shouldRetain
         ? (chat?.metadata?.last_council_results as CachedCouncilResult | undefined)
         : undefined;

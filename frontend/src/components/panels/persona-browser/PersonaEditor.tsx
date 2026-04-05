@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link } from 'lucide-react'
+import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link, Globe } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { getPersonaAvatarLargeUrl } from '@/lib/avatarUrls'
@@ -243,7 +243,9 @@ export default function PersonaEditor({
   // Character-persona binding
   const activeCharName = activeCharacterId ? characters.find((c) => c.id === activeCharacterId)?.name : null
   const isBoundToActiveChar = activeCharacterId ? characterPersonaBindings[activeCharacterId] === persona.id : false
-  const addonCount = Array.isArray(persona.metadata?.addons) ? persona.metadata.addons.length : 0
+  const personaAddonCount = Array.isArray(persona.metadata?.addons) ? persona.metadata.addons.length : 0
+  const globalAddonCount = Array.isArray(persona.metadata?.attached_global_addons) ? persona.metadata.attached_global_addons.length : 0
+  const addonCount = personaAddonCount + globalAddonCount
 
   const handleToggleCharacterBinding = useCallback(() => {
     if (!activeCharacterId) return
@@ -405,6 +407,15 @@ export default function PersonaEditor({
         >
           <IconPlaylistAdd size={13} />
           <span>Add-Ons{addonCount > 0 ? ` (${addonCount})` : ''}</span>
+        </button>
+        <button
+          type="button"
+          className={styles.toggleBtn}
+          onClick={() => openModal('globalAddonsLibrary')}
+          title="Global add-ons library"
+        >
+          <Globe size={13} />
+          <span>Global Library</span>
         </button>
       </div>
 
