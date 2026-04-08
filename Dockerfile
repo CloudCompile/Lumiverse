@@ -9,7 +9,6 @@
 # Stage 1: Build frontend (Vite + TypeScript)
 # ---------------------------------------------------------------------------
 FROM oven/bun:1-slim AS frontend-build
-
 WORKDIR /app/frontend
 
 # Install dependencies first (cache layer)
@@ -34,6 +33,12 @@ RUN bun install --production --frozen-lockfile 2>/dev/null || bun install --prod
 # Stage 3: Runtime
 # ---------------------------------------------------------------------------
 FROM oven/bun:1-slim
+RUN apt-get update \
+    && apt-get install --no-install-recommends --no-install-suggests -y git \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+
 
 LABEL org.opencontainers.image.title="Lumiverse"
 LABEL org.opencontainers.image.description="AI chat application server"
