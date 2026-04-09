@@ -3,7 +3,7 @@ import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
 
 export class PollinationsProvider extends OpenAICompatibleProvider {
   readonly name = "pollinations";
-  readonly displayName = "Pollinations";
+  readonly displayName = "Pollinations (Gen)";
   readonly defaultUrl = "https://gen.pollinations.ai/v1";
 
   readonly capabilities: ProviderCapabilities = {
