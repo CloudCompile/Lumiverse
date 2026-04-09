@@ -1,12 +1,13 @@
 /**
- * Two responsibilities:
+ * Two responsibilities, both opt-in via `characterAware: true` on the theme:
  *
- * 1. **Character name colors** (always active): Extracts a palette from the active
- *    character's avatar and sets `--char-name-dark` / `--char-name-light` on the root.
- *    These are vibrant, theme-mode-aware name colors used in chat messages.
+ * 1. **Character name colors**: Extracts a palette from the active character's
+ *    avatar and sets `--char-name-dark` / `--char-name-light` on the root.
+ *    Without characterAware (or with extension overrides), these are removed
+ *    so CSS falls back to `--lumiverse-primary-text` (white/black per mode).
  *
- * 2. **Character-aware theme overlay** (opt-in via `characterAware: true`): Merges
- *    accent + base colors derived from the avatar onto the current theme.
+ * 2. **Character-aware theme overlay**: Merges accent + base colors derived
+ *    from the avatar onto the current theme.
  */
 
 import { useEffect, useRef } from 'react'
@@ -47,14 +48,14 @@ export function useCharacterTheme() {
   const appliedAvatarKeyRef = useRef<string | null>(null)
   const nameAppliedAvatarKeyRef = useRef<string | null>(null)
 
-  // ── 1. Character name colors (always active, unless extension overrides) ──
+  // ── 1. Character name colors (opt-in via characterAware) ──
   useEffect(() => {
     const root = document.documentElement
 
-    // When extension theme overrides are active, remove character-derived name
-    // colors so the CSS fallback (--lumiverse-primary-text) applies instead —
-    // that variable IS controlled by the extension's theme.
-    if (hasExtensionOverrides || !activeCharacterId || !avatarUrl || !avatarCacheKey) {
+    // Only derive name colors when characterAware is enabled and no extension
+    // overrides are active. Otherwise the CSS fallback (--lumiverse-primary-text)
+    // applies — white in dark mode, black in light mode.
+    if (!characterAware || hasExtensionOverrides || !activeCharacterId || !avatarUrl || !avatarCacheKey) {
       NAME_VAR_KEYS.forEach((k) => root.style.removeProperty(k))
       nameAppliedAvatarKeyRef.current = null
       return
@@ -86,7 +87,7 @@ export function useCharacterTheme() {
 
     apply()
     return () => { cancelled = true }
-  }, [hasExtensionOverrides, activeCharacterId, avatarUrl, avatarCacheKey])
+  }, [characterAware, hasExtensionOverrides, activeCharacterId, avatarUrl, avatarCacheKey])
 
   // ── 2. Character-aware theme overlay (opt-in) ──
   // Suppressed when extension theme overrides are active — extensions take full
