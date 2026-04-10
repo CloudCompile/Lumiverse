@@ -657,6 +657,47 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
   return updated;
 }
 
+export function bulkDeleteMessages(userId: string, chatId: string, messageIds: string[]): number {
+  const chat = getChat(userId, chatId);
+  if (!chat) throw new Error("Chat not found");
+
+  if (messageIds.length > 500) throw new Error("Maximum 500 messages per batch");
+
+  const db = getDb();
+  const getStmt = db.query("SELECT id FROM messages WHERE id = ? AND chat_id = ?");
+  const deleteStmt = db.query("DELETE FROM messages WHERE id = ?");
+
+  let deleted = 0;
+  const deletedIds: string[] = [];
+
+  const transaction = db.transaction(() => {
+    for (const msgId of messageIds) {
+      const row = getStmt.get(msgId, chatId) as any;
+      if (!row) continue;
+
+      deleteStmt.run(msgId);
+      deleted++;
+      deletedIds.push(msgId);
+    }
+  });
+
+  transaction();
+
+  for (const msgId of deletedIds) {
+    eventBus.emit(EventType.MESSAGE_DELETED, { chatId, messageId: msgId }, userId);
+  }
+
+  if (deleted > 0) {
+    invalidateChatMemoryCache(chatId);
+
+    rebuildChatChunks(userId, chatId).catch(err => {
+      console.warn("[chats] Failed to rebuild chunks after bulk delete:", err);
+    });
+  }
+
+  return deleted;
+}
+
 export function deleteMessage(userId: string, id: string): boolean {
   const msg = getMessage(userId, id);
   if (!msg) return false;

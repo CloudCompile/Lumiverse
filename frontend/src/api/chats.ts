@@ -123,4 +123,11 @@ export const messagesApi = {
       { message_ids: messageIds, hidden }
     )
   },
+
+  bulkDelete(chatId: string, messageIds: string[]) {
+    return post<{ success: true; deleted: number }>(
+      `/chats/${chatId}/messages/bulk-delete`,
+      { message_ids: messageIds }
+    )
+  },
 }
