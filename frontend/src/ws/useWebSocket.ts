@@ -272,14 +272,20 @@ export function useWebSocket() {
             })
           }
         }
-        // Transition chat head to terminal state (it auto-dismisses after a delay)
+        // Transition chat head to terminal state (it auto-dismisses after a delay).
+        // If the user is currently viewing this chat, dismiss & acknowledge instead —
+        // otherwise the persisted 'completed' head would spawn the moment they navigate away.
         if (payload.chatId && payload.generationId) {
-          state.updateChatHead(payload.generationId, {
-            status: payload.error ? 'error' : 'completed',
-          })
-          // Ping when a backgrounded chat finishes successfully
-          if (!payload.error && payload.chatId !== state.activeChatId) {
-            playNotificationPing()
+          if (payload.chatId === state.activeChatId) {
+            state.removeChatHead(payload.chatId)
+          } else {
+            state.updateChatHead(payload.generationId, {
+              status: payload.error ? 'error' : 'completed',
+            })
+            // Ping when a backgrounded chat finishes successfully
+            if (!payload.error) {
+              playNotificationPing()
+            }
           }
         }
       }),
@@ -317,9 +323,15 @@ export function useWebSocket() {
         } else {
           state.stopStreaming()
         }
-        // Transition chat head to stopped state (auto-dismisses after a delay)
+        // Transition chat head to stopped state (auto-dismisses after a delay).
+        // If the user is viewing this chat, dismiss & acknowledge instead so it
+        // doesn't reappear when they navigate away.
         if (payload.chatId && payload.generationId) {
-          state.updateChatHead(payload.generationId, { status: 'stopped' })
+          if (payload.chatId === state.activeChatId) {
+            state.removeChatHead(payload.chatId)
+          } else {
+            state.updateChatHead(payload.generationId, { status: 'stopped' })
+          }
         }
       }),
 
