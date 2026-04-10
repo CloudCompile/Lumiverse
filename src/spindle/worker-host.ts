@@ -2664,11 +2664,17 @@ export class WorkerHost {
             ? (extra.spindle_metadata as Record<string, unknown>)
             : undefined;
 
+        const swipes = Array.isArray(m.swipes) ? m.swipes.slice() : [];
+        const swipeId =
+          typeof m.swipe_id === "number" && Number.isFinite(m.swipe_id) ? m.swipe_id : 0;
+
         return {
           id: m.id,
           role,
           content: m.content,
           metadata,
+          swipe_id: swipeId,
+          swipes,
         };
       });
 

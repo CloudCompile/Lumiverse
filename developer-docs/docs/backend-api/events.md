@@ -21,7 +21,7 @@ unsub()
 | `MESSAGE_SENT` | `{ chatId, message }` |
 | `MESSAGE_EDITED` | `{ chatId, message }` |
 | `MESSAGE_DELETED` | `{ chatId, messageId }` |
-| `MESSAGE_SWIPED` | `{ chatId, messageId, swipeId }` |
+| `MESSAGE_SWIPED` | `{ chatId, message }` — `message.id` is the message ID, `message.swipe_id` is the active swipe index, `message.swipes[]` holds every variant |
 | `CHAT_CHANGED` | `{ chatId }` |
 | `CHARACTER_MESSAGE_RENDERED` | `{ chatId, messageId }` |
 | `USER_MESSAGE_RENDERED` | `{ chatId, messageId }` |
