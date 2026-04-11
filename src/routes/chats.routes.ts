@@ -103,6 +103,35 @@ app.put("/:id", async (c) => {
   return c.json(updated);
 });
 
+/**
+ * Atomic partial metadata merge. Re-reads the latest chat row inside the
+ * service so concurrent writers (post-generation expression detection,
+ * council caching, deferred WI/chat var persistence, etc.) cannot clobber
+ * the keys the caller is updating. Pass `null` for a key to delete it.
+ *
+ * Used by chat-scoped UI controls (alternate field selector, world book
+ * attachments, author's note) that previously did GET-then-PUT and lost
+ * concurrent edits.
+ */
+app.patch("/:id/metadata", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("id");
+  const chat = svc.getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json();
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "Body must be an object of metadata keys" }, 400);
+  }
+  // Translate `null` sentinels to `undefined` so mergeChatMetadata deletes them.
+  const partial: Record<string, any> = {};
+  for (const [key, value] of Object.entries(body)) {
+    partial[key] = value === null ? undefined : value;
+  }
+  const updated = svc.mergeChatMetadata(userId, chatId, partial);
+  if (!updated) return c.json({ error: "Not found" }, 404);
+  return c.json(updated);
+});
+
 app.delete("/:id", (c) => {
   const userId = c.get("userId");
   const deleted = svc.deleteChat(userId, c.req.param("id"));

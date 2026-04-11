@@ -125,11 +125,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
     else delete newSelections[field]
     setAltFieldSelections(newSelections)
     try {
-      const chat = await chatsApi.get(chatId, { messages: false })
-      const metadata = { ...(chat.metadata || {}) }
-      if (Object.keys(newSelections).length > 0) metadata.alternate_field_selections = newSelections
-      else delete metadata.alternate_field_selections
-      await chatsApi.update(chatId, { metadata })
+      // Atomic merge — server re-reads the latest chat row so background
+      // writers (post-generation expression detection, council caching,
+      // deferred WI/chat var persistence) cannot clobber this selection.
+      // Send `null` to delete the key when no fields are selected.
+      await chatsApi.patchMetadata(chatId, {
+        alternate_field_selections: Object.keys(newSelections).length > 0 ? newSelections : null,
+      })
     } catch (err) {
       console.error('[AltFields] Failed to save:', err)
     }
@@ -1008,17 +1010,36 @@ export default function InputArea({ chatId }: InputAreaProps) {
               <UserCircle size={14} />
               {sendPersonaId && <span className={styles.badge}>1</span>}
             </button>
-            {hasAltFields && (
-              <button
-                type="button"
-                className={clsx(styles.actionBtn, openPopover === 'altFields' && styles.actionBtnActive)}
-                onClick={() => setOpenPopover((p) => (p === 'altFields' ? null : 'altFields'))}
-                title="Alternate fields"
-              >
-                <Layers size={14} />
-                {Object.keys(altFieldSelections).length > 0 && <span className={styles.badge}>{Object.keys(altFieldSelections).length}</span>}
-              </button>
-            )}
+            {hasAltFields && (() => {
+              const selectionCount = Object.keys(altFieldSelections).length
+              const hasSelection = selectionCount > 0
+              // Build a descriptive title so the user can confirm what's bound
+              // to this chat without opening the popover.
+              const titleParts: string[] = []
+              for (const [field, variantId] of Object.entries(altFieldSelections)) {
+                const variant = altFieldsData[field]?.find((v) => v.id === variantId)
+                if (variant) titleParts.push(`${field}: ${variant.label}`)
+              }
+              const title = hasSelection
+                ? `Alternate fields — ${titleParts.join(', ')}`
+                : 'Alternate fields'
+              return (
+                <button
+                  type="button"
+                  className={clsx(
+                    styles.actionBtn,
+                    openPopover === 'altFields' && styles.actionBtnActive,
+                    hasSelection && styles.actionBtnHasSelection,
+                  )}
+                  onClick={() => setOpenPopover((p) => (p === 'altFields' ? null : 'altFields'))}
+                  title={title}
+                  aria-label={title}
+                >
+                  <Layers size={14} />
+                  {hasSelection && <span className={styles.badge}>{selectionCount}</span>}
+                </button>
+              )
+            })()}
             {hasAddons && (
               <button
                 type="button"
@@ -1399,9 +1420,35 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 const variants = altFieldsData[field]
                 if (!Array.isArray(variants) || variants.length === 0) return null
                 const selectedId = altFieldSelections[field] || ''
+                const isOverridden = !!selectedId
                 return (
-                  <div key={field} className={styles.popRowBtn} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'default' }}>
-                    <span style={{ textTransform: 'capitalize' }}>{field}</span>
+                  <div
+                    key={field}
+                    className={styles.popRowBtn}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      cursor: 'default',
+                      // Subtle accent border on rows that have an active override
+                      // so the user sees at a glance which fields are bound.
+                      borderLeft: isOverridden
+                        ? '2px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
+                        : '2px solid transparent',
+                      paddingLeft: isOverridden ? 6 : 8,
+                    }}
+                  >
+                    <span
+                      style={{
+                        textTransform: 'capitalize',
+                        color: isOverridden
+                          ? 'var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
+                          : undefined,
+                        fontWeight: isOverridden ? 600 : undefined,
+                      }}
+                    >
+                      {field}
+                    </span>
                     <select
                       style={{
                         marginLeft: 8,
@@ -1410,7 +1457,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
                         padding: '3px 6px',
                         fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))',
                         background: 'var(--lumiverse-fill-hover)',
-                        border: '1px solid var(--lumiverse-border)',
+                        border: isOverridden
+                          ? '1px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.6))'
+                          : '1px solid var(--lumiverse-border)',
                         borderRadius: 6,
                         color: 'var(--lumiverse-text)',
                         outline: 'none',

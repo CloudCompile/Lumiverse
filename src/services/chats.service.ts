@@ -284,6 +284,37 @@ export function updateChat(userId: string, id: string, input: UpdateChatInput): 
   return updated;
 }
 
+/**
+ * Atomically merge a partial metadata object into a chat's existing metadata.
+ *
+ * Background writers (post-generation expression detection, council result
+ * caching, deferred WI/chat-var persistence, etc.) used to read `chat.metadata`
+ * at the start of an operation and write it back later as a full replace via
+ * `updateChat({ metadata })`. Any user-driven metadata changes that landed
+ * mid-operation (alternate field selections, world book attachments, author's
+ * notes) were silently clobbered.
+ *
+ * This helper re-reads the current chat row inside the same call so the merge
+ * always sees the latest metadata. Callers only need to specify the keys they
+ * actually want to change.
+ *
+ * Pass `undefined` for a key to delete it from metadata.
+ */
+export function mergeChatMetadata(
+  userId: string,
+  id: string,
+  partial: Record<string, any>,
+): Chat | null {
+  const existing = getChat(userId, id);
+  if (!existing) return null;
+  const merged: Record<string, any> = { ...(existing.metadata || {}) };
+  for (const [key, value] of Object.entries(partial)) {
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
+  return updateChat(userId, id, { metadata: merged });
+}
+
 // ---- Group chat muting ----
 
 export function getGroupMutedIds(chat: Chat): string[] {

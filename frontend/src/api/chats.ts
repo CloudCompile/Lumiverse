@@ -1,4 +1,4 @@
-import { get, post, put, del } from './client'
+import { get, post, put, patch, del } from './client'
 import type {
   Chat, CreateChatInput, CreateGroupChatInput, RecentChat, Message,
   CreateMessageInput, UpdateMessageInput, PaginatedResult,
@@ -32,6 +32,16 @@ export const chatsApi = {
 
   update(id: string, input: Partial<{ name: string; metadata: Record<string, any> }>) {
     return put<Chat>(`/chats/${id}`, input)
+  },
+
+  /**
+   * Atomic partial merge of chat metadata. Use this for chat-scoped UI
+   * controls (alternate field selector, world book attachments, author's
+   * note, etc.) so concurrent server-side writers can't clobber the keys
+   * the user just changed. Pass `null` for a key to delete it.
+   */
+  patchMetadata(id: string, partial: Record<string, any>) {
+    return patch<Chat>(`/chats/${id}/metadata`, partial)
   },
 
   delete(id: string) {

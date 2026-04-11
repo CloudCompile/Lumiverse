@@ -120,6 +120,20 @@
   background: var(--lumiverse-fill, rgba(255, 255, 255, 0.08));
 }
 
+/* Persistent state indicator for buttons whose feature is "armed" — e.g.
+ * an alternate-field selection is bound to the current chat. Distinct from
+ * .actionBtnActive (which only highlights while the popover is open) so the
+ * user can see at a glance that the chat has an active override even when
+ * no popover is open. */
+.actionBtnHasSelection {
+  color: var(--lumiverse-primary, rgba(140, 130, 255, 0.95));
+  background: color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 12%, transparent);
+}
+
+.actionBtnHasSelection:hover {
+  background: color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 18%, transparent);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

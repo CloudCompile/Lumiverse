@@ -130,6 +130,21 @@ export function registerCoreMacros(): void {
       }
       let conditionStr = (await ctx.resolveNodes(conditionNodes)).trim();
 
+      // Iteratively re-resolve the condition string. A single resolve pass only
+      // walks the AST one level deep — if the resolved value itself contains
+      // macro markers (e.g. a character description that embeds {{user}} or
+      // {{char}}), those need additional passes to resolve. This mirrors the
+      // top-level evaluate() loop. Stops when nothing changes (genuinely
+      // unresolvable, e.g. an unknown macro reconstructed as {{name}}) or when
+      // no markers remain.
+      const MAX_CONDITION_PASSES = 5;
+      for (let i = 0; i < MAX_CONDITION_PASSES; i++) {
+        if (!conditionStr.includes("{{")) break;
+        const next = (await ctx.resolve(conditionStr)).trim();
+        if (next === conditionStr) break;
+        conditionStr = next;
+      }
+
       // Handle ! prefix negation (ST compat: {{if !condition}})
       let negate = false;
       if (conditionStr.startsWith("!")) {

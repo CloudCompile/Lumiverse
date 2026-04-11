@@ -177,7 +177,7 @@ interface PromptPipelineResult {
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
   worldInfoStats?: DryRunResult["worldInfoStats"];
   memoryStats?: import("../llm/types").MemoryStats;
-  deferredWiState?: { chatId: string; metadata: any };
+  deferredWiState?: { chatId: string; partial: Record<string, any> };
   spindleContext: SpindleContext;
   /** True if the {{lumiaCouncilDeliberation}} macro was resolved during assembly. */
   deliberationHandledByMacro?: boolean;
@@ -318,7 +318,7 @@ async function runPromptPipeline(opts: {
   let activatedWorldInfo: ActivatedWorldInfoEntry[] | undefined;
   let worldInfoStats: DryRunResult["worldInfoStats"] | undefined;
   let memoryStats: import("../llm/types").MemoryStats | undefined;
-  let deferredWiState: { chatId: string; metadata: any } | undefined;
+  let deferredWiState: { chatId: string; partial: Record<string, any> } | undefined;
   let macroEnv: import("../macros/types").MacroEnv | undefined;
 
   let deliberationHandledByMacro = false;
@@ -882,9 +882,11 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         cachedAt: Date.now(),
       };
       try {
-        const currentMeta = chat?.metadata ?? {};
-        chatsSvc.updateChat(input.userId, input.chat_id, {
-          metadata: { ...currentMeta, last_council_results: cachedResult },
+        // Atomic merge so we don't clobber concurrent user edits to chat
+        // metadata (alternate field selections, world book attachments, etc.)
+        // that landed while the council was running.
+        chatsSvc.mergeChatMetadata(input.userId, input.chat_id, {
+          last_council_results: cachedResult,
         });
       } catch (err) {
         console.warn("[council] Failed to cache results to chat metadata:", err);
@@ -917,25 +919,21 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   let { messages } = pipeline;
   const { parameters: mergedParams, breakdown, activatedWorldInfo, deliberationHandledByMacro } = pipeline;
 
-  // Persist deferred WI state and dirty chat variables after assembly
+  // Persist deferred WI state and dirty chat variables after assembly.
+  // Both go through mergeChatMetadata so that any user-driven metadata edits
+  // (alternate field selections, world book attachments, etc.) that landed
+  // during generation survive these background writes.
   {
-    let deferredMetadata = pipeline.deferredWiState?.metadata;
+    const partial: Record<string, any> = { ...(pipeline.deferredWiState?.partial ?? {}) };
     if (pipeline.macroEnv?._chatVarsDirty) {
-      if (deferredMetadata) {
-        // Merge chat variables into the same metadata snapshot (single DB write)
-        deferredMetadata = { ...deferredMetadata, chat_variables: Object.fromEntries(pipeline.macroEnv.variables.chat) };
-      } else {
-        // No WI state to persist — build metadata from current chat
-        const chat = chatsSvc.getChat(input.userId, input.chat_id);
-        if (chat) {
-          deferredMetadata = { ...chat.metadata, chat_variables: Object.fromEntries(pipeline.macroEnv.variables.chat) };
-        }
-      }
+      partial.chat_variables = Object.fromEntries(pipeline.macroEnv.variables.chat);
     }
-    if (deferredMetadata) {
-      chatsSvc.updateChat(input.userId, pipeline.deferredWiState?.chatId ?? input.chat_id, {
-        metadata: deferredMetadata,
-      });
+    if (Object.keys(partial).length > 0) {
+      chatsSvc.mergeChatMetadata(
+        input.userId,
+        pipeline.deferredWiState?.chatId ?? input.chat_id,
+        partial,
+      );
     }
   }
 
@@ -1600,19 +1598,24 @@ function emitExpressionChanged(
   imageId: string
 ): void {
   const isGroup = chat.metadata?.group === true;
-  const metaUpdate: Record<string, any> = { ...chat.metadata };
+
+  // Build only the keys this writer owns. The merge helper re-reads current
+  // chat metadata so any user-driven changes that landed during generation
+  // (alternate field selections, world books, etc.) are preserved.
+  const partial: Record<string, any> = { active_expression: label };
 
   if (isGroup) {
-    // Persist per-character expression map for group chats
-    const groupExpressions: Record<string, { label: string; imageId: string }> =
-      metaUpdate.group_expressions ? { ...metaUpdate.group_expressions } : {};
-    groupExpressions[characterId] = { label, imageId };
-    metaUpdate.group_expressions = groupExpressions;
+    // Re-read current group_expressions so we don't drop entries written by
+    // concurrent expression detections for other group members.
+    const latest = chatsSvc.getChat(userId, chatId);
+    const existingGroup = (latest?.metadata?.group_expressions ?? {}) as Record<
+      string,
+      { label: string; imageId: string }
+    >;
+    partial.group_expressions = { ...existingGroup, [characterId]: { label, imageId } };
   }
-  // Always persist the latest expression as active_expression (for single chats / backward compat)
-  metaUpdate.active_expression = label;
 
-  chatsSvc.updateChat(userId, chatId, { metadata: metaUpdate });
+  chatsSvc.mergeChatMetadata(userId, chatId, partial);
   // Emit to frontend
   eventBus.emit(EventType.EXPRESSION_CHANGED, {
     chatId,

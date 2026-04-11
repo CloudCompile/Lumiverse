@@ -439,9 +439,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   };
 
   // ---- Defer WI state persistence to after generation ----
+  // Only carry the keys this writer owns. The post-generation save uses
+  // mergeChatMetadata so any user-driven changes (alt field selections, world
+  // book attachments, author's notes) that landed during generation survive.
   const deferredWiState = {
     chatId: chat.id,
-    metadata: { ...chat.metadata, wi_state: wiResult.wiState },
+    partial: { wi_state: wiResult.wiState } as Record<string, any>,
   };
 
   // ---- Macro engine ----

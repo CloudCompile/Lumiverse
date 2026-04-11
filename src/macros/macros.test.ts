@@ -1054,4 +1054,22 @@ describe("Edge cases", () => {
   test("if with unresolved macro selects else branch", async () => {
     expect(await ev("{{if::{{thisMacroDoesNotExist}}}}True{{else}}False{{/if}}")).toBe("False");
   });
+
+  test("if with description containing {{user}}/{{char}} resolves recursively", async () => {
+    const env = makeEnv();
+    env.character.description = "A friend of {{user}} who travels with {{char}}";
+    expect(await ev("{{if::{{description}}}}has-desc{{else}}empty{{/if}}", env)).toBe("has-desc");
+  });
+
+  test("if with empty description (containing only macros that resolve to empty) is falsy", async () => {
+    const env = makeEnv();
+    env.character.description = "";
+    expect(await ev("{{if::{{description}}}}has-desc{{else}}empty{{/if}}", env)).toBe("empty");
+  });
+
+  test("if with description compared to literal works through nested macros", async () => {
+    const env = makeEnv();
+    env.character.description = "Friend of {{user}}";
+    expect(await ev("{{if::{{description}} == Friend of Alice}}match{{else}}nomatch{{/if}}", env)).toBe("match");
+  });
 });

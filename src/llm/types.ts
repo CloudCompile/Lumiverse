@@ -224,8 +224,10 @@ export interface AssemblyResult {
   };
   /** Statistics from long-term memory retrieval. */
   memoryStats?: MemoryStats;
-  /** Deferred WI state to persist after generation completes. */
-  deferredWiState?: { chatId: string; metadata: Record<string, any> };
+  /** Deferred WI state to persist after generation completes. Only the keys
+   *  this writer owns; merged via mergeChatMetadata so concurrent user edits
+   *  to chat metadata are not clobbered. */
+  deferredWiState?: { chatId: string; partial: Record<string, any> };
   /** True if the {{lumiaCouncilDeliberation}} macro was resolved during assembly. */
   deliberationHandledByMacro?: boolean;
   /** The macro environment built during assembly — used downstream for regex script macro substitution. */

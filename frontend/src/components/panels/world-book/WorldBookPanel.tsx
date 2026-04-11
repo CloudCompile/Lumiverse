@@ -429,17 +429,17 @@ export default function WorldBookPanel() {
       ? chatWorldBookIds.filter((x) => x !== id)
       : [...chatWorldBookIds, id]
     setChatWorldBookIds(next)
-    const meta = { ...chatMetadata, chat_world_book_ids: next }
-    setChatMetadata(meta)
-    if (activeChatId) chatsApi.update(activeChatId, { metadata: meta }).catch(() => {})
+    setChatMetadata((prev) => ({ ...prev, chat_world_book_ids: next }))
+    // Atomic partial merge so concurrent server-side writers (post-generation
+    // expression detection, council caching, etc.) can't clobber this change.
+    if (activeChatId) chatsApi.patchMetadata(activeChatId, { chat_world_book_ids: next }).catch(() => {})
   }
 
   const removeChatBook = (id: string) => {
     const next = chatWorldBookIds.filter((x) => x !== id)
     setChatWorldBookIds(next)
-    const meta = { ...chatMetadata, chat_world_book_ids: next }
-    setChatMetadata(meta)
-    if (activeChatId) chatsApi.update(activeChatId, { metadata: meta }).catch(() => {})
+    setChatMetadata((prev) => ({ ...prev, chat_world_book_ids: next }))
+    if (activeChatId) chatsApi.patchMetadata(activeChatId, { chat_world_book_ids: next }).catch(() => {})
   }
 
   const activeChatBooks = books.filter((b) => chatWorldBookIds.includes(b.id))
