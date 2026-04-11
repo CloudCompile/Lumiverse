@@ -123,6 +123,19 @@ select:focus-visible,
   color: var(--lumiverse-text);
 }
 
+/* Avatar placeholder initials should never be text-selectable.
+   Prevents iOS Safari from showing the Copy/Look Up text-selection
+   bubble on chathead/avatar fallback letters. CSS Modules transform
+   `avatarFallback` → `_avatarFallback_<hash>_<line>`, so the substring
+   attribute selector with `i` (case-insensitive) catches every variant
+   like avatarFallback, charAvatarFallback, dotAvatarFallback,
+   memberAvatarFallback, etc. */
+[class*="avatarFallback" i],
+[class*="thumbFallback" i] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* Syntax highlighter classes */
 .lce-hl-macro { color: #c084fc; }
 .lce-hl-dialog { color: #c084fc; font-weight: 600; }
