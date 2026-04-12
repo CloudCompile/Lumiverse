@@ -162,13 +162,16 @@ export function resolveCanonicalId(
     .get(chatId, nameOrId) as { id: string } | null;
   if (byName) return byName.id;
 
-  // 3. Alias lookup — scan active entities, cap at 500
-  const candidates = db
-    .query("SELECT id, aliases FROM memory_entities WHERE chat_id = ? ORDER BY mention_count DESC LIMIT 500")
-    .all(chatId) as Array<{ id: string; aliases: string }>;
+  // 3+4. Combined alias lookup and normalized fuzzy match.
+  // Single query fetches all fields needed for both alias and fuzzy resolution,
+  // replacing the two separate LIMIT 500 queries that previously ran sequentially.
+  const allEntities = db
+    .query("SELECT id, name, aliases, entity_type FROM memory_entities WHERE chat_id = ? ORDER BY mention_count DESC LIMIT 500")
+    .all(chatId) as Array<{ id: string; name: string; aliases: string; entity_type: string }>;
 
+  // 3. Exact alias match (case-insensitive)
   const lowerName = nameOrId.toLowerCase();
-  for (const row of candidates) {
+  for (const row of allEntities) {
     const aliases = safeJsonArray(row.aliases);
     if (aliases.some((a) => a.toLowerCase() === lowerName)) {
       return row.id;
@@ -178,10 +181,6 @@ export function resolveCanonicalId(
   // 4. Normalized fuzzy match — strip titles, check both incoming and stored names
   const normalized = normalizeEntityName(nameOrId);
   if (normalized.length < 2) return null;
-
-  const allEntities = db
-    .query("SELECT id, name, aliases, entity_type FROM memory_entities WHERE chat_id = ? ORDER BY mention_count DESC LIMIT 500")
-    .all(chatId) as Array<{ id: string; name: string; aliases: string; entity_type: string }>;
 
   for (const row of allEntities) {
     // Check if normalized stored name matches
@@ -1153,10 +1152,12 @@ export function getAllRelationsUnfiltered(chatId: string): MemoryRelation[] {
   return rows.map(rowToRelation);
 }
 
-/** Get relations involving specific entity IDs (excludes superseded, suspect, merged) */
-export function getRelationsForEntities(chatId: string, entityIds: string[]): MemoryRelation[] {
+/** Get relations involving specific entity IDs (excludes superseded, suspect, merged).
+ *  Pass `limit` to cap the result set — callers typically only need the top N by salience/strength. */
+export function getRelationsForEntities(chatId: string, entityIds: string[], limit?: number): MemoryRelation[] {
   if (entityIds.length === 0) return [];
   const placeholders = entityIds.map(() => "?").join(",");
+  const limitClause = limit != null ? ` LIMIT ${Math.max(1, limit)}` : "";
   const rows = getDb()
     .query(
       `SELECT * FROM memory_relations
@@ -1164,7 +1165,7 @@ export function getRelationsForEntities(chatId: string, entityIds: string[]): Me
          AND superseded_by IS NULL AND merged_into IS NULL
          AND contradiction_flag != 'suspect'
          AND (source_entity_id IN (${placeholders}) OR target_entity_id IN (${placeholders}))
-       ORDER BY edge_salience DESC, strength DESC`,
+       ORDER BY edge_salience DESC, strength DESC${limitClause}`,
     )
     .all(chatId, ...entityIds, ...entityIds) as MemoryRelationRow[];
   return rows.map(rowToRelation);

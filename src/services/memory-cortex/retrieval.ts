@@ -15,6 +15,7 @@
 import { getDb } from "../../db/connection";
 import * as embeddingsSvc from "../embeddings.service";
 import * as entityContext from "./entity-context";
+import * as entityGraph from "./entity-graph";
 import * as consolidation from "./consolidation";
 import type {
   CortexQuery,
@@ -40,6 +41,7 @@ import type { MemoryCortexConfig } from "./config";
 export async function queryCortex(
   query: CortexQuery,
   config: MemoryCortexConfig,
+  signal?: AbortSignal,
 ): Promise<CortexResult> {
   const startTime = Date.now();
   const db = getDb();
@@ -85,6 +87,10 @@ export async function queryCortex(
   // 1c. Load salience data for all candidates
   const salienceMap = loadSalienceMap(db, query.chatId, candidateChunkIds);
 
+  // Early abort: if the caller (timeout wrapper) already fired, bail out
+  // before the expensive vector search + embedding API call.
+  if (signal?.aborted) return emptyResult(startTime);
+
   // ────────────────────────────────────────────
   // PHASE 2: LanceDB Vector Search
   // ────────────────────────────────────────────
@@ -113,6 +119,9 @@ export async function queryCortex(
   if (vectorResults.length === 0) {
     return emptyResult(startTime);
   }
+
+  // Abort check before the CPU-intensive score fusion and diversity selection.
+  if (signal?.aborted) return emptyResult(startTime);
 
   // ────────────────────────────────────────────
   // PHASE 3: Score Fusion
@@ -237,11 +246,24 @@ export async function queryCortex(
   let activeRelationships: RelationEdge[] = [];
   let arcCtx: string | null = null;
 
+  // Load relations once and pass to both snapshot assembly and edge extraction
+  // to avoid the duplicate unbounded query that previously ran twice.
+  const needsRelations = activeEntityIds.length > 0 &&
+    (config.retrieval.entityContextInjection || config.retrieval.relationshipInjection);
+  const relationsLimit = Math.max(
+    config.retrieval.maxEntitySnapshots * 5,
+    config.retrieval.maxRelationships,
+  );
+  const preloadedRelations = needsRelations
+    ? entityGraph.getRelationsForEntities(query.chatId, activeEntityIds, relationsLimit)
+    : [];
+
   if (config.retrieval.entityContextInjection && activeEntityIds.length > 0) {
     entitySnapshots = entityContext.assembleEntitySnapshots(
       query.chatId,
       activeEntityIds,
       config.retrieval.maxEntitySnapshots,
+      preloadedRelations,
     );
   }
 
@@ -250,6 +272,7 @@ export async function queryCortex(
       query.chatId,
       activeEntityIds,
       config.retrieval.maxRelationships,
+      preloadedRelations,
     );
   }
 
@@ -519,8 +542,17 @@ function batchUpdateRetrievalStats(db: any, chunkIds: string[]): void {
   const stmt = db.query(
     "UPDATE chat_chunks SET retrieval_count = COALESCE(retrieval_count, 0) + 1, last_retrieved_at = ? WHERE id = ?",
   );
-  for (const id of chunkIds) {
-    stmt.run(now, id);
+  // Wrap in a transaction so all updates share a single WAL write
+  // instead of each stmt.run() auto-committing individually.
+  db.exec("BEGIN");
+  try {
+    for (const id of chunkIds) {
+      stmt.run(now, id);
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
   }
 }
 

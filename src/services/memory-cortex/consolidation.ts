@@ -104,21 +104,29 @@ export async function maybeConsolidate(
 
   const db = getDb();
 
-  // Count unconsolidated chunks
-  const unconsolidated = db
+  // Check if we have enough unconsolidated chunks to warrant consolidation.
+  // Use a COUNT query first to avoid loading the entire result set into memory
+  // (in long chats with a backlog, there can be thousands of unconsolidated chunks).
+  const countRow = db
+    .query(
+      `SELECT COUNT(*) as count FROM chat_chunks
+       WHERE chat_id = ? AND consolidation_id IS NULL`,
+    )
+    .get(chatId) as { count: number } | null;
+
+  if (!countRow || countRow.count < config.chunkThreshold) return;
+
+  // Only fetch the batch we actually need
+  const batch = db
     .query(
       `SELECT cc.*, ms.score as salience_score, ms.emotional_tags as salience_emotional_tags
        FROM chat_chunks cc
        LEFT JOIN memory_salience ms ON ms.chunk_id = cc.id
        WHERE cc.chat_id = ? AND cc.consolidation_id IS NULL
-       ORDER BY cc.created_at ASC`,
+       ORDER BY cc.created_at ASC
+       LIMIT ?`,
     )
-    .all(chatId) as any[];
-
-  if (unconsolidated.length < config.chunkThreshold) return;
-
-  // Take the oldest batch
-  const batch = unconsolidated.slice(0, config.chunksPerConsolidation);
+    .all(chatId, config.chunksPerConsolidation) as any[];
 
   let summary: string;
   let title: string | null = null;
@@ -242,8 +250,22 @@ async function maybeConsolidateArcs(
 ): Promise<void> {
   const db = getDb();
 
-  // Count tier-1 consolidations not yet rolled into an arc
-  const tier1 = db
+  // Check threshold with COUNT first, then fetch only the batch we need.
+  const countRow = db
+    .query(
+      `SELECT COUNT(*) as count FROM memory_consolidations
+       WHERE chat_id = ? AND tier = 1
+         AND id NOT IN (
+           SELECT json_each.value FROM memory_consolidations mc2
+           CROSS JOIN json_each(mc2.source_consolidation_ids)
+           WHERE mc2.chat_id = ? AND mc2.tier = 2
+         )`,
+    )
+    .get(chatId, chatId) as { count: number } | null;
+
+  if (!countRow || countRow.count < config.arcThreshold) return;
+
+  const batch = db
     .query(
       `SELECT * FROM memory_consolidations
        WHERE chat_id = ? AND tier = 1
@@ -252,13 +274,10 @@ async function maybeConsolidateArcs(
            CROSS JOIN json_each(mc2.source_consolidation_ids)
            WHERE mc2.chat_id = ? AND mc2.tier = 2
          )
-       ORDER BY message_range_start ASC`,
+       ORDER BY message_range_start ASC
+       LIMIT ?`,
     )
-    .all(chatId, chatId) as MemoryConsolidationRow[];
-
-  if (tier1.length < config.arcThreshold) return;
-
-  const batch = tier1.slice(0, config.arcThreshold);
+    .all(chatId, chatId, config.arcThreshold) as MemoryConsolidationRow[];
   const summaries = batch.map((c) => c.summary);
 
   let arcSummary: string;

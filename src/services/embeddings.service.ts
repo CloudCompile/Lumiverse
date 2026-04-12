@@ -680,7 +680,12 @@ async function ensureVectorIndex(table: Table): Promise<void> {
     }
     // IVF_PQ handles metadata-filtered workloads (every query uses .where())
     // much better than HNSW_PQ, which suffers latency fluctuation with filters.
-    const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+    // Cap partitions so KMeans has at least 256 rows per partition to avoid
+    // "more than 10% of clusters are empty" warnings and poor index quality.
+    const numPartitions = Math.max(2, Math.min(
+      Math.floor(Math.sqrt(rowCount)),
+      Math.floor(rowCount / 256),
+    ));
     await table.createIndex("vector", {
       config: Index.ivfPq({
         distanceType: "cosine",
@@ -1128,18 +1133,35 @@ async function requestEmbeddings(
   if (!apiKey) throw new Error("Embedding API key is not configured");
   if (!texts.length) return [];
 
-  const isOllamaNative = /\/api\/(embed|embeddings)\b/.test(cfg.api_url);
+  const url = resolveEmbeddingUrl(cfg.api_url);
+
+  // Detect Ollama endpoints from the resolved URL (not the raw user input)
+  // so that partial paths like /api → /api/embeddings are caught correctly.
+  const isOllamaNative = /\/api\/(embed|embeddings)\b/.test(url);
+  // Ollama's legacy /api/embeddings endpoint only supports single inputs.
+  // The modern /api/embed endpoint supports batch natively.
+  const isOllamaLegacySingleOnly = /\/api\/embeddings\b/.test(url);
+
+  // If using the legacy single-input Ollama endpoint with multiple texts,
+  // send them sequentially instead of as a batch to avoid the
+  // "only supports single inputs" error.
+  if (isOllamaLegacySingleOnly && texts.length > 1) {
+    const results: number[][] = [];
+    for (const text of texts) {
+      const [vec] = await requestEmbeddings(userId, [text], options);
+      results.push(vec);
+    }
+    return results;
+  }
 
   const body: Record<string, any> = {
     model: cfg.model,
-    input: texts,
+    input: isOllamaLegacySingleOnly ? texts[0] : texts,
   };
   if (!isOllamaNative) {
     body.encoding_format = "float";
   }
   if (!options?.omitDimensions && cfg.send_dimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
-
-  const url = resolveEmbeddingUrl(cfg.api_url);
   const timeoutMs = cfg.request_timeout > 0
     ? cfg.request_timeout * 1000
     : DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS;
@@ -2013,13 +2035,22 @@ export async function searchChatChunks(
 
   const baseFilter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
   const sourceFilter = buildAllowedChunkFilter(allowedChunkIds);
+  const filterWasScoped = sourceFilter != null;
   const filter = sourceFilter ? `${baseFilter} AND ${sourceFilter}` : baseFilter;
-  const fetchLimit = Math.max(1, Math.min(limit + 50, 150));
+
+  // When source filter was dropped (candidate set > MAX_LANCE_SOURCE_FILTER_IDS),
+  // the query searches the entire chat partition and results are client-side filtered.
+  // Increase fetchLimit to compensate for post-filter loss, but skip refineFactor
+  // since re-scanning 5x results on a large unscoped partition is the biggest cost.
+  const fetchLimit = filterWasScoped
+    ? Math.max(1, Math.min(limit + 50, 150))
+    : Math.max(1, Math.min(limit * 4, 300));
 
   // Try hybrid search when query text is available
   let rows: any[];
-  // Refine with full vectors after PQ approximate search for better accuracy
-  const applyRefineFactor = (q: any) => { if (vectorIndexReady) q.refineFactor(5); return q; };
+  // Refine with full vectors after PQ approximate search for better accuracy.
+  // Skip refineFactor for unscoped queries — the cost is prohibitive on large partitions.
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady && filterWasScoped) q.refineFactor(5); return q; };
   if (queryText?.trim() && hybridWeightMode !== "vector_first") {
     try {
       const reranker = await rerankers.RRFReranker.create();
@@ -2052,9 +2083,10 @@ export async function searchChatChunks(
     rows = await applyRefineFactor(q).toArray();
   }
 
-  // Parse and exclude
+  // Parse rows and collect metadata
   type ParsedRow = { chunkId: string; score: number; content: string; metadata: any; rowVector: number[] | null };
-  const candidates: ParsedRow[] = [];
+  const parsed: Array<{ chunkId: string; meta: any; row: any }> = [];
+  const needMessageIdLookup: string[] = [];
 
   for (const row of rows) {
     const chunkId = String(row.source_id);
@@ -2070,21 +2102,36 @@ export async function searchChatChunks(
       // Treat as empty metadata
     }
 
-    // Exclusion check: resolve message IDs from metadata or fall back to SQLite
-    let chunkMessageIds: string[] = [];
-    if (meta.messageIds && Array.isArray(meta.messageIds)) {
-      chunkMessageIds = meta.messageIds;
-    } else {
-      // Fallback: look up message_ids from the chat_chunks table
-      try {
-        const chunkRow = getDb().query("SELECT message_ids FROM chat_chunks WHERE id = ?").get(chunkId) as any;
-        if (chunkRow?.message_ids) {
-          chunkMessageIds = JSON.parse(chunkRow.message_ids);
-        }
-      } catch {
-        // non-fatal
-      }
+    parsed.push({ chunkId, meta, row });
+    if (!meta.messageIds || !Array.isArray(meta.messageIds)) {
+      needMessageIdLookup.push(chunkId);
     }
+  }
+
+  // Batch-load message_ids for chunks missing them in metadata (replaces N+1 individual queries)
+  const messageIdsByChunk = new Map<string, string[]>();
+  if (needMessageIdLookup.length > 0) {
+    const db = getDb();
+    for (let i = 0; i < needMessageIdLookup.length; i += 500) {
+      const batch = needMessageIdLookup.slice(i, i + 500);
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const chunkRows = db.query(`SELECT id, message_ids FROM chat_chunks WHERE id IN (${placeholders})`).all(...batch) as any[];
+        for (const cr of chunkRows) {
+          if (cr.message_ids) {
+            try { messageIdsByChunk.set(cr.id, JSON.parse(cr.message_ids)); } catch { /* non-fatal */ }
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  // Exclude and build candidates
+  const candidates: ParsedRow[] = [];
+  for (const { chunkId, meta, row } of parsed) {
+    const chunkMessageIds: string[] = (meta.messageIds && Array.isArray(meta.messageIds))
+      ? meta.messageIds
+      : (messageIdsByChunk.get(chunkId) ?? []);
 
     const shouldExclude = chunkMessageIds.length > 0 && chunkMessageIds.some((id: string) => excludeIds.has(id));
     if (shouldExclude) continue;

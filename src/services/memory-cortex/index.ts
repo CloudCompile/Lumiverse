@@ -300,15 +300,25 @@ export async function queryCortex(
 
     if (timeoutMs > 0) {
       const TIMEOUT = Symbol("cortex-timeout");
-      const raced = await Promise.race([
-        queryCortexImpl(query, cfg),
-        new Promise<typeof TIMEOUT>((resolve) =>
-          setTimeout(() => {
-            console.warn(`[memory-cortex] Retrieval timed out after ${timeoutMs}ms`);
-            resolve(TIMEOUT);
-          }, timeoutMs),
-        ),
-      ]);
+      // AbortController lets the retrieval pipeline bail out early instead of
+      // continuing to run in the background after the timeout fires.
+      const ac = new AbortController();
+      const timer = setTimeout(() => {
+        console.warn(`[memory-cortex] Retrieval timed out after ${timeoutMs}ms`);
+        ac.abort();
+      }, timeoutMs);
+
+      let raced: CortexResult | typeof TIMEOUT;
+      try {
+        raced = await Promise.race([
+          queryCortexImpl(query, cfg, ac.signal),
+          new Promise<typeof TIMEOUT>((resolve) => {
+            ac.signal.addEventListener("abort", () => resolve(TIMEOUT), { once: true });
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
 
       if (raced === TIMEOUT) {
         // Do NOT cache timeouts — leave any existing cache entry intact so

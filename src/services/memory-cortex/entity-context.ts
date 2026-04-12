@@ -21,16 +21,22 @@ import type {
  * Build entity snapshots for the given entity IDs.
  * Each snapshot includes the entity's current state, top facts,
  * emotional profile, and immediate relationships.
+ *
+ * @param preloadedRelations - Optional pre-loaded relations to avoid duplicate queries
+ *   when the caller also needs relations for getActiveRelationEdges().
  */
 export function assembleEntitySnapshots(
   chatId: string,
   entityIds: string[],
   maxSnapshots: number,
+  preloadedRelations?: MemoryRelation[],
 ): EntitySnapshot[] {
   if (entityIds.length === 0) return [];
 
   const entities = entityGraph.getEntitiesByIds(entityIds);
-  const relations = entityGraph.getRelationsForEntities(chatId, entityIds);
+  // Use pre-loaded relations if provided, otherwise fetch with a reasonable limit.
+  // Each snapshot uses at most 5 relationships, so maxSnapshots * 5 is sufficient.
+  const relations = preloadedRelations ?? entityGraph.getRelationsForEntities(chatId, entityIds, maxSnapshots * 5);
 
   // Build a lookup for entity names by ID
   const allRelatedIds = new Set<string>();
@@ -88,13 +94,16 @@ export function assembleEntitySnapshots(
 /**
  * Get active relationships between the given entity IDs.
  * Returns edges with resolved names.
+ *
+ * @param preloadedRelations - Optional pre-loaded relations to avoid duplicate queries.
  */
 export function getActiveRelationEdges(
   chatId: string,
   entityIds: string[],
   maxEdges: number,
+  preloadedRelations?: MemoryRelation[],
 ): RelationEdge[] {
-  const relations = entityGraph.getRelationsForEntities(chatId, entityIds);
+  const relations = preloadedRelations ?? entityGraph.getRelationsForEntities(chatId, entityIds, maxEdges);
 
   // Collect all entity IDs involved
   const allIds = new Set<string>();
