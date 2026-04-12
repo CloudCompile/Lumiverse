@@ -444,19 +444,27 @@ function normalizeConfig(input: any): EmbeddingConfig {
 /**
  * Resolve the final embedding request URL from user-provided api_url.
  *
- * - No path or just "/" → append /v1/embeddings  (bare base URL)
- * - Any path present     → use as-is             (user-specified endpoint)
+ * - Already ends with /embeddings or /embed → use as-is
+ * - No path or just "/"                     → append /v1/embeddings
+ * - Has a partial path (e.g. /v1)           → append /embeddings
  */
 function resolveEmbeddingUrl(rawUrl: string): string {
   const trimmed = rawUrl.replace(/\/+$/, "");
   try {
     const parsed = new URL(trimmed);
-    const path = parsed.pathname;
-    if (!path || path === "/") {
-      parsed.pathname = "/v1/embeddings";
-      return parsed.toString().replace(/\/+$/, "");
+    const path = parsed.pathname.replace(/\/+$/, "");
+    // Already ends with an embedding endpoint — use as-is
+    if (/\/(embeddings|embed)$/.test(path)) {
+      return trimmed;
     }
-    return trimmed;
+    if (!path || path === "/") {
+      // Bare base URL — add full /v1/embeddings
+      parsed.pathname = "/v1/embeddings";
+    } else {
+      // Partial path (e.g. /v1, /api/v1, /proxy) — append /embeddings
+      parsed.pathname = path + "/embeddings";
+    }
+    return parsed.toString().replace(/\/+$/, "");
   } catch {
     // Malformed URL — best-effort append
     return `${trimmed}/v1/embeddings`;

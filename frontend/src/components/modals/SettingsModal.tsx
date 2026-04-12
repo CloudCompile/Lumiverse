@@ -1338,8 +1338,23 @@ function EmbeddingsSettings() {
     load()
   }, [])
 
+  const PROVIDER_DEFAULTS: Record<string, { api_url: string; model: string }> = {
+    'openai-compatible': { api_url: 'https://api.openai.com/v1/embeddings', model: 'text-embedding-3-small' },
+    openai: { api_url: 'https://api.openai.com/v1/embeddings', model: 'text-embedding-3-small' },
+    openrouter: { api_url: 'https://openrouter.ai/api/v1/embeddings', model: 'text-embedding-3-small' },
+    electronhub: { api_url: 'https://api.electronhub.top/v1/embeddings', model: 'text-embedding-3-small' },
+    nanogpt: { api_url: 'https://nano-gpt.com/api/v1/embeddings', model: 'text-embedding-3-small' },
+  }
+
   const update = (patch: Partial<EmbeddingConfig>) => {
     if (!cfg) return
+    // When provider changes, auto-fill URL and model with provider defaults
+    if (patch.provider && patch.provider !== cfg.provider) {
+      const defaults = PROVIDER_DEFAULTS[patch.provider]
+      if (defaults) {
+        patch = { ...patch, api_url: defaults.api_url, model: defaults.model }
+      }
+    }
     setCfg({ ...cfg, ...patch })
   }
 
@@ -1511,7 +1526,7 @@ function EmbeddingsSettings() {
         <label className={styles.fieldLabel}>API URL</label>
         <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} />
         <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-          Base domain auto-appends /v1/embeddings. Custom paths (e.g. /v1/embeddings) are used as-is.
+          Auto-appends /v1/embeddings to base domains and /embeddings to partial paths (e.g. /v1). Full paths ending in /embeddings are used as-is.
         </span>
       </div>
 
