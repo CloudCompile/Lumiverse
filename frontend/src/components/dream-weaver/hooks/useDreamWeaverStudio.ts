@@ -4,6 +4,7 @@ import {
   dreamWeaverApi,
   normalizeDraftVisualAssets,
   normalizeDreamWeaverDraft,
+  syncDraftVisualAssets,
   type DreamWeaverDraft,
   type DreamWeaverSession,
   type ExtendTarget,
@@ -412,7 +413,13 @@ export function useDreamWeaverStudio(
 
   const updateDraftField = useCallback(
     <K extends keyof DreamWeaverDraft>(field: K, value: DreamWeaverDraft[K]) => {
-      setDraft((current) => (current ? { ...current, [field]: value } : current))
+      setDraft((current) => {
+        if (!current) return current
+        const next = { ...current, [field]: value }
+        // Keep image_assets in sync with visual_assets so stale legacy data
+        // cannot clobber prompts when the draft is reloaded.
+        return field === 'visual_assets' ? syncDraftVisualAssets(next) as DreamWeaverDraft : next
+      })
       setDirty(true)
     },
     [],

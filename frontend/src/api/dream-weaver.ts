@@ -480,11 +480,6 @@ function mergeLegacyIntoVisualAssets(
       label: typeof legacyAsset.label === 'string' && legacyAsset.label.trim()
         ? legacyAsset.label
         : existingVisual.label,
-      prompt: typeof legacyAsset.prompt === 'string' ? legacyAsset.prompt : existingVisual.prompt,
-      negative_prompt:
-        typeof legacyAsset.negative === 'string'
-          ? legacyAsset.negative
-          : existingVisual.negative_prompt,
     }
   })
 
