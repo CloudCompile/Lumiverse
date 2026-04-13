@@ -997,14 +997,18 @@ export interface ExtendDraftInput {
   target: ExtendTarget;
   instruction?: string;
   count?: number;
+  /** For lorebook_entries: generate entries inside this specific book rather than creating a new book. */
+  bookId?: string;
 }
 
 export interface ExtendDraftResult {
   target: ExtendTarget;
   items: any[];
+  /** Present when entries were generated for a specific book (lorebook_entries + bookId). */
+  bookId?: string;
 }
 
-function parseExtendResponse(content: string, target: ExtendTarget): any[] {
+function parseExtendResponse(content: string, target: ExtendTarget, bookId?: string): any[] {
   const parsed = safeParseJson(content);
   if (!parsed) {
     console.warn("[DreamWeaver] Could not parse extend response — returning empty items");
@@ -1019,6 +1023,10 @@ function parseExtendResponse(content: string, target: ExtendTarget): any[] {
     case "alternate_fields.scenario":
       return Array.isArray(parsed.alternates) ? parsed.alternates : [];
     case "lorebook_entries":
+      // Per-book mode returns { entries: [...] }; whole-book mode returns { lorebooks: [...] }
+      if (bookId) {
+        return Array.isArray(parsed.entries) ? parsed.entries : [];
+      }
       return Array.isArray(parsed.lorebooks) ? parsed.lorebooks : [];
     case "npc_definitions":
       return Array.isArray(parsed.npc_definitions) ? parsed.npc_definitions : [];
@@ -1047,7 +1055,7 @@ export async function extendDraft(
   if (!connection) throw new Error("No connection available");
 
   const count = Math.min(Math.max(input.count ?? 2, 1), 5);
-  const prompt = buildExtendPrompt(draft, input.target, count, input.instruction);
+  const prompt = buildExtendPrompt(draft, input.target, count, input.instruction, input.bookId);
 
   const result = await rawGenerate(userId, {
     provider: connection.provider,
@@ -1065,6 +1073,7 @@ export async function extendDraft(
 
   return {
     target: input.target,
-    items: parseExtendResponse(result.content, input.target),
+    bookId: input.bookId,
+    items: parseExtendResponse(result.content, input.target, input.bookId),
   };
 }

@@ -44,6 +44,10 @@ export const imageGenConnectionsApi = {
     return get<ImageGenConnectionModelsResult>(`/image-gen-connections/${id}/models`)
   },
 
+  modelsBySubtype(id: string, subtype: string) {
+    return get<ImageGenConnectionModelsResult>(`/image-gen-connections/${id}/models/${encodeURIComponent(subtype)}`)
+  },
+
   setApiKey(id: string, apiKey: string) {
     return put<{ success: boolean }>(`/image-gen-connections/${id}/api-key`, { api_key: apiKey })
   },

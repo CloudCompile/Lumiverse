@@ -67,7 +67,7 @@ export function getProviderWorkspaceKind(
 ): VisualWorkspaceKind {
   if (!provider) return 'none'
   if (provider === 'comfyui') return 'comfyui'
-  if (provider === 'a1111' || provider === 'swarmui') return 'none'
+  if (provider === 'a1111') return 'none'
   return 'simple'
 }
 

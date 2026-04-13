@@ -154,6 +154,7 @@ export function SourceSettingsRibbon({ visuals, worldStale }: SourceSettingsRibb
               schema={visuals.providerSchema}
               values={visuals.providerValues}
               onChange={visuals.updateProviderParam}
+              connectionId={visuals.selectedConnectionId}
             />
           ) : (
             <p className={styles.meta}>This source does not expose extra controls yet.</p>

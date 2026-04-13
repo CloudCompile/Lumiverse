@@ -14,6 +14,7 @@ import {
   updateConnection,
   imageGenConnectionSecretKey,
 } from "../services/image-gen-connections.service";
+import { getImageGenSettings } from "../services/image-gen.service";
 import * as imagesSvc from "../services/images.service";
 import * as secretsSvc from "../services/secrets.service";
 import {
@@ -263,6 +264,13 @@ app.post("/visual/jobs", async (c) => {
 
   const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(connectionId)) ?? "";
 
+  const imageGenSettings = getImageGenSettings(userId);
+  const timeoutSecs = imageGenSettings.generationTimeoutSeconds ?? 300;
+  const controller = timeoutSecs > 0 ? new AbortController() : null;
+  const timeoutHandle = controller
+    ? setTimeout(() => controller.abort(new Error(`Dream Weaver generation timed out after ${timeoutSecs}s`)), timeoutSecs * 1000)
+    : null;
+
   const job = startDreamWeaverVisualJob({
     userId,
     sessionId,
@@ -270,6 +278,8 @@ app.post("/visual/jobs", async (c) => {
     asset,
     connection,
     apiKey,
+    signal: controller?.signal,
+    onSettled: timeoutHandle !== null ? () => clearTimeout(timeoutHandle) : undefined,
     persistResult: async ({ job, result }) => {
       if (!result.image_url || !result.image_url.startsWith("data:image/")) {
         return result;

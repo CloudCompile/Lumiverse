@@ -123,6 +123,15 @@
   color: var(--lumiverse-text-muted);
 }
 
+.reviewSectionLabel {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-muted);
+  margin-bottom: -0.3rem;
+}
+
 .reviewPreview {
   padding: 0.8rem 0.9rem;
   border-radius: 14px;

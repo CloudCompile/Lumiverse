@@ -108,6 +108,12 @@
   gap: 0.9rem;
 }
 
+.compareGrid .pane,
+.compareGrid .image,
+.compareGrid .emptyImage {
+  min-height: 300px;
+}
+
 .pane {
   display: flex;
   flex-direction: column;
@@ -130,11 +136,10 @@
 }
 
 .actions {
-  position: absolute;
-  right: 1rem;
-  bottom: 1rem;
   display: flex;
+  justify-content: flex-end;
   gap: 0.55rem;
+  flex-wrap: wrap;
 }
 
 .primaryAction,
@@ -185,10 +190,10 @@
     min-height: 340px;
   }
 
-  .actions {
-    left: 1rem;
-    right: 1rem;
-    flex-wrap: wrap;
+  .compareGrid .pane,
+  .compareGrid .image,
+  .compareGrid .emptyImage {
+    min-height: 260px;
   }
 
   .stageHeader {

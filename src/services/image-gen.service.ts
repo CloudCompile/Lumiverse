@@ -27,6 +27,13 @@ interface ImageGenSettings {
   forceGeneration: boolean;
   backgroundOpacity: number;
   fadeTransitionMs: number;
+  /** Per-session parameter overrides set via the Image Gen panel — merged on top of connection.default_parameters at generation time. */
+  parameters?: Record<string, any>;
+  /**
+   * Maximum seconds to wait for the image provider to respond.
+   * Defaults to 300 (5 minutes). Set to 0 to disable the timeout entirely.
+   */
+  generationTimeoutSeconds?: number;
   // Legacy fields preserved for auto-migration
   provider?: string;
   google?: any;
@@ -142,8 +149,8 @@ export async function generateSceneBackground(
   // Build prompt
   const prompt = buildImagePrompt(scene, connection.provider, settings.includeCharacters, connection.default_parameters);
 
-  // Prepare request parameters
-  const params = { ...connection.default_parameters };
+  // Prepare request parameters — connection defaults first, then panel-level overrides
+  const params = { ...connection.default_parameters, ...(settings.parameters || {}) };
 
   // For NovelAI: pre-resolve director reference images (orchestration concern)
   if (connection.provider === "novelai") {
@@ -165,13 +172,25 @@ export async function generateSceneBackground(
   }
 
   // Generate image through provider
+  const timeoutSecs = settings.generationTimeoutSeconds ?? 300;
+  const controller = timeoutSecs > 0 ? new AbortController() : null;
+  const timeoutHandle = controller
+    ? setTimeout(() => controller.abort(new Error(`Image generation timed out after ${timeoutSecs}s`)), timeoutSecs * 1000)
+    : null;
+
   const request: ImageGenRequest = {
     prompt,
     model: connection.model,
     parameters: params,
+    signal: controller?.signal,
   };
 
-  const response = await provider.generate(apiKey || "", connection.api_url || "", request);
+  let response: Awaited<ReturnType<typeof provider.generate>>;
+  try {
+    response = await provider.generate(apiKey || "", connection.api_url || "", request);
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+  }
 
   // Persist the generated image to the images table
   let imageId: string | undefined;
@@ -438,7 +457,7 @@ function uint8ToBase64(bytes: Uint8Array): string {
 
 // --- Settings ---
 
-function getImageGenSettings(userId: string): ImageGenSettings {
+export function getImageGenSettings(userId: string): ImageGenSettings {
   const row = settingsSvc.getSetting(userId, IMAGE_SETTINGS_KEY);
   return { ...DEFAULT_IMAGE_SETTINGS, ...(row?.value || {}) };
 }

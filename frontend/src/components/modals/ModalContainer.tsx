@@ -122,6 +122,7 @@ export default function ModalContainer() {
             closeModal()
           }}
           onSkip={() => {
+            useStore.getState().setLastRegenFeedback('')
             modalProps.onSkip?.()
             closeModal()
           }}

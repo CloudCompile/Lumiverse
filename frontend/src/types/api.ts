@@ -298,6 +298,8 @@ export interface ImageGenParameterSchema {
   required?: boolean;
   options?: Array<{ id: string; label: string }>;
   group?: string;
+  /** When set, the UI fetches models from GET /image-gen-connections/:id/models/:modelSubtype */
+  modelSubtype?: string;
 }
 
 export interface ImageGenProviderCapabilities {

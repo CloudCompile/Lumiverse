@@ -94,12 +94,16 @@ await startAllExtensions().catch((err) => {
 console.log(`Lumiverse Backend starting on port ${env.port}...`);
 
 // Use explicit Bun.serve() so we get the Server reference for native pub/sub.
+// idleTimeout: 0 disables Bun's default 30-second idle connection cutoff so that
+// long-running generation requests (image gen, heavy LLM calls) are not terminated
+// prematurely. Application-level AbortSignal timeouts guard against hung providers.
 const server = Bun.serve({
   port: env.port,
   hostname: "::",
   fetch: app.fetch,
   websocket,
   maxRequestBodySize: 1000 * 1024 * 1024, // 1000 MB — matches MAX_CHARX_SIZE in character-card.service.ts
+  idleTimeout: 0,
 });
 
 // Give the EventBus access to the server for native topic-based publish().

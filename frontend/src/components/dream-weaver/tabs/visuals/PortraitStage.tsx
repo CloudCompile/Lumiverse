@@ -63,22 +63,22 @@ export function PortraitStage({
           <div className={styles.pane}>
             <div className={styles.paneLabel}>New Result</div>
             <img src={candidateImageUrl} alt="Candidate portrait" className={styles.image} />
-            <div className={styles.actions}>
-              <button type="button" className={styles.secondaryAction} onClick={onDismiss}>
-                Dismiss
-              </button>
-              <button type="button" className={styles.secondaryAction} onClick={onRegenerate}>
-                Regenerate
-              </button>
-              <button
-                type="button"
-                className={styles.primaryAction}
-                onClick={onAccept}
-              >
-                {acceptLabel}
-              </button>
-            </div>
           </div>
+        </div>
+        <div className={styles.actions}>
+          <button type="button" className={styles.secondaryAction} onClick={onDismiss}>
+            Dismiss
+          </button>
+          <button type="button" className={styles.secondaryAction} onClick={onRegenerate}>
+            Regenerate
+          </button>
+          <button
+            type="button"
+            className={styles.primaryAction}
+            onClick={onAccept}
+          >
+            {acceptLabel}
+          </button>
         </div>
       </section>
     )

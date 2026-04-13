@@ -24,6 +24,10 @@ export interface StartDreamWeaverVisualJobInput {
   asset: DreamWeaverVisualAsset;
   connection: ImageGenConnectionProfile;
   apiKey: string;
+  /** Optional AbortSignal for generation timeout. */
+  signal?: AbortSignal;
+  /** Called when the job settles (success or failure). Use to clean up external timers/resources. */
+  onSettled?: () => void;
   persistResult: (input: {
     job: DreamWeaverVisualJob;
     result: DreamWeaverVisualJobResult;
@@ -74,6 +78,10 @@ async function generateWithOptionalStreaming(
     message: "Generating image",
   });
   emitJobEvent(EventType.DREAM_WEAVER_VISUAL_JOB_PROGRESS, getVisualJob(job.id, job.userId)!);
+
+  if (input.signal) {
+    buildResult.request.signal = input.signal;
+  }
 
   if (provider.generateStream) {
     const stream = provider.generateStream(
@@ -146,6 +154,8 @@ async function executeDreamWeaverVisualJob(
   } catch (error) {
     const failed = failVisualJob(job.id, job.userId, toErrorMessage(error));
     emitJobEvent(EventType.DREAM_WEAVER_VISUAL_JOB_FAILED, failed);
+  } finally {
+    input.onSettled?.();
   }
 }
 

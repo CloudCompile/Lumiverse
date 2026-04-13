@@ -8,6 +8,7 @@ import {
 } from '@/api/dream-weaver'
 import { imageGenConnectionsApi } from '@/api/image-gen-connections'
 import type { ImageGenConnectionProfile } from '@/types/api'
+import { useStore } from '@/store'
 import { useDreamWeaverVisualJob } from '@/hooks/useDreamWeaverVisualJob'
 import {
   applySuggestedTagsToPrompt,
@@ -39,6 +40,7 @@ export interface VisualStudioModel {
   tagSuggestionLoading: boolean
   tagSuggestionError: string | null
   pendingTagSuggestion: string | null
+  pendingNegativeTagSuggestion: string | null
   providerSchema: Record<string, any> | null
   providerValues: Record<string, unknown>
   comfyui: ReturnType<typeof useComfyUIWorkflowConfig>
@@ -79,12 +81,16 @@ export function useVisualStudio(
   const [tagSuggestionLoading, setTagSuggestionLoading] = useState(false)
   const [tagSuggestionError, setTagSuggestionError] = useState<string | null>(null)
   const [pendingTagSuggestion, setPendingTagSuggestion] = useState<string | null>(null)
+  const [pendingNegativeTagSuggestion, setPendingNegativeTagSuggestion] = useState<string | null>(null)
 
   const assetsRef = useRef(assets)
   assetsRef.current = assets
   const connectionsRef = useRef(connections)
   connectionsRef.current = connections
   const workflowAutoOpenedForConnectionRef = useRef<string | null>(null)
+
+  const imageGenProviders = useStore((s) => s.imageGenProviders)
+  const setImageGenProviders = useStore((s) => s.setImageGenProviders)
 
   const { job: activeJob } = useDreamWeaverVisualJob(activeJobId, !!activeJobId)
 
@@ -97,6 +103,15 @@ export function useVisualStudio(
       cancelled = true
     }
   }, [])
+
+  // Ensure provider capabilities are loaded so parameter schemas are available
+  // even if the user hasn't opened ImageGenPanel or the connection manager yet.
+  useEffect(() => {
+    if (imageGenProviders.length > 0) return
+    imageGenConnectionsApi.providers().then((res) => {
+      if (res.providers?.length) setImageGenProviders(res.providers)
+    }).catch(() => {})
+  }, [imageGenProviders.length, setImageGenProviders])
 
   useEffect(() => {
     if (draft) {
@@ -123,6 +138,7 @@ export function useVisualStudio(
   useEffect(() => {
     setTagSuggestionError(null)
     setPendingTagSuggestion(null)
+    setPendingNegativeTagSuggestion(null)
   }, [selectedAssetId])
 
   useEffect(() => {
@@ -246,6 +262,7 @@ export function useVisualStudio(
     try {
       const result = await dreamWeaverApi.suggestVisualTags(sessionId, draft)
       setPendingTagSuggestion(result.suggestedTags)
+      setPendingNegativeTagSuggestion(result.suggestedNegativeTags || null)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to suggest tags.'
       setTagSuggestionError(message)
@@ -262,23 +279,36 @@ export function useVisualStudio(
     const previousSuggestion = getLastSuggestedTags(asset)
     const nextPrompt = applySuggestedTagsToPrompt(asset.prompt, suggestion, previousSuggestion)
 
+    const negSuggestion = pendingNegativeTagSuggestion?.trim() ?? null
+    const previousNegSuggestion =
+      typeof asset.provider_state?.tag_suggester?.lastSuggestedNegativeTags === 'string'
+        ? asset.provider_state.tag_suggester.lastSuggestedNegativeTags
+        : null
+    const nextNegativePrompt = negSuggestion
+      ? applySuggestedTagsToPrompt(asset.negative_prompt ?? '', negSuggestion, previousNegSuggestion)
+      : asset.negative_prompt
+
     handleUpdateAsset(asset.id, {
       prompt: nextPrompt,
+      negative_prompt: nextNegativePrompt,
       macro_tokens: collectPromptMacroTokens(nextPrompt),
       provider_state: {
         ...asset.provider_state,
         tag_suggester: {
           ...(asset.provider_state?.tag_suggester ?? {}),
           lastSuggestedTags: suggestion,
+          ...(negSuggestion ? { lastSuggestedNegativeTags: negSuggestion } : {}),
         },
       },
     })
     setPendingTagSuggestion(null)
+    setPendingNegativeTagSuggestion(null)
     setTagSuggestionError(null)
-  }, [handleUpdateAsset, pendingTagSuggestion])
+  }, [handleUpdateAsset, pendingNegativeTagSuggestion, pendingTagSuggestion])
 
   const handleCancelSuggestedTags = useCallback(() => {
     setPendingTagSuggestion(null)
+    setPendingNegativeTagSuggestion(null)
     setTagSuggestionError(null)
   }, [])
 
@@ -329,8 +359,20 @@ export function useVisualStudio(
 
   const isGenerating =
     generating || activeJob?.status === 'running' || activeJob?.status === 'queued'
-  const providerSchema =
-    (selectedConnection?.metadata?.parameter_schema as Record<string, any> | undefined) ?? null
+
+  // Prefer schema stored on the connection (e.g. ComfyUI capabilities snapshot).
+  // Fall back to the live provider capabilities from the registry so that
+  // providers like SwarmUI which don't store schema in metadata still surface
+  // their parameter controls.
+  const providerSchema = useMemo(() => {
+    const fromMetadata = selectedConnection?.metadata?.parameter_schema as Record<string, any> | undefined
+    if (fromMetadata && Object.keys(fromMetadata).length > 0) return fromMetadata
+    if (!selectedConnection?.provider) return null
+    const providerInfo = imageGenProviders.find((p) => p.id === selectedConnection.provider)
+    const params = providerInfo?.capabilities?.parameters
+    if (!params || Object.keys(params).length === 0) return null
+    return params
+  }, [selectedConnection, imageGenProviders])
   const providerValues = (selectedAsset?.provider_state?.params ??
     selectedConnection?.default_parameters ??
     {}) as Record<string, unknown>
@@ -354,6 +396,7 @@ export function useVisualStudio(
       tagSuggestionLoading,
       tagSuggestionError,
       pendingTagSuggestion,
+      pendingNegativeTagSuggestion,
       providerSchema,
       providerValues,
       comfyui,
@@ -399,6 +442,7 @@ export function useVisualStudio(
       tagSuggestionError,
       tagSuggestionLoading,
       pendingTagSuggestion,
+      pendingNegativeTagSuggestion,
       updateProviderParam,
       workflowEditorOpen,
       workspaceState,

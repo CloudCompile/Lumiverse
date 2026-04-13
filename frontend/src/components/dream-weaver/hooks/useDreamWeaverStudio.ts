@@ -66,7 +66,7 @@ interface StudioActions {
   requestClose: () => boolean
   dismissError: () => void
   getSectionStatus: (section: string) => SectionStatus
-  extendField: (target: ExtendTarget, instruction?: string) => Promise<void>
+  extendField: (target: ExtendTarget, instruction?: string, bookId?: string) => Promise<void>
 }
 
 function parseStoredDraft(rawDraft: string | null): DreamWeaverDraft | null {
@@ -631,16 +631,18 @@ export function useDreamWeaverStudio(
   // -----------------------------------------------------------------------
   // Extend (additive generation)
   // -----------------------------------------------------------------------
-  const extendField = useCallback(async (target: ExtendTarget, instruction?: string) => {
+  const extendField = useCallback(async (target: ExtendTarget, instruction?: string, bookId?: string) => {
     const currentSession = sessionRef.current
     if (!currentSession || !draftRef.current) return
 
-    setExtending((prev) => ({ ...prev, [target]: true }))
+    // Use bookId as the extending key for per-book generation so each book has independent loading state
+    const extendingKey = bookId ? `lorebook_entries:${bookId}` : target
+    setExtending((prev) => ({ ...prev, [extendingKey]: true }))
     setErrorMessage(null)
     try {
       if (dirtyRef.current) await save()
 
-      const result = await dreamWeaverApi.extend(currentSession.id, { target, instruction })
+      const result = await dreamWeaverApi.extend(currentSession.id, { target, instruction, bookId })
 
       setDraft((current) => {
         if (!current) return current
@@ -661,6 +663,18 @@ export function useDreamWeaverStudio(
             }
           }
           case 'lorebook_entries':
+            if (result.bookId) {
+              // Per-book mode: merge new entries into the specific book
+              return {
+                ...current,
+                lorebooks: current.lorebooks.map((book: any) =>
+                  book.id === result.bookId
+                    ? { ...book, entries: [...(book.entries ?? []), ...result.items] }
+                    : book,
+                ),
+              }
+            }
+            // Whole-book mode: append new lorebook objects
             return { ...current, lorebooks: [...current.lorebooks, ...result.items] }
           case 'npc_definitions':
             return { ...current, npc_definitions: [...current.npc_definitions, ...result.items] }
@@ -672,7 +686,7 @@ export function useDreamWeaverStudio(
     } catch (err: any) {
       setErrorMessage(err?.message ?? 'Generation failed')
     } finally {
-      setExtending((prev) => ({ ...prev, [target]: false }))
+      setExtending((prev) => ({ ...prev, [extendingKey]: false }))
     }
   }, [save])
 

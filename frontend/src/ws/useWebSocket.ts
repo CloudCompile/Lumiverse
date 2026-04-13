@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { wsClient } from './client'
 import { EventType } from './events'
 import { useStore } from '@/store'
+import { hasUnsavedSettings } from '@/store/slices/settings'
 import { routeBackendMessage } from '@/lib/spindle/loader'
 import { messagesApi } from '@/api/chats'
 import { imageGenApi } from '@/api/image-gen'
@@ -395,6 +396,24 @@ export function useWebSocket() {
           store.getState().reconcileRole(payload.role)
         }
         syncExtensions(true)
+
+        // Re-sync settings on every WS (re)connect. Covers two cases:
+        // 1. Page refresh: the old page's keepalive flush may have landed after
+        //    this page's initial loadSettings() — re-reading picks up those values.
+        // 2. Server restart while page is open: settings may have been written by
+        //    another tab or the server itself while we were disconnected.
+        if (!hasUnsavedSettings()) {
+          store.getState().loadSettings()
+        }
+      }),
+
+      // Re-sync settings when another tab (or the old page's keepalive flush)
+      // writes to the settings table. Skip if this tab has pending writes to
+      // avoid overwriting in-flight local changes with stale DB values.
+      wsClient.on(EventType.SETTINGS_UPDATED, () => {
+        if (!hasUnsavedSettings()) {
+          store.getState().loadSettings()
+        }
       }),
 
       wsClient.on(EventType.CHARACTER_EDITED, (payload: { id: string; character?: import('@/types/api').Character }) => {

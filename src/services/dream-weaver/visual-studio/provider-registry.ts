@@ -7,6 +7,7 @@ const adapters = new Map<DreamWeaverVisualProvider, VisualProviderAdapter>([
   ["novelai", createSimpleProviderAdapter("novelai")],
   ["nanogpt", createSimpleProviderAdapter("nanogpt")],
   ["google_gemini", createSimpleProviderAdapter("google_gemini")],
+  ["swarmui", createSimpleProviderAdapter("swarmui")],
   ["comfyui", comfyUIProviderAdapter],
 ]);
 

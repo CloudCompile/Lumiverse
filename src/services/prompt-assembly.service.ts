@@ -2511,10 +2511,6 @@ export function mergeActivatedWorldInfoEntries(
   let vectorSkippedBudgetSim = 0;
 
   for (const item of vectorEntries) {
-    if (finalized.activatedEntries.length >= maxActivatedTarget) {
-      vectorSkippedBudget += vectorEntries.length - vectorEntries.indexOf(item);
-      break;
-    }
     if (seen.has(item.entry.id)) {
       vectorSkippedDedup++;
       continue;
@@ -2530,15 +2526,27 @@ export function mergeActivatedWorldInfoEntries(
       continue;
     }
 
+    // When the entry-count budget is already full from keyword entries, use
+    // priority ordering so higher-priority vector entries can displace
+    // lower-priority keyword entries instead of being blanket-rejected.
+    const budgetFull = finalized.activatedEntries.length >= maxActivatedTarget;
     const nextMergedEntries = [...mergedEntries, item.entry];
     const nextFinalized = finalizeActivatedWorldInfoEntries(nextMergedEntries, settings, {
       skipGroupLogic: true,
-      preserveOrder: true,
+      preserveOrder: !budgetFull,
     });
     const itemSurvived = nextFinalized.activatedEntries.some((entry) => entry.id === item.entry.id);
     const grewActivationSet = nextFinalized.activatedEntries.length > finalized.activatedEntries.length;
 
-    if (!itemSurvived || (!grewActivationSet && !item.entry.constant)) {
+    if (!itemSurvived) {
+      if (budgetFull) vectorSkippedBudget++;
+      else vectorSkippedBudgetSim++;
+      continue;
+    }
+    // When budget has room, require growth to avoid unnecessary displacement
+    // from token budget enforcement. When budget is full, displacement is
+    // expected — priority ordering ensures only deserving entries win.
+    if (!budgetFull && !grewActivationSet && !item.entry.constant) {
       vectorSkippedBudgetSim++;
       continue;
     }

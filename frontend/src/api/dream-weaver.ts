@@ -117,6 +117,7 @@ export interface DreamWeaverVisualJob {
 
 export interface DreamWeaverVisualTagSuggestion {
   suggestedTags: string
+  suggestedNegativeTags: string
 }
 
 export interface PromptLayer {
@@ -215,11 +216,15 @@ export interface ExtendDraftInput {
   target: ExtendTarget
   instruction?: string
   count?: number
+  /** For lorebook_entries: generate entries inside this specific book instead of creating a new book. */
+  bookId?: string
 }
 
 export interface ExtendDraftResult {
   target: ExtendTarget
   items: any[]
+  /** Present when entries were generated for a specific existing book. */
+  bookId?: string
 }
 
 export interface CreateSessionInput {

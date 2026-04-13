@@ -3,6 +3,7 @@ import * as svc from "../services/chats.service";
 import * as personasSvc from "../services/personas.service";
 import { parsePagination } from "../services/pagination";
 import { RECENT_CHATS_DEFAULT_LIMIT } from "../types/pagination";
+import { parseDateString, parseMessageDate } from "../migration/st-reader";
 
 const app = new Hono();
 
@@ -173,6 +174,100 @@ app.post("/import", async (c) => {
 
     const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages);
 
+    return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Import failed" }, 500);
+  }
+});
+
+app.post("/import-st", async (c) => {
+  const userId = c.get("userId");
+
+  let formData: FormData;
+  try {
+    formData = await c.req.formData();
+  } catch {
+    return c.json({ error: "Expected multipart/form-data" }, 400);
+  }
+
+  const characterId = formData.get("character_id");
+  const file = formData.get("file");
+
+  if (typeof characterId !== "string" || !characterId) {
+    return c.json({ error: "character_id is required" }, 400);
+  }
+  if (!(file instanceof File)) {
+    return c.json({ error: "file is required" }, 400);
+  }
+
+  const text = await file.text();
+  const lines = text.split("\n").filter((l) => l.trim());
+  if (lines.length === 0) return c.json({ error: "File is empty" }, 400);
+
+  // Detect and parse optional ST metadata header (line 0)
+  let chatName = file.name.replace(/\.jsonl$/i, "");
+  let chatCreatedAt: number | undefined;
+
+  try {
+    const meta = JSON.parse(lines[0]);
+    if (meta.chat_metadata || meta.user_name !== undefined) {
+      chatName = meta.chat_metadata?.name || chatName;
+      if (meta.create_date) {
+        const ts = parseDateString(meta.create_date);
+        if (ts) chatCreatedAt = ts;
+      }
+    }
+  } catch { /* not a metadata line */ }
+
+  const startLine = (() => {
+    try {
+      const first = JSON.parse(lines[0]);
+      if (first.user_name !== undefined || first.chat_metadata) return 1;
+    } catch { /* ignore */ }
+    return 0;
+  })();
+
+  const messages: {
+    is_user: boolean;
+    name: string;
+    content: string;
+    send_date: number;
+    swipes?: string[];
+    swipe_id?: number;
+    extra?: Record<string, any>;
+  }[] = [];
+
+  for (let i = startLine; i < lines.length; i++) {
+    try {
+      const msg = JSON.parse(lines[i]);
+      const content = msg.mes || msg.content || "";
+      if (!content && !msg.name) continue;
+
+      messages.push({
+        is_user: !!msg.is_user,
+        name: msg.name || (msg.is_user ? "User" : "Character"),
+        content,
+        send_date: parseMessageDate(msg),
+        swipes: Array.isArray(msg.swipes) ? msg.swipes : undefined,
+        swipe_id: typeof msg.swipe_id === "number" ? msg.swipe_id : undefined,
+        extra: msg.extra || undefined,
+      });
+    } catch { /* skip unparseable lines */ }
+  }
+
+  if (messages.length === 0) {
+    return c.json({ error: "No valid messages found in file" }, 400);
+  }
+
+  try {
+    const chat = svc.createChatRaw(userId, {
+      character_id: characterId,
+      name: chatName,
+      metadata: {},
+      ...(chatCreatedAt ? { created_at: chatCreatedAt } : {}),
+    });
+
+    const msgCount = svc.bulkInsertMessages(chat.id, messages);
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
     return c.json({ error: err.message || "Import failed" }, 500);

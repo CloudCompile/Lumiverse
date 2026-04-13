@@ -1,4 +1,4 @@
-import { get, post, put, patch, del } from './client'
+import { get, post, put, patch, del, upload } from './client'
 import type {
   Chat, CreateChatInput, CreateGroupChatInput, RecentChat, Message,
   CreateMessageInput, UpdateMessageInput, PaginatedResult,
@@ -95,6 +95,13 @@ export const chatsApi = {
       chat: exportData.chat,
       messages: exportData.messages,
     })
+  },
+
+  importFromSt(characterId: string, file: File) {
+    const fd = new FormData()
+    fd.append('character_id', characterId)
+    fd.append('file', file)
+    return upload<{ chat_id: string; name: string; message_count: number }>('/chats/import-st', fd)
   },
 }
 

@@ -86,7 +86,16 @@ export function VisualPromptFields({ visuals }: VisualPromptFieldsProps) {
               <span className={styles.reviewHint}>Replaces the previous suggested tag block only</span>
             </div>
             {visuals.pendingTagSuggestion ? (
-              <div className={styles.reviewPreview}>{visuals.pendingTagSuggestion}</div>
+              <>
+                <div className={styles.reviewSectionLabel}>Positive</div>
+                <div className={styles.reviewPreview}>{visuals.pendingTagSuggestion}</div>
+              </>
+            ) : null}
+            {visuals.pendingNegativeTagSuggestion ? (
+              <>
+                <div className={styles.reviewSectionLabel}>Negative</div>
+                <div className={styles.reviewPreview}>{visuals.pendingNegativeTagSuggestion}</div>
+              </>
             ) : null}
             {visuals.tagSuggestionError ? (
               <p className={styles.reviewError}>{visuals.tagSuggestionError}</p>

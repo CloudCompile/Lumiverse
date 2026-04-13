@@ -9,7 +9,7 @@ import type { VisualProviderAdapter } from "../provider-adapter";
 
 type SimpleVisualProvider = Extract<
   DreamWeaverVisualProvider,
-  "novelai" | "nanogpt" | "google_gemini"
+  "novelai" | "nanogpt" | "google_gemini" | "swarmui"
 >;
 
 function filterSupportedParameters(
@@ -50,6 +50,13 @@ function buildProviderSpecificParameters(
         aspectRatio: asset.aspect_ratio,
         steps: stepOverride,
       };
+    case "swarmui":
+      return {
+        width: asset.width,
+        height: asset.height,
+        seed: asset.seed ?? undefined,
+        steps: stepOverride,
+      };
   }
 }
 
@@ -78,9 +85,15 @@ export function createSimpleProviderAdapter(
         provider,
         connection.default_parameters,
       );
+      // Per-asset overrides set via ProviderParamRenderer in Dream Weaver
+      const assetParams = filterSupportedParameters(
+        provider,
+        asset.provider_state?.params,
+      );
       const providerParameters = buildProviderSpecificParameters(provider, asset);
       const parameters = {
         ...supportedDefaults,
+        ...assetParams,
         ...providerParameters,
       };
 

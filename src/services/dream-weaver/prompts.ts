@@ -301,6 +301,7 @@ export function buildExtendPrompt(
   target: ExtendTarget,
   count: number,
   instruction?: string,
+  bookId?: string,
 ): string {
   const sections: string[] = [
     "## Character Context",
@@ -340,16 +341,39 @@ export function buildExtendPrompt(
       break;
     }
 
-    case "lorebook_entries":
-      sections.push(
-        "## Existing World Books",
-        summarizeExistingLorebooks(draft),
-        "## Task",
-        `Generate ${count} new world book(s) with entries. Cover new aspects of the world not already present. Each book should have a clear theme and 3-5 entries with keyword triggers.`,
-        "## Output Format",
-        `{ "lorebooks": [{ "id": "unique-string", "name": "Book Name", "entries": [{ "id": "unique-string", "keywords": ["keyword1", "keyword2"], "content": "World detail" }] }] }`,
-      );
+    case "lorebook_entries": {
+      if (bookId) {
+        // Per-book mode: generate additional entries for a specific existing book
+        const book = draft.lorebooks.find((b: any) => b.id === bookId);
+        const bookName = book?.name ?? "the world book";
+        const existingEntries: string = book?.entries?.length
+          ? (book.entries as any[])
+              .map((e: any) => `- [${(e.keywords ?? []).join(", ")}]: ${String(e.content ?? "").slice(0, 120)}`)
+              .join("\n")
+          : "(none yet)";
+        sections.push(
+          `## Target World Book: "${bookName}"`,
+          "## Existing Entries in This Book",
+          existingEntries,
+          "## All World Books (for context)",
+          summarizeExistingLorebooks(draft),
+          "## Task",
+          `Generate ${count} new entr${count === 1 ? "y" : "ies"} for the "${bookName}" world book. Each entry must cover a distinct aspect not already present in the existing entries above. Use tight keyword triggers and dense, lore-rich content.`,
+          "## Output Format",
+          `{ "entries": [{ "id": "unique-string", "keywords": ["keyword1", "keyword2"], "content": "World detail" }] }`,
+        );
+      } else {
+        sections.push(
+          "## Existing World Books",
+          summarizeExistingLorebooks(draft),
+          "## Task",
+          `Generate ${count} new world book(s) with entries. Cover new aspects of the world not already present. Each book should have a clear theme and 3-5 entries with keyword triggers.`,
+          "## Output Format",
+          `{ "lorebooks": [{ "id": "unique-string", "name": "Book Name", "entries": [{ "id": "unique-string", "keywords": ["keyword1", "keyword2"], "content": "World detail" }] }] }`,
+        );
+      }
       break;
+    }
 
     case "npc_definitions":
       sections.push(

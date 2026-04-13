@@ -17,7 +17,7 @@ interface WorldTabProps {
   onUpdateLorebooks: (lorebooks: DreamWeaverDraft['lorebooks']) => void
   onUpdateNpcs: (npcs: DreamWeaverDraft['npc_definitions']) => void
   onGenerateWorld: () => Promise<void>
-  onExtend: (target: ExtendTarget, instruction?: string) => Promise<void>
+  onExtend: (target: ExtendTarget, instruction?: string, bookId?: string) => Promise<void>
   getSectionStatus: (section: string) => SectionStatus
 }
 
@@ -139,14 +139,24 @@ export function WorldTab({
                 >&times;</button>
               </div>
             ))}
-            <button
-              className={styles.addButton}
-              onClick={() => {
-                const newBooks = [...draft.lorebooks]
-                newBooks[bookIdx] = { ...newBooks[bookIdx], entries: [...(newBooks[bookIdx].entries || []), { id: generateUUID(), keywords: [], content: '' }] }
-                onUpdateLorebooks(newBooks)
-              }}
-            >+ Add Entry</button>
+            <div className={styles.buttonRow}>
+              <button
+                className={styles.addButton}
+                onClick={() => {
+                  const newBooks = [...draft.lorebooks]
+                  newBooks[bookIdx] = { ...newBooks[bookIdx], entries: [...(newBooks[bookIdx].entries || []), { id: generateUUID(), keywords: [], content: '' }] }
+                  onUpdateLorebooks(newBooks)
+                }}
+              >+ Add Entry</button>
+              <button
+                className={styles.generateButton}
+                disabled={!!extending[`lorebook_entries:${book.id}`]}
+                onClick={() => onExtend('lorebook_entries', undefined, book.id)}
+              >
+                {extending[`lorebook_entries:${book.id}`] ? <Spinner size={11} /> : <Sparkles size={11} />}
+                Generate Entries
+              </button>
+            </div>
           </CollapsibleGroup>
         ))}
         <div className={styles.buttonRow}>
