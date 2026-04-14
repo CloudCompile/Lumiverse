@@ -340,7 +340,7 @@ export default function MemoryCortexSettings() {
             {config.sidecar.connectionProfileId && (
               <>
                 <div className={styles.infoRow}>
-                  <span className={styles.infoLabel}>Model</span>
+                  <span className={styles.infoLabel}>Model override</span>
                   {modelsLoading ? (
                     <span className={styles.infoValue}>Loading models...</span>
                   ) : sidecarModels.length > 0 ? (
@@ -360,8 +360,8 @@ export default function MemoryCortexSettings() {
                       className={styles.textInput}
                       value={config.sidecar.model || ""}
                       onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, model: e.target.value || null } })}
-                      placeholder="e.g. gpt-4o-mini"
-                      style={{ width: 180 }}
+                      placeholder="Leave empty to use connection default"
+                      style={{ width: 220 }}
                     />
                   )}
                 </div>

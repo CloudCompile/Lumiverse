@@ -1916,9 +1916,17 @@ export async function quietGenerate(userId: string, input: QuietGenerateInput): 
     mergedParams._openrouter = connection.metadata.openrouter;
   }
 
+  // Allow callers (e.g. Memory Cortex sidecar) to override the model without
+  // swapping connection profiles. Strip the key from parameters so it doesn't
+  // leak into provider-specific request bodies as an unknown field.
+  const paramModel = typeof (mergedParams as any).model === "string"
+    ? (mergedParams as any).model.trim()
+    : "";
+  if ("model" in mergedParams) delete (mergedParams as any).model;
+
   const request: GenerationRequest = {
     messages: input.messages,
-    model: connection.model,
+    model: paramModel || connection.model,
     parameters: mergedParams,
     tools: input.tools,
     signal: input.signal,
