@@ -11,17 +11,66 @@ import type {
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 
+const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 15_000;
+
+export interface ConnectionTestResult {
+  success: boolean;
+  message: string;
+  provider: string;
+  durationMs: number;
+  timedOut: boolean;
+  error: string | null;
+}
+
+function describeConnectionTestError(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message;
+  if (typeof err === "string" && err.trim()) return err;
+  return "Connection test failed";
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+
+  const TIMEOUT = Symbol("connection-test-timeout");
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let result: T | typeof TIMEOUT;
+  try {
+    result = await Promise.race([
+      promise,
+      new Promise<typeof TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMEOUT), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  if (result === TIMEOUT) {
+    const seconds = (timeoutMs / 1000).toFixed(timeoutMs % 1000 === 0 ? 0 : 1);
+    const error = new Error(`${label} timed out after ${seconds}s`);
+    error.name = "TimeoutError";
+    throw error;
+  }
+
+  return result as T;
+}
+
 /** Secret key for a connection's API key. */
 export function connectionSecretKey(id: string): string {
   return `connection_${id}_api_key`;
 }
 
-/** Resolve effective API URL, accounting for provider-specific metadata flags (e.g. NanoGPT subscription mode). */
+/** Resolve effective API URL, accounting for provider-specific metadata flags. */
 export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: string | null; metadata?: Record<string, any> | null }): string {
   const url = profile.api_url || "";
   if (profile.provider === "nanogpt" && profile.metadata?.use_subscription_api) {
     if (!url) return "https://nano-gpt.com/api/subscription/v1";
     return url.replace("/api/v1", "/api/subscription/v1");
+  }
+  if (profile.provider === "google_vertex") {
+    const region = profile.metadata?.vertex_region;
+    if (!region || region === "global") return "https://aiplatform.googleapis.com";
+    return `https://${region}-aiplatform.googleapis.com`;
   }
   return url;
 }
@@ -239,31 +288,77 @@ export async function clearConnectionApiKey(userId: string, id: string): Promise
     .run(Math.floor(Date.now() / 1000), id, userId);
 }
 
-export async function testConnection(userId: string, id: string): Promise<{ success: boolean; message: string; provider: string }> {
+export async function testConnection(
+  userId: string,
+  id: string,
+  options?: { timeoutMs?: number }
+): Promise<ConnectionTestResult> {
+  const startedAt = Date.now();
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_CONNECTION_TEST_TIMEOUT_MS;
   const profile = getConnection(userId, id);
-  if (!profile) return { success: false, message: "Connection not found", provider: "" };
+  if (!profile) {
+    return {
+      success: false,
+      message: "Connection not found",
+      provider: "",
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      error: "Connection not found",
+    };
+  }
 
   const provider = getProvider(profile.provider);
-  if (!provider) return { success: false, message: `Unknown provider: ${profile.provider}`, provider: profile.provider };
+  if (!provider) {
+    return {
+      success: false,
+      message: `Unknown provider: ${profile.provider}`,
+      provider: profile.provider,
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      error: `Unknown provider: ${profile.provider}`,
+    };
+  }
 
   const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
   if (!apiKey && provider.capabilities.apiKeyRequired) {
-    return { success: false, message: `No API key for connection "${profile.name}"`, provider: profile.provider };
+    return {
+      success: false,
+      message: `No API key for connection "${profile.name}"`,
+      provider: profile.provider,
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      error: `Missing API key for connection "${profile.name}"`,
+    };
   }
 
   try {
-    const valid = await provider.validateKey(apiKey || "", resolveEffectiveApiUrl(profile));
+    const valid = await withTimeout(
+      provider.validateKey(apiKey || "", resolveEffectiveApiUrl(profile)),
+      timeoutMs,
+      `Connection test for "${profile.name}" (${profile.provider})`
+    );
     return {
       success: valid,
       message: valid ? "Connection successful" : "API key validation failed",
       provider: profile.provider,
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      error: valid ? null : "API key validation failed",
     };
   } catch (err: any) {
-    return { success: false, message: err.message || "Connection test failed", provider: profile.provider };
+    const timedOut = err?.name === "TimeoutError";
+    return {
+      success: false,
+      message: describeConnectionTestError(err),
+      provider: profile.provider,
+      durationMs: Date.now() - startedAt,
+      timedOut,
+      error: describeConnectionTestError(err),
+    };
   }
 }
 
-export async function listConnectionModels(userId: string, id: string): Promise<{ models: string[]; provider: string; error?: string }> {
+export async function listConnectionModels(userId: string, id: string): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: string; error?: string }> {
   const profile = getConnection(userId, id);
   if (!profile) return { models: [], provider: "", error: "Connection not found" };
 
@@ -276,9 +371,44 @@ export async function listConnectionModels(userId: string, id: string): Promise<
   }
 
   try {
-    const models = await provider.listModels(apiKey || "", resolveEffectiveApiUrl(profile));
-    return { models, provider: profile.provider };
+    const apiUrl = resolveEffectiveApiUrl(profile);
+    const models = await provider.listModels(apiKey || "", apiUrl);
+
+    // For providers that expose human-readable names, build a label map
+    let model_labels: Record<string, string> | undefined;
+    if (profile.provider === "openrouter") {
+      const { OpenRouterProvider } = await import("../llm/providers/openrouter");
+      if (provider instanceof OpenRouterProvider) {
+        const richModels = await provider.fetchModelsWithMetadata(apiKey || "", apiUrl);
+        model_labels = {};
+        for (const m of richModels) {
+          if (m.name && m.name !== m.id) model_labels[m.id] = m.name;
+        }
+      }
+    }
+
+    return { models, model_labels, provider: profile.provider };
   } catch (err: any) {
     return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+  }
+}
+
+export async function listConnectionRegions(userId: string, id: string): Promise<{ regions: string[]; error?: string }> {
+  const profile = getConnection(userId, id);
+  if (!profile) return { regions: [], error: "Connection not found" };
+
+  if (profile.provider !== "google_vertex") {
+    return { regions: [], error: "Region listing is only supported for Google Vertex AI" };
+  }
+
+  const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
+  if (!apiKey) return { regions: [], error: "No service account configured" };
+
+  try {
+    const { listVertexLocations } = await import("../llm/providers/google-vertex");
+    const regions = await listVertexLocations(apiKey);
+    return { regions };
+  } catch (err: any) {
+    return { regions: [], error: err.message || "Failed to list regions" };
   }
 }

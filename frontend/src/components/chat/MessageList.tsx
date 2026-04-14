@@ -24,6 +24,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const isNearBottomRef = useRef(true)
+  const isProgrammaticScrollRef = useRef(false)
   const rafRef = useRef<number>(0)
   const { visibleMessages, hasMore, loadMore, loadingOlder, justPrependedRef } = useChunkedMessages(messages, chatId)
   const lastScrollHeightRef = useRef(0)
@@ -47,6 +48,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const streamingContent = useStore((s) => s.streamingContent)
   const streamingReasoning = useStore((s) => s.streamingReasoning)
   const streamingReasoningDuration = useStore((s) => s.streamingReasoningDuration)
+  const streamingReasoningStartedAt = useStore((s) => s.streamingReasoningStartedAt)
   const streamingError = useStore((s) => s.streamingError)
   const regeneratingMessageId = useStore((s) => s.regeneratingMessageId)
   const autoParse = useStore((s) => s.reasoningSettings.autoParse)
@@ -54,7 +56,9 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const activePersonaId = useStore((s) => s.activePersonaId)
   const personas = useStore((s) => s.personas)
   const streamingGenerationType = useStore((s) => s.streamingGenerationType)
+  const bubbleUserAlign = useStore((s) => s.bubbleUserAlign)
   const isImpersonateStream = streamingGenerationType === 'impersonate'
+  const impersonateUserLeft = isImpersonateStream && bubbleUserAlign === 'left'
 
   // The store's appendStreamToken state machine already separates reasoning
   // from content during streaming. Skip the redundant per-frame regex scan
@@ -115,11 +119,18 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     return () => observer.disconnect()
   }, [hasMore, loadMore])
 
-  // Track if user is near bottom
+  // Track if user is near bottom — only update pin state for user-initiated
+  // scrolls so that programmatic auto-scrolls don't fight user intent.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const threshold = 150
+
+    if (isProgrammaticScrollRef.current) {
+      isProgrammaticScrollRef.current = false
+      return
+    }
+
+    const threshold = 30
     isNearBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < threshold
   }, [])
@@ -134,6 +145,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       justPrependedRef.current = false
       const heightDiff = el.scrollHeight - lastScrollHeightRef.current
       if (heightDiff > 0 && lastScrollHeightRef.current > 0) {
+        isProgrammaticScrollRef.current = true
         el.scrollTop += heightDiff
       }
     }
@@ -141,7 +153,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     lastScrollHeightRef.current = el.scrollHeight
   })
 
-  // RAF-batched auto-scroll during streaming
+  // RAF-batched auto-scroll during streaming — skipped when user scrolls up
   useEffect(() => {
     if (!isNearBottomRef.current) return
 
@@ -149,6 +161,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     rafRef.current = requestAnimationFrame(() => {
       const el = scrollRef.current
       if (el) {
+        isProgrammaticScrollRef.current = true
         el.scrollTop = el.scrollHeight
       }
     })
@@ -156,10 +169,12 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     return () => cancelAnimationFrame(rafRef.current)
   }, [messages.length, streamingContent])
 
-  // Scroll to bottom on chat change
+  // Scroll to bottom on chat change — always pin when switching chats
   useEffect(() => {
     const el = scrollRef.current
     if (el) {
+      isNearBottomRef.current = true
+      isProgrammaticScrollRef.current = true
       el.scrollTop = el.scrollHeight
     }
   }, [chatId])
@@ -201,7 +216,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   }, [visibleMessages.length, glassEnabled])
 
   return (
-    <div className={`${styles.list} ${revealed ? styles.listRevealed : styles.listHidden}`} ref={scrollRef} onScroll={handleScroll} data-chat-scroll="true">
+    <div data-component="MessageList" className={`${styles.list} ${revealed ? styles.listRevealed : styles.listHidden}`} ref={scrollRef} onScroll={handleScroll} data-chat-scroll="true">
       {isGroupChat && <GroupChatMemberBar chatId={chatId} />}
       {hasMore && <div ref={sentinelRef} className={styles.sentinel} />}
       {loadingOlder && (
@@ -219,13 +234,13 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       {/* Group chat progress bar during nudge loop */}
       {isGroupChat && isNudgeLoopActive && <GroupChatProgressBar />}
 
-      {/* Streaming message bubble — shows tokens as they arrive (only for new messages, not regeneration) */}
-      {isStreaming && !regeneratingMessageId && (streamDisplay || !streamingError) && (() => {
+      {/* Streaming message bubble — shows tokens as they arrive (only for new messages, not regeneration or continue) */}
+      {isStreaming && !regeneratingMessageId && streamingGenerationType !== 'continue' && (streamDisplay || !streamingError) && (() => {
         const bubbleName = isImpersonateStream ? userName : streamDisplayName
         const bubbleStyleClass = isImpersonateStream ? bubbleStyles.user : bubbleStyles.character
         const nameStyleClass = isImpersonateStream ? bubbleStyles.nameUser : bubbleStyles.nameChar
         return (
-          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${bubbleStyles.streaming}`} data-in-viewport>
+          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${impersonateUserLeft ? bubbleStyles.userLeft : ''} ${bubbleStyles.streaming}`} data-in-viewport>
             <div className={bubbleStyles.bubble}>
               <div className={bubbleStyles.header}>
                 <div className={bubbleStyles.headerLeft}>
@@ -257,9 +272,10 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
                 <ReasoningBlock
                   reasoning={streamingReasoning}
                   reasoningDuration={streamingReasoningDuration ?? undefined}
+                  reasoningStartedAt={streamingReasoningStartedAt}
                   isStreaming
                   variant="bubble"
-                  align={isImpersonateStream ? 'right' : undefined}
+                  align={isImpersonateStream && !impersonateUserLeft ? 'right' : undefined}
                 />
               )}
               <div className={bubbleStyles.content}>
