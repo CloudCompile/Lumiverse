@@ -68,6 +68,7 @@ interface PendingSession {
 
 const pendingSessions = new Map<string, PendingSession>();
 const SESSION_TTL = 5 * 60 * 1000; // 5 minutes
+const MAX_PENDING_SESSIONS = 50;
 
 function cleanExpired() {
   const now = Date.now();
@@ -110,6 +111,10 @@ app.get("/auth", async (c) => {
   }
 
   cleanExpired();
+
+  if (pendingSessions.size >= MAX_PENDING_SESSIONS) {
+    return c.json({ error: "Too many pending OAuth sessions — wait a few minutes and retry" }, 429);
+  }
 
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await computeCodeChallenge(codeVerifier);
@@ -167,9 +172,10 @@ app.get("/oauth-landing", (c) => {
     }, window.location.origin);
     window.close();
   } else {
-    document.body.innerHTML = error
-      ? "<p>Authorization failed: " + error + "</p>"
-      : "<p>Authorization complete. You can close this window.</p>";
+    // textContent avoids HTML injection from the error query param
+    document.body.textContent = error
+      ? "Authorization failed: " + error
+      : "Authorization complete. You can close this window.";
   }
 </script>
 </body></html>`;

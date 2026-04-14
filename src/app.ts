@@ -138,7 +138,8 @@ app.get("/api/v1/openrouter/oauth-landing", async (c) => {
 <script>
 var code = ${JSON.stringify(code)};
 if (code && window.opener) {
-  window.opener.postMessage({ type: 'openrouter_oauth_code', code: code }, '*');
+  // Restrict postMessage to this origin so only the Lumiverse opener receives the code
+  window.opener.postMessage({ type: 'openrouter_oauth_code', code: code }, window.location.origin);
   document.getElementById('s').textContent = 'Authorized! Closing...';
   setTimeout(function(){ window.close(); }, 500);
 } else if (!code) {

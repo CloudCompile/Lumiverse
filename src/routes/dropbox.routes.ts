@@ -66,6 +66,7 @@ interface PendingSession {
 
 const pendingSessions = new Map<string, PendingSession>();
 const SESSION_TTL = 10 * 60 * 1000; // 10 minutes — user needs time to copy the code
+const MAX_PENDING_SESSIONS = 50;
 
 function cleanExpired() {
   const now = Date.now();
@@ -89,6 +90,10 @@ app.get("/auth", async (c) => {
   }
 
   cleanExpired();
+
+  if (pendingSessions.size >= MAX_PENDING_SESSIONS) {
+    return c.json({ error: "Too many pending OAuth sessions — wait a few minutes and retry" }, 429);
+  }
 
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await computeCodeChallenge(codeVerifier);

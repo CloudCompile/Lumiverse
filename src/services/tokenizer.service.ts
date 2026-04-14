@@ -1,6 +1,24 @@
 import { getDb } from "../db/connection";
 import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCountBreakdownEntry } from "../types/tokenizer";
 import { getTextContent, type AssemblyBreakdownEntry, type LlmMessage } from "../llm/types";
+import { validateHost, SSRFError } from "../utils/safe-fetch";
+
+/**
+ * Validate a tokenizer resource URL before fetching. Owner-supplied, but still
+ * should not reach private/internal hosts.
+ */
+async function validateTokenizerUrl(url: string, label: string): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new SSRFError(`${label} is not a valid URL: ${url}`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new SSRFError(`${label} must use http or https, got: ${parsed.protocol}`);
+  }
+  await validateHost(parsed.hostname);
+}
 
 /** A loaded tokenizer instance with a count(text) method. */
 interface TokenizerInstance {
@@ -140,6 +158,7 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
     // If the user's URL doesn't end with tokenizer.json (e.g. a direct download link),
     // try fetching the JSON data manually and use fromPreTrained() instead of fromPreTrainedUrls()
     if (configUrl === cfg.url) {
+      await validateTokenizerUrl(cfg.url, "tokenizer url");
       const resp = await fetch(cfg.url);
       if (!resp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${resp.status}`);
       const tokenizerJSON = await resp.json();
@@ -150,6 +169,9 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
       return { count: (text: string) => tokenizer.encode(text).length };
     }
 
+    // fromPreTrainedUrls() fetches both URLs internally — validate both hosts up front
+    await validateTokenizerUrl(cfg.url, "tokenizer url");
+    await validateTokenizerUrl(configUrl, "tokenizer config url");
     const tokenizer = await TokenizerLoader.fromPreTrainedUrls({
       tokenizerJSON: cfg.url,
       tokenizerConfig: configUrl,
@@ -165,6 +187,7 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   const cfg = config.config;
   if (!cfg.url) throw new Error("Tiktoken requires 'url' in config pointing to .model file");
 
+  await validateTokenizerUrl(cfg.url, "tiktoken model url");
   const resp = await fetch(cfg.url);
   if (!resp.ok) throw new Error(`Failed to fetch tiktoken model from ${cfg.url}`);
   const bpeData = await resp.text();
@@ -173,6 +196,7 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   let specialTokens: Record<string, number> = {};
   if (cfg.configUrl) {
     try {
+      await validateTokenizerUrl(cfg.configUrl, "tiktoken config url");
       const configResp = await fetch(cfg.configUrl);
       if (configResp.ok) {
         const configData = await configResp.json();

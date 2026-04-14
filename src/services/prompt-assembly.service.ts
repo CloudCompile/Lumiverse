@@ -1484,54 +1484,42 @@ export function collectWorldInfoSources(
   globalWorldBookIds?: string[],
   chatWorldBookIds?: string[],
 ): { entries: import("../types/world-book").WorldBookEntry[]; worldBookIds: string[]; bookSourceMap: Map<string, BookSource> } {
-  const entries: import("../types/world-book").WorldBookEntry[] = [];
   const worldBookIds: string[] = [];
   const bookSourceMap = new Map<string, BookSource>();
   const seen = new Set<string>();
 
-  // Character's attached world books (stored in extensions)
-  const charBookIds = getCharacterWorldBookIds(character.extensions);
-  for (const charBookId of charBookIds) {
-    if (seen.has(charBookId)) continue;
-    seen.add(charBookId);
-    worldBookIds.push(charBookId);
-    bookSourceMap.set(charBookId, 'character');
-    entries.push(...worldBooksSvc.listEntries(userId, charBookId));
-  }
+  const pushBook = (id: string | null | undefined, source: BookSource) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    worldBookIds.push(id);
+    bookSourceMap.set(id, source);
+  };
 
-  // Persona's attached world book
-  if (persona?.attached_world_book_id && !seen.has(persona.attached_world_book_id)) {
-    seen.add(persona.attached_world_book_id);
-    worldBookIds.push(persona.attached_world_book_id);
-    bookSourceMap.set(persona.attached_world_book_id, 'persona');
-    entries.push(...worldBooksSvc.listEntries(userId, persona.attached_world_book_id));
+  // Collect in priority order: character → persona → chat → global.
+  // Source attribution keeps the first (narrowest) winner.
+  for (const charBookId of getCharacterWorldBookIds(character.extensions)) {
+    pushBook(charBookId, 'character');
   }
+  pushBook(persona?.attached_world_book_id, 'persona');
+  for (const cId of chatWorldBookIds ?? []) pushBook(cId, 'chat');
+  for (const gId of globalWorldBookIds ?? []) pushBook(gId, 'global');
 
-  // Chat-scoped world books (active for this chat only)
-  if (chatWorldBookIds?.length) {
-    for (const cId of chatWorldBookIds) {
-      if (seen.has(cId)) continue;
-      seen.add(cId);
-      worldBookIds.push(cId);
-      bookSourceMap.set(cId, 'chat');
-      entries.push(...worldBooksSvc.listEntries(userId, cId));
-    }
-  }
-
-  // Global world books (user-wide, always active regardless of character/persona)
-  if (globalWorldBookIds?.length) {
-    for (const gId of globalWorldBookIds) {
-      if (seen.has(gId)) continue;
-      seen.add(gId);
-      worldBookIds.push(gId);
-      bookSourceMap.set(gId, 'global');
-      entries.push(...worldBooksSvc.listEntries(userId, gId));
+  // Batch-load all books in a single pair of queries. With large books
+  // (thousands of entries each), this avoids the N+1 round-trip cost of
+  // calling listEntries() once per attached book.
+  const entries: import("../types/world-book").WorldBookEntry[] = [];
+  if (worldBookIds.length > 0) {
+    const entryMap = worldBooksSvc.listEntriesForBooks(userId, worldBookIds);
+    // Preserve original per-book ordering (character → persona → chat → global).
+    for (const id of worldBookIds) {
+      const bookEntries = entryMap.get(id);
+      if (bookEntries && bookEntries.length > 0) entries.push(...bookEntries);
     }
   }
 
   return {
     entries,
-    worldBookIds: Array.from(new Set(worldBookIds)),
+    worldBookIds,
     bookSourceMap,
   };
 }
@@ -1783,22 +1771,34 @@ function buildPhraseSpecificityState(entries: WorldBookEntryModel[]): PhraseSpec
   const tokenDocFrequency = new Map<string, number>();
 
   for (const entry of entries) {
+    // Fast-path: entries with no lexical signals (no keys / keysecondary /
+    // comment) contribute nothing to either frequency map. In large
+    // vector-only lorebooks (e.g. 9000+ entries with key=[]), skipping the
+    // allocation of two empty Sets + three empty-string normalizations per
+    // entry is the difference between a ~1s build and a ~30ms one.
+    const keys = entry.key;
+    const secondaries = entry.keysecondary;
+    const comment = entry.comment;
+    const hasKeys = keys && keys.length > 0;
+    const hasSecondaries = secondaries && secondaries.length > 0;
+    const hasComment = !!(comment && comment.length > 0);
+    if (!hasKeys && !hasSecondaries && !hasComment) continue;
+
     const entryPhrases = new Set<string>();
     const entryTokens = new Set<string>();
-    const values = [
-      ...(entry.key || []),
-      ...(entry.keysecondary || []),
-      entry.comment || "",
-    ];
 
-    for (const value of values) {
+    const ingest = (value: string) => {
       const normalizedValue = normalizeLexicalText(value);
-      if (!normalizedValue) continue;
+      if (!normalizedValue) return;
       entryPhrases.add(normalizedValue);
       for (const token of tokenizeLexicalText(value)) {
         entryTokens.add(token);
       }
-    }
+    };
+
+    if (hasKeys) for (const value of keys) ingest(value);
+    if (hasSecondaries) for (const value of secondaries) ingest(value);
+    if (hasComment) ingest(comment);
 
     for (const phrase of entryPhrases) {
       incrementFrequency(phraseDocFrequency, phrase);

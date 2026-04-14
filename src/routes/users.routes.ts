@@ -68,10 +68,18 @@ admin.get("/", (c) => {
 });
 
 // POST / — create a new user
+const VALID_ROLES = new Set(["user", "admin", "owner"]);
+
 admin.post("/", async (c) => {
   const body = await c.req.json();
   if (!body.username || !body.password) {
     return c.json({ error: "username and password are required" }, 400);
+  }
+
+  // Reject arbitrary role strings up front — only the roles registered with
+  // BetterAuth's admin plugin are valid.
+  if (body.role !== undefined && !VALID_ROLES.has(body.role)) {
+    return c.json({ error: `Invalid role. Allowed: ${[...VALID_ROLES].join(", ")}` }, 400);
   }
 
   allowCreation();

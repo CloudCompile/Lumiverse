@@ -102,11 +102,29 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
   const { entries, messages, wiState } = input;
   const settings: WorldInfoSettings = { ...DEFAULT_WORLD_INFO_SETTINGS, ...input.settings };
 
-  // 0. Cleanup wiState: Remove any keys that are no longer in the candidates list.
-  // This prevents hidden sticky/active entries from persisting after a lorebook is removed.
+  // 0. Cleanup wiState:
+  //   (a) Drop entries whose UID no longer exists in the candidate list —
+  //       prevents hidden sticky/active state from persisting after a book
+  //       is detached.
+  //   (b) Drop default-valued records (no-op state with all zeros / inactive).
+  //       Older versions of this function called getOrInitState on every
+  //       conditional entry regardless of whether it could match, which
+  //       bloated chat.metadata.wi_state to hundreds of KB for 9000+ entry
+  //       books. Compacting on read prevents that blob from being rewritten.
   const entryUids = new Set(entries.map(e => e.uid));
   for (const uid in wiState) {
+    const state = wiState[uid];
     if (!entryUids.has(uid)) {
+      delete wiState[uid];
+      continue;
+    }
+    if (
+      state &&
+      state.stickyLeft === 0 &&
+      state.cooldownLeft === 0 &&
+      state.delayCount === 0 &&
+      state.active === false
+    ) {
       delete wiState[uid];
     }
   }
@@ -124,12 +142,21 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
     return true;
   });
 
-  // 2. Separate constants (always activate)
+  // 2. Separate constants (always activate) from conditional candidates,
+  // and split conditional into "keyable" (has keywords → can match) and
+  // "unkeyable" (no keywords → only reachable via vector/sticky carryover).
+  //
+  // Large vector-only lorebooks (e.g. 9000+ entries with key=[]) land entirely
+  // in `unkeyable`. Iterating them in the recursion loop below does no useful
+  // work but allocates O(N) getOrInitState records and repeats 3× per pass.
+  // Treating them separately keeps the hot path proportional to keyable N only.
   const constants: WorldBookEntry[] = [];
-  const conditional: WorldBookEntry[] = [];
+  const keyableConditional: WorldBookEntry[] = [];
+  const unkeyableConditional: WorldBookEntry[] = [];
   for (const e of candidates) {
     if (e.constant) constants.push(e);
-    else conditional.push(e);
+    else if (e.key.length > 0) keyableConditional.push(e);
+    else unkeyableConditional.push(e);
   }
 
   // 3. Evaluate conditional entries
@@ -139,13 +166,23 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
   const matchedThisTurn = new Set<string>();
   const delayIncremented = new Set<string>();
 
-  for (const entry of conditional) {
+  // Cooldown decay: keyable entries participate every turn (they might match).
+  // Unkeyable entries only need decay if they have prior state — otherwise
+  // cooldownLeft is 0 by construction and there is nothing to decrement.
+  for (const entry of keyableConditional) {
     const state = getOrInitState(wiState, entry);
     if (state.cooldownLeft > 0) {
       state.cooldownLeft--;
       state.active = false;
       blockedByCooldown.add(entry.uid);
     }
+  }
+  for (const entry of unkeyableConditional) {
+    const state = wiState[entry.uid];
+    if (!state || state.cooldownLeft <= 0) continue;
+    state.cooldownLeft--;
+    state.active = false;
+    blockedByCooldown.add(entry.uid);
   }
 
   const activatedUids = new Set<string>();
@@ -164,6 +201,8 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
 
   let recursionPassesUsed = 0;
   const maxPasses = Math.max(0, settings.maxRecursionPasses);
+  // Only iterate keyable entries — unkeyable ones always short-circuited on
+  // the old `entry.key.length === 0` check and cannot contribute to recursion.
   for (let pass = 0; pass <= maxPasses; pass++) {
     let activatedThisPass = false;
     const recursionText = recursionSourceParts.join("\n");
@@ -171,17 +210,13 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
     // Clear scan text cache between passes (recursionText grows)
     scanTextCache.clear();
 
-    for (const entry of conditional) {
+    for (const entry of keyableConditional) {
       if (activatedUids.has(entry.uid)) continue;
       if (blockedByCooldown.has(entry.uid)) continue;
       if (pass === 0 && entry.delay_until_recursion) continue;
       if (pass > 0 && entry.prevent_recursion) continue;
 
       const state = getOrInitState(wiState, entry);
-
-      // Entries with no keys cannot match via keyword — they are left for
-      // vector retrieval (or should be marked as constant if always-on).
-      if (entry.key.length === 0) continue;
 
       // Resolve effective scan depth: per-entry value takes precedence,
       // otherwise fall back to the global default.
@@ -237,26 +272,45 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
     recursionPassesUsed = pass + 1;
   }
 
-  for (const entry of conditional) {
+  // Post-match state decay. Keyable entries always get a state record (we
+  // may need to reset their delay counter). Unkeyable entries only need
+  // touch-up if they already have a state record — unreached entries stay
+  // out of wiState entirely, which keeps chat.metadata.wi_state bounded.
+  for (const entry of keyableConditional) {
     if (activatedUids.has(entry.uid)) continue;
     if (blockedByCooldown.has(entry.uid)) continue;
     if (matchedThisTurn.has(entry.uid)) continue;
     const state = getOrInitState(wiState, entry);
     handleNoMatch(state, entry);
   }
-
-  // Also re-activate sticky entries that are still in their sticky window
-  for (const entry of conditional) {
-    if (activated.includes(entry)) continue;
+  for (const entry of unkeyableConditional) {
     const state = wiState[entry.uid];
-    if (state && state.stickyLeft > 0) {
-      state.stickyLeft--;
-      state.active = true;
-      activated.push(entry);
-      // When sticky expires, start cooldown
-      if (state.stickyLeft === 0 && entry.cooldown > 0) {
-        state.cooldownLeft = entry.cooldown;
-      }
+    if (!state) continue;
+    if (activatedUids.has(entry.uid)) continue;
+    if (blockedByCooldown.has(entry.uid)) continue;
+    handleNoMatch(state, entry);
+  }
+
+  // Re-activate sticky entries still in their sticky window. Iterate wiState
+  // directly (bounded by entries that actually have state) rather than
+  // scanning every conditional — the old `activated.includes(entry)` guard
+  // was also O(activated.length) per entry.
+  const conditionalByUid = new Map<string, WorldBookEntry>();
+  for (const e of keyableConditional) conditionalByUid.set(e.uid, e);
+  for (const e of unkeyableConditional) conditionalByUid.set(e.uid, e);
+  for (const uid in wiState) {
+    const state = wiState[uid];
+    if (!state || state.stickyLeft <= 0) continue;
+    if (activatedUids.has(uid)) continue;
+    const entry = conditionalByUid.get(uid);
+    if (!entry) continue;
+    state.stickyLeft--;
+    state.active = true;
+    activated.push(entry);
+    activatedUids.add(uid);
+    // When sticky expires, start cooldown
+    if (state.stickyLeft === 0 && entry.cooldown > 0) {
+      state.cooldownLeft = entry.cooldown;
     }
   }
 
