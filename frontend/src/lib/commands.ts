@@ -11,6 +11,7 @@ import { generateApi } from '@/api/generate'
 import { charactersApi } from '@/api/characters'
 import { DRAWER_TABS, registryToCommands } from '@/lib/drawer-tab-registry'
 import { getVisibleSettingsTabs, settingsRegistryToCommands } from '@/lib/settings-tab-registry'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 export type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character'
 
@@ -211,7 +212,7 @@ export const COMMANDS: Command[] = [
       if (messages.length === 0) return
       const last = messages[messages.length - 1]
       try {
-        await navigator.clipboard.writeText(last.content)
+        await copyTextToClipboard(last.content)
         addToast({ type: 'success', message: 'Copied to clipboard' })
       } catch {
         addToast({ type: 'error', message: 'Failed to copy' })

@@ -5,6 +5,7 @@ import { useStore } from '@/store'
 import { useCallback, useMemo } from 'react'
 import type { Message } from '@/types/api'
 import type { MessageOverrideProps } from '@/lib/componentOverrides'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './BubbleMessage.module.css'
 
 interface BubbleMessageProps {
@@ -75,7 +76,7 @@ export default function BubbleMessage({ message, chatId, depth = 0, isSelectMode
       cancel: handleCancelEdit,
     }),
     actions: Object.freeze({
-      copy: () => navigator.clipboard.writeText(message.content).catch(console.error),
+      copy: () => copyTextToClipboard(message.content).catch(console.error),
       edit: handleEdit,
       delete: handleDelete,
       toggleHidden: handleToggleHidden,

@@ -17,6 +17,7 @@ import {
 import clsx from 'clsx'
 import { worldBooksApi } from '@/api/world-books'
 import type { WorldBook, WorldBookDiagnostics } from '@/types/api'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './WorldBookDiagnosticsModal.module.css'
 
 type DiagnosticVectorEntry = WorldBookDiagnostics['vector_trace'][number]
@@ -153,32 +154,6 @@ function formatScoreBreakdownReport(
       return `${key}:${key === 'broadPenalty' || key === 'focusMissPenalty' ? `-${formatDiagnosticNumber(value)}` : formatDiagnosticNumber(value)}`
     })
     .join(', ')
-}
-
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  textarea.style.pointerEvents = 'none'
-  document.body.appendChild(textarea)
-  textarea.select()
-  textarea.setSelectionRange(0, textarea.value.length)
-
-  try {
-    const successful = document.execCommand('copy')
-    if (!successful) {
-      throw new Error('The browser refused the copy command.')
-    }
-  } finally {
-    document.body.removeChild(textarea)
-  }
 }
 
 interface Props {

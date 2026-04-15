@@ -4,6 +4,7 @@ import { highlightCode } from '@/lib/codeHighlight'
 import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { resolveDisplayMacros } from '@/lib/resolveDisplayMacros'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import {
   stripAndDispatchMessageTags,
   subscribeTagInterceptorRegistry,
@@ -617,7 +618,7 @@ export default function MessageContent({
       const codeEl = codeBlock?.querySelector('code')
       if (!codeEl) return
       const text = codeEl.textContent || ''
-      navigator.clipboard.writeText(text).then(() => {
+      copyTextToClipboard(text).then(() => {
         const label = btn.querySelector('span')
         if (label) {
           label.textContent = 'Copied!'
@@ -627,6 +628,8 @@ export default function MessageContent({
             btn.classList.remove(styles.codeCopied)
           }, 2000)
         }
+      }).catch((err) => {
+        console.error('[MessageContent] Copy failed:', err)
       })
     }
     container.addEventListener('click', handleClick)

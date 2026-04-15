@@ -7,6 +7,7 @@ import { systemApi, type SystemInfo } from '@/api/system'
 import { pushApi } from '@/api/push'
 import { chatsApi } from '@/api/chats'
 import { BASE_URL } from '@/api/client'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './Diagnostics.module.css'
 import clsx from 'clsx'
 
@@ -168,7 +169,7 @@ export default function Diagnostics() {
 
   const handleCopy = useCallback(async () => {
     const md = buildMarkdown(backend, backendError, extList)
-    await navigator.clipboard.writeText(md)
+    await copyTextToClipboard(md)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }, [backend, backendError, extList])

@@ -5,6 +5,7 @@ import { ApiError, RequestTimeoutError } from '@/api/client'
 import { memoryCortexApi, type CortexHealthCheck, type CortexHealthReport, type CortexProbeStatus } from '@/api/memory-cortex'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './MemoryCortexDiagnosticsModal.module.css'
 
 function formatCheckLabel(status: CortexHealthCheck['status']) {
@@ -91,32 +92,6 @@ function describeDiagnosticsError(error: unknown, chatId?: string | null): Diagn
   return {
     summary: 'Failed to load Memory Cortex diagnostics.',
     details: [chatId ? `Chat: ${chatId}` : 'Chat: none'],
-  }
-}
-
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  textarea.style.pointerEvents = 'none'
-  document.body.appendChild(textarea)
-  textarea.select()
-  textarea.setSelectionRange(0, textarea.value.length)
-
-  try {
-    const successful = document.execCommand('copy')
-    if (!successful) {
-      throw new Error('Copy command failed.')
-    }
-  } finally {
-    document.body.removeChild(textarea)
   }
 }
 

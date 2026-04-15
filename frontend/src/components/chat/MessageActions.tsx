@@ -2,6 +2,7 @@ import { Pencil, Trash2, Copy, Check, BarChart3, EyeOff, Eye, Volume2, Square } 
 import { IconGitFork } from '@tabler/icons-react'
 import { useState, useCallback } from 'react'
 import { Button } from '@/components/shared/FormComponents'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './MessageActions.module.css'
 
 interface MessageActionsProps {
@@ -21,7 +22,7 @@ export default function MessageActions({ onEdit, onDelete, onToggleHidden, onFor
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(content).catch(console.error)
+    copyTextToClipboard(content).catch(console.error)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }, [content])

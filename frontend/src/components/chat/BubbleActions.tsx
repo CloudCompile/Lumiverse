@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { Copy, Check, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square } from 'lucide-react'
 import { IconGitFork } from '@tabler/icons-react'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './BubbleActions.module.css'
 
 interface BubbleActionsProps {
@@ -20,7 +21,7 @@ export default function BubbleActions({ onEdit, onDelete, onToggleHidden, onFork
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(content).catch(console.error)
+    copyTextToClipboard(content).catch(console.error)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }, [content])
