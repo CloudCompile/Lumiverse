@@ -49,6 +49,7 @@ nav = [
     { "Push Notifications" = "backend-api/push-notifications.md" },
     { "User Presence" = "backend-api/user-presence.md" },
     { "Frontend Communication" = "backend-api/frontend-communication.md" },
+    { "Version" = "backend-api/version.md" },
   ] },
   { "Frontend API" = [
     { "Overview" = "frontend-api/index.md" },

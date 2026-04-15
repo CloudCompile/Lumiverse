@@ -40,3 +40,4 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [Push Notifications](push-notifications.md) | `push_notification` | Send OS-level push notifications to user devices |
 | [Frontend Communication](frontend-communication.md) | Free | Message passing to/from frontend |
 | [Commands](commands.md) | Free | Register custom commands in the command palette (Cmd/Ctrl+K) |
+| [Version](version.md) | Free | Read the backend and frontend semantic versions |

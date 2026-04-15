@@ -79,6 +79,29 @@ import { join, resolve, relative, sep } from "path";
 
 const EPHEMERAL_MAX_FILES = 250;
 
+let cachedBackendVersion: string | null = null;
+let cachedFrontendVersion: string | null = null;
+
+async function readPackageVersion(relativePath: string): Promise<string> {
+  const raw = await Bun.file(join(import.meta.dir, relativePath)).text();
+  const pkg = JSON.parse(raw);
+  const version = typeof pkg.version === "string" ? pkg.version : null;
+  if (!version) throw new Error(`No version field in ${relativePath}`);
+  return version;
+}
+
+async function getBackendVersion(): Promise<string> {
+  if (cachedBackendVersion) return cachedBackendVersion;
+  cachedBackendVersion = await readPackageVersion("../../package.json");
+  return cachedBackendVersion;
+}
+
+async function getFrontendVersion(): Promise<string> {
+  if (cachedFrontendVersion) return cachedFrontendVersion;
+  cachedFrontendVersion = await readPackageVersion("../../frontend/package.json");
+  return cachedFrontendVersion;
+}
+
 const CORS_PROXY_TIMEOUT_MS = 30_000;
 const CORS_PROXY_MAX_BODY_BYTES = 25 * 1024 * 1024; // 25 MB
 
@@ -1006,6 +1029,13 @@ export class WorkerHost {
         break;
       case "commands_unregister":
         this.handleCommandsUnregister(msg.commandIds);
+        break;
+      // ─── Version (free tier) ─────────────────────────────────────────
+      case "version_get_backend":
+        this.handleVersionGetBackend(msg.requestId);
+        break;
+      case "version_get_frontend":
+        this.handleVersionGetFrontend(msg.requestId);
         break;
       // ─── Push Notifications (gated: "push_notification") ──────────────
       case "push_send":
@@ -4775,6 +4805,26 @@ export class WorkerHost {
         requestId,
         result: eventBus.isUserVisible(resolvedUserId),
       });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Version (free tier) ────────────────────────────────────────────
+
+  private async handleVersionGetBackend(requestId: string): Promise<void> {
+    try {
+      const version = await getBackendVersion();
+      this.postToWorker({ type: "response", requestId, result: version });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleVersionGetFrontend(requestId: string): Promise<void> {
+    try {
+      const version = await getFrontendVersion();
+      this.postToWorker({ type: "response", requestId, result: version });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }

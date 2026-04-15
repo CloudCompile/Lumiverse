@@ -342,9 +342,11 @@ function runAhoCorasickPasses(args: AhoCorasickPassArgs): number {
     matcher.scanChunk(text, state, scope);
   }
 
-  // Constants' content is visible to all entries on pass 0.
+  // Constants' content is visible to all entries on pass 0, unless the
+  // constant is marked "Prevent Further Recursion" — that flag means the
+  // entry's content should not be scanned as a source for activating others.
   for (const c of constants) {
-    if (c.content && !c.exclude_recursion) matcher.scanChunk(c.content, state);
+    if (c.content && !c.prevent_recursion) matcher.scanChunk(c.content, state);
   }
 
   let recursionPassesUsed = 0;
@@ -363,7 +365,10 @@ function runAhoCorasickPasses(args: AhoCorasickPassArgs): number {
       if (activatedUids.has(entry.uid)) continue;
       if (blockedByCooldown.has(entry.uid)) continue;
       if (pass === 0 && entry.delay_until_recursion) continue;
-      if (pass > 0 && entry.prevent_recursion) continue;
+      // "Non-recursable" — exclude_recursion means the entry cannot be
+      // activated by a recursion pass (pass > 0). It can still activate on
+      // pass 0 from the raw chat messages.
+      if (pass > 0 && entry.exclude_recursion) continue;
       if (entry.key.length === 0) continue;
 
       if (!matcher.shouldActivate(entry, state)) continue;
@@ -388,7 +393,9 @@ function runAhoCorasickPasses(args: AhoCorasickPassArgs): number {
       activated.push(entry);
       activatedUids.add(entry.uid);
       activatedThisPass = true;
-      if (entry.content && !entry.exclude_recursion) newContent.push(entry.content);
+      // "Prevent Further Recursion" — activated entry's content is not fed
+      // back into the scanner for subsequent recursion passes.
+      if (entry.content && !entry.prevent_recursion) newContent.push(entry.content);
     }
 
     if (!activatedThisPass) break;

@@ -1360,6 +1360,19 @@ const spindleApi: SpindleAPI = {
     },
   },
 
+  version: {
+    async getBackend(): Promise<string> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "version_get_backend", requestId });
+      return result as string;
+    },
+    async getFrontend(): Promise<string> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "version_get_frontend", requestId });
+      return result as string;
+    },
+  },
+
   get manifest() {
     return manifest;
   },
