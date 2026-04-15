@@ -1,5 +1,5 @@
 import { mkdirSync, existsSync } from "fs";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { env } from "../env";
 
 export function provisionUserDirectories(userId: string): void {
@@ -20,5 +20,13 @@ export function getUserStoragePath(userId: string): string {
 }
 
 export function getUserExtensionPath(userId: string, identifier: string): string {
-  return join(getUserBaseDir(userId), "extensions", identifier);
+  const base = join(getUserBaseDir(userId), "extensions");
+  // Resolve the full path and verify it is still inside the user's extensions
+  // directory.  path.join() does not prevent directory traversal so we must
+  // use resolve() + a startsWith() guard.
+  const resolved = resolve(base, identifier);
+  if (!resolved.startsWith(base + sep) && resolved !== base) {
+    throw new Error(`Invalid extension identifier: path traversal detected`);
+  }
+  return resolved;
 }

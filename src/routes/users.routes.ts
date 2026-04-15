@@ -107,6 +107,7 @@ admin.post("/", async (c) => {
 // POST /:id/reset-password — admin password reset
 admin.post("/:id/reset-password", async (c) => {
   const { id } = c.req.param();
+  const session = c.get("session");
   const body = await c.req.json();
 
   if (!body.newPassword) {
@@ -115,6 +116,19 @@ admin.post("/:id/reset-password", async (c) => {
 
   if (body.newPassword.length < 8) {
     return c.json({ error: "Password must be at least 8 characters" }, 400);
+  }
+
+  // H-23: Enforce role hierarchy — an admin cannot reset the password of a
+  // user with a higher privilege level (owner).  Only the owner can reset
+  // another owner's password.
+  if (session.user.role !== "owner") {
+    const targetUser = getDb()
+      .query('SELECT role FROM "user" WHERE id = ?')
+      .get(id) as { role: string } | null;
+    if (!targetUser) return c.json({ error: "User not found" }, 404);
+    if (targetUser.role === "owner") {
+      return c.json({ error: "Forbidden: cannot modify a higher-privileged account" }, 403);
+    }
   }
 
   const hashed = await hashPassword(body.newPassword);

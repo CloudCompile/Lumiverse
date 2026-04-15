@@ -164,9 +164,19 @@ export class SMBFileSystem implements FileSystem {
 
   // ─── Path helpers ──────────────────────────────────────────────────────
 
-  /** Convert forward-slash paths to backslash for smbclient commands */
+  /** Convert forward-slash paths to backslash for smbclient commands.
+   *
+   * smbclient -c arguments are passed as a single shell-quoted string.
+   * Paths are embedded inside double-quoted substrings (e.g. `ls "path"`),
+   * so a `"` in the path would break out of the quote context.  A semicolon
+   * or the smbclient shell-escape `!` would inject additional commands.
+   * Strip all of those characters to prevent command injection.
+   */
   private toSmbPath(path: string): string {
-    return path.replace(/^\/+/, "").replace(/\//g, "\\");
+    return path
+      .replace(/^\/+/, "")
+      .replace(/\//g, "\\")
+      .replace(/["`;!]/g, ""); // remove characters that break smbclient -c quoting
   }
 
   join(...parts: string[]): string {
@@ -188,10 +198,13 @@ export class SMBFileSystem implements FileSystem {
   // ─── smbclient execution ──────────────────────────────────────────────
 
   private async runCommand(command: string): Promise<string> {
-    const args = this.buildArgs(command);
+    const { args, credentials } = this.buildArgs(command);
     const proc = Bun.spawn(["smbclient", ...args], {
       stdout: "pipe",
       stderr: "pipe",
+      // Feed credentials via stdin so the password is never visible in
+      // /proc/<pid>/cmdline or `ps` output.
+      stdin: credentials ? new TextEncoder().encode(credentials) : undefined,
     });
 
     const [stdout, stderr] = await Promise.all([
@@ -226,7 +239,7 @@ export class SMBFileSystem implements FileSystem {
     return stdout;
   }
 
-  private buildArgs(command: string): string[] {
+  private buildArgs(command: string): { args: string[]; credentials: string | null } {
     const { host, share, port, username, password, domain } = this.config;
     const service = `//${host}/${share}`;
 
@@ -236,8 +249,22 @@ export class SMBFileSystem implements FileSystem {
       args.push("-p", String(port));
     }
 
+    let credentials: string | null = null;
     if (username) {
-      args.push("-U", password ? `${username}%${password}` : username);
+      // Pass just the username via -U (no password in the argument) and supply
+      // the password via stdin using smbclient's "credentials file" stdin format
+      // so it never appears in /proc/<pid>/cmdline or `ps` output.
+      args.push("-U", username);
+      if (password) {
+        // smbclient reads a credentials file when given --authentication-file=-
+        // but the simplest cross-version approach is to provide
+        // "username\npassword\n" via stdin when using -U without %.
+        credentials = `${password}\n`;
+        args.push("--no-pass"); // tell smbclient not to prompt; we provide it via stdin
+        // Remove --no-pass and instead supply password via stdin pipe
+        args.pop(); // remove --no-pass
+        // smbclient will prompt for password; we feed it via stdin
+      }
     } else {
       // Anonymous / guest
       args.push("-N");
@@ -247,7 +274,7 @@ export class SMBFileSystem implements FileSystem {
       args.push("-W", domain);
     }
 
-    return args;
+    return { args, credentials };
   }
 
   // ─── Output parsing ───────────────────────────────────────────────────

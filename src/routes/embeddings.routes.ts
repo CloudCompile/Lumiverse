@@ -3,6 +3,8 @@ import { getDb } from "../db/connection";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as worldBooksSvc from "../services/world-books.service";
 import * as chatsSvc from "../services/chats.service";
+import { requireOwner, requireOwnerStrict } from "../auth/middleware";
+import { env } from "../env";
 
 const app = new Hono();
 
@@ -112,7 +114,8 @@ app.post("/world-books/:bookId/reindex", async (c) => {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     };
-    if (origin) {
+    // C-13: Only reflect origins that are in the configured trusted origins list.
+    if (origin && (env.trustAnyOrigin || env.trustedOriginsSet.has(origin))) {
       corsHeaders["Access-Control-Allow-Origin"] = origin;
       corsHeaders["Access-Control-Allow-Credentials"] = "true";
     }
@@ -140,7 +143,7 @@ app.put("/chat-memory-settings", async (c) => {
   return c.json(updated);
 });
 
-app.post("/force-reset", async (c) => {
+app.post("/force-reset", requireOwnerStrict, async (c) => {
   try {
     const result = await embeddingsSvc.forceResetLanceDB();
     return c.json({ success: true, ...result });

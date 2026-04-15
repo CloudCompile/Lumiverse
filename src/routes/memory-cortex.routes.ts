@@ -500,6 +500,18 @@ app.get("/health", async (c) => {
   });
 });
 
+// ─── Ownership guard for all chat-scoped cortex routes ───────────────────────
+// Every /chats/:chatId/* route below must be preceded by this middleware so that
+// authenticated users cannot access, modify, or delete cortex data belonging to
+// other users' chats by guessing/enumerating chat IDs.
+app.use("/chats/:chatId/*", async (c, next) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const chat = getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Chat not found" }, 404);
+  return next();
+});
+
 /** GET /chats/:chatId/entities — List entities for a chat */
 app.get("/chats/:chatId/entities", (c) => {
   const chatId = c.req.param("chatId");
@@ -679,8 +691,11 @@ app.get("/chats/:chatId/colors", (c) => {
 
 /** DELETE /chats/:chatId/colors/:id — Delete a color attribution */
 app.delete("/chats/:chatId/colors/:id", (c) => {
-  const { getDb } = require("../db/connection");
-  const result = getDb().query("DELETE FROM memory_font_colors WHERE id = ?").run(c.req.param("id"));
+  const chatId = c.req.param("chatId");
+  // Ownership of chatId was verified by the middleware above.
+  // Scope the DELETE to the specific chatId so a user cannot delete records
+  // belonging to a different chat by supplying a mismatched :id.
+  const result = getDb().query("DELETE FROM memory_font_colors WHERE id = ? AND chat_id = ?").run(c.req.param("id"), chatId);
   if (result.changes === 0) return c.json({ error: "Not found" }, 404);
   return c.json({ success: true });
 });

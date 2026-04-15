@@ -1097,18 +1097,21 @@ export function cortexToMemoryResult(
   }));
 
   // Render chunks using the user's templates
+  // M-24: Use a replacer function instead of a string replacement value so that
+  // `$` metacharacters in memory content (e.g. $&, $1, $`) are not interpreted
+  // as replacement patterns by String.prototype.replace.
   const renderedChunks = chunks.map((c) => {
     let rendered = settings.chunkTemplate;
-    rendered = rendered.replace(/\{\{content\}\}/g, c.content);
-    rendered = rendered.replace(/\{\{score\}\}/g, c.score.toFixed(4));
-    rendered = rendered.replace(/\{\{startIndex\}\}/g, String(c.metadata.messageRange?.[0] ?? "?"));
-    rendered = rendered.replace(/\{\{endIndex\}\}/g, String(c.metadata.messageRange?.[1] ?? "?"));
+    rendered = rendered.replace(/\{\{content\}\}/g, () => c.content);
+    rendered = rendered.replace(/\{\{score\}\}/g, () => c.score.toFixed(4));
+    rendered = rendered.replace(/\{\{startIndex\}\}/g, () => String(c.metadata.messageRange?.[0] ?? "?"));
+    rendered = rendered.replace(/\{\{endIndex\}\}/g, () => String(c.metadata.messageRange?.[1] ?? "?"));
     return rendered;
   });
 
   const joined = renderedChunks.join(settings.chunkSeparator);
   const formatted = chunks.length > 0
-    ? settings.memoryHeaderTemplate.replace(/\{\{memories\}\}/g, joined)
+    ? settings.memoryHeaderTemplate.replace(/\{\{memories\}\}/g, () => joined)
     : "";
 
   return {
