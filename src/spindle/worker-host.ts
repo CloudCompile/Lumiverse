@@ -183,6 +183,7 @@ export class WorkerHost {
   private static readonly MAX_COMMANDS_PER_EXTENSION = 20;
   private commandInvokedHandlers = new Set<string>(); // tracked for cleanup only
   private onWorkerReady: (() => void) | null = null;
+  private onWorkerShutdownAck: (() => void) | null = null;
   private readonly installScope: "operator" | "user";
   private readonly installedByUserId: string | null;
 
@@ -298,27 +299,41 @@ export class WorkerHost {
   async stop(): Promise<void> {
     if (!this.worker) return;
 
-    // Send shutdown
-    this.postToWorker({ type: "shutdown" });
-
-    // Wait up to 5 seconds then terminate
+    // Wait for the worker to acknowledge shutdown (posted right before
+    // process.exit(0) in worker-runtime.ts) — or fall back to terminate()
+    // after 5s if the worker is wedged. Resolving early is important for
+    // the bulk-update path: without it, every extension stop burned the
+    // full 5s fallback before the next step could run.
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.worker?.terminate();
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.onWorkerShutdownAck = null;
         resolve();
-      }, 5000);
-
-      // If the worker terminates naturally, clear the timer
-      const origOnMessage = this.worker!.onmessage;
-      this.worker!.onmessage = (event) => {
-        if (origOnMessage) (origOnMessage as any)(event);
       };
 
-      setTimeout(() => {
-        clearTimeout(timer);
-        this.worker?.terminate();
-        resolve();
+      this.onWorkerShutdownAck = finish;
+
+      const timer = setTimeout(() => {
+        // Fallback: worker never acknowledged. Force-terminate.
+        try {
+          this.worker?.terminate();
+        } catch {
+          // ignore — terminate is best-effort
+        }
+        finish();
       }, 5000);
+
+      // Actually send the shutdown after the listener is installed so we
+      // can never miss the ack due to a fast worker exit.
+      try {
+        this.postToWorker({ type: "shutdown" });
+      } catch {
+        // Worker already gone — finish immediately.
+        finish();
+      }
     });
 
     this.cleanup();
@@ -4495,6 +4510,14 @@ export class WorkerHost {
     if (message === "__worker_ready__") {
       this.onWorkerReady?.();
       this.onWorkerReady = null;
+      return;
+    }
+
+    // Detect the shutdown acknowledgement so stop() can resolve promptly
+    // instead of always waiting for the 5s fallback timeout.
+    if (message === "__worker_shutdown_ack__") {
+      this.onWorkerShutdownAck?.();
+      this.onWorkerShutdownAck = null;
       return;
     }
 

@@ -7,6 +7,7 @@ import { routeBackendMessage } from '@/lib/spindle/loader'
 import { messagesApi } from '@/api/chats'
 import { imageGenApi } from '@/api/image-gen'
 import { toast } from '@/lib/toast'
+import { triggerTTSAutoPlay } from '@/hooks/useTTSAutoPlay'
 import type {
   StreamTokenPayload,
   GenerationStartedPayload,
@@ -247,6 +248,10 @@ export function useWebSocket() {
             // Increment app badge when generation completes while tab is hidden
             if (document.hidden) {
               store.getState().incrementBadgeCount()
+            }
+
+            if (payload.messageId && typeof payload.content === 'string') {
+              triggerTTSAutoPlay(payload.messageId, payload.content)
             }
 
             // End streaming immediately, then reconcile the full message list
@@ -518,6 +523,45 @@ export function useWebSocket() {
           payload.operation,
           payload.name ?? null
         )
+      }),
+
+      wsClient.on(EventType.SPINDLE_BULK_UPDATE_PROGRESS, (payload: { total: number; completed: number; failed: number; currentExtensionId?: string; currentName?: string; phase?: string }) => {
+        useStore.getState().setBulkUpdateStatus({
+          total: payload.total,
+          completed: payload.completed,
+          failed: payload.failed,
+          currentExtensionId: payload.currentExtensionId,
+          currentName: payload.currentName,
+        })
+      }),
+
+      wsClient.on(EventType.SPINDLE_BULK_UPDATE_COMPLETE, (payload: { total: number; updated: number; failed: number; errors: Array<{ id: string; name: string; error: string }> }) => {
+        const { total, updated, failed, errors } = payload
+        useStore.getState().setBulkUpdateStatus({
+          total,
+          completed: updated,
+          failed,
+          done: true,
+          errors,
+        })
+        if (total === 0) {
+          toast.info('No extensions to update')
+        } else if (failed === 0) {
+          toast.success(`Updated ${updated} extension${updated === 1 ? '' : 's'}`)
+        } else if (updated === 0) {
+          toast.error(`All ${failed} extension update${failed === 1 ? '' : 's'} failed. Check the console for details.`)
+          console.error('[Spindle] Bulk update errors:', errors)
+        } else {
+          toast.warning(`${updated} updated, ${failed} failed. Check the console for details.`)
+          console.error('[Spindle] Bulk update errors:', errors)
+        }
+        // Pick up new version metadata in the list
+        useStore.getState().loadExtensions()
+        // Clear progress state a few seconds after completion
+        setTimeout(() => {
+          const current = useStore.getState().bulkUpdateStatus
+          if (current?.done) useStore.getState().setBulkUpdateStatus(null)
+        }, 3000)
       }),
 
       wsClient.on(EventType.SPINDLE_FRONTEND_MSG, (payload: { extensionId: string; data: unknown }) => {

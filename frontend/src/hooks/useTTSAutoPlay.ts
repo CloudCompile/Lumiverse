@@ -1,70 +1,50 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { useStore } from '@/store'
 import { getSpokenText } from '@/lib/speechDetection'
-import { speak, stop, setTTSVolume, setTTSSpeed } from '@/lib/ttsAudio'
+import { speak, stop, setTTSVolume, setTTSSpeed, installTTSAudioPrimer } from '@/lib/ttsAudio'
 import { ttsApi } from '@/api/tts'
 
 /**
- * Watches for generation completion and auto-speaks the AI response
- * when TTS auto-play is enabled.
- *
- * Detects the streaming → not-streaming transition to trigger TTS.
+ * Trigger auto-play for a completed assistant message using the final content
+ * delivered by the backend, rather than reading from the in-flight message store.
  */
-export function useTTSAutoPlay() {
-  const wasStreamingRef = useRef(false)
+export function triggerTTSAutoPlay(messageId: string, content: string): void {
+  const { voiceSettings } = useStore.getState()
 
-  useEffect(() => {
-    const unsub = useStore.subscribe((state) => {
-      const isStreaming = state.isStreaming
+  if (!voiceSettings.ttsEnabled || !voiceSettings.ttsAutoPlay || !voiceSettings.ttsConnectionId) {
+    return
+  }
 
-      if (wasStreamingRef.current && !isStreaming) {
-        // Generation just ended
-        const { voiceSettings, messages } = useStore.getState()
+  const text = getSpokenText(content, voiceSettings.speechDetectionRules)
+  if (!text) return
 
-        if (!voiceSettings.ttsEnabled || !voiceSettings.ttsAutoPlay || !voiceSettings.ttsConnectionId) {
-          wasStreamingRef.current = false
-          return
-        }
+  stop()
+  setTTSVolume(voiceSettings.ttsVolume)
+  setTTSSpeed(voiceSettings.ttsSpeed)
 
-        // Get the last non-user message
-        const lastMsg = messages[messages.length - 1]
-        if (!lastMsg || lastMsg.is_user) {
-          wasStreamingRef.current = false
-          return
-        }
-
-        // Apply speech detection rules
-        const text = getSpokenText(lastMsg.content, voiceSettings.speechDetectionRules)
-        if (!text) {
-          wasStreamingRef.current = false
-          return
-        }
-
-        // Stop any currently playing TTS
-        stop()
-
-        // Configure audio pipeline
-        setTTSVolume(voiceSettings.ttsVolume)
-        setTTSSpeed(voiceSettings.ttsSpeed)
-
-        // Request synthesis and play
-        ttsApi
-          .synthesize(voiceSettings.ttsConnectionId, text, {
-            speed: voiceSettings.ttsSpeed,
-          })
-          .then(async (response) => {
-            if (!response.ok) return
-            const buffer = await response.arrayBuffer()
-            speak(buffer)
-          })
-          .catch((err) => {
-            console.error('[TTS AutoPlay] Synthesis failed:', err)
-          })
+  ttsApi
+    .synthesize(voiceSettings.ttsConnectionId, text, {
+      speed: voiceSettings.ttsSpeed,
+    })
+    .then(async (response) => {
+      if (!response.ok) {
+        console.error('[TTS AutoPlay] Synthesis failed:', response.status, await response.text().catch(() => ''))
+        return
       }
 
-      wasStreamingRef.current = isStreaming
+      const buffer = await response.arrayBuffer()
+      speak(buffer, messageId)
     })
+    .catch((err) => {
+      console.error('[TTS AutoPlay] Synthesis failed:', err)
+    })
+}
 
-    return unsub
-  }, [])
+/**
+ * Installs a global one-time listener that primes the AudioContext on the
+ * first user gesture, so generation-triggered playback isn't blocked by the
+ * browser's autoplay policy.
+ */
+export function useTTSAutoPlay() {
+  useEffect(() => installTTSAudioPrimer(), [])
 }

@@ -1678,6 +1678,15 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
     }
 
     case "shutdown": {
+      // Signal the host so it doesn't have to wait for the 5s fallback
+      // timeout in WorkerHost.stop(). Posting via the existing log channel
+      // matches the __worker_ready__ pattern and avoids touching the
+      // shared WorkerToHost union type.
+      try {
+        post({ type: "log", level: "info", message: "__worker_shutdown_ack__" });
+      } catch {
+        // If posting fails, the host's 5s fallback terminates us anyway.
+      }
       // Allow extension to clean up
       process.exit(0);
       break;

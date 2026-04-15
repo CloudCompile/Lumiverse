@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore } from '@/store'
 import { useMessageCard } from '@/hooks/useMessageCard'
+import { useMessagePlayback } from '@/hooks/useMessagePlayback'
 import useSwipeAction from '@/hooks/useSwipeAction'
 import useSwipeGesture from '@/hooks/useSwipeGesture'
 import MessageContent from './MessageContent'
@@ -152,6 +153,7 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
   const { handleSwipe } = useSwipeAction(message, chatId)
   const onSwipeLeft = useCallback(() => handleSwipe('left'), [handleSwipe])
   const onSwipeRight = useCallback(() => handleSwipe('right'), [handleSwipe])
+  const { canPlay, isPlaying, toggle: togglePlayback } = useMessagePlayback(message.id, message.content)
 
   useSwipeGesture(cardRef, {
     enabled: swipeGesturesEnabled && !isUser && !isEditing && !isSelectMode,
@@ -274,6 +276,8 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
             onToggleHidden={handleToggleHidden}
             onFork={handleFork}
             onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
+            onPlay={canPlay ? togglePlayback : undefined}
+            isPlaying={isPlaying}
             isUser={isUser}
             isHidden={isHidden}
             content={message.content}
