@@ -1,4 +1,4 @@
-import { Pencil, Trash2, Copy, Check, BarChart3, EyeOff, Eye } from 'lucide-react'
+import { Pencil, Trash2, Copy, Check, BarChart3, EyeOff, Eye, Volume2, Square } from 'lucide-react'
 import { IconGitFork } from '@tabler/icons-react'
 import { useState, useCallback } from 'react'
 import { Button } from '@/components/shared/FormComponents'
@@ -10,12 +10,14 @@ interface MessageActionsProps {
   onToggleHidden: () => void
   onFork: () => void
   onPromptBreakdown?: () => void
+  onPlay?: () => void
+  isPlaying?: boolean
   isUser: boolean
   isHidden: boolean
   content: string
 }
 
-export default function MessageActions({ onEdit, onDelete, onToggleHidden, onFork, onPromptBreakdown, isUser, isHidden, content }: MessageActionsProps) {
+export default function MessageActions({ onEdit, onDelete, onToggleHidden, onFork, onPromptBreakdown, onPlay, isPlaying, isUser, isHidden, content }: MessageActionsProps) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback(() => {
@@ -32,6 +34,18 @@ export default function MessageActions({ onEdit, onDelete, onToggleHidden, onFor
       <Button size="icon-sm" variant="ghost" onClick={handleCopy} title="Copy" aria-label="Copy">
         {copied ? <Check size={13} /> : <Copy size={13} />}
       </Button>
+      {onPlay && (
+        <Button
+          size="icon-sm"
+          variant="ghost"
+          onClick={onPlay}
+          title={isPlaying ? 'Stop playback' : 'Play with TTS'}
+          aria-label={isPlaying ? 'Stop playback' : 'Play with TTS'}
+          aria-pressed={isPlaying}
+        >
+          {isPlaying ? <Square size={13} /> : <Volume2 size={13} />}
+        </Button>
+      )}
       <Button
         size="icon-sm"
         variant="ghost"

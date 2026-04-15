@@ -15,6 +15,7 @@ import BubbleActions from './BubbleActions'
 import LazyImage from '@/components/shared/LazyImage'
 import useSwipeAction from '@/hooks/useSwipeAction'
 import useSwipeGesture from '@/hooks/useSwipeGesture'
+import { useMessagePlayback } from '@/hooks/useMessagePlayback'
 import { useStore } from '@/store'
 import type { Message } from '@/types/api'
 import type { GenerationMetrics } from '@/types/ws-events'
@@ -157,6 +158,7 @@ export default function BubbleMessageDefault({
   const { handleSwipe } = useSwipeAction(message, chatId)
   const onSwipeLeft = useCallback(() => handleSwipe('left'), [handleSwipe])
   const onSwipeRight = useCallback(() => handleSwipe('right'), [handleSwipe])
+  const { canPlay, isPlaying, toggle: togglePlayback } = useMessagePlayback(message.id, message.content)
 
   useSwipeGesture(cardRef, {
     enabled: swipeGesturesEnabled && !isUser && !isEditing && !isSelectMode,
@@ -293,6 +295,8 @@ export default function BubbleMessageDefault({
           onToggleHidden={handleToggleHidden}
           onFork={handleFork}
           onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
+          onPlay={canPlay ? togglePlayback : undefined}
+          isPlaying={isPlaying}
           isHidden={isHidden}
           content={message.content}
           className={styles.actionsPill}

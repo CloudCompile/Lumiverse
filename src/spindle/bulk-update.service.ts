@@ -17,6 +17,15 @@
  *     then restarted (matches single-extension update behavior).
  *   - Per-extension failures are collected but do not abort the run.
  *   - A process-wide mutex prevents overlapping bulk runs.
+ *
+ * Crash-avoidance structure (Bun 1.3.x):
+ *   The run is split into three phases — stop-all, update-all, start-all —
+ *   instead of stop/update/start per extension. Interleaving Worker
+ *   teardown with `git pull` / `bun install` / `bun build` subprocess
+ *   spawns has been observed to trigger a null-pointer segfault in Bun's
+ *   subprocess/worker cleanup path. Batching the Worker lifecycle bursts
+ *   on either side of the pure-subprocess phase gives JSC time to
+ *   finalize terminated workers before we start spawning, and vice versa.
  */
 
 import * as managerSvc from "./manager.service";
@@ -95,30 +104,54 @@ export function isBulkUpdateInProgress(): boolean {
 }
 
 /**
- * Sleep helper used to give Bun breathing room between iterations. The bulk
- * loop tears down + rebuilds Workers and spawns many subprocesses (git, bun
- * install, bun build); without a small gap between iterations, Bun 1.3.x has
- * been observed to segfault in its subprocess/worker cleanup path. 150ms is
- * cheap (invisible over the tens-of-seconds each extension takes) and
- * sufficient to let pending stream/worker cleanup complete.
+ * Sleep helper used to give Bun breathing room between phases.
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Best-effort GC hint between phases. Bun exposes `Bun.gc(true)` which
+ * runs a synchronous full collection; this helps finalize terminated
+ * Workers and drain subprocess pipe handles before we move on. Wrapped
+ * in a try/catch so older Bun builds don't blow up the bulk run.
+ */
+function maybeGc(): void {
+  try {
+    (globalThis as any).Bun?.gc?.(true);
+  } catch {
+    // ignore
+  }
+}
+
+interface BulkPlanEntry {
+  ext: ExtensionInfo;
+  wasRunning: boolean;
+  wasEnabled: boolean;
+  /** Set when the update (git pull / bun install / bun build) succeeded. */
+  updated: boolean;
+  /** Set when the update failed so we can decide whether to attempt restart. */
+  updateError: string | null;
 }
 
 async function runBulkUpdate(
   targets: ExtensionInfo[],
   userId: string
 ): Promise<void> {
-  let updated = 0;
-  let failed = 0;
   const errors: BulkUpdateError[] = [];
+  const plan: BulkPlanEntry[] = targets.map((ext) => ({
+    ext,
+    wasRunning: lifecycle.isRunning(ext.id),
+    wasEnabled: ext.enabled,
+    updated: false,
+    updateError: null,
+  }));
 
   // Initial progress tick so the UI can render "0/N" immediately.
   eventBus.emit(
     EventType.SPINDLE_BULK_UPDATE_PROGRESS,
     {
-      total: targets.length,
+      total: plan.length,
       completed: 0,
       failed: 0,
       phase: "starting",
@@ -126,14 +159,40 @@ async function runBulkUpdate(
     userId
   );
 
-  for (let i = 0; i < targets.length; i++) {
-    const ext = targets[i];
+  // ─── Phase 1: stop all running workers ────────────────────────────────
+  // Batch worker teardown in a single burst so the subsequent subprocess
+  // phase never races with a Worker.terminate() cleanup.
+  for (const entry of plan) {
+    if (!entry.wasRunning) continue;
+    try {
+      await lifecycle.stopExtension(entry.ext.id);
+    } catch (err: any) {
+      console.error(
+        `[Spindle] Bulk update: failed to stop ${entry.ext.identifier}:`,
+        err
+      );
+      // Don't abort — we'll still try to update and we'll record the
+      // failure if the update itself fails.
+    }
+  }
+
+  // Let JSC finalize the terminated Worker state before we start spawning
+  // git/bun subprocesses. This is the specific interleaving that has
+  // triggered segfaults on Bun 1.3.x.
+  await sleep(500);
+  maybeGc();
+
+  // ─── Phase 2: update every extension (no Worker activity) ─────────────
+  let completed = 0;
+  let failed = 0;
+  for (const entry of plan) {
+    const { ext } = entry;
 
     eventBus.emit(
       EventType.SPINDLE_BULK_UPDATE_PROGRESS,
       {
-        total: targets.length,
-        completed: updated,
+        total: plan.length,
+        completed,
         failed,
         currentExtensionId: ext.id,
         currentName: ext.name,
@@ -142,82 +201,88 @@ async function runBulkUpdate(
       userId
     );
 
-    // Emit per-extension status so the per-card spinner shows on the
-    // affected card — same event the single-update path emits.
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
       operation: "updating",
       name: ext.name,
     });
 
-    const wasRunning = lifecycle.isRunning(ext.id);
-    const wasEnabled = ext.enabled;
-
     try {
-      if (wasRunning) {
-        await lifecycle.stopExtension(ext.id);
-        // Brief pause after worker teardown so Bun's worker-cleanup path
-        // settles before we start spawning git/bun subprocesses.
-        await sleep(100);
-      }
-
       await managerSvc.update(ext.identifier);
-
-      // Only restart if it was enabled before the update. Disabled
-      // extensions stay disabled — we update them, but never auto-enable.
-      if (wasEnabled) {
-        await sleep(100); // give the FS + subprocess cleanup a beat
-        await lifecycle.startExtension(ext.id);
-      }
-
+      entry.updated = true;
+      completed++;
       eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
         extensionId: ext.id,
         operation: "updated",
         name: ext.name,
       });
-      updated++;
     } catch (err: any) {
       const message = err?.message || "Update failed";
+      entry.updateError = message;
       errors.push({ id: ext.id, name: ext.name, error: message });
       failed++;
-
       eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
         extensionId: ext.id,
         operation: "failed",
         name: ext.name,
       });
-
-      // Best-effort: if we stopped it and the update failed, try to
-      // restart so the user isn't left with a silently-stopped extension.
-      if (wasRunning && wasEnabled) {
-        try {
-          await sleep(100);
-          await lifecycle.startExtension(ext.id);
-        } catch (restartErr: any) {
-          console.error(
-            `[Spindle] Failed to restart ${ext.identifier} after update error:`,
-            restartErr
-          );
-        }
-      }
-
       console.error(`[Spindle] Bulk update failed for ${ext.identifier}:`, err);
     }
 
-    // Inter-iteration breathing room: lets Bun finish tearing down the
-    // previous extension's workers + subprocesses before we spin up the
-    // next one's.
-    if (i < targets.length - 1) {
-      await sleep(150);
+    // Small breather between subprocess bursts so pipe handles and
+    // child-process zombies can be reaped before the next extension's
+    // git + bun install + bun build chain fires.
+    await sleep(150);
+    maybeGc();
+  }
+
+  // Let the last extension's build subprocesses fully drain before we
+  // start spinning up new Workers.
+  await sleep(500);
+  maybeGc();
+
+  // ─── Phase 3: start previously-running extensions ─────────────────────
+  // Only restart extensions that were enabled before the bulk run started.
+  // Disabled extensions stay disabled — we update them, but never
+  // auto-enable. If the update failed we still best-effort restart an
+  // extension that was previously running so the user isn't left with a
+  // silently-stopped extension on a partial failure.
+  for (const entry of plan) {
+    if (!entry.wasEnabled) continue;
+    const shouldRestart = entry.updated || entry.wasRunning;
+    if (!shouldRestart) continue;
+
+    try {
+      await lifecycle.startExtension(entry.ext.id);
+    } catch (restartErr: any) {
+      console.error(
+        `[Spindle] Bulk update: failed to restart ${entry.ext.identifier}:`,
+        restartErr
+      );
+      // If we haven't already recorded an error for this extension,
+      // surface the restart failure so the UI doesn't claim success.
+      if (!entry.updateError) {
+        const message = restartErr?.message || "Restart failed";
+        errors.push({ id: entry.ext.id, name: entry.ext.name, error: message });
+        eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
+          extensionId: entry.ext.id,
+          operation: "failed",
+          name: entry.ext.name,
+        });
+      }
     }
+
+    // Pace worker startups so we don't stack N Worker() constructors
+    // inside the same tick.
+    await sleep(250);
   }
 
   eventBus.emit(
     EventType.SPINDLE_BULK_UPDATE_COMPLETE,
     {
-      total: targets.length,
-      updated,
-      failed,
+      total: plan.length,
+      updated: plan.filter((p) => p.updated).length,
+      failed: plan.length - plan.filter((p) => p.updated).length,
       errors,
     },
     userId
