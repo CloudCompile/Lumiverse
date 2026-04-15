@@ -4960,6 +4960,9 @@ export class WorkerHost {
           },
           character: {
             name: "", description: "", personality: "", scenario: "", persona: persona?.description || "",
+            personaSubjectivePronoun: persona?.subjective_pronoun || "",
+            personaObjectivePronoun: persona?.objective_pronoun || "",
+            personaPossessivePronoun: persona?.possessive_pronoun || "",
             mesExamples: "", mesExamplesRaw: "", systemPrompt: "", postHistoryInstructions: "",
             depthPrompt: "", creatorNotes: "", version: "", creator: "", firstMessage: "",
           },

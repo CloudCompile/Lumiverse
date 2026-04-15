@@ -141,6 +141,9 @@ export interface MacroEnv {
     personality: string;
     scenario: string;
     persona: string;
+    personaSubjectivePronoun: string;
+    personaObjectivePronoun: string;
+    personaPossessivePronoun: string;
     mesExamples: string;
     mesExamplesRaw: string;
     systemPrompt: string;

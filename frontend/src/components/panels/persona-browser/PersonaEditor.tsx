@@ -19,6 +19,19 @@ import type { Persona, WorldBook } from '@/types/api'
 import styles from './PersonaEditor.module.css'
 import clsx from 'clsx'
 
+type PronounField = 'subjective_pronoun' | 'objective_pronoun' | 'possessive_pronoun'
+
+const PRONOUN_FIELDS: Array<{
+  key: PronounField
+  label: string
+  macro: '{{sub}}' | '{{obj}}' | '{{poss}}'
+  placeholder: string
+}> = [
+  { key: 'subjective_pronoun', label: 'Subjective', macro: '{{sub}}', placeholder: 'she' },
+  { key: 'objective_pronoun', label: 'Objective', macro: '{{obj}}', placeholder: 'her' },
+  { key: 'possessive_pronoun', label: 'Possessive', macro: '{{poss}}', placeholder: 'her' },
+]
+
 const POSITION_OPTIONS = [
   { value: 0, label: 'In Prompt' },
   { value: 1, label: 'Top AN' },
@@ -59,6 +72,9 @@ export default function PersonaEditor({
   const [name, setName] = useState(persona.name)
   const [title, setTitle] = useState(persona.title || '')
   const [description, setDescription] = useState(persona.description)
+  const [subjectivePronoun, setSubjectivePronoun] = useState(persona.subjective_pronoun || '')
+  const [objectivePronoun, setObjectivePronoun] = useState(persona.objective_pronoun || '')
+  const [possessivePronoun, setPossessivePronoun] = useState(persona.possessive_pronoun || '')
   const [folder, setFolder] = useState(persona.folder || '')
   const [descPosition, setDescPosition] = useState<number>(persona.metadata?.description_position ?? 0)
   const [descDepth, setDescDepth] = useState<number>(persona.metadata?.description_depth ?? 4)
@@ -80,6 +96,7 @@ export default function PersonaEditor({
   const nameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const titleTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const descTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const pronounTimers = useRef<Partial<Record<PronounField, ReturnType<typeof setTimeout>>>>({})
   const fileRef = useRef<HTMLInputElement>(null)
   const lastSyncedId = useRef<string | null>(null)
 
@@ -93,6 +110,9 @@ export default function PersonaEditor({
     setName(persona.name)
     setTitle(persona.title || '')
     setDescription(persona.description)
+    setSubjectivePronoun(persona.subjective_pronoun || '')
+    setObjectivePronoun(persona.objective_pronoun || '')
+    setPossessivePronoun(persona.possessive_pronoun || '')
     setFolder(persona.folder || '')
     setDescPosition(persona.metadata?.description_position ?? 0)
     setDescDepth(persona.metadata?.description_depth ?? 4)
@@ -138,6 +158,20 @@ export default function PersonaEditor({
       clearTimeout(descTimer.current)
       descTimer.current = setTimeout(() => {
         onUpdate(persona.id, { description: value })
+      }, 400)
+    },
+    [persona.id, onUpdate]
+  )
+
+  const handlePronounChange = useCallback(
+    (field: PronounField, value: string) => {
+      if (field === 'subjective_pronoun') setSubjectivePronoun(value)
+      if (field === 'objective_pronoun') setObjectivePronoun(value)
+      if (field === 'possessive_pronoun') setPossessivePronoun(value)
+
+      clearTimeout(pronounTimers.current[field])
+      pronounTimers.current[field] = setTimeout(() => {
+        onUpdate(persona.id, { [field]: value })
       }, 400)
     },
     [persona.id, onUpdate]
@@ -374,6 +408,39 @@ export default function PersonaEditor({
               </option>
             ))}
           </select>
+        </div>
+      </div>
+
+      <div className={styles.pronounSection}>
+        <div className={styles.pronounHeader}>
+          <span className={styles.pronounTitle}>Pronouns</span>
+          <span className={styles.pronounHint}>Used by JanitorAI persona macros</span>
+        </div>
+        <div className={styles.pronounGrid}>
+          {PRONOUN_FIELDS.map((field) => {
+            const value =
+              field.key === 'subjective_pronoun'
+                ? subjectivePronoun
+                : field.key === 'objective_pronoun'
+                  ? objectivePronoun
+                  : possessivePronoun
+
+            return (
+              <label key={field.key} className={styles.pronounField}>
+                <span className={styles.pronounMeta}>
+                  <span className={styles.pronounLabel}>{field.label}</span>
+                  <code className={styles.pronounMacro}>{field.macro}</code>
+                </span>
+                <input
+                  type="text"
+                  className={styles.pronounInput}
+                  value={value}
+                  onChange={(e) => handlePronounChange(field.key, e.target.value)}
+                  placeholder={field.placeholder}
+                />
+              </label>
+            )
+          })}
         </div>
       </div>
 

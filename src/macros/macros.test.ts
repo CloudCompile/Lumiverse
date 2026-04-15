@@ -35,6 +35,9 @@ function makeEnv(opts: {
       personality: "Courageous and kind",
       scenario: "In a fantasy kingdom",
       persona: "I am Alice, a mage",
+      personaSubjectivePronoun: "she",
+      personaObjectivePronoun: "her",
+      personaPossessivePronoun: "her",
       mesExamples: "<START>\n{{user}}: Hi\n{{char}}: Hello!",
       mesExamplesRaw: "<START>\n{{user}}: Hi\n{{char}}: Hello!",
       systemPrompt: "You are Bob.",
@@ -143,6 +146,16 @@ describe("Core primitives", () => {
 
   test("input", async () => {
     expect(await ev("{{input}}")).toBe("I draw my sword.");
+  });
+});
+
+describe("Persona pronoun macros", () => {
+  test("JanitorAI persona pronouns resolve", async () => {
+    expect(await ev("{{sub}}/{{obj}}/{{poss}}")).toBe("she/her/her");
+  });
+
+  test("explicit persona pronoun aliases resolve", async () => {
+    expect(await ev("{{subjectivePronoun}} {{objectivePronoun}} {{possessivePronoun}}")).toBe("she her her");
   });
 });
 
