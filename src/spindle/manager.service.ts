@@ -10,7 +10,6 @@ import {
   existsSync,
   mkdirSync,
   rmSync,
-  readFileSync,
   readdirSync,
   renameSync,
   statSync,
@@ -53,19 +52,31 @@ function moveSync(from: string, to: string): void {
 
 // ─── Manifest parsing ────────────────────────────────────────────────────
 
-function readManifest(identifier: string): SpindleManifest {
+async function readManifest(identifier: string): Promise<SpindleManifest> {
   const repo = repoDir(identifier);
   const candidates = [
     join(repo, "spindle.json"),
     join(repo, "spindlefile"),
     join(repo, "spindlefile.json"),
   ];
-  const manifestPath = candidates.find((p) => existsSync(p));
+  let manifestPath: string | undefined;
+  for (const p of candidates) {
+    if (await Bun.file(p).exists()) {
+      manifestPath = p;
+      break;
+    }
+  }
   if (!manifestPath) {
     throw new Error(`spindle manifest not found in ${repo}`);
   }
-  const raw = readFileSync(manifestPath, "utf-8");
-  const manifest: SpindleManifest = JSON.parse(raw);
+  const raw = await Bun.file(manifestPath).text();
+  // L-17: Guard JSON.parse so a corrupt spindle.json produces a clear error.
+  let manifest: SpindleManifest;
+  try {
+    manifest = JSON.parse(raw) as SpindleManifest;
+  } catch {
+    throw new Error(`spindle.json in ${repo} is not valid JSON`);
+  }
 
   // Validate
   if (!manifest.identifier || !validateIdentifier(manifest.identifier)) {
@@ -83,16 +94,21 @@ function readManifest(identifier: string): SpindleManifest {
   return manifest;
 }
 
-function readManifestFromPath(
+async function readManifestFromPath(
   manifestPath: string,
   options?: { allowMissingGithub?: boolean }
-): SpindleManifest {
-  if (!existsSync(manifestPath)) {
+): Promise<SpindleManifest> {
+  if (!(await Bun.file(manifestPath).exists())) {
     throw new Error(`spindle.json not found at ${manifestPath}`);
   }
 
-  const raw = readFileSync(manifestPath, "utf-8");
-  const manifest: SpindleManifest = JSON.parse(raw);
+  const raw = await Bun.file(manifestPath).text();
+  let manifest: SpindleManifest;
+  try {
+    manifest = JSON.parse(raw) as SpindleManifest;
+  } catch {
+    throw new Error(`spindle.json at ${manifestPath} is not valid JSON`);
+  }
 
   if (!manifest.identifier || !validateIdentifier(manifest.identifier)) {
     throw new Error(
@@ -128,7 +144,7 @@ function moveRootRepoToNestedRepo(extRootDir: string): void {
   }
 }
 
-function ensureRepoLayoutForIdentifier(identifier: string): void {
+async function ensureRepoLayoutForIdentifier(identifier: string): Promise<void> {
   const root = extensionDir(identifier);
   const rootManifestPath = join(root, "spindle.json");
   const rootSpindleFilePath = join(root, "spindlefile");
@@ -138,16 +154,16 @@ function ensureRepoLayoutForIdentifier(identifier: string): void {
   const nestedSpindleFileJsonPath = join(root, "repo", "spindlefile.json");
 
   if (
-    existsSync(nestedManifestPath) ||
-    existsSync(nestedSpindleFilePath) ||
-    existsSync(nestedSpindleFileJsonPath)
+    (await Bun.file(nestedManifestPath).exists()) ||
+    (await Bun.file(nestedSpindleFilePath).exists()) ||
+    (await Bun.file(nestedSpindleFileJsonPath).exists())
   ) {
     return;
   }
   if (
-    !existsSync(rootManifestPath) &&
-    !existsSync(rootSpindleFilePath) &&
-    !existsSync(rootSpindleFileJsonPath)
+    !(await Bun.file(rootManifestPath).exists()) &&
+    !(await Bun.file(rootSpindleFilePath).exists()) &&
+    !(await Bun.file(rootSpindleFileJsonPath).exists())
   ) {
     throw new Error(`No spindle.json found for local extension ${identifier}`);
   }
@@ -252,10 +268,10 @@ function syncPermissionGrants(
  * if anything has changed. Safe to call on every start — no-ops when the
  * manifest matches what the DB already has.
  */
-export function syncManifestToDb(identifier: string): void {
+export async function syncManifestToDb(identifier: string): Promise<void> {
   let manifest: SpindleManifest;
   try {
-    manifest = readManifest(identifier);
+    manifest = await readManifest(identifier);
   } catch {
     // If manifest can't be read (e.g. repo missing), skip sync silently
     return;
@@ -441,7 +457,7 @@ function bunInstallCmd(): string[] {
 
 export async function buildExtension(identifier: string): Promise<void> {
   const repo = repoDir(identifier);
-  const manifest = readManifest(identifier);
+  const manifest = await readManifest(identifier);
 
   const backendEntry = manifest.entry_backend || "dist/backend.js";
   const frontendEntry = manifest.entry_frontend || "dist/frontend.js";
@@ -547,13 +563,19 @@ export async function install(
 
   // Read manifest from cloned repo
   const manifestPath = join(tempDir, "spindle.json");
-  if (!existsSync(manifestPath)) {
+  if (!(await Bun.file(manifestPath).exists())) {
     rmSync(tempDir, { recursive: true, force: true });
     throw new Error("No spindle.json found in repository");
   }
 
-  const raw = readFileSync(manifestPath, "utf-8");
-  const manifest: SpindleManifest = JSON.parse(raw);
+  const raw = await Bun.file(manifestPath).text();
+  let manifest: SpindleManifest;
+  try {
+    manifest = JSON.parse(raw) as SpindleManifest;
+  } catch {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw new Error("spindle.json in repository is not valid JSON");
+  }
 
   if (!manifest.identifier || !validateIdentifier(manifest.identifier)) {
     rmSync(tempDir, { recursive: true, force: true });
@@ -616,7 +638,7 @@ export async function install(
     ]
   );
 
-  return getExtension(id)!;
+  return (await getExtension(id))!;
 }
 
 // ─── Update ──────────────────────────────────────────────────────────────
@@ -640,7 +662,7 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
   }
 
   // Re-read manifest
-  const manifest = readManifest(identifier);
+  const manifest = await readManifest(identifier);
 
   const db = getDb();
   const existing = db
@@ -697,7 +719,7 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
     existingPermissions
   );
 
-  return getExtensionByIdentifier(identifier)!;
+  return (await getExtensionByIdentifier(identifier))!;
 }
 
 // ─── Remove ──────────────────────────────────────────────────────────────
@@ -808,13 +830,13 @@ export function hasPermission(
 
 // ─── Queries ─────────────────────────────────────────────────────────────
 
-export function list(): ExtensionInfo[] {
+export async function list(): Promise<ExtensionInfo[]> {
   const db = getDb();
   const rows = db.query("SELECT * FROM extensions ORDER BY installed_at DESC").all() as any[];
-  return rows.map(rowToExtensionInfo);
+  return Promise.all(rows.map(rowToExtensionInfo));
 }
 
-export function listForUser(userId: string, role: string | null | undefined): ExtensionInfo[] {
+export async function listForUser(userId: string, role: string | null | undefined): Promise<ExtensionInfo[]> {
   if (role === "owner" || role === "admin") {
     return list();
   }
@@ -828,20 +850,20 @@ export function listForUser(userId: string, role: string | null | undefined): Ex
     )
     .all(userId) as any[];
 
-  return rows.map(rowToExtensionInfo);
+  return Promise.all(rows.map(rowToExtensionInfo));
 }
 
-export function getExtension(id: string): ExtensionInfo | null {
+export async function getExtension(id: string): Promise<ExtensionInfo | null> {
   const db = getDb();
   const row = db.query("SELECT * FROM extensions WHERE id = ?").get(id) as any;
   return row ? rowToExtensionInfo(row) : null;
 }
 
-export function getExtensionForUser(
+export async function getExtensionForUser(
   id: string,
   userId: string,
   role: string | null | undefined
-): ExtensionInfo | null {
+): Promise<ExtensionInfo | null> {
   if (role === "owner" || role === "admin") {
     return getExtension(id);
   }
@@ -871,9 +893,9 @@ export function canManageExtension(
   );
 }
 
-export function getExtensionByIdentifier(
+export async function getExtensionByIdentifier(
   identifier: string
-): ExtensionInfo | null {
+): Promise<ExtensionInfo | null> {
   const db = getDb();
   const row = db
     .query("SELECT * FROM extensions WHERE identifier = ?")
@@ -881,32 +903,32 @@ export function getExtensionByIdentifier(
   return row ? rowToExtensionInfo(row) : null;
 }
 
-export function getManifest(identifier: string): SpindleManifest {
+export async function getManifest(identifier: string): Promise<SpindleManifest> {
   return readManifest(identifier);
 }
 
-export function getEnabledExtensions(): ExtensionInfo[] {
+export async function getEnabledExtensions(): Promise<ExtensionInfo[]> {
   const db = getDb();
   const rows = db
     .query("SELECT * FROM extensions WHERE enabled = 1")
     .all() as any[];
-  return rows.map(rowToExtensionInfo);
+  return Promise.all(rows.map(rowToExtensionInfo));
 }
 
-export function getFrontendBundlePath(identifier: string): string | null {
-  const manifest = readManifest(identifier);
+export async function getFrontendBundlePath(identifier: string): Promise<string | null> {
+  const manifest = await readManifest(identifier);
   const entry = manifest.entry_frontend || "dist/frontend.js";
   const repo = repoDir(identifier);
   const bundlePath = resolveWithin(repo, entry, "entry_frontend");
-  return existsSync(bundlePath) ? bundlePath : null;
+  return (await Bun.file(bundlePath).exists()) ? bundlePath : null;
 }
 
-export function getBackendEntryPath(identifier: string): string | null {
-  const manifest = readManifest(identifier);
+export async function getBackendEntryPath(identifier: string): Promise<string | null> {
+  const manifest = await readManifest(identifier);
   const entry = manifest.entry_backend || "dist/backend.js";
   const repo = repoDir(identifier);
   const entryPath = resolveWithin(repo, entry, "entry_backend");
-  return existsSync(entryPath) ? entryPath : null;
+  return (await Bun.file(entryPath).exists()) ? entryPath : null;
 }
 
 export function getStoragePath(identifier: string): string {
@@ -960,12 +982,12 @@ export async function importLocalExtensions(): Promise<{
       const rootSpindleFileJsonPath = join(candidateRoot, "spindlefile.json");
 
       let manifestPath: string | null = null;
-      if (existsSync(nestedManifestPath)) manifestPath = nestedManifestPath;
-      else if (existsSync(nestedSpindleFilePath)) manifestPath = nestedSpindleFilePath;
-      else if (existsSync(nestedSpindleFileJsonPath)) manifestPath = nestedSpindleFileJsonPath;
-      else if (existsSync(rootManifestPath)) manifestPath = rootManifestPath;
-      else if (existsSync(rootSpindleFilePath)) manifestPath = rootSpindleFilePath;
-      else if (existsSync(rootSpindleFileJsonPath)) manifestPath = rootSpindleFileJsonPath;
+      if (await Bun.file(nestedManifestPath).exists()) manifestPath = nestedManifestPath;
+      else if (await Bun.file(nestedSpindleFilePath).exists()) manifestPath = nestedSpindleFilePath;
+      else if (await Bun.file(nestedSpindleFileJsonPath).exists()) manifestPath = nestedSpindleFileJsonPath;
+      else if (await Bun.file(rootManifestPath).exists()) manifestPath = rootManifestPath;
+      else if (await Bun.file(rootSpindleFilePath).exists()) manifestPath = rootSpindleFilePath;
+      else if (await Bun.file(rootSpindleFileJsonPath).exists()) manifestPath = rootSpindleFileJsonPath;
       else {
         skipped.push({
           path: candidateRoot,
@@ -974,7 +996,7 @@ export async function importLocalExtensions(): Promise<{
         continue;
       }
 
-      const manifest = readManifestFromPath(manifestPath, {
+      const manifest = await readManifestFromPath(manifestPath, {
         allowMissingGithub: true,
       });
 
@@ -996,7 +1018,7 @@ export async function importLocalExtensions(): Promise<{
           moveSync(candidateRoot, desiredRoot);
         }
 
-        ensureRepoLayoutForIdentifier(manifest.identifier);
+        await ensureRepoLayoutForIdentifier(manifest.identifier);
       } else {
         // Already nested layout, but ensure root directory matches identifier if needed
         const desiredRoot = extensionDir(manifest.identifier);
@@ -1015,7 +1037,7 @@ export async function importLocalExtensions(): Promise<{
       applyStorageSeeds(manifest.identifier, manifest);
       insertExtensionFromManifest(manifest);
 
-      const ext = getExtensionByIdentifier(manifest.identifier);
+      const ext = await getExtensionByIdentifier(manifest.identifier);
       if (ext) imported.push(ext);
     } catch (err: any) {
       skipped.push({
@@ -1121,7 +1143,7 @@ export async function switchBranch(
   }
 
   // Re-read manifest
-  const manifest = readManifest(identifier);
+  const manifest = await readManifest(identifier);
 
   const db = getDb();
   const existing = db
@@ -1178,12 +1200,12 @@ export async function switchBranch(
     existingPermissions
   );
 
-  return getExtensionByIdentifier(identifier)!;
+  return (await getExtensionByIdentifier(identifier))!;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-function rowToExtensionInfo(row: any): ExtensionInfo {
+async function rowToExtensionInfo(row: any): Promise<ExtensionInfo> {
   const identifier = row.identifier;
   const permissions: SpindlePermission[] = JSON.parse(row.permissions || "[]");
   const granted = getGrantedPermissions(identifier);
@@ -1191,8 +1213,8 @@ function rowToExtensionInfo(row: any): ExtensionInfo {
   let hasFrontend = false;
   let hasBackend = false;
   try {
-    hasFrontend = getFrontendBundlePath(identifier) !== null;
-    hasBackend = getBackendEntryPath(identifier) !== null;
+    hasFrontend = (await getFrontendBundlePath(identifier)) !== null;
+    hasBackend = (await getBackendEntryPath(identifier)) !== null;
   } catch {
     // Extension files may not exist
   }

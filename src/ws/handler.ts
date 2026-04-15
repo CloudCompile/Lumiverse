@@ -110,7 +110,7 @@ export const wsHandler = upgradeWebSocket((c) => {
         console.error("[WS] onOpen error:", err);
       }
     },
-    onMessage(event, ws) {
+    async onMessage(event, ws) {
       try {
         const data = JSON.parse(event.data as string);
         if (data.type === "ping") {
@@ -136,12 +136,43 @@ export const wsHandler = upgradeWebSocket((c) => {
           return;
         }
 
+        if (data.type === "SPINDLE_CONFIRM_RESULT") {
+          if (userId && data.requestId) {
+            eventBus.emit(EventType.SPINDLE_CONFIRM_RESULT, {
+              requestId: data.requestId,
+              confirmed: !!data.confirmed,
+            }, userId);
+          }
+          return;
+        }
+
+        if (data.type === "SPINDLE_MODAL_RESULT") {
+          if (userId && data.requestId) {
+            eventBus.emit(EventType.SPINDLE_MODAL_RESULT, {
+              requestId: data.requestId,
+              dismissedBy: data.dismissedBy,
+            }, userId);
+          }
+          return;
+        }
+
+        if (data.type === "SPINDLE_INPUT_PROMPT_RESULT") {
+          if (userId && data.requestId) {
+            eventBus.emit(EventType.SPINDLE_INPUT_PROMPT_RESULT, {
+              requestId: data.requestId,
+              value: data.value ?? null,
+              cancelled: !!data.cancelled,
+            }, userId);
+          }
+          return;
+        }
+
         if (data.type === "SPINDLE_BACKEND_MSG") {
           const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
           if (!extensionId) return;
           if (!userId) return;
 
-          const ext = managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
           if (!ext) {
             return;
           }
@@ -158,13 +189,31 @@ export const wsHandler = upgradeWebSocket((c) => {
               extensionId,
               identifier: host.manifest.identifier,
               ...(data.payload as Record<string, unknown>),
-            });
+            }, userId);
           }
 
           host.sendFrontendMessage(data.payload, userId!);
         }
-      } catch {
-        // Ignore malformed messages
+
+        if (data.type === "SPINDLE_COMMAND_INVOKE") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const commandId = typeof data.commandId === "string" ? data.commandId : null;
+          if (!extensionId || !commandId || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          host.invokeCommand(commandId, data.context ?? {}, userId);
+        }
+      } catch (err) {
+        // L-16: Log unexpected errors rather than silently discarding them.
+        // This preserves the intent to ignore benign parse errors for malformed
+        // client messages while still surfacing actual server-side bugs.
+        if (err instanceof SyntaxError) return; // malformed JSON from client — ignore silently
+        console.error("[WS] onMessage error:", err);
       }
     },
     onClose(_event, ws) {

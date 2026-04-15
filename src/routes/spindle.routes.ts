@@ -12,7 +12,6 @@ import {
   getEphemeralPoolConfig,
   updateEphemeralPoolConfig,
 } from "../spindle/ephemeral-pool.service";
-import { readFileSync, existsSync } from "fs";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 
@@ -26,7 +25,7 @@ function getViewer(c: any): { userId: string; role: string } {
   };
 }
 
-function getVisibleExtension(c: any, id: string | undefined): ExtensionInfo | null {
+async function getVisibleExtension(c: any, id: string | undefined): Promise<ExtensionInfo | null> {
   if (!id) return null;
   const viewer = getViewer(c);
   return managerSvc.getExtensionForUser(id, viewer.userId, viewer.role);
@@ -38,31 +37,34 @@ function canManageExtension(c: any, ext: ExtensionInfo): boolean {
 }
 
 // GET /api/v1/spindle — List all extensions with status + viewer privilege
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const viewer = getViewer(c);
-  const extensions = managerSvc.listForUser(viewer.userId, viewer.role).map((ext) => ({
+  const extensions = (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ({
     ...ext,
+    // L-07: Both branches of the ternary returned "stopped", so the "running"
+    // state was never surfaced to clients.  Fix: "disabled" for non-enabled
+    // extensions, "stopped" only for enabled ones that aren't currently running.
     status: lifecycle.isRunning(ext.id)
       ? "running"
       : ext.enabled
         ? "stopped"
-        : "stopped",
+        : "disabled",
   }));
   const isPrivileged = viewer.role === "owner" || viewer.role === "admin";
   return c.json({ extensions, isPrivileged });
 });
 
 // GET /api/v1/spindle/ephemeral/overview — Admin overview with reservations
-app.get("/ephemeral/overview", requireOwner, (c) => {
-  return c.json(getEphemeralPoolOverview({ includeReservations: true }));
+app.get("/ephemeral/overview", requireOwner, async (c) => {
+  return c.json(await getEphemeralPoolOverview({ includeReservations: true }));
 });
 
 // GET /api/v1/spindle/ephemeral/overview/me — User-facing pool overview
-app.get("/ephemeral/overview/me", (c) => {
+app.get("/ephemeral/overview/me", async (c) => {
   const viewer = getViewer(c);
-  const overview = getEphemeralPoolOverview({ includeReservations: false });
+  const overview = await getEphemeralPoolOverview({ includeReservations: false });
   const visibleIds = new Set(
-    managerSvc.listForUser(viewer.userId, viewer.role).map((ext) => ext.id)
+    (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ext.id)
   );
   const visibleExtensions = overview.extensions.filter((row) =>
     visibleIds.has(row.extensionId)
@@ -91,8 +93,8 @@ app.get("/ephemeral/overview/me", (c) => {
 });
 
 // GET /api/v1/spindle/ephemeral/config — Effective pool config
-app.get("/ephemeral/config", requireOwner, (c) => {
-  return c.json(getEphemeralPoolConfig());
+app.get("/ephemeral/config", requireOwner, async (c) => {
+  return c.json(await getEphemeralPoolConfig());
 });
 
 // PUT /api/v1/spindle/ephemeral/config — Update pool config (credential-gated)
@@ -123,7 +125,7 @@ app.put("/ephemeral/config", requireOwner, async (c) => {
       return c.json({ error: "Invalid credentials" }, 403);
     }
 
-    const next = updateEphemeralPoolConfig({
+    const next = await updateEphemeralPoolConfig({
       globalMaxBytes: body.globalMaxBytes,
       extensionDefaultMaxBytes: body.extensionDefaultMaxBytes,
       extensionMaxOverrides: body.extensionMaxOverrides,
@@ -161,6 +163,24 @@ app.post("/install", requireOwner, async (c) => {
     const body = await c.req.json();
     if (!body.github_url) {
       return c.json({ error: "github_url is required" }, 400);
+    }
+
+    // H-08: Validate the github_url to ensure it is a legitimate GitHub HTTPS
+    // URL.  Accepting arbitrary git URLs (including file://, ssh://, git+...,
+    // or git@ shorthand) would allow an owner to read local filesystem paths or
+    // connect to internal network services via the git clone step.
+    const githubUrl = String(body.github_url).trim();
+    let parsedGitUrl: URL;
+    try {
+      parsedGitUrl = new URL(githubUrl);
+    } catch {
+      return c.json({ error: "github_url is not a valid URL" }, 400);
+    }
+    if (parsedGitUrl.protocol !== "https:") {
+      return c.json({ error: "github_url must use https" }, 400);
+    }
+    if (parsedGitUrl.hostname !== "github.com") {
+      return c.json({ error: "github_url must be a github.com URL" }, 400);
     }
 
     const requestedScope =
@@ -209,7 +229,7 @@ app.post("/import-local", requireOwner, async (c) => {
 // POST /api/v1/spindle/:id/update — Git pull + rebuild
 app.post("/:id/update", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -246,7 +266,7 @@ app.post("/:id/update", async (c) => {
 // DELETE /api/v1/spindle/:id — Remove extension
 app.delete("/:id", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -278,7 +298,7 @@ app.delete("/:id", async (c) => {
 // POST /api/v1/spindle/:id/enable — Enable + start worker (admin/owner only)
 app.post("/:id/enable", requireOwner, async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -306,7 +326,7 @@ app.post("/:id/enable", requireOwner, async (c) => {
 // POST /api/v1/spindle/:id/disable — Disable + stop worker
 app.post("/:id/disable", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -336,7 +356,7 @@ app.post("/:id/disable", async (c) => {
 // POST /api/v1/spindle/:id/restart — Restart worker (stop + start)
 app.post("/:id/restart", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -363,8 +383,8 @@ app.post("/:id/restart", async (c) => {
 });
 
 // GET /api/v1/spindle/:id/permissions — Get requested + granted permissions
-app.get("/:id/permissions", (c) => {
-  const ext = getVisibleExtension(c, c.req.param("id"));
+app.get("/:id/permissions", async (c) => {
+  const ext = await getVisibleExtension(c, c.req.param("id"));
   if (!ext) return c.json({ error: "Not found" }, 404);
 
   return c.json({
@@ -376,7 +396,7 @@ app.get("/:id/permissions", (c) => {
 // POST /api/v1/spindle/:id/permissions — Grant/revoke permissions
 app.post("/:id/permissions", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -401,7 +421,7 @@ app.post("/:id/permissions", async (c) => {
       }
     }
 
-    const updated = managerSvc.getExtension(ext.id);
+    const updated = await managerSvc.getExtension(ext.id);
     const allGranted = updated?.granted_permissions ?? [];
 
     // Hot-apply permission changes to the running worker (no restart needed)
@@ -428,12 +448,12 @@ app.post("/:id/permissions", async (c) => {
 });
 
 // GET /api/v1/spindle/:id/manifest — Get parsed spindle.json
-app.get("/:id/manifest", (c) => {
+app.get("/:id/manifest", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
 
-    const manifest = managerSvc.getManifest(ext.identifier);
+    const manifest = await managerSvc.getManifest(ext.identifier);
     return c.json(manifest);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
@@ -443,7 +463,7 @@ app.get("/:id/manifest", (c) => {
 // GET /api/v1/spindle/:id/branches — List branches for an installed extension
 app.get("/:id/branches", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
 
     const result = managerSvc.getBranches(ext.identifier);
@@ -456,7 +476,7 @@ app.get("/:id/branches", async (c) => {
 // POST /api/v1/spindle/:id/switch-branch — Switch to a different branch
 app.post("/:id/switch-branch", async (c) => {
   try {
-    const ext = getVisibleExtension(c, c.req.param("id"));
+    const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
 
@@ -484,25 +504,25 @@ app.post("/:id/switch-branch", async (c) => {
 });
 
 // GET /api/v1/spindle/tools — List all registered tools
-app.get("/tools", (c) => {
+app.get("/tools", async (c) => {
   const viewer = getViewer(c);
   const visibleIds = new Set(
-    managerSvc.listForUser(viewer.userId, viewer.role).map((ext) => ext.id)
+    (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ext.id)
   );
   return c.json(toolRegistry.getTools().filter((tool) => visibleIds.has(tool.extension_id)));
 });
 
 // GET /api/v1/spindle/:id/frontend — Serve the extension's frontend bundle
-app.get("/:id/frontend", (c) => {
-  const ext = getVisibleExtension(c, c.req.param("id"));
+app.get("/:id/frontend", async (c) => {
+  const ext = await getVisibleExtension(c, c.req.param("id"));
   if (!ext) return c.json({ error: "Not found" }, 404);
 
-  const bundlePath = managerSvc.getFrontendBundlePath(ext.identifier);
-  if (!bundlePath || !existsSync(bundlePath)) {
+  const bundlePath = await managerSvc.getFrontendBundlePath(ext.identifier);
+  if (!bundlePath || !(await Bun.file(bundlePath).exists())) {
     return c.json({ error: "No frontend bundle" }, 404);
   }
 
-  const content = readFileSync(bundlePath, "utf-8");
+  const content = await Bun.file(bundlePath).text();
   return new Response(content, {
     headers: {
       "Content-Type": "application/javascript",

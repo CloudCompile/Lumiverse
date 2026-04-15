@@ -7,12 +7,14 @@ import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/lo
 export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
   extensionThemeOverrides: {},
+  mutedExtensionThemes: {},
   extensionOperationStatus: null,
   spindlePrivileged: false,
   pendingPermissionRequest: null,
   pendingTextEditor: null,
   pendingModal: null,
   pendingConfirm: null,
+  pendingInputPrompt: null,
   pendingContextMenu: null,
 
   loadExtensions: async () => {
@@ -166,6 +168,16 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     })
   },
 
+  dismissSpindleModal: (requestId: string) => {
+    set((state) => {
+      // Only clear if the requestId matches to avoid stale dismissals.
+      // Unlike closeSpindleModal, this does NOT send a WS message back —
+      // preventing an echo loop when the server initiates the close.
+      if (state.pendingModal?.requestId !== requestId) return state
+      return { ...state, pendingModal: null }
+    })
+  },
+
   openSpindleConfirm: (request) => {
     set({ pendingConfirm: request })
   },
@@ -182,6 +194,20 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
         detail: { requestId, confirmed },
       })
     )
+  },
+
+  openInputPrompt: (request) => {
+    set({ pendingInputPrompt: request })
+  },
+
+  closeInputPrompt: (requestId: string, value: string | null) => {
+    set({ pendingInputPrompt: null })
+    wsClient.send({
+      type: 'SPINDLE_INPUT_PROMPT_RESULT',
+      requestId,
+      value,
+      cancelled: value === null,
+    })
   },
 
   openContextMenu: (request: PendingContextMenuRequest) => {
@@ -215,6 +241,23 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   clearAllExtensionThemeOverrides: () => {
     set({ extensionThemeOverrides: {} })
+  },
+
+  muteExtensionTheme: (extensionId: string) => {
+    set((state) => {
+      const { [extensionId]: _, ...rest } = state.extensionThemeOverrides
+      return {
+        mutedExtensionThemes: { ...state.mutedExtensionThemes, [extensionId]: true },
+        extensionThemeOverrides: rest,
+      }
+    })
+  },
+
+  unmuteExtensionTheme: (extensionId: string) => {
+    set((state) => {
+      const { [extensionId]: _, ...rest } = state.mutedExtensionThemes
+      return { mutedExtensionThemes: rest }
+    })
   },
 
   setExtensionOperationStatus: (extensionId: string | null, operation: string, name: string | null) => {

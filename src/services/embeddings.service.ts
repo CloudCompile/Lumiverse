@@ -19,6 +19,10 @@ const LANCEDB_PATH = join(env.dataDir, "lancedb");
 const EMBEDDINGS_TABLE = "embeddings";
 const WORLD_BOOK_VECTOR_VERSION = 2;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
+/** Default safety timeout for embedding API requests. Prevents a hanging
+ *  upstream server from stalling the entire generation pipeline.
+ *  User-configurable via EmbeddingConfig.request_timeout (seconds). */
+const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS = 120_000; // 120 seconds
 
 export type EmbeddingProvider =
   | "openai-compatible"
@@ -44,6 +48,9 @@ export interface EmbeddingConfig {
   vectorize_chat_messages: boolean;
   vectorize_chat_documents: boolean;
   chat_memory_mode: "conservative" | "balanced" | "aggressive";
+  /** Timeout in seconds for individual embedding API requests.
+   *  0 = no timeout. Default: 60. */
+  request_timeout: number;
 }
 
 export interface EmbeddingConfigWithStatus extends EmbeddingConfig {
@@ -169,6 +176,45 @@ function clampFloat(v: unknown, min: number, max: number, fallback: number): num
   return Math.min(max, Math.max(min, v));
 }
 
+// ─── LTCM Config Hash ─────────────────────────────────────────
+// Detects when chunking settings or compilation logic change so stale
+// chunks can be lazily rebuilt per-chat at the next generation.
+
+/**
+ * Bump this when the chunk compilation logic changes in a breaking way.
+ * Any chat whose stored hash doesn't match the current hash will get
+ * its chunks rebuilt on the next generation.
+ */
+export const LTCM_FORMAT_VERSION = 2;
+
+/**
+ * Compute a deterministic hash from the settings that affect how chunks
+ * are compiled. Changes to retrieval-only settings (topK, exclusionWindow,
+ * templates) do NOT trigger a rebuild — only structural chunking params.
+ */
+export function computeChatMemoryHash(
+  settings: ChatMemorySettings,
+  embeddingModel?: string,
+): string {
+  const input = JSON.stringify({
+    v: LTCM_FORMAT_VERSION,
+    ct: settings.chunkTargetTokens,
+    cm: settings.chunkMaxTokens,
+    co: settings.chunkOverlapTokens,
+    sb: settings.splitOnSceneBreaks,
+    tg: settings.splitOnTimeGapMinutes,
+    mm: settings.maxMessagesPerChunk,
+    em: embeddingModel || "",
+  });
+  // FNV-1a 32-bit — fast, deterministic, good enough for config comparison
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
 /**
  * Resolve effective chat memory parameters. When quickMode is active,
  * the preset map values override the fine-grained fields (backward compat).
@@ -255,7 +301,70 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
 let connPromise: Promise<Connection> | null = null;
 let vectorIndexReady = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
-const OPTIMIZE_DEBOUNCE_MS = 30_000; // 30 seconds after last write
+const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
+/** Grace period for version cleanup — keeps old versions alive long enough for
+ *  in-flight reads to complete. Without this, optimize() can delete manifests
+ *  that concurrent queries still reference, causing "Object not found" errors. */
+const CLEANUP_GRACE_PERIOD_MS = 2 * 60_000;
+
+// ---------------------------------------------------------------------------
+// Write serialization — prevents concurrent LanceDB mutations from racing.
+// LanceDB's internal conflict resolver panics when optimize() deletes version
+// manifests that in-flight mergeInsert() operations still reference.
+// Serializing all writes through a single async mutex eliminates this entirely.
+//
+// Safety bounds:
+//   - Lock acquisition times out after WRITE_LOCK_WAIT_TIMEOUT_MS to prevent
+//     unbounded queue growth when LanceDB operations are slow or hung.
+//   - The queue is capped at MAX_WRITE_LOCK_QUEUE to reject new work instead
+//     of piling up indefinitely behind a slow lock holder.
+// ---------------------------------------------------------------------------
+const WRITE_LOCK_WAIT_TIMEOUT_MS = 30_000; // 30s max wait to acquire the lock
+const MAX_WRITE_LOCK_QUEUE = 50;           // reject if more than 50 waiters queued
+const _writeLockQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+let _writeLockHeld = false;
+
+async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (!_writeLockHeld) {
+    _writeLockHeld = true;
+  } else {
+    if (_writeLockQueue.length >= MAX_WRITE_LOCK_QUEUE) {
+      throw new Error(`[embeddings] Write lock queue full (${_writeLockQueue.length} waiters) — rejecting to prevent resource exhaustion`);
+    }
+    await new Promise<void>((resolve, reject) => {
+      const entry = { resolve, reject };
+      _writeLockQueue.push(entry);
+      const timer = setTimeout(() => {
+        const idx = _writeLockQueue.indexOf(entry);
+        if (idx >= 0) {
+          _writeLockQueue.splice(idx, 1);
+          reject(new Error(`[embeddings] Write lock acquisition timed out after ${WRITE_LOCK_WAIT_TIMEOUT_MS}ms (${_writeLockQueue.length} still queued)`));
+        }
+      }, WRITE_LOCK_WAIT_TIMEOUT_MS);
+      // Clear the timer if the lock is acquired before timeout
+      const origResolve = entry.resolve;
+      entry.resolve = () => { clearTimeout(timer); origResolve(); };
+    });
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = _writeLockQueue.shift();
+    if (next) next.resolve();
+    else _writeLockHeld = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Table handle cache — avoids repeated openTable() calls that each hit disk
+// to resolve the version manifest. Invalidated on reset/errors.
+// ---------------------------------------------------------------------------
+let tableHandle: Table | null = null;
+
+function invalidateTableHandle(): void {
+  tableHandle = null;
+}
+
 const worldBookVectorVersionChecked = new Set<string>();
 
 // Periodically clear the version-check cache so it doesn't grow unbounded.
@@ -297,6 +406,7 @@ function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): Embed
     vectorize_chat_messages: false,
     vectorize_chat_documents: true,
     chat_memory_mode: "balanced",
+    request_timeout: 120,
   };
 }
 
@@ -348,25 +458,37 @@ function normalizeConfig(input: any): EmbeddingConfig {
       input?.chat_memory_mode === "aggressive"
         ? input.chat_memory_mode
         : base.chat_memory_mode,
+    request_timeout:
+      Number.isFinite(input?.request_timeout) && input.request_timeout >= 0
+        ? Math.min(300, input.request_timeout)
+        : base.request_timeout,
   };
 }
 
 /**
  * Resolve the final embedding request URL from user-provided api_url.
  *
- * - No path or just "/" → append /v1/embeddings  (bare base URL)
- * - Any path present     → use as-is             (user-specified endpoint)
+ * - Already ends with /embeddings or /embed → use as-is
+ * - No path or just "/"                     → append /v1/embeddings
+ * - Has a partial path (e.g. /v1)           → append /embeddings
  */
 function resolveEmbeddingUrl(rawUrl: string): string {
   const trimmed = rawUrl.replace(/\/+$/, "");
   try {
     const parsed = new URL(trimmed);
-    const path = parsed.pathname;
-    if (!path || path === "/") {
-      parsed.pathname = "/v1/embeddings";
-      return parsed.toString().replace(/\/+$/, "");
+    const path = parsed.pathname.replace(/\/+$/, "");
+    // Already ends with an embedding endpoint — use as-is
+    if (/\/(embeddings|embed)$/.test(path)) {
+      return trimmed;
     }
-    return trimmed;
+    if (!path || path === "/") {
+      // Bare base URL — add full /v1/embeddings
+      parsed.pathname = "/v1/embeddings";
+    } else {
+      // Partial path (e.g. /v1, /api/v1, /proxy) — append /embeddings
+      parsed.pathname = path + "/embeddings";
+    }
+    return parsed.toString().replace(/\/+$/, "");
   } catch {
     // Malformed URL — best-effort append
     return `${trimmed}/v1/embeddings`;
@@ -422,30 +544,45 @@ async function tableExists(conn: Connection, name: string): Promise<boolean> {
 }
 
 async function getTableIfExists(): Promise<Table | null> {
+  if (tableHandle) return tableHandle;
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
-  if (exists) {
-    return conn.openTable(EMBEDDINGS_TABLE);
-  }
-  return null;
+  if (!exists) return null;
+  tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+  return tableHandle;
 }
 
 async function getOrCreateTable(seedRows?: EmbeddingRow[]): Promise<Table> {
+  if (tableHandle) return tableHandle;
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
   if (exists) {
-    return conn.openTable(EMBEDDINGS_TABLE);
+    tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+    return tableHandle;
   }
   if (!seedRows || seedRows.length === 0) {
     throw new Error("Cannot create embeddings table without initial seed rows to infer schema.");
   }
-  const table = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
-  return table;
+  tableHandle = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
+  return tableHandle;
 }
 
-const MIN_ROWS_FOR_VECTOR_INDEX = 10_000;
+const MIN_ROWS_FOR_VECTOR_INDEX = 5_000;
 let scalarIndexReady = false;
 let ftsIndexReady = false;
+const MAX_LANCE_SOURCE_FILTER_IDS = 250;
+const OPTIMIZE_MAX_WAIT_MS = 2 * 60_000; // 2 minutes (reduced from 5 min to prevent fragment buildup)
+let optimizeQueuedAt: number | null = null;
+
+// ---------------------------------------------------------------------------
+// Index health tracking — detect when indexes need rebuilding
+// ---------------------------------------------------------------------------
+let lastIndexRebuildAt = 0;
+let unindexedRowEstimate = 0;
+const INDEX_REBUILD_COOLDOWN_MS = 10 * 60_000; // Don't rebuild more than once per 10 min
+const UNINDEXED_ROW_THRESHOLD = 2_000; // Rebuild when this many rows are unindexed
+const INDEX_HEALTH_CHECK_INTERVAL_MS = 2 * 60_000; // Check index health every 2 min
+let indexHealthTimer: ReturnType<typeof setInterval> | null = null;
 
 function getWorldBookVectorVersionCacheKey(userId: string): string {
   return `${userId}:${WORLD_BOOK_VECTOR_VERSION}`;
@@ -526,13 +663,15 @@ async function ensureWorldBookVectorVersion(userId: string): Promise<void> {
   }
 
   try {
-    const table = await getTableIfExists();
-    if (table) {
-      await table.delete(
-        `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry'`
-      );
-      scheduleOptimize();
-    }
+    await withWriteLock(async () => {
+      const table = await getTableIfExists();
+      if (table) {
+        await table.delete(
+          `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry'`
+        );
+      }
+    });
+    scheduleOptimize();
   } catch (err) {
     console.warn("[embeddings] Failed to invalidate legacy world-book vectors:", err);
   }
@@ -563,86 +702,369 @@ async function ensureVectorIndex(table: Table): Promise<void> {
       vectorIndexReady = true;
       return;
     }
+    // IVF_PQ handles metadata-filtered workloads (every query uses .where())
+    // much better than HNSW_PQ, which suffers latency fluctuation with filters.
+    // Cap partitions so KMeans has at least 256 rows per partition to avoid
+    // "more than 10% of clusters are empty" warnings and poor index quality.
+    const numPartitions = Math.max(2, Math.min(
+      Math.floor(Math.sqrt(rowCount)),
+      Math.floor(rowCount / 256),
+    ));
     await table.createIndex("vector", {
-      config: Index.hnswPq({
+      config: Index.ivfPq({
         distanceType: "cosine",
-        m: 20,
-        efConstruction: 300,
+        numPartitions,
       }),
     } as any);
   } catch {
     // Index may already exist - that's fine
   }
   vectorIndexReady = true;
+  lastIndexRebuildAt = Date.now();
+  startIndexHealthMonitor();
 }
 
 /**
  * Ensure scalar indexes exist on filter columns for fast prefiltering.
- * BTree for high-cardinality (user_id, owner_id), Bitmap for low-cardinality (source_type).
+ * BTree for high-cardinality (user_id, owner_id, id), Bitmap for low-cardinality (source_type).
+ * The `id` BTree is critical for mergeInsert performance — without it, every upsert
+ * does a full table scan to find matching rows.
+ *
+ * When `force` is true, indexes are rebuilt with `replace: true` even if they already
+ * exist. This is needed after compaction cleanup, which can leave stale index files
+ * referencing deleted data versions (manifests as "Object not found" errors on Windows
+ * and other platforms).
  */
-async function ensureScalarIndexes(table: Table): Promise<void> {
-  if (scalarIndexReady) return;
-  const indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+async function ensureScalarIndexes(table: Table, force = false): Promise<void> {
+  if (scalarIndexReady && !force) return;
+
+  let indexNames: Set<string>;
+  try {
+    indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+  } catch {
+    // listIndices can fail if index files are orphaned from a previous compaction.
+    // Treat as empty so every index gets (re)created below.
+    indexNames = new Set();
+  }
+
   const create = async (col: string, config?: any) => {
     // LanceDB names indexes as {col}_idx by convention
-    if (indexNames.has(`${col}_idx`)) return;
+    if (!force && indexNames.has(`${col}_idx`)) return;
     try {
-      if (config) {
-        await table.createIndex(col, { config });
-      } else {
-        await table.createIndex(col);
+      const opts: any = config ? { config } : {};
+      if (force && indexNames.has(`${col}_idx`)) opts.replace = true;
+      await table.createIndex(col, opts);
+    } catch (err) {
+      // replace: true can fail when the old index references orphaned files.
+      // Fall back to a plain create (LanceDB overwrites by column name).
+      if (force) {
+        try {
+          const opts: any = config ? { config } : {};
+          await table.createIndex(col, opts);
+        } catch {
+          // Index may already exist in a usable state
+        }
       }
-    } catch {
-      // Index may already exist
     }
   };
+  await create("id"); // Critical for mergeInsert("id") join performance
   await create("user_id");
   await create("owner_id");
+  await create("source_id");
   await create("source_type", Index.bitmap());
   scalarIndexReady = true;
 }
 
 /**
  * Ensure FTS index exists on the content column for hybrid search.
+ * When `force` is true, the index is rebuilt even if it already exists.
  */
-async function ensureFtsIndex(table: Table): Promise<void> {
-  if (ftsIndexReady) return;
-  const indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
-  if (indexNames.has("content_idx")) {
+async function ensureFtsIndex(table: Table, force = false): Promise<void> {
+  if (ftsIndexReady && !force) return;
+
+  let indexNames: Set<string>;
+  try {
+    indexNames = new Set((await table.listIndices()).map((i: any) => i.name || i.indexName || ""));
+  } catch {
+    indexNames = new Set();
+  }
+
+  if (!force && indexNames.has("content_idx")) {
     ftsIndexReady = true;
     return;
   }
   try {
-    await table.createIndex("content", {
-      config: Index.fts(),
-    });
+    const opts: any = { config: Index.fts() };
+    if (force && indexNames.has("content_idx")) opts.replace = true;
+    await table.createIndex("content", opts);
   } catch {
-    // Index may already exist
+    if (force) {
+      try {
+        await table.createIndex("content", { config: Index.fts() });
+      } catch {
+        // Index may already exist in a usable state
+      }
+    }
   }
   ftsIndexReady = true;
 }
 
-export async function optimizeTable(): Promise<void> {
+/**
+ * Periodic index health monitor. Checks unindexed row count and triggers
+ * a vector index rebuild when too many rows have drifted out of the index
+ * (which happens naturally with mergeInsert updates).
+ */
+function startIndexHealthMonitor(): void {
+  if (indexHealthTimer) return;
+  indexHealthTimer = setInterval(async () => {
+    try {
+      const table = await getTableIfExists();
+      if (table) await checkAndRebuildIndexes(table);
+    } catch (err) {
+      console.warn("[embeddings] Index health check failed:", err);
+    }
+  }, INDEX_HEALTH_CHECK_INTERVAL_MS);
+}
+
+export function stopIndexHealthMonitor(): void {
+  if (indexHealthTimer) {
+    clearInterval(indexHealthTimer);
+    indexHealthTimer = null;
+  }
+}
+
+async function checkAndRebuildIndexes(table: Table): Promise<void> {
+  const now = Date.now();
+  if (now - lastIndexRebuildAt < INDEX_REBUILD_COOLDOWN_MS) return;
+
+  try {
+    const indices = await table.listIndices();
+    const vectorIdx = indices.find((i: any) => {
+      const name = i.name || i.indexName || "";
+      return name.includes("vector");
+    });
+    if (!vectorIdx) return;
+
+    const idxName = vectorIdx.name || (vectorIdx as any).indexName;
+    let unindexed = 0;
+    try {
+      const stats = await (table as any).indexStats(idxName);
+      if (stats) {
+        unindexed = (stats as any).num_unindexed_rows ?? (stats as any).numUnindexedRows ?? 0;
+      }
+    } catch {
+      // indexStats may not be supported for this index type — fall back to
+      // heuristic: rebuild if enough time has passed since last rebuild and
+      // we've been writing (optimizeQueuedAt !== null indicates recent writes).
+      if (optimizeQueuedAt !== null && now - lastIndexRebuildAt > INDEX_REBUILD_COOLDOWN_MS * 3) {
+        unindexed = UNINDEXED_ROW_THRESHOLD; // Force rebuild
+      }
+    }
+    unindexedRowEstimate = unindexed;
+
+    if (unindexed >= UNINDEXED_ROW_THRESHOLD) {
+      console.info(`[embeddings] ${unindexed} unindexed rows detected, rebuilding vector index...`);
+      await withWriteLock(async () => {
+        const t = await getTableIfExists();
+        if (!t) return;
+        const rowCount = await t.countRows();
+        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+        await t.createIndex("vector", {
+          config: Index.ivfPq({
+            distanceType: "cosine",
+            numPartitions,
+          }),
+          replace: true,
+        } as any);
+        lastIndexRebuildAt = Date.now();
+        unindexedRowEstimate = 0;
+        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows, ${numPartitions} partitions)`);
+      });
+    }
+  } catch (err) {
+    // Non-fatal — index health checks are best-effort
+    console.warn("[embeddings] Index health check error:", err);
+  }
+}
+
+/**
+ * One-time startup migration: detect old HNSW_PQ vector index and replace it
+ * with IVF_PQ (better for filtered workloads). Also compacts fragments.
+ * Safe to call every startup — skips quickly if no table exists or index is
+ * already the correct type.
+ */
+export async function runStartupVectorMaintenance(): Promise<void> {
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
   if (!exists) return;
 
-  const table = await conn.openTable(EMBEDDINGS_TABLE);
-  await table.optimize({
-    cleanupOlderThan: new Date(),
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+
+    let indices: any[];
+    try {
+      indices = await table.listIndices();
+    } catch {
+      // Index metadata may reference orphaned files — proceed with compaction
+      // and rebuild which will fix this.
+      indices = [];
+    }
+    const vectorIdx = indices.find((i: any) => {
+      const name = i.name || i.indexName || "";
+      return name.includes("vector");
+    });
+
+    // Check if the existing index is the old HNSW_PQ type that needs migration
+    const idxType = vectorIdx ? ((vectorIdx as any).indexType || (vectorIdx as any).type || "") : "";
+    const needsMigration = vectorIdx && /hnsw/i.test(idxType);
+
+    // Compact fragments — use grace period to avoid deleting versions that
+    // in-flight reads might still reference (prevents "manifest not found" panics).
+    try {
+      console.info("[embeddings] Running startup compaction...");
+      await table.optimize({ cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS) });
+    } catch (err) {
+      console.warn("[embeddings] Startup compaction failed:", err);
+    }
+
+    if (needsMigration) {
+      const rowCount = await table.countRows();
+      if (rowCount >= MIN_ROWS_FOR_VECTOR_INDEX) {
+        console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
+        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+        try {
+          await table.createIndex("vector", {
+            config: Index.ivfPq({
+              distanceType: "cosine",
+              numPartitions,
+            }),
+            replace: true,
+          } as any);
+          vectorIndexReady = true;
+          lastIndexRebuildAt = Date.now();
+          console.info(`[embeddings] Vector index migrated successfully (${numPartitions} partitions)`);
+        } catch (err) {
+          console.warn("[embeddings] Vector index migration failed (will retry on next query):", err);
+        }
+      }
+    }
+
+    // Force-rebuild scalar + FTS indexes after compaction cleanup to avoid stale
+    // index files referencing deleted data versions (causes "Object not found" errors).
+    await ensureScalarIndexes(table, true);
+    await ensureFtsIndex(table, true);
+    await ensureVectorIndex(table);
+  });
+
+  startIndexHealthMonitor();
+}
+
+export async function optimizeTable(): Promise<void> {
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+
+    // Use grace period to avoid deleting version manifests that in-flight reads
+    // might still reference. Without this, concurrent queries can hit
+    // "Object at location ... not found" errors for recently-cleaned versions.
+    await table.optimize({
+      cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS),
+    });
+
+    // Rebuild scalar + FTS indexes after compaction cleanup.
+    // optimize() with cleanupOlderThan removes old data versions, which can
+    // orphan index files that referenced those versions. Force-rebuilding
+    // ensures indexes reference the current compacted data.
+    try {
+      await ensureScalarIndexes(table, true);
+      await ensureFtsIndex(table, true);
+    } catch (err) {
+      console.warn("[embeddings] Post-optimize index rebuild failed:", err);
+    }
   });
 }
 
+/**
+ * Get LanceDB table health diagnostics for the embeddings table.
+ */
+export async function getVectorStoreHealth(): Promise<{
+  exists: boolean;
+  rowCount: number;
+  vectorIndexReady: boolean;
+  scalarIndexReady: boolean;
+  ftsIndexReady: boolean;
+  unindexedRowEstimate: number;
+  lastIndexRebuildAt: number;
+  indexes: Array<{ name: string; type?: string }>;
+}> {
+  const table = await getTableIfExists();
+  if (!table) {
+    return {
+      exists: false,
+      rowCount: 0,
+      vectorIndexReady,
+      scalarIndexReady,
+      ftsIndexReady,
+      unindexedRowEstimate: 0,
+      lastIndexRebuildAt: 0,
+      indexes: [],
+    };
+  }
+  const rowCount = await table.countRows();
+
+  let indices: any[];
+  try {
+    indices = await table.listIndices();
+  } catch {
+    // Index metadata may reference orphaned files from a previous compaction
+    // that didn't complete its rebuild pass. Force-rebuild and retry.
+    try {
+      await withWriteLock(async () => {
+        const t = await getTableIfExists();
+        if (t) {
+          await ensureScalarIndexes(t, true);
+          await ensureFtsIndex(t, true);
+        }
+      });
+      indices = await table.listIndices();
+    } catch {
+      indices = [];
+    }
+  }
+
+  return {
+    exists: true,
+    rowCount,
+    vectorIndexReady,
+    scalarIndexReady,
+    ftsIndexReady,
+    unindexedRowEstimate,
+    lastIndexRebuildAt,
+    indexes: indices.map((i: any) => ({
+      name: i.name || i.indexName || "unknown",
+      type: i.indexType || i.type || undefined,
+    })),
+  };
+}
+
 function scheduleOptimize(): void {
+  const now = Date.now();
+  if (optimizeQueuedAt == null) optimizeQueuedAt = now;
   if (optimizeTimer) clearTimeout(optimizeTimer);
+  const elapsed = now - optimizeQueuedAt;
+  const delay = elapsed >= OPTIMIZE_MAX_WAIT_MS
+    ? 0
+    : Math.min(OPTIMIZE_DEBOUNCE_MS, OPTIMIZE_MAX_WAIT_MS - elapsed);
   optimizeTimer = setTimeout(async () => {
     optimizeTimer = null;
+    optimizeQueuedAt = null;
     try {
       await optimizeTable();
     } catch (err) {
       console.warn("[embeddings] Deferred optimize failed:", err);
     }
-  }, OPTIMIZE_DEBOUNCE_MS);
+  }, delay);
 }
 
 export function getProviderDefaults(provider: EmbeddingProvider) {
@@ -735,26 +1157,59 @@ async function requestEmbeddings(
   if (!apiKey) throw new Error("Embedding API key is not configured");
   if (!texts.length) return [];
 
-  const isOllamaNative = /\/api\/(embed|embeddings)\b/.test(cfg.api_url);
+  const url = resolveEmbeddingUrl(cfg.api_url);
+
+  // Detect Ollama endpoints from the resolved URL (not the raw user input)
+  // so that partial paths like /api → /api/embeddings are caught correctly.
+  const isOllamaNative = /\/api\/(embed|embeddings)\b/.test(url);
+  // Ollama's legacy /api/embeddings endpoint only supports single inputs.
+  // The modern /api/embed endpoint supports batch natively.
+  const isOllamaLegacySingleOnly = /\/api\/embeddings\b/.test(url);
+
+  // If using the legacy single-input Ollama endpoint with multiple texts,
+  // send them sequentially instead of as a batch to avoid the
+  // "only supports single inputs" error.
+  if (isOllamaLegacySingleOnly && texts.length > 1) {
+    const results: number[][] = [];
+    for (const text of texts) {
+      const [vec] = await requestEmbeddings(userId, [text], options);
+      results.push(vec);
+    }
+    return results;
+  }
 
   const body: Record<string, any> = {
     model: cfg.model,
-    input: texts,
+    input: isOllamaLegacySingleOnly ? texts[0] : texts,
   };
   if (!isOllamaNative) {
     body.encoding_format = "float";
   }
   if (!options?.omitDimensions && cfg.send_dimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
-
-  const url = resolveEmbeddingUrl(cfg.api_url);
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const timeoutMs = cfg.request_timeout > 0
+    ? cfg.request_timeout * 1000
+    : DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new Error(`Embedding request timed out after ${timeoutMs / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const msg = await res.text().catch(() => "Embedding request failed");
@@ -775,14 +1230,47 @@ function getModelFingerprint(cfg: EmbeddingConfig): ModelFingerprint {
 }
 
 /**
+ * In-flight dedup: prevents concurrent requestEmbeddings() calls for the
+ * same text. Key = cache key (model-aware), Value = pending promise.
+ */
+const inflightEmbeddings = new Map<string, Promise<number[]>>();
+
+/**
  * Cache-aware embedding. Checks in-memory LRU cache first, batches only
  * uncached texts to the upstream API, then stores results.
+ *
+ * Single-text calls are deduped: if another caller is already fetching the
+ * same text, we share its promise instead of making a second API call.
  */
 export async function cachedEmbedTexts(userId: string, texts: string[]): Promise<number[][]> {
   if (!texts.length) return [];
   const cfg = await getEmbeddingConfig(userId);
   const fingerprint = getModelFingerprint(cfg);
 
+  // Fast path for single-text calls (the common case for cortex + chat memory retrieval)
+  if (texts.length === 1) {
+    const key = computeCacheKey(texts[0], fingerprint);
+    const cached = embeddingCache.get(key);
+    if (cached) return [cached];
+
+    // Join an in-flight request for the same text instead of making a duplicate API call
+    const inflight = inflightEmbeddings.get(key);
+    if (inflight) return [await inflight];
+
+    const promise = requestEmbeddings(userId, texts).then(vecs => {
+      const vec = vecs[0];
+      embeddingCache.set(key, vec);
+      inflightEmbeddings.delete(key);
+      return vec;
+    }, err => {
+      inflightEmbeddings.delete(key);
+      throw err;
+    });
+    inflightEmbeddings.set(key, promise);
+    return [await promise];
+  }
+
+  // Multi-text path: LRU cache check, batch uncached
   const results: (number[] | null)[] = new Array(texts.length).fill(null);
   const uncachedIndices: number[] = [];
 
@@ -833,11 +1321,13 @@ export async function testEmbeddingConfig(
 }
 
 export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: string): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
-  await table.delete(
-    `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
-  );
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    await table.delete(
+      `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
+    );
+  });
   scheduleOptimize();
 }
 
@@ -922,7 +1412,7 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
   const searchText = buildWorldBookEntrySearchText(entry);
   if (!cfg.enabled || !cfg.vectorize_world_books || entry.disabled || !content) {
     await deleteWorldBookEntryEmbeddings(userId, entry.id);
-    updateWorldBookEntryVectorState(entry.id, "pending", null, null);
+    updateWorldBookEntryVectorState(entry.id, "not_enabled", null, null);
     return;
   }
 
@@ -954,15 +1444,17 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
       updated_at: now,
     };
 
-    const table = await getOrCreateTable([row]);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows([row]));
+    await withWriteLock(async () => {
+      const table = await getOrCreateTable([row]);
+      await ensureVectorIndex(table);
+      await ensureScalarIndexes(table);
+      await ensureFtsIndex(table);
+      await table
+        .mergeInsert("id")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute(asLanceRows([row]));
+    });
 
     updateWorldBookEntryVectorState(entry.id, "indexed", now, null);
     scheduleOptimize();
@@ -1027,7 +1519,7 @@ export async function reindexWorldBookEntries(
 
   for (const entry of disabledOrEmpty) {
     await deleteWorldBookEntryEmbeddings(userId, entry.id);
-    updateWorldBookEntryVectorState(entry.id, "pending", null, null);
+    updateWorldBookEntryVectorState(entry.id, "not_enabled", null, null);
     progress.removed += 1;
     progress.current += 1;
     emitProgress();
@@ -1037,7 +1529,7 @@ export async function reindexWorldBookEntries(
   if (!cfg.enabled || !cfg.vectorize_world_books) {
     for (const entry of toIndex) {
       await deleteWorldBookEntryEmbeddings(userId, entry.id);
-      updateWorldBookEntryVectorState(entry.id, "pending", null, null);
+      updateWorldBookEntryVectorState(entry.id, "not_enabled", null, null);
       progress.removed += 1;
       progress.current += 1;
       emitProgress();
@@ -1047,9 +1539,10 @@ export async function reindexWorldBookEntries(
 
   await ensureWorldBookVectorVersion(userId);
 
-  for (let i = 0; i < toIndex.length; i += batchSize) {
-    const batch = toIndex.slice(i, i + batchSize);
-
+  /** Process a batch of entries: embed, upsert into LanceDB, update state.
+   *  On timeout/abort failures, retries with halved batch size (min 1).
+   *  Returns the entries that permanently failed after all retries. */
+  const processBatch = async (batch: WorldBookEntry[], currentBatchSize: number): Promise<void> => {
     try {
       const searchTexts = batch.map((entry) => buildWorldBookEntrySearchText(entry));
       const vectors = await cachedEmbedTexts(userId, searchTexts);
@@ -1068,21 +1561,39 @@ export async function reindexWorldBookEntries(
         updated_at: now,
       }));
 
-      const table = await getOrCreateTable(rows);
-      await ensureVectorIndex(table);
-      await ensureScalarIndexes(table);
-      await ensureFtsIndex(table);
-      await table
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows(rows));
+      await withWriteLock(async () => {
+        const table = await getOrCreateTable(rows);
+        await ensureVectorIndex(table);
+        await ensureScalarIndexes(table);
+        await ensureFtsIndex(table);
+        await table
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
 
       updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "indexed", now, null);
       progress.indexed += batch.length;
       progress.current += batch.length;
       emitProgress();
     } catch (err) {
+      const isTimeout = err instanceof Error && /timed out|abort/i.test(err.message);
+
+      // Retry with smaller batches if the failure looks like a timeout and
+      // we can still split further.
+      if (isTimeout && currentBatchSize > 1) {
+        const half = Math.max(1, Math.floor(currentBatchSize / 2));
+        console.warn(
+          `[embeddings] Batch of ${batch.length} timed out, retrying in sub-batches of ${half}`
+        );
+        for (let j = 0; j < batch.length; j += half) {
+          await processBatch(batch.slice(j, j + half), half);
+        }
+        return;
+      }
+
+      // Permanent failure — mark entries as errored.
       console.warn("[embeddings] Batch embedding failed:", err);
       const message = err instanceof Error ? err.message : "Batch vector indexing failed";
       updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "error", null, message);
@@ -1090,11 +1601,25 @@ export async function reindexWorldBookEntries(
       progress.current += batch.length;
       emitProgress();
     }
+  };
+
+  for (let i = 0; i < toIndex.length; i += batchSize) {
+    const batch = toIndex.slice(i, i + batchSize);
+    await processBatch(batch, batchSize);
   }
 
-  // Compact all fragments into fewer files and prune old versions
+  // Compact all fragments into fewer files, prune old versions, and
+  // rebuild vector index so freshly-upserted rows are fully indexed.
   try {
     await optimizeTable();
+    // After bulk reindex, force a vector index rebuild to absorb all new rows
+    await withWriteLock(async () => {
+      const table = await getTableIfExists();
+      if (table) {
+        vectorIndexReady = false;
+        await ensureVectorIndex(table);
+      }
+    });
   } catch (err) {
     console.warn("[embeddings] Post-reindex optimize failed:", err);
   }
@@ -1135,19 +1660,28 @@ export async function searchWorldBookEntriesHybridWithVector(
 ): Promise<WorldBookSearchCandidate[]> {
   await ensureWorldBookVectorVersion(userId);
   const table = await getTableIfExists();
-  if (!table) return [];
+  if (!table) {
+    console.debug("[embeddings] WI vector search: no LanceDB table exists yet (entries may not be indexed)");
+    return [];
+  }
 
   const trimmedQuery = queryText.trim();
   const filter = `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND owner_id = ${sqlValue(worldBookId)}`;
   const effectiveLimit = Math.max(1, Math.min(limit, 100));
 
-  const vectorRows = await table
+  const query = table
     .query()
     .nearestTo(vector)
     .where(filter)
     .select(["source_id", "content", "_distance", "metadata_json"])
-    .limit(effectiveLimit)
-    .toArray();
+    .limit(effectiveLimit) as any;
+  // Refine with full vectors after PQ approximate search for better accuracy
+  if (vectorIndexReady) query.refineFactor(5);
+  const vectorRows = await query.toArray();
+
+  if (vectorRows.length === 0) {
+    console.debug("[embeddings] WI vector search: 0 rows from LanceDB for book=%s (limit=%d)", worldBookId.slice(0, 8), effectiveLimit);
+  }
 
   const merged = new Map<string, WorldBookSearchCandidate>();
 
@@ -1235,11 +1769,13 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
   embeddingCache.clear();
 
   try {
-    const table = await getTableIfExists();
-    if (table) {
-      await table.delete(`user_id = ${sqlValue(userId)}`);
-      scheduleOptimize();
-    }
+    await withWriteLock(async () => {
+      const table = await getTableIfExists();
+      if (table) {
+        await table.delete(`user_id = ${sqlValue(userId)}`);
+      }
+    });
+    scheduleOptimize();
   } catch (err) {
     console.warn("[embeddings] Failed to delete LanceDB rows during invalidation:", err);
   }
@@ -1264,6 +1800,9 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
   vectorIndexReady = false;
   scalarIndexReady = false;
   ftsIndexReady = false;
+  lastIndexRebuildAt = 0;
+  unindexedRowEstimate = 0;
+  stopIndexHealthMonitor();
 }
 
 /**
@@ -1273,57 +1812,70 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
  * recovering from corruption (e.g. "vector not divisible by 8" errors).
  */
 export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: string }> {
-  // 1. Cancel any pending optimize
-  if (optimizeTimer) {
-    clearTimeout(optimizeTimer);
-    optimizeTimer = null;
-  }
+  // Acquire write lock to ensure no LanceDB operations are in-flight when we
+  // delete the directory. Without this, concurrent writes would panic trying
+  // to access files that no longer exist.
+  return withWriteLock(async () => {
+    // 1. Cancel any pending optimize and index health monitor
+    if (optimizeTimer) {
+      clearTimeout(optimizeTimer);
+      optimizeTimer = null;
+    }
+    optimizeQueuedAt = null;
+    stopIndexHealthMonitor();
 
-  // 2. Clear in-memory caches
-  embeddingCache.clear();
+    // 2. Clear in-memory caches
+    embeddingCache.clear();
 
-  // 3. Reset connection state so next access creates a fresh connection
-  connPromise = null;
-  vectorIndexReady = false;
-  scalarIndexReady = false;
-  ftsIndexReady = false;
+    // 3. Reset connection + table state so next access creates fresh handles
+    connPromise = null;
+    tableHandle = null;
+    vectorIndexReady = false;
+    scalarIndexReady = false;
+    ftsIndexReady = false;
+    lastIndexRebuildAt = 0;
+    unindexedRowEstimate = 0;
 
-  // 4. Delete the entire LanceDB directory from disk
-  const deleted = existsSync(LANCEDB_PATH);
-  if (deleted) {
-    rmSync(LANCEDB_PATH, { recursive: true, force: true });
-    console.info(`[embeddings] Force-deleted LanceDB directory: ${LANCEDB_PATH}`);
-  }
+    // 4. Delete the entire LanceDB directory from disk
+    const deleted = existsSync(LANCEDB_PATH);
+    if (deleted) {
+      rmSync(LANCEDB_PATH, { recursive: true, force: true });
+      console.info(`[embeddings] Force-deleted LanceDB directory: ${LANCEDB_PATH}`);
+    }
 
-  // 5. Reset world book index state in SQLite while preserving semantic opt-in
-  try {
-    const db = getDb();
-    db.run(
-      `UPDATE world_book_entries
-       SET vector_index_status = CASE WHEN vectorized = 1 THEN 'pending' ELSE 'not_enabled' END,
-           vector_indexed_at = NULL,
-           vector_index_error = NULL`
-    );
-    db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
-    db.run(`DELETE FROM query_vector_cache`);
-  } catch (err) {
-    console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
-  }
+    // 5. Reset world book index state in SQLite while preserving semantic opt-in
+    try {
+      const db = getDb();
+      db.run(
+        `UPDATE world_book_entries
+         SET vector_index_status = CASE WHEN vectorized = 1 THEN 'pending' ELSE 'not_enabled' END,
+             vector_indexed_at = NULL,
+             vector_index_error = NULL`
+      );
+      db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
+      db.run(`DELETE FROM query_vector_cache`);
+      db.run(`DELETE FROM chat_memory_cache`);
+    } catch (err) {
+      console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
+    }
 
-  console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
-  return { deleted, path: LANCEDB_PATH };
+    console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
+    return { deleted, path: LANCEDB_PATH };
+  });
 }
 
 // --- Chat Vectorization ---
 
 export async function deleteChatChunkEmbeddings(userId: string, chatId: string, chunkId?: string): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
   let filter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
   if (chunkId) {
     filter += ` AND source_id = ${sqlValue(chunkId)}`;
   }
-  await table.delete(filter);
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    await table.delete(filter);
+  });
   scheduleOptimize();
 }
 
@@ -1363,18 +1915,61 @@ export async function syncChatChunkEmbedding(
     updated_at: now,
   };
 
-  const table = await getOrCreateTable([row]);
-  await ensureVectorIndex(table);
-  await ensureScalarIndexes(table);
-  await ensureFtsIndex(table);
-  await table
-    .mergeInsert("id")
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute(asLanceRows([row]));
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable([row]);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows([row]));
+  });
 
   console.info(`[embeddings] Vectorized chat chunk ${chunkId} for chat ${chatId}`);
 
+  scheduleOptimize();
+}
+
+/**
+ * Batch upsert multiple chunk vectors in a single mergeInsert call.
+ * Avoids creating one Lance fragment per chunk (the main cause of slow queries
+ * after accumulating tens of thousands of embeddings via individual upserts).
+ */
+export async function batchUpsertChunkVectors(
+  userId: string,
+  chunks: Array<{ chatId: string; chunkId: string; vector: number[]; content: string; metadata?: Record<string, any> }>,
+): Promise<void> {
+  if (chunks.length === 0) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const rows: EmbeddingRow[] = chunks.map((c) => ({
+    id: rowId(userId, "chat_chunk", c.chunkId, 0),
+    user_id: userId,
+    source_type: "chat_chunk",
+    source_id: c.chunkId,
+    owner_id: c.chatId,
+    chunk_index: 0,
+    content: c.content.trim(),
+    vector: c.vector,
+    metadata_json: JSON.stringify(c.metadata || {}),
+    updated_at: now,
+  }));
+
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable(rows);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows(rows));
+  });
+
+  console.info(`[embeddings] Batch-vectorized ${rows.length} chat chunk(s)`);
   scheduleOptimize();
 }
 
@@ -1455,15 +2050,17 @@ export async function reindexChatMessages(
         updated_at: now,
       }));
 
-      const table = await getOrCreateTable(rows);
-      await ensureVectorIndex(table);
-      await ensureScalarIndexes(table);
-      await ensureFtsIndex(table);
-      await table
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows(rows));
+      await withWriteLock(async () => {
+        const table = await getOrCreateTable(rows);
+        await ensureVectorIndex(table);
+        await ensureScalarIndexes(table);
+        await ensureFtsIndex(table);
+        await table
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
     } catch (err) {
       console.warn("[embeddings] Batch chat embedding failed:", err);
     }
@@ -1484,50 +2081,65 @@ export async function searchChatChunks(
   limit = 8,
   queryText?: string,
   hybridWeightMode?: "keyword_first" | "balanced" | "vector_first",
+  allowedChunkIds?: Set<string>,
 ): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
   const table = await getTableIfExists();
   if (!table) return [];
 
-  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
-  const fetchLimit = Math.max(1, Math.min(limit + 50, 150));
+  const baseFilter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`;
+  const sourceFilter = buildAllowedChunkFilter(allowedChunkIds);
+  const filterWasScoped = sourceFilter != null;
+  const filter = sourceFilter ? `${baseFilter} AND ${sourceFilter}` : baseFilter;
+
+  // When source filter was dropped (candidate set > MAX_LANCE_SOURCE_FILTER_IDS),
+  // the query searches the entire chat partition and results are client-side filtered.
+  // Increase fetchLimit to compensate for post-filter loss, but skip refineFactor
+  // since re-scanning 5x results on a large unscoped partition is the biggest cost.
+  const fetchLimit = filterWasScoped
+    ? Math.max(1, Math.min(limit + 50, 150))
+    : Math.max(1, Math.min(limit * 4, 300));
 
   // Try hybrid search when query text is available
   let rows: any[];
+  // Refine with full vectors after PQ approximate search for better accuracy.
+  // Skip refineFactor for unscoped queries — the cost is prohibitive on large partitions.
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady && filterWasScoped) q.refineFactor(5); return q; };
   if (queryText?.trim() && hybridWeightMode !== "vector_first") {
     try {
       const reranker = await rerankers.RRFReranker.create();
-      rows = await table
+      const q = table
         .query()
         .nearestTo(vector)
         .fullTextSearch(queryText.trim())
         .where(filter)
         .rerank(reranker)
         .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json", "vector"])
-        .limit(fetchLimit)
-        .toArray();
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
     } catch {
       // FTS index may not exist yet — fall back to vector-only
-      rows = await table
+      const q = table
         .query()
         .nearestTo(vector)
         .where(filter)
         .select(["source_id", "content", "_distance", "metadata_json", "vector"])
-        .limit(fetchLimit)
-        .toArray();
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
     }
   } else {
-    rows = await table
+    const q = table
       .query()
       .nearestTo(vector)
       .where(filter)
       .select(["source_id", "content", "_distance", "metadata_json", "vector"])
-      .limit(fetchLimit)
-      .toArray();
+      .limit(fetchLimit);
+    rows = await applyRefineFactor(q).toArray();
   }
 
-  // Parse and exclude
+  // Parse rows and collect metadata
   type ParsedRow = { chunkId: string; score: number; content: string; metadata: any; rowVector: number[] | null };
-  const candidates: ParsedRow[] = [];
+  const parsed: Array<{ chunkId: string; meta: any; row: any }> = [];
+  const needMessageIdLookup: string[] = [];
 
   for (const row of rows) {
     const chunkId = String(row.source_id);
@@ -1543,21 +2155,36 @@ export async function searchChatChunks(
       // Treat as empty metadata
     }
 
-    // Exclusion check: resolve message IDs from metadata or fall back to SQLite
-    let chunkMessageIds: string[] = [];
-    if (meta.messageIds && Array.isArray(meta.messageIds)) {
-      chunkMessageIds = meta.messageIds;
-    } else {
-      // Fallback: look up message_ids from the chat_chunks table
-      try {
-        const chunkRow = getDb().query("SELECT message_ids FROM chat_chunks WHERE id = ?").get(chunkId) as any;
-        if (chunkRow?.message_ids) {
-          chunkMessageIds = JSON.parse(chunkRow.message_ids);
-        }
-      } catch {
-        // non-fatal
-      }
+    parsed.push({ chunkId, meta, row });
+    if (!meta.messageIds || !Array.isArray(meta.messageIds)) {
+      needMessageIdLookup.push(chunkId);
     }
+  }
+
+  // Batch-load message_ids for chunks missing them in metadata (replaces N+1 individual queries)
+  const messageIdsByChunk = new Map<string, string[]>();
+  if (needMessageIdLookup.length > 0) {
+    const db = getDb();
+    for (let i = 0; i < needMessageIdLookup.length; i += 500) {
+      const batch = needMessageIdLookup.slice(i, i + 500);
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const chunkRows = db.query(`SELECT id, message_ids FROM chat_chunks WHERE id IN (${placeholders})`).all(...batch) as any[];
+        for (const cr of chunkRows) {
+          if (cr.message_ids) {
+            try { messageIdsByChunk.set(cr.id, JSON.parse(cr.message_ids)); } catch { /* non-fatal */ }
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  // Exclude and build candidates
+  const candidates: ParsedRow[] = [];
+  for (const { chunkId, meta, row } of parsed) {
+    const chunkMessageIds: string[] = (meta.messageIds && Array.isArray(meta.messageIds))
+      ? meta.messageIds
+      : (messageIdsByChunk.get(chunkId) ?? []);
 
     const shouldExclude = chunkMessageIds.length > 0 && chunkMessageIds.some((id: string) => excludeIds.has(id));
     if (shouldExclude) continue;
@@ -1588,6 +2215,13 @@ export async function searchChatChunks(
     content: c.content,
     metadata: c.metadata,
   }));
+}
+
+function buildAllowedChunkFilter(allowedChunkIds?: Set<string>): string | null {
+  if (!allowedChunkIds || allowedChunkIds.size === 0) return null;
+  if (allowedChunkIds.size > MAX_LANCE_SOURCE_FILTER_IDS) return null;
+  const values = [...allowedChunkIds].map((id) => sqlValue(id)).join(", ");
+  return `source_id IN (${values})`;
 }
 
 /**
@@ -1689,15 +2323,17 @@ export async function upsertChunkVector(
     updated_at: now,
   };
 
-  const table = await getOrCreateTable([row]);
-  await ensureVectorIndex(table);
-  await ensureScalarIndexes(table);
-  await ensureFtsIndex(table);
-  await table
-    .mergeInsert("id")
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute(asLanceRows([row]));
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable([row]);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows([row]));
+  });
 
   scheduleOptimize();
 }
@@ -1706,9 +2342,172 @@ export async function upsertChunkVector(
  * Delete a specific chunk's vector from LanceDB.
  */
 export async function deleteChunkVector(userId: string, chunkId: string): Promise<void> {
-  const table = await getTableIfExists();
-  if (!table) return;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    const id = rowId(userId, "chat_chunk", chunkId, 0);
+    await table.delete(`id = ${sqlValue(id)}`);
+  });
+}
 
-  const id = rowId(userId, "chat_chunk", chunkId, 0);
-  await table.delete(`id = ${sqlValue(id)}`);
+// ─── Databank Vector Operations ─────────────────────────────────
+
+/**
+ * Batch upsert databank chunk vectors into LanceDB.
+ * Uses source_type "databank" and owner_id = databankId for scope filtering.
+ */
+export async function batchUpsertDatabankVectors(
+  userId: string,
+  chunks: Array<{ chatId: string; chunkId: string; vector: number[]; content: string; metadata?: Record<string, any> }>,
+): Promise<void> {
+  if (chunks.length === 0) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const rows: EmbeddingRow[] = chunks.map((c) => ({
+    id: rowId(userId, "databank", c.chunkId, 0),
+    user_id: userId,
+    source_type: "databank",
+    source_id: c.chunkId,
+    owner_id: c.chatId, // owner_id = databankId for databank chunks
+    chunk_index: 0,
+    content: c.content.trim(),
+    vector: c.vector,
+    metadata_json: JSON.stringify(c.metadata || {}),
+    updated_at: now,
+  }));
+
+  await withWriteLock(async () => {
+    const table = await getOrCreateTable(rows);
+    await ensureVectorIndex(table);
+    await ensureScalarIndexes(table);
+    await ensureFtsIndex(table);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows(rows));
+  });
+
+  console.info(`[embeddings] Batch-vectorized ${rows.length} databank chunk(s)`);
+  scheduleOptimize();
+}
+
+/**
+ * Delete all databank embeddings for a specific bank from LanceDB.
+ * Uses owner_id = databankId for efficient filtering.
+ * For per-document deletion, use deleteDatabankChunksByIds() instead.
+ */
+export async function deleteDatabankEmbeddings(
+  userId: string,
+  databankId: string,
+): Promise<void> {
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND owner_id = ${sqlValue(databankId)}`;
+    await table.delete(filter);
+  });
+  scheduleOptimize();
+}
+
+/**
+ * Delete specific databank chunk vectors by their chunk IDs.
+ * More precise than filtering by owner_id — avoids deleting unrelated documents.
+ */
+export async function deleteDatabankChunksByIds(userId: string, chunkIds: string[]): Promise<void> {
+  if (chunkIds.length === 0) return;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    // Delete in batches to avoid overly long filter expressions
+    const BATCH = 100;
+    for (let i = 0; i < chunkIds.length; i += BATCH) {
+      const batch = chunkIds.slice(i, i + BATCH);
+      const ids = batch.map((id) => rowId(userId, "databank", id, 0));
+      const filter = ids.map((id) => `id = ${sqlValue(id)}`).join(" OR ");
+      await table.delete(filter);
+    }
+  });
+  scheduleOptimize();
+}
+
+/**
+ * Search databank chunks in LanceDB by vector similarity.
+ * Filters by source_type="databank" and owner_id IN (databankIds).
+ */
+export async function searchDatabankChunks(
+  userId: string,
+  databankIds: string[],
+  vector: number[],
+  limit = 4,
+  queryText?: string,
+): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+  if (databankIds.length === 0) return [];
+
+  const table = await getTableIfExists();
+  if (!table) return [];
+
+  const ownerFilter = databankIds.map((id) => `owner_id = ${sqlValue(id)}`).join(" OR ");
+  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND (${ownerFilter})`;
+  const fetchLimit = Math.max(1, Math.min(limit + 20, 100));
+
+  let rows: any[];
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady) q.refineFactor(5); return q; };
+
+  if (queryText?.trim()) {
+    try {
+      const { rerankers } = await import("@lancedb/lancedb");
+      const reranker = await rerankers.RRFReranker.create();
+      const q = table
+        .query()
+        .nearestTo(vector)
+        .fullTextSearch(queryText.trim())
+        .where(filter)
+        .rerank(reranker)
+        .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json"])
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
+    } catch {
+      const q = table
+        .query()
+        .nearestTo(vector)
+        .where(filter)
+        .select(["source_id", "content", "_distance", "metadata_json"])
+        .limit(fetchLimit);
+      rows = await applyRefineFactor(q).toArray();
+    }
+  } else {
+    const q = table
+      .query()
+      .nearestTo(vector)
+      .where(filter)
+      .select(["source_id", "content", "_distance", "metadata_json"])
+      .limit(fetchLimit);
+    rows = await applyRefineFactor(q).toArray();
+  }
+
+  const results: Array<{ chunk_id: string; score: number; content: string; metadata: any }> = [];
+
+  for (const row of rows) {
+    let meta: any = {};
+    try {
+      const raw = row.metadata_json;
+      if (typeof raw === "string") meta = JSON.parse(raw);
+      else if (raw && typeof raw === "object") meta = raw;
+    } catch { /* empty */ }
+
+    const distance = typeof row._distance === "number" ? row._distance : 0;
+    const score = Math.max(0, 1 - distance);
+
+    results.push({
+      chunk_id: String(row.source_id),
+      score,
+      content: String(row.content || ""),
+      metadata: meta,
+    });
+  }
+
+  // Sort by score descending and take top N
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, limit);
 }

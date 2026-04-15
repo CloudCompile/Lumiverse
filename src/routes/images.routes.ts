@@ -1,13 +1,21 @@
 import { Hono } from "hono";
 import * as svc from "../services/images.service";
+import { env } from "../env";
 
 const app = new Hono();
+
+// Maximum image upload size: 50 MB
+const MAX_IMAGE_SIZE = 50 * 1024 * 1024;
 
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const formData = await c.req.formData();
   const file = formData.get("image") as File | null;
   if (!file) return c.json({ error: "image file is required" }, 400);
+  // H-22: enforce upload size limit before processing
+  if (file.size > MAX_IMAGE_SIZE) {
+    return c.json({ error: `Image too large. Maximum size is ${MAX_IMAGE_SIZE / 1024 / 1024} MB` }, 413);
+  }
 
   const image = await svc.uploadImage(userId, file);
   return c.json(image, 201);
@@ -25,6 +33,10 @@ app.get("/:id", async (c) => {
 
   const response = new Response(Bun.file(filepath));
   response.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  // H-20: Prevent browser from sniffing content type and rendering uploaded
+  // HTML/SVG files as active web content (stored XSS mitigation).
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
   return response;
 });
 
@@ -60,7 +72,9 @@ app.post("/rebuild-thumbnails", async (c) => {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     };
-    if (origin) {
+    // C-13: Only reflect origins that are in the configured trusted origins list.
+    // Reflecting arbitrary Origin values with credentials:true bypasses CORS entirely.
+    if (origin && (env.trustAnyOrigin || env.trustedOriginsSet.has(origin))) {
       corsHeaders["Access-Control-Allow-Origin"] = origin;
       corsHeaders["Access-Control-Allow-Credentials"] = "true";
     }
