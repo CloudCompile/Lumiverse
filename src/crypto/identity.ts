@@ -38,14 +38,19 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
 }
 
 async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+  // M-01 fix: `key` is the HMAC secret key and `data` is the message to sign.
+  // The previous implementation had these inverted (importing `data` as the
+  // HMAC key and signing `key` as the message), which meant the HMAC secret
+  // was the salt — a value stored in plaintext in the file — allowing an
+  // attacker to forge the integrity tag for any key material.
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
-    data as BufferSource, // salt is the HMAC key
+    key as BufferSource,
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
   );
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, key as BufferSource);
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, data as BufferSource);
   return new Uint8Array(sig);
 }
 
@@ -164,13 +169,47 @@ export async function readIdentityFile(filePath: string): Promise<Uint8Array> {
   const mask = await sha256(concatBytes(salt, DERIVATION_TAG));
   const key = xorBytes(maskedKey, mask);
 
-  // Verify integrity
+  // Verify integrity — try the correct HMAC first, then fall back to the
+  // legacy (inverted) computation for identity files created before the
+  // M-01 fix.  If only the legacy HMAC matches, re-write the file with the
+  // corrected HMAC so future reads use the secure format.
   const expectedHmac = await hmacSha256(key, salt);
   if (!constantTimeEqual(storedHmac, expectedHmac)) {
-    throw new Error("Identity file integrity check failed — file may be corrupted");
+    // Check whether this is a file written with the old inverted HMAC logic
+    // (key and data arguments were swapped: HMAC(key=salt, message=key)).
+    const legacyHmac = await hmacSha256LegacyInverted(key, salt);
+    if (constantTimeEqual(storedHmac, legacyHmac)) {
+      // Legacy file detected — re-write with the corrected HMAC immediately.
+      console.warn(
+        "[identity] Identity file was created with a legacy (insecure) HMAC. " +
+        "Re-writing with corrected HMAC..."
+      );
+      await createIdentityFile(filePath, key);
+    } else {
+      throw new Error("Identity file integrity check failed — file may be corrupted");
+    }
   }
 
   return key;
+}
+
+/**
+ * Legacy HMAC computation with inverted key/data arguments — used only to
+ * detect and migrate identity files written before the M-01 security fix.
+ * @internal
+ */
+async function hmacSha256LegacyInverted(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+  // Pre-fix code had: importKey(data) and sign(key) — i.e. data was the HMAC
+  // key and key was the message.  We reproduce that here solely for migration.
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    data as BufferSource,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, key as BufferSource);
+  return new Uint8Array(sig);
 }
 
 /**

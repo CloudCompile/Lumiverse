@@ -410,7 +410,13 @@ app.post("/:chatId/messages", async (c) => {
 
 app.put("/:chatId/messages/:id", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
   const body = await c.req.json();
+  // M-30: Verify the message actually belongs to the specified chatId, not just
+  // to any chat owned by the user.  Without this check the chatId URL parameter
+  // is completely ignored, allowing cross-chat mutations by ID enumeration.
+  const existing = svc.getMessage(userId, c.req.param("id"));
+  if (!existing || existing.chat_id !== chatId) return c.json({ error: "Not found" }, 404);
   const msg = svc.updateMessage(userId, c.req.param("id"), body);
   if (!msg) return c.json({ error: "Not found" }, 404);
   return c.json(msg);
@@ -418,6 +424,10 @@ app.put("/:chatId/messages/:id", async (c) => {
 
 app.delete("/:chatId/messages/:id", (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  // M-30: Same chatId ownership guard as PUT above.
+  const existing = svc.getMessage(userId, c.req.param("id"));
+  if (!existing || existing.chat_id !== chatId) return c.json({ error: "Not found" }, 404);
   const deleted = svc.deleteMessage(userId, c.req.param("id"));
   if (!deleted) return c.json({ error: "Not found" }, 404);
   return c.json({ success: true });

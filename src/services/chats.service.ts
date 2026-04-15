@@ -430,21 +430,26 @@ export function reattributeUserMessages(userId: string, chatId: string, personaI
   const chat = getChat(userId, chatId);
   if (!chat) return null;
 
-  const rows = getDb()
+  const db = getDb();
+  const rows = db
     .query("SELECT id, extra FROM messages WHERE chat_id = ? AND is_user = 1")
     .all(chatId) as Array<{ id: string; extra: string }>;
 
-  const update = getDb().query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
-  for (const row of rows) {
-    let extra: Record<string, any> = {};
-    try {
-      extra = row.extra ? JSON.parse(row.extra) : {};
-    } catch {
-      extra = {};
+  // M-19: Wrap all per-message UPDATEs in a transaction so a mid-loop crash
+  // cannot leave messages in a partially-reattributed state.
+  db.transaction(() => {
+    const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
+    for (const row of rows) {
+      let extra: Record<string, any> = {};
+      try {
+        extra = row.extra ? JSON.parse(row.extra) : {};
+      } catch {
+        extra = {};
+      }
+      extra.persona_id = personaId;
+      update.run(personaName, JSON.stringify(extra), row.id);
     }
-    extra.persona_id = personaId;
-    update.run(personaName, JSON.stringify(extra), row.id);
-  }
+  })();
 
   if (rows.length > 0) {
     eventBus.emit(EventType.CHAT_CHANGED, { chatId, reattributedUserMessages: rows.length }, userId);
@@ -615,7 +620,16 @@ export function createMessage(chatId: string, input: CreateMessageInput, userId?
 export function patchMessageExtra(userId: string, id: string, extra: Record<string, any>): void {
   const existing = getMessage(userId, id);
   if (!existing) return;
-  getDb().query("UPDATE messages SET extra = ? WHERE id = ?").run(JSON.stringify(extra), id);
+  // M-20: Include the chat_id ownership check directly in the UPDATE WHERE
+  // clause to eliminate the TOCTOU window between getMessage() and run().
+  // Join through chats to verify the message belongs to the calling user.
+  getDb()
+    .query(
+      `UPDATE messages SET extra = ?
+       WHERE id = ?
+         AND chat_id IN (SELECT id FROM chats WHERE user_id = ?)`,
+    )
+    .run(JSON.stringify(extra), id, userId);
 }
 
 export function updateMessage(userId: string, id: string, input: UpdateMessageInput): Message | null {
@@ -912,9 +926,12 @@ export function branchChat(userId: string, chatId: string, atMessageId: string):
   const branchLabel = `${baseName} — Branch at #${msg.index_in_chat}`;
 
   // De-duplicate if multiple branches @ same point
+  // M-07: Escape LIKE metacharacters in branchLabel so a chat name containing
+  // "%" or "_" doesn't match unrelated chats and produce a wrong branch count.
+  const branchLabelEscaped = branchLabel.replace(/[%_\\]/g, "\\$&");
   const existing = getDb()
-    .query("SELECT COUNT(*) as count FROM chats WHERE user_id = ? AND name LIKE ?")
-    .get(userId, `${branchLabel}%`) as { count: number };
+    .query("SELECT COUNT(*) as count FROM chats WHERE user_id = ? AND name LIKE ? ESCAPE '\\'")
+    .get(userId, `${branchLabelEscaped}%`) as { count: number };
   const newName = existing.count > 0 ? `${branchLabel} (${existing.count + 1})` : branchLabel;
 
   const metadata = { ...chat.metadata, branched_from: chatId, branch_at_message: atMessageId };

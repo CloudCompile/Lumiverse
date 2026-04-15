@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { auth, allowCreation } from "../auth";
+import { auth, withCreationNonce } from "../auth";
 import { getDb } from "../db/connection";
 import { getUserBaseDir } from "../auth/provision";
 import { hashPassword, verifyPassword } from "../crypto/password";
@@ -68,7 +68,11 @@ admin.get("/", (c) => {
 });
 
 // POST / — create a new user
-const VALID_ROLES = new Set(["user", "admin", "owner"]);
+// Only "user" and "admin" are assignable via the create-user API.
+// Nobody can create a second "owner" account — the single-owner model
+// is a core security invariant.  (Bug from audit: VALID_ROLES previously
+// included "owner", allowing privilege escalation.)
+const VALID_ROLES = new Set(["user", "admin"]);
 
 admin.post("/", async (c) => {
   const body = await c.req.json();
@@ -82,17 +86,20 @@ admin.post("/", async (c) => {
     return c.json({ error: `Invalid role. Allowed: ${[...VALID_ROLES].join(", ")}` }, 400);
   }
 
-  allowCreation();
-
   try {
-    const newUser = await auth.api.signUpEmail({
-      body: {
-        email: `${body.username}@lumiverse.local`,
-        password: body.password,
-        name: body.name || body.username,
-        username: body.username,
-      },
-    });
+    // Race-condition fix: withCreationNonce holds a lock around the entire
+    // async signUpEmail call, preventing concurrent requests from overwriting
+    // each other's nonce and bypassing the single-use gate.
+    const newUser = await withCreationNonce(() =>
+      auth.api.signUpEmail({
+        body: {
+          email: `${body.username}@lumiverse.local`,
+          password: body.password,
+          name: body.name || body.username,
+          username: body.username,
+        },
+      })
+    );
 
     if (body.role && body.role !== "user") {
       getDb().run('UPDATE "user" SET role = ? WHERE id = ?', [body.role, newUser.user.id]);
@@ -107,6 +114,7 @@ admin.post("/", async (c) => {
 // POST /:id/reset-password — admin password reset
 admin.post("/:id/reset-password", async (c) => {
   const { id } = c.req.param();
+  const session = c.get("session");
   const body = await c.req.json();
 
   if (!body.newPassword) {
@@ -115,6 +123,19 @@ admin.post("/:id/reset-password", async (c) => {
 
   if (body.newPassword.length < 8) {
     return c.json({ error: "Password must be at least 8 characters" }, 400);
+  }
+
+  // H-23: Enforce role hierarchy — an admin cannot reset the password of a
+  // user with a higher privilege level (owner).  Only the owner can reset
+  // another owner's password.
+  if (session.user.role !== "owner") {
+    const targetUser = getDb()
+      .query('SELECT role FROM "user" WHERE id = ?')
+      .get(id) as { role: string } | null;
+    if (!targetUser) return c.json({ error: "User not found" }, 404);
+    if (targetUser.role === "owner") {
+      return c.json({ error: "Forbidden: cannot modify a higher-privileged account" }, 403);
+    }
   }
 
   const hashed = await hashPassword(body.newPassword);

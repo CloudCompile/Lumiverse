@@ -88,7 +88,10 @@ allowedHosts.add(`[::1]:${env.port}`);
 app.use("/api/*", async (c, next) => {
   if (env.trustAnyOrigin) return next();
   const host = c.req.header("host");
-  if (host && !allowedHosts.has(host)) {
+  // H-13: An absent Host header must also be blocked — HTTP/1.0 clients and
+  // some raw TCP connections can omit it, which previously allowed bypassing
+  // the DNS rebinding protection entirely.
+  if (!host || !allowedHosts.has(host)) {
     return c.json({ error: "Forbidden" }, 403);
   }
   return next();
@@ -130,13 +133,18 @@ app.route("/api/v1/lumihub", lumihubCallbackRoute);
 // to the opener window via postMessage so it can call our exchange endpoint.
 app.get("/api/v1/openrouter/oauth-landing", async (c) => {
   const code = c.req.query("code") || "";
+  // JSON.stringify does NOT escape `<`, `>`, or `/` which can break out of a
+  // <script> block via </script>.  Use a safe serialisation that encodes those
+  // characters as Unicode escape sequences so they are inert inside JS string
+  // literals.
+  const safeCode = JSON.stringify(code).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/\//g, "\\u002f");
   return c.html(`<!DOCTYPE html>
 <html><head><title>OpenRouter Authorization</title>
 <style>body{background:#1c1826;color:rgba(255,255,255,.8);font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:14px}</style></head>
 <body>
 <div id="s">Completing authorization...</div>
 <script>
-var code = ${JSON.stringify(code)};
+var code = ${safeCode};
 if (code && window.opener) {
   // Restrict postMessage to this origin so only the Lumiverse opener receives the code
   window.opener.postMessage({ type: 'openrouter_oauth_code', code: code }, window.location.origin);

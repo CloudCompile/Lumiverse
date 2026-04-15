@@ -260,6 +260,44 @@ class McpClientManager {
   }
 
   private async buildStdioTransport(userId: string, server: McpServerProfile): Promise<Transport> {
+    // Validate command: must be an absolute path or a plain executable name
+    // with no shell metacharacters.  This prevents `command: "/bin/bash"` +
+    // `args: ["-c", "..."]` style RCE via user-created MCP profiles.
+    const cmd = (server.command || "").trim();
+    if (!cmd) throw new Error("MCP stdio server has no command configured");
+
+    // Reject shell interpreters that could trivially execute arbitrary code.
+    const BLOCKED_COMMANDS = new Set([
+      "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
+      "/bin/bash", "/bin/sh", "/bin/zsh", "/bin/fish", "/bin/dash",
+      "/usr/bin/bash", "/usr/bin/sh", "/usr/bin/zsh",
+      "cmd", "cmd.exe", "powershell", "pwsh",
+      "python", "python3", "node", "ruby", "perl", "php",
+    ]);
+    const cmdBase = cmd.replace(/\\/g, "/").split("/").pop()!.toLowerCase().replace(/\.exe$/, "");
+    if (BLOCKED_COMMANDS.has(cmd) || BLOCKED_COMMANDS.has(cmdBase)) {
+      throw new Error(
+        `MCP stdio command "${cmd}" is not allowed. ` +
+        "Only dedicated MCP server binaries may be used as stdio commands.",
+      );
+    }
+
+    // Reject shell metacharacters in the command itself.
+    if (/[;&|`$<>()\n\r]/.test(cmd)) {
+      throw new Error(`MCP stdio command contains disallowed characters: "${cmd}"`);
+    }
+
+    // Validate each argument: reject shell injection metacharacters.
+    for (const arg of server.args ?? []) {
+      if (typeof arg !== "string") {
+        throw new Error("MCP stdio args must all be strings");
+      }
+      // Allow common flag characters but block shell expansion metacharacters
+      if (/[;&|`$<>()\n\r]/.test(arg)) {
+        throw new Error(`MCP stdio argument contains disallowed characters: "${arg}"`);
+      }
+    }
+
     const envValues = await mcpServersSvc.getServerEnv(userId, server.id);
 
     // Build restricted env: declared vars + PATH only

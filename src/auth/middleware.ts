@@ -75,7 +75,29 @@ export async function requireOwner(c: Context, next: Next) {
   }
 
   const role = session.user.role;
+  // H-26: "requireOwner" allows both the system owner and admins because most
+  // routes using this middleware (user management, spindle, etc.) are
+  // legitimately accessible to admins.  For operations that must be
+  // restricted to the single instance owner only, use requireOwnerStrict.
   if (role !== "owner" && role !== "admin") {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  return next();
+}
+
+/**
+ * Strictly requires the "owner" role — does NOT allow admins.
+ * Use this for destructive global operations (e.g. vector store wipe, identity
+ * key rotation) that affect all users and should never be delegated to admins.
+ */
+export async function requireOwnerStrict(c: Context, next: Next) {
+  const session = c.get("session");
+  if (!session) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  if (session.user.role !== "owner") {
     return c.json({ error: "Forbidden" }, 403);
   }
 
