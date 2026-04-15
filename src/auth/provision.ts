@@ -2,10 +2,12 @@ import { mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { env } from "../env";
 
-// BetterAuth IDs are UUIDs; rejecting anything else means a future custom
-// auth backend or corrupt DB row can never produce an ID that resolves
-// outside the per-user data dir via path.join (which doesn't strip "..").
-const USER_ID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+// BetterAuth's default generator produces 32-char alphanumeric IDs; our
+// owner-seed path uses crypto.randomUUID(). Accept both shapes (plus nanoid)
+// by allowing URL-safe characters only. Critically, `.`, `/`, and `\` are
+// rejected so a corrupt row can never escape the per-user data dir via
+// path.join (which doesn't strip "..").
+const USER_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 // Extension identifiers are validated separately at install time
 // (lumiverse-spindle-types.validateIdentifier), but defend the path call
 // anyway so a bug elsewhere can't leak into a traversal.
