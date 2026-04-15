@@ -427,17 +427,19 @@ export default function PersonaEditor({
 
             return (
               <label key={field.key} className={styles.pronounField}>
-                <span className={styles.pronounMeta}>
-                  <span className={styles.pronounLabel}>{field.label}</span>
-                  <code className={styles.pronounMacro}>{field.macro}</code>
-                </span>
-                <input
-                  type="text"
-                  className={styles.pronounInput}
-                  value={value}
-                  onChange={(e) => handlePronounChange(field.key, e.target.value)}
-                  placeholder={field.placeholder}
-                />
+                <span className={styles.pronounLabel}>{field.label}</span>
+                <div className={styles.pronounInputWrap}>
+                  <code className={styles.pronounMacro} aria-hidden="true">
+                    {field.macro}
+                  </code>
+                  <input
+                    type="text"
+                    className={styles.pronounInput}
+                    value={value}
+                    onChange={(e) => handlePronounChange(field.key, e.target.value)}
+                    placeholder={field.placeholder}
+                  />
+                </div>
               </label>
             )
           })}
