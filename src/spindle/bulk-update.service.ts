@@ -132,6 +132,8 @@ interface BulkPlanEntry {
   updated: boolean;
   /** Set when the update failed so we can decide whether to attempt restart. */
   updateError: string | null;
+  /** Set when Phase 3 restart failed (even if Phase 2 update succeeded). */
+  restartError: string | null;
 }
 
 async function runBulkUpdate(
@@ -145,6 +147,7 @@ async function runBulkUpdate(
     wasEnabled: ext.enabled,
     updated: false,
     updateError: null,
+    restartError: null,
   }));
 
   // Initial progress tick so the UI can render "0/N" immediately.
@@ -255,6 +258,8 @@ async function runBulkUpdate(
     try {
       await lifecycle.startExtension(entry.ext.id);
     } catch (restartErr: any) {
+      const message = restartErr?.message || "Restart failed";
+      entry.restartError = message;
       console.error(
         `[Spindle] Bulk update: failed to restart ${entry.ext.identifier}:`,
         restartErr
@@ -262,7 +267,6 @@ async function runBulkUpdate(
       // If we haven't already recorded an error for this extension,
       // surface the restart failure so the UI doesn't claim success.
       if (!entry.updateError) {
-        const message = restartErr?.message || "Restart failed";
         errors.push({ id: entry.ext.id, name: entry.ext.name, error: message });
         eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
           extensionId: entry.ext.id,
@@ -277,12 +281,15 @@ async function runBulkUpdate(
     await sleep(250);
   }
 
+  // "updated" = Phase 2 succeeded AND Phase 3 restart (if attempted) succeeded.
+  // Anything else counts as failed so the UI surfaces partial-success cases.
+  const successCount = plan.filter((p) => p.updated && !p.restartError).length;
   eventBus.emit(
     EventType.SPINDLE_BULK_UPDATE_COMPLETE,
     {
       total: plan.length,
-      updated: plan.filter((p) => p.updated).length,
-      failed: plan.length - plan.filter((p) => p.updated).length,
+      updated: successCount,
+      failed: plan.length - successCount,
       errors,
     },
     userId

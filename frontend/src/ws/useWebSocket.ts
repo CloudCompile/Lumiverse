@@ -7,6 +7,7 @@ import { routeBackendMessage } from '@/lib/spindle/loader'
 import { messagesApi } from '@/api/chats'
 import { imageGenApi } from '@/api/image-gen'
 import { toast } from '@/lib/toast'
+import { triggerTTSAutoPlay } from '@/hooks/useTTSAutoPlay'
 import type {
   StreamTokenPayload,
   GenerationStartedPayload,
@@ -247,6 +248,10 @@ export function useWebSocket() {
             // Increment app badge when generation completes while tab is hidden
             if (document.hidden) {
               store.getState().incrementBadgeCount()
+            }
+
+            if (payload.messageId && typeof payload.content === 'string') {
+              triggerTTSAutoPlay(payload.messageId, payload.content)
             }
 
             // End streaming immediately, then reconcile the full message list

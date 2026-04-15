@@ -4,40 +4,56 @@ export type SegmentType = 'asterisked' | 'quoted' | 'undecorated'
 export type SegmentAction = 'speech' | 'narration' | 'skip'
 
 /**
- * Loom/Lumia meta tags. Content wrapped in these never belongs in TTS —
- * it's state, memory, or UI scaffolding.
+ * Tags whose inner text is prose that SHOULD be spoken. Any tag not in this
+ * set is treated as meta/scaffolding (reasoning, loom state, tool calls,
+ * status cards, tracker blocks, custom structured output — anything the
+ * author's prompt-craft can produce) and is dropped along with its contents.
+ *
+ * The list is intentionally limited to standard HTML elements that carry
+ * narrative prose. Anything like `<tracker>`, `<stats>`, `<status>`,
+ * `<state>`, `<thinking>`, `<loom_sum>`, etc. falls through the allowlist
+ * and gets stripped wholesale.
  */
-const LOOM_META_TAGS = [
-  'loom_sum', 'loom_if', 'loom_else', 'loom_endif',
-  'lumia_ooc', 'lumiaooc', 'lumio_ooc', 'lumioooc',
-  'loom_state', 'loom_memory', 'loom_context', 'loom_inject',
-  'loom_var', 'loom_set', 'loom_get',
-  'loom_record', 'loomrecord', 'loom_ledger', 'loomledger',
-]
+const PROSE_TAGS = new Set<string>([
+  // Block containers that typically hold prose
+  'p', 'div', 'span', 'section', 'article', 'header', 'footer', 'main',
+  'aside', 'nav', 'address', 'blockquote', 'q', 'cite',
+  'figure', 'figcaption', 'hgroup',
+  // Lists
+  'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'menu',
+  // Line-level separators (no inner content anyway)
+  'br', 'hr', 'wbr',
+  // Headings
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  // Inline formatting — content kept, markers stripped
+  'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del', 'ins',
+  'mark', 'small', 'big', 'sub', 'sup', 'abbr', 'acronym',
+  'dfn', 'kbd', 'samp', 'var', 'time', 'font', 'tt',
+  'bdi', 'bdo', 'data', 'ruby', 'rb', 'rp', 'rt', 'rtc',
+  // Links — label is spoken, href is dropped with the opening tag
+  'a',
+  // Tables — cells often hold prose
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'col', 'colgroup',
+  // Misc prose carriers
+  'label', 'legend', 'fieldset',
+])
 
-const REASONING_TAGS = ['think', 'thinking', 'reasoning']
+/** Paired tag — `<TAG...>…</TAG>`. Non-greedy so the innermost pair matches first. */
+const PAIRED_TAG_RE = /<([a-z][\w-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1\s*>/gi
+/** Self-closing: requires a `/` before the closing `>`. */
+const SELF_CLOSING_RE = /<([a-z][\w-]*)(?:\s[^>]*?)?\s*\/\s*>/gi
+/** Any opening tag (used to find the first unclosed non-prose tag). */
+const OPENING_TAG_RE = /<([a-z][\w-]*)(?:\s[^>]*)?>/gi
+/** Closing marker `</TAG>`. */
+const CLOSING_TAG_RE = /<\/([a-z][\w-]*)\s*>/gi
+/** Any remaining tag marker (allowlisted tags after their contents are kept). */
+const ANY_TAG_MARKER_RE = /<\/?[a-z][\w-]*(?:\s[^>]*)?\s*\/?>/gi
 
-// Paired tag stripper (greedy over inner content). Built once per run.
-function buildPairedStripper(tags: string[]): RegExp {
-  return new RegExp(`<(${tags.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1>`, 'gi')
-}
-
-// Self-closing / unpaired variant — drop the tag but not surrounding content.
-function buildSelfClosingStripper(tags: string[]): RegExp {
-  return new RegExp(`<(${tags.join('|')})(?:\\s[^>]*)?\\/?>`, 'gi')
-}
-
-const REASONING_PAIRED_RE = buildPairedStripper(REASONING_TAGS)
-const REASONING_UNCLOSED_RE = new RegExp(`<(${REASONING_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*$`, 'i')
-const LOOM_PAIRED_RE = buildPairedStripper(LOOM_META_TAGS)
-const LOOM_SELF_RE = buildSelfClosingStripper(LOOM_META_TAGS)
-const DETAILS_PAIRED_RE = /<details(?:\s[^>]*)?>[\s\S]*?<\/details>/gi
-const DETAILS_UNCLOSED_RE = /<details(?:\s[^>]*)?>[\s\S]*$/i
 const FENCED_CODE_RE = /```[\s\S]*?```/g
 const INLINE_CODE_RE = /`[^`\n]*`/g
 const MD_IMAGE_RE = /!\[[^\]]*]\([^)]*\)/g
 const MD_LINK_RE = /\[([^\]]+)]\([^)]+\)/g
-const REMAINING_HTML_RE = /<\/?[a-z][^>]*>/gi
+
 const HTML_ENTITY_MAP: Record<string, string> = {
   '&nbsp;': ' ',
   '&amp;': '&',
@@ -53,44 +69,91 @@ const HTML_ENTITY_MAP: Record<string, string> = {
 }
 const HTML_ENTITY_RE = /&(?:nbsp|amp|lt|gt|quot|apos|#39|ldquo|rdquo|lsquo|rsquo);/g
 
+const MAX_SWEEP_ITERATIONS = 10
+
+function isProse(tag: string): boolean {
+  return PROSE_TAGS.has(tag.toLowerCase())
+}
+
 /**
- * Remove anything that reads poorly (or nonsensically) when spoken:
- * reasoning/thinking blocks, Loom meta tags, `<details>` collapsibles,
- * fenced/inline code, markdown image markers, and any remaining HTML.
+ * Iteratively drop paired non-prose tags along with their contents. Iteration
+ * handles the rare case where sibling tag removal exposes a newly-completable
+ * outer pair. Bounded by MAX_SWEEP_ITERATIONS as a safety valve.
+ */
+function stripNonProsePairedTags(text: string): string {
+  let out = text
+  let prev: string
+  let i = 0
+  do {
+    prev = out
+    out = out.replace(PAIRED_TAG_RE, (match, tag) => (isProse(tag as string) ? match : ' '))
+    i++
+  } while (out !== prev && i < MAX_SWEEP_ITERATIONS)
+  return out
+}
+
+/** Drop self-closing non-prose tags (`<tracker/>`, `<loom_state />`, etc.). */
+function stripNonProseSelfClosingTags(text: string): string {
+  return text.replace(SELF_CLOSING_RE, (match, tag) => (isProse(tag as string) ? match : ' '))
+}
+
+/**
+ * If an unpaired (never-closed) non-prose tag remains — typical of streams
+ * that were cut off mid-meta-block — drop from that tag to end-of-input.
+ * Walks left-to-right so prose that precedes the meta-block is preserved.
+ */
+function stripTrailingUnclosedNonProseTag(text: string): string {
+  OPENING_TAG_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = OPENING_TAG_RE.exec(text)) !== null) {
+    if (!isProse(match[1])) {
+      return text.slice(0, match.index)
+    }
+  }
+  return text
+}
+
+/** Drop stray non-prose closing markers (e.g. `</tracker>` with no opener). */
+function stripStrayNonProseClosings(text: string): string {
+  return text.replace(CLOSING_TAG_RE, (match, tag) => (isProse(tag as string) ? match : ' '))
+}
+
+/**
+ * Remove anything that reads poorly (or nonsensically) when spoken.
  *
- * Inner text is preserved for display-oriented HTML (e.g. `<b>hi</b>` → `hi`),
- * but discarded for containers whose contents are meta-UI rather than prose.
+ * Strategy: maintain an allowlist of prose HTML tags. Paired tags whose name
+ * is NOT on the allowlist (including every custom `<tracker>`, `<stats>`,
+ * `<status>`, reasoning tag, loom tag, `<details>` card, etc.) are removed
+ * together with their contents. Self-closing and stray-closing variants are
+ * dropped. Unclosed non-prose tags (interrupted streams) are dropped from
+ * the tag to end-of-input. Finally, allowlisted tag markers are stripped so
+ * their inner text is preserved.
  */
 export function sanitizeForTts(text: string): string {
   let out = text
 
-  // 1. Reasoning blocks — drop the whole thing (content is meta, not spoken prose).
-  out = out.replace(REASONING_PAIRED_RE, ' ')
-  out = out.replace(REASONING_UNCLOSED_RE, ' ') // interrupted stream
-
-  // 2. <details> blocks — typically tool calls / collapsed reasoning.
-  out = out.replace(DETAILS_PAIRED_RE, ' ')
-  out = out.replace(DETAILS_UNCLOSED_RE, ' ')
-
-  // 3. Loom/Lumia meta tags — drop paired content AND self-closing markers.
-  out = out.replace(LOOM_PAIRED_RE, ' ')
-  out = out.replace(LOOM_SELF_RE, ' ')
-
-  // 4. Code — fenced first (multiline), then inline.
+  // 1. Strip code first so `<` inside code can't be misread as tag syntax.
   out = out.replace(FENCED_CODE_RE, ' ')
   out = out.replace(INLINE_CODE_RE, ' ')
 
-  // 5. Markdown images dropped; links kept as their label text.
+  // 2. Tag sweeps. Paired → self-closing → unclosed trailing → stray closings.
+  out = stripNonProsePairedTags(out)
+  out = stripNonProseSelfClosingTags(out)
+  out = stripTrailingUnclosedNonProseTag(out)
+  out = stripStrayNonProseClosings(out)
+
+  // 3. Markdown: images dropped entirely, links reduced to their label text.
   out = out.replace(MD_IMAGE_RE, ' ')
   out = out.replace(MD_LINK_RE, '$1')
 
-  // 6. Any remaining HTML tags — strip the tag, keep inner text.
-  out = out.replace(REMAINING_HTML_RE, ' ')
+  // 4. Strip any remaining tag markers (only prose tags at this point); the
+  //    inner text survives because only the marker is removed.
+  out = out.replace(ANY_TAG_MARKER_RE, ' ')
 
-  // 7. Decode a handful of common HTML entities so they're pronounced, not spelled.
+  // 5. Decode a handful of common HTML entities so they're pronounced, not spelled.
   out = out.replace(HTML_ENTITY_RE, (m) => HTML_ENTITY_MAP[m] ?? m)
 
-  // 8. Collapse whitespace (including newlines) into single spaces.
+  // 6. Collapse whitespace (including newlines) into single spaces.
   out = out.replace(/\s+/g, ' ').trim()
 
   return out
