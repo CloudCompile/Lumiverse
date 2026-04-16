@@ -10,7 +10,7 @@ export interface Setting {
 
 const MAX_SETTING_KEY_LENGTH = 200;
 const MAX_SETTING_VALUE_BYTES = 2 * 1024 * 1024; // 2 MB serialized JSON
-const SETTING_KEY_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
+const SETTING_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
 
 export class InvalidSettingError extends Error {
   status = 400 as const;
@@ -24,7 +24,7 @@ function assertValidKey(key: unknown): asserts key is string {
   }
   if (!SETTING_KEY_PATTERN.test(key)) {
     throw new InvalidSettingError(
-      "Setting key may only contain letters, digits, '.', '_', and '-'",
+      "Setting key may only contain letters, digits, '.', '_', '-', and ':'",
     );
   }
 }
