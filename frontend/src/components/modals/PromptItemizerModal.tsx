@@ -26,6 +26,9 @@ export default function PromptItemizerModal() {
   const cacheBreakdown = useStore((s) => s.cacheBreakdown)
   const activeChatId = useStore((s) => s.activeChatId)
   const messages = useStore((s) => s.messages)
+  const activeProfileId = useStore((s) => s.activeProfileId)
+  const activePersonaId = useStore((s) => s.activePersonaId)
+  const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
 
   const messageId = modalProps?.messageId as string | undefined
   const chatId = useMemo(() => {
@@ -88,7 +91,13 @@ export default function PromptItemizerModal() {
     setRawLoading(true)
     setRawError(null)
     try {
-      const res = await generateApi.dryRun({ chat_id: chatId, exclude_message_id: messageId })
+      const res = await generateApi.dryRun({
+        chat_id: chatId,
+        connection_id: activeProfileId || undefined,
+        persona_id: activePersonaId || undefined,
+        preset_id: getActivePresetForGeneration() || undefined,
+        exclude_message_id: messageId,
+      })
       setRawData(res)
       return res
     } catch (err: any) {
@@ -97,7 +106,7 @@ export default function PromptItemizerModal() {
     } finally {
       setRawLoading(false)
     }
-  }, [rawData, chatId, messageId])
+  }, [rawData, chatId, messageId, activeProfileId, activePersonaId, getActivePresetForGeneration])
 
   const handleToggleRaw = useCallback(async () => {
     if (rawView !== 'off') {
