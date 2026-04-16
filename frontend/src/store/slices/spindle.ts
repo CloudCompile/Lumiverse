@@ -212,11 +212,30 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   },
 
   openContextMenu: (request: PendingContextMenuRequest) => {
+    // If another extension already has a pending context menu, cancel it so
+    // its showContextMenu() promise resolves with null instead of being
+    // silently orphaned when we overwrite the slot. This preserves ownership
+    // correctness: the previous extension sees cancellation, and only the
+    // new request owns the visible menu.
+    const prev = get().pendingContextMenu
+    if (prev && prev.requestId !== request.requestId) {
+      window.dispatchEvent(
+        new CustomEvent('spindle:context-menu-resolved', {
+          detail: { requestId: prev.requestId, selectedKey: null },
+        })
+      )
+    }
     set({ pendingContextMenu: request })
   },
 
   closeContextMenu: (requestId: string, selectedKey: string | null) => {
-    set({ pendingContextMenu: null })
+    // Only clear the slot if the requestId still matches the currently-pending
+    // menu. A stale close (e.g. from an onClose closure captured when a prior
+    // request was pending) must not wipe out a newer request's menu.
+    const current = get().pendingContextMenu
+    if (current && current.requestId === requestId) {
+      set({ pendingContextMenu: null })
+    }
     window.dispatchEvent(
       new CustomEvent('spindle:context-menu-resolved', {
         detail: { requestId, selectedKey },
