@@ -44,7 +44,6 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'activeProfileId',
   'activePersonaId',
   'activeLoomPresetId',
-  'activeLumiPresetId',
   // Character browser preferences
   'favorites',
   'viewMode',
@@ -422,6 +421,13 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       const rows = await settingsApi.getAll()
       const patch: Record<string, any> = {}
       const defaults = get()
+      // Retroactive purge: `activeLumiPresetId` was a defunct preset pointer
+      // that still ghost-drove generation for users with a stale value. It has
+      // no UI setter; wipe it from the DB on load so it stops resolving to a
+      // preset behind the user's back.
+      if (rows.some((r) => r.key === 'activeLumiPresetId')) {
+        settingsApi.delete('activeLumiPresetId').catch(() => {})
+      }
       for (const row of rows) {
         if (!DATA_KEYS.has(row.key)) continue
         patch[row.key] = mergeStoredSetting((defaults as any)[row.key], row.value)

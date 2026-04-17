@@ -381,14 +381,12 @@ export interface PresetsSlice {
   presets: Record<string, Preset>
   activePresetId: string | null
   activeLoomPresetId: string | null
-  activeLumiPresetId: string | null
   loomRegistry: Record<string, LoomRegistryEntry>
   setPresets: (presets: Record<string, Preset>) => void
   setActivePreset: (id: string | null) => void
   setActiveLoomPreset: (id: string | null) => void
-  setActiveLumiPreset: (id: string | null) => void
   setLoomRegistry: (registry: Record<string, LoomRegistryEntry>) => void
-  /** Prefers Lumi preset when set. */
+  /** Resolves the preset id that should drive generation. */
   getActivePresetForGeneration: () => string | null
 }
 
