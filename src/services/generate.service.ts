@@ -581,6 +581,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   try {
 
   const connection = resolveConnection(input.userId, input.connection_id);
+  presetsSvc.assertUsablePreset(input.userId, input.preset_id, connection.preset_id);
   const { provider, apiKey, apiUrl } = await resolveProviderAndKey(input.userId, connection.id);
 
   // Resolve character name for saved messages — prefer target_character_id for group chats
@@ -1142,6 +1143,7 @@ export async function dryRunGeneration(input: GenerateInput): Promise<DryRunResu
   }
 
   const connection = resolveConnection(input.userId, input.connection_id);
+  presetsSvc.assertUsablePreset(input.userId, input.preset_id, connection.preset_id);
   const { provider } = await resolveProviderAndKey(input.userId, connection.id);
 
   const pipeline = await runPromptPipeline({

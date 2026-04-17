@@ -83,6 +83,39 @@ export function getPreset(userId: string, id: string): Preset | null {
   return row ? rowToPreset(row) : null;
 }
 
+export function countPresets(userId: string): number {
+  const row = getDb().query("SELECT COUNT(*) as count FROM presets WHERE user_id = ?").get(userId) as any;
+  return row?.count ?? 0;
+}
+
+/**
+ * Validate that a usable preset exists for generation. Throws a config error
+ * (mapped to HTTP 400 by the route) when the user has no presets at all or
+ * when the resolved preset id points at a row that was deleted.
+ *
+ * `requestedPresetId` is the explicit preset the caller asked for; `connectionPresetId`
+ * is the fallback carried by the connection profile. Either pointing at a
+ * missing row is a hard error — silently falling back to legacy assembly lets
+ * stale state produce working-but-unintended generations.
+ */
+export function assertUsablePreset(
+  userId: string,
+  requestedPresetId: string | undefined | null,
+  connectionPresetId: string | undefined | null,
+): void {
+  const resolvedId = requestedPresetId || connectionPresetId || null;
+  if (resolvedId) {
+    if (!getPreset(userId, resolvedId)) {
+      throw new Error("The selected preset was deleted. Pick a different preset before generating.");
+    }
+    return;
+  }
+  if (countPresets(userId) === 0) {
+    throw new Error("No presets available. Create a preset before generating.");
+  }
+  throw new Error("No preset selected. Choose a preset before generating.");
+}
+
 export function createPreset(userId: string, input: CreatePresetInput): Preset {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
