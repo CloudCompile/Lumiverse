@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useStore } from '@/store'
 import { presetsApi } from '@/api/presets'
 import { connectionsApi } from '@/api/connections'
+import { ApiError } from '@/api/client'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
 import { getMacroCatalog } from '@/api/macros'
@@ -57,14 +58,22 @@ export function useLoomBuilder() {
         setIsLoading(false)
       }
     }).catch((err) => {
-      if (!cancelled) {
-        console.warn('[LoomBuilder] Failed to load preset:', err)
-        setError(err.message)
+      if (cancelled) return
+      // Retroactive cleanup: if the persisted active preset id points at a row
+      // that no longer exists (legacy deletions that didn't cascade), clear it
+      // so generation doesn't keep 400ing on a ghost id.
+      if (err instanceof ApiError && err.status === 404) {
+        setActiveLoomPreset(null)
+        setActivePreset(null)
         setIsLoading(false)
+        return
       }
+      console.warn('[LoomBuilder] Failed to load preset:', err)
+      setError(err.message)
+      setIsLoading(false)
     })
     return () => { cancelled = true }
-  }, [activeLoomPresetId, activePreset?.id])
+  }, [activeLoomPresetId, activePreset?.id, setActiveLoomPreset])
 
   // Refresh registry from API
   const refreshRegistry = useCallback(async () => {
