@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useStore } from '@/store'
 import { presetsApi } from '@/api/presets'
+import { connectionsApi } from '@/api/connections'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
 import { getMacroCatalog } from '@/api/macros'
@@ -188,6 +189,14 @@ export function useLoomBuilder() {
     if (presetId === activeLoomPresetId) {
       setActiveLoomPreset(null)
       setActivePreset(null)
+    }
+    // Refresh connection profiles so any stale preset_id references (the
+    // backend's FK nulls them out on delete) drop from the store.
+    try {
+      const res = await connectionsApi.list({ limit: 100 })
+      useStore.getState().setProfiles(res.data)
+    } catch {
+      // non-fatal — store just keeps the previous profile list
     }
   }, [activeLoomPresetId, refreshRegistry, setActiveLoomPreset])
 
