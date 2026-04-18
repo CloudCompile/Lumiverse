@@ -67,14 +67,13 @@ app.get("/trusted-hosts", async (c) => {
 });
 
 app.put("/trusted-hosts", async (c) => {
-  const userId = c.get("userId");
   const body = await c.req.json().catch(() => null);
   const hosts = Array.isArray(body?.hosts) ? body.hosts : null;
   if (!hosts) {
     return c.json({ error: "Payload must be { hosts: string[] }" }, 400);
   }
   try {
-    const configured = setTrustedHosts(userId, hosts);
+    const configured = setTrustedHosts(hosts);
     return c.json({ configured, baseline: getTrustedHostsSnapshot().baseline });
   } catch (err) {
     if (err instanceof InvalidTrustedHostError) {
