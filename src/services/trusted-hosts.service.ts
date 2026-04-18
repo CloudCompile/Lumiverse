@@ -28,6 +28,22 @@ export interface TrustedHostsSuggestions {
 const HOSTNAME_PATTERN = /^(?:\[[0-9a-f:%.]+\]|[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)$/i;
 const MAX_CONFIGURED_HOSTS = 32;
 
+let networkInterfacesWarned = false;
+
+// Termux/Android sandboxes deny getifaddrs() (EACCES). Treat enumeration as
+// best-effort so a missing LAN-IP list doesn't crash the server at startup.
+function safeNetworkInterfaces(): ReturnType<typeof networkInterfaces> {
+  try {
+    return networkInterfaces();
+  } catch (err) {
+    if (!networkInterfacesWarned) {
+      networkInterfacesWarned = true;
+      console.warn("[trusted-hosts] Could not enumerate network interfaces:", (err as Error)?.message ?? err);
+    }
+    return {};
+  }
+}
+
 export class InvalidTrustedHostError extends Error {
   status = 400 as const;
   constructor(message: string) { super(message); }
@@ -120,7 +136,7 @@ function baselineEntries(): TrustedHostEntry[] {
     } catch { /* skip malformed */ }
   }
 
-  for (const iface of Object.values(networkInterfaces())) {
+  for (const iface of Object.values(safeNetworkInterfaces())) {
     if (!iface) continue;
     for (const addr of iface) {
       if (addr.internal) continue;
@@ -304,7 +320,7 @@ export async function detectHostnameSuggestions(): Promise<TrustedHostsSuggestio
 
   // Collect non-internal IPs once, then reverse-resolve in parallel.
   const ips: string[] = [];
-  for (const iface of Object.values(networkInterfaces())) {
+  for (const iface of Object.values(safeNetworkInterfaces())) {
     if (!iface) continue;
     for (const addr of iface) {
       if (addr.internal) continue;
