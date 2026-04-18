@@ -1694,11 +1694,19 @@ async function runGeneration(
     // user-initiated stop, not an error. On Bun for Windows the thrown value
     // may be `null` in this case, which is why errorMessage() is used.
     if (signal.aborted) {
+      // Persist whatever was already streamed — same recovery as the
+      // non-abort error path. Without this, cancelling mid-stream wiped the
+      // message even though the tokens had already rendered for the user.
+      let savedContent = fullContent;
+      try {
+        const persisted = await persistPartialContent();
+        savedContent = persisted.content;
+      } catch { /* best-effort; fall back to in-memory content */ }
       pool.stopPool(generationId);
       eventBus.emit(EventType.GENERATION_STOPPED, {
         generationId,
         chatId,
-        content: fullContent,
+        content: savedContent,
       }, userId);
     } else {
       const msg = errorMessage(err);
