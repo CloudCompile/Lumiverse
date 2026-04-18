@@ -259,6 +259,27 @@ function errorMessage(err: unknown): string {
   try { return String(err); } catch { return "Unknown error"; }
 }
 
+/**
+ * Race a promise against an AbortSignal. If the signal fires before the
+ * promise settles, rejects with the signal's reason (or a standard AbortError).
+ * Used to tear down long-running pipelines (prompt assembly, etc.) whose inner
+ * awaits may not all be signal-aware — the race guarantees the caller unwinds
+ * immediately on abort instead of stalling behind a blocking op.
+ */
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
 // Track active generations for stop support
 const activeGenerations = new Map<string, { controller: AbortController; userId: string; chatId: string; startedAt: number }>();
 
@@ -589,10 +610,13 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   activeGenerations.set(generationId, { controller: abortController, userId: input.userId, chatId: input.chat_id, startedAt: Date.now() });
   activeChatGenerations.set(chatKey, generationId);
 
-  // Helper: bail out cleanly if aborted during the setup phase
+  // Helper: bail out cleanly if aborted during the setup phase.
+  // Throws the same DOMException shape that fetch / AbortSignal.any use so
+  // intermediate catches that sniff `err.name === "AbortError"` re-throw
+  // rather than swallowing it.
   const checkAborted = () => {
     if (abortController.signal.aborted) {
-      throw new Error("Generation aborted");
+      throw abortController.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
   };
 
@@ -1006,25 +1030,33 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   checkAborted();
 
   // Run shared prompt pipeline — cortex retrieval runs concurrently inside assembly.
-  const pipeline = await runPromptPipeline({
-    userId: input.userId,
-    chatId: input.chat_id,
-    connectionId: input.connection_id,
-    presetId: input.preset_id,
-    personaId: input.persona_id,
-    generationType: genType,
-    impersonateMode: genType === "impersonate" ? (input.impersonate_mode || "prompts") : undefined,
-    inputMessages: input.messages,
-    inputParameters: input.parameters,
-    excludeMessageId,
-    targetCharacterId: input.target_character_id,
-    councilToolResults,
-    councilNamedResults,
-    precomputedVectorEntries,
-    regenFeedback: input.regen_feedback,
-    regenFeedbackPosition: input.regen_feedback_position,
-    signal: abortController.signal,
-  });
+  // Raced against the abort signal so a stop request tears down the setup phase
+  // immediately, even when an inner await (e.g. databank mention resolution with
+  // large docs) is sleeping on a non-signal-aware op. The race rejects with a
+  // DOMException("Aborted","AbortError") which is caught below and converted into
+  // a GENERATION_STOPPED event so the frontend clears its streaming state.
+  const pipeline = await raceWithSignal(
+    runPromptPipeline({
+      userId: input.userId,
+      chatId: input.chat_id,
+      connectionId: input.connection_id,
+      presetId: input.preset_id,
+      personaId: input.persona_id,
+      generationType: genType,
+      impersonateMode: genType === "impersonate" ? (input.impersonate_mode || "prompts") : undefined,
+      inputMessages: input.messages,
+      inputParameters: input.parameters,
+      excludeMessageId,
+      targetCharacterId: input.target_character_id,
+      councilToolResults,
+      councilNamedResults,
+      precomputedVectorEntries,
+      regenFeedback: input.regen_feedback,
+      regenFeedbackPosition: input.regen_feedback_position,
+      signal: abortController.signal,
+    }),
+    abortController.signal,
+  );
 
   let { messages } = pipeline;
   const { parameters: mergedParams, breakdown, activatedWorldInfo, deliberationHandledByMacro } = pipeline;
@@ -1099,9 +1131,14 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools, pipeline.assistantPrefill, pipeline.macroEnv);
 
     } catch (err: any) {
-      // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted
+      // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted.
+      // Only clear the per-chat mapping if it still points at THIS generation —
+      // a newer startGeneration on the same chat may have already taken over the
+      // chatKey (see line 590), and wiping it would strand the new generation.
       activeGenerations.delete(generationId);
-      activeChatGenerations.delete(chatKey);
+      if (activeChatGenerations.get(chatKey) === generationId) {
+        activeChatGenerations.delete(chatKey);
+      }
 
       // Clean up any pending council retry decision
       const pendingRetry = pendingCouncilRetries.get(generationId);
