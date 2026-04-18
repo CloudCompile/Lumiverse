@@ -18,11 +18,13 @@
     "js-tiktoken": "^1.0.16",
     "jsdom": "^29.0.1",
     "lumiverse-spindle-types": "0.4.24",
+    "mute-stream": "^3.0.0",
     "sharp": "^0.34.5",
     "ssh2-sftp-client": "^12.1.1"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.1",
+    "@types/mute-stream": "^0.0.4",
     "@types/ssh2-sftp-client": "^9.0.6",
     "bun-types": "^1.3.10"
   },

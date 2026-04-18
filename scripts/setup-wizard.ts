@@ -22,7 +22,7 @@ import {
   printCompletionAnimation,
   theme,
 } from "./ui";
-import { askSecret, askText } from "./input";
+import { askSecret, askText, closeInput } from "./input";
 
 // All input goes through askText / askSecret (scripts/input.ts) so that a
 // single raw-mode consumer owns stdin.  Mixing Node's readline with a raw
@@ -237,7 +237,9 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error("Setup failed:", err);
-  process.exit(1);
-});
+main()
+  .catch((err) => {
+    console.error("Setup failed:", err);
+    process.exitCode = 1;
+  })
+  .finally(() => closeInput());

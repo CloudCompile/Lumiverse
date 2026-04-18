@@ -1,25 +1,27 @@
 /**
  * Shared input helpers for CLI scripts (setup wizard, password reset, etc.).
  *
- * Both askText() and askSecret() use the same byte-level raw-mode reader so
- * that a single consumer owns stdin.  Mixing Node's readline with a raw-mode
- * handler causes cross-platform breakage (double-echoed characters on Windows
- * ConPTY / Termux) and occasionally loses bytes when readline's internal line
- * editor steals the CR before the raw listener sees it.
+ * Built on a single long-lived `readline.Interface` whose output is piped
+ * through a `mute-stream`.  This pattern (used by inquirer / prompts /
+ * enquirer) sidesteps two Bun-on-Windows bugs that broke the previous
+ * raw-mode byte reader on PowerShell 5 / classic conhost:
  *
- * Features:
- *  - Byte-level processing (handles multi-byte data events like CRLF in one chunk)
- *  - ANSI escape sequence filtering (arrow keys, IME composition sequences)
- *  - Multi-byte UTF-8 support (bytes accumulated raw, decoded only at the end)
- *  - Unicode NFC normalization for consistent string comparison
- *  - Raw-mode engagement check with graceful fallback for environments where
- *    stdin.setRawMode() silently no-ops (some Windows wrappers, non-TTY pipes)
+ *   - oven-sh/bun#9853, #25663 — `setRawMode(true)` returns and `isRaw`
+ *     reads `true`, but the underlying console mode never actually
+ *     switches.  Cooked-mode echo prints the password before the data
+ *     handler fires.
+ *   - oven-sh/bun#8693 — `stdin.pause()` + `removeListener` doesn't
+ *     release fd 0 on Windows, so the next prompt's `data` listener
+ *     never fires (re-prompt after validation rejection hangs).
  *
- * These are critical for Termux / Android, where software keyboards and IME
- * can send multi-character data events, escape sequences, and varying line
- * endings that break naive char.toString() single-event handling.
+ * Keeping ONE readline interface for the whole script means stdin
+ * ownership never changes hands — the second bug can't trigger.  Mask
+ * rendering is a per-character `*` replacement applied by mute-stream
+ * while muted, so we don't depend on any VT escape code support.
  */
 
+import readline from "node:readline";
+import MuteStream from "mute-stream";
 import { theme, promptLabel, inputHint } from "./ui";
 
 export interface AskTextOptions {
@@ -30,14 +32,12 @@ export interface AskTextOptions {
 
 /**
  * Prompt for plain text input with visible echo.
- *
  * Loops on validation failure so callers don't need to reconstruct the prompt.
  */
 export async function askText(question: string, options: AskTextOptions = {}): Promise<string> {
   const { defaultValue, validate } = options;
-
   for (;;) {
-    const raw = await readLine({ masked: false, question, defaultValue });
+    const raw = await prompt(question, { masked: false, defaultValue });
     const value = raw.trim() || defaultValue || "";
     if (validate) {
       const error = validate(value);
@@ -51,225 +51,87 @@ export async function askText(question: string, options: AskTextOptions = {}): P
 }
 
 /**
- * Prompt for secret input with masked echo (* per character).
- *
- * Processes stdin byte-by-byte so that multi-byte data events (CRLF as a
- * single chunk, pasted input, IME bursts) are handled correctly.  The final
- * string is NFC-normalized so that identical visual passwords always compare
- * equal regardless of how the terminal encodes combining characters.
+ * Prompt for secret input with masked echo (one `*` per typed character).
+ * NFC-normalized so identical visual passwords always compare equal.
  */
 export function askSecret(question: string): Promise<string> {
-  return readLine({ masked: true, question });
+  return prompt(question, { masked: true });
 }
 
-// ─── Internal: unified raw-mode line reader ─────────────────────────────────
+/**
+ * Close the cached readline interface so the script can exit.  Without this
+ * call, the readline keeps stdin readable and Node/Bun will keep the event
+ * loop alive even after the wizard's `main()` resolves.
+ */
+export function closeInput(): void {
+  if (cachedRl) {
+    cachedOutput?.unmute();
+    cachedRl.close();
+    cachedRl = null;
+    cachedOutput = null;
+  }
+}
 
-interface ReadLineOptions {
+// ─── Internals ──────────────────────────────────────────────────────────────
+
+let cachedRl: readline.Interface | null = null;
+let cachedOutput: MuteStream | null = null;
+
+function getReadline(): { rl: readline.Interface; output: MuteStream } {
+  if (cachedRl && cachedOutput) return { rl: cachedRl, output: cachedOutput };
+
+  const output = new MuteStream();
+  output.pipe(process.stdout);
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output,
+    terminal: true,
+    historySize: 0,
+  });
+
+  // Ctrl+C → exit cleanly (unmute first so the next shell prompt isn't
+  // hidden behind a still-muted output stream).
+  rl.on("SIGINT", () => {
+    output.unmute();
+    process.stdout.write("\n");
+    rl.close();
+    process.exit(1);
+  });
+
+  cachedRl = rl;
+  cachedOutput = output;
+  return { rl, output };
+}
+
+interface PromptOptions {
   masked: boolean;
-  question: string;
   defaultValue?: string;
 }
 
-function readLine(opts: ReadLineOptions): Promise<string> {
-  const { masked, question, defaultValue } = opts;
-  const hint = !masked && defaultValue ? ` ${inputHint(`(${defaultValue})`)}` : "";
-  process.stdout.write(`${promptLabel(question)}${hint} `);
+function prompt(question: string, opts: PromptOptions): Promise<string> {
+  const { rl, output } = getReadline();
+  const hint = !opts.masked && opts.defaultValue ? ` ${inputHint(`(${opts.defaultValue})`)}` : "";
+  const prefix = `${promptLabel(question)}${hint} `;
 
-  const stdin = process.stdin;
-  const wasRaw = stdin.isRaw ?? false;
-
-  // Attempt to engage raw mode.  On some Windows wrappers and non-TTY pipes
-  // this is a silent no-op — we detect that by re-reading stdin.isRaw and
-  // fall back to a line-buffered read path.
-  let rawEngaged = false;
-  if (stdin.isTTY) {
-    try {
-      stdin.setRawMode(true);
-      rawEngaged = stdin.isRaw === true;
-    } catch {
-      rawEngaged = false;
+  return new Promise<string>((resolve) => {
+    if (opts.masked) {
+      // Write the visible prefix BEFORE muting so mute-stream doesn't
+      // replace the prompt itself with `*`s.  Then mute and let
+      // mute-stream substitute one `*` per echoed keystroke.
+      output.write(prefix);
+      output.mute();
+      output.replace = "*";
+      rl.question("", (answer) => {
+        output.unmute();
+        output.replace = "";
+        process.stdout.write("\n"); // the Enter keystroke was muted
+        resolve(answer.normalize("NFC"));
+      });
+    } else {
+      rl.question(prefix, (answer) => {
+        resolve(answer.normalize("NFC"));
+      });
     }
-  }
-
-  if (!rawEngaged) {
-    return readLineFallback({ masked, wasRaw });
-  }
-
-  return readLineRaw({ masked, wasRaw });
-}
-
-/**
- * Raw-mode byte-by-byte read.  Responsible for echo (visible or masked),
- * backspace, CR/LF handling, Ctrl+C abort, and ANSI escape filtering.
- */
-function readLineRaw(opts: { masked: boolean; wasRaw: boolean }): Promise<string> {
-  const { masked, wasRaw } = opts;
-  const stdin = process.stdin;
-
-  return new Promise((resolve) => {
-    const inputBytes: number[] = [];
-    let displayCount = 0;
-    let escState: "normal" | "esc" | "csi" = "normal";
-
-    const finish = () => {
-      if (stdin.isTTY) {
-        try { stdin.setRawMode(wasRaw); } catch {}
-      }
-      stdin.removeListener("data", onData);
-      stdin.pause();
-      process.stdout.write("\n");
-
-      const value = Buffer.from(inputBytes)
-        .toString("utf-8")
-        .normalize("NFC");
-      resolve(value);
-    };
-
-    const handleBackspace = () => {
-      if (inputBytes.length === 0) return;
-
-      // Decode → remove last visual character → re-encode.
-      // Array.from() splits correctly on surrogate pairs (emoji, etc.).
-      const chars = Array.from(Buffer.from(inputBytes).toString("utf-8"));
-      chars.pop();
-      const shortened = chars.join("");
-
-      inputBytes.length = 0;
-      if (shortened.length > 0) {
-        const buf = Buffer.from(shortened, "utf-8");
-        for (let j = 0; j < buf.length; j++) inputBytes.push(buf[j]);
-      }
-
-      if (displayCount > 0) {
-        displayCount--;
-        process.stdout.write("\b \b");
-      }
-    };
-
-    const onData = (data: Buffer) => {
-      for (let i = 0; i < data.length; i++) {
-        const byte = data[i];
-
-        // ── ANSI escape sequence tracking ──────────────────────────────
-        // ESC starts a sequence; ESC [ starts a CSI sequence whose
-        // parameter bytes (0x20-0x3F) are skipped until a final byte
-        // (0x40-0x7E) terminates it.  Non-CSI escapes (ESC + char) are
-        // consumed as two bytes.  This prevents arrow keys, function
-        // keys, and other terminal sequences from leaking into input.
-        if (escState === "esc") {
-          escState = byte === 0x5b ? "csi" : "normal";
-          continue;
-        }
-        if (escState === "csi") {
-          if (byte >= 0x40 && byte <= 0x7e) escState = "normal";
-          continue;
-        }
-        if (byte === 0x1b) {
-          escState = "esc";
-          continue;
-        }
-
-        // ── CR (0x0D) or LF (0x0A) → finish ───────────────────────────
-        // Handles Enter regardless of whether the terminal sends CR, LF,
-        // or CRLF, and whether they arrive in one chunk or two.
-        if (byte === 0x0d || byte === 0x0a) {
-          finish();
-          return;
-        }
-
-        // ── Backspace (DEL 0x7F) or BS (0x08) ─────────────────────────
-        if (byte === 0x7f || byte === 0x08) {
-          handleBackspace();
-          continue;
-        }
-
-        // ── Ctrl+C → abort ─────────────────────────────────────────────
-        if (byte === 0x03) {
-          if (stdin.isTTY) {
-            try { stdin.setRawMode(wasRaw); } catch {}
-          }
-          process.stdout.write("\n");
-          process.exit(1);
-        }
-
-        // ── Skip other control characters (Ctrl+A … Ctrl+Z, etc.) ─────
-        if (byte < 0x20) continue;
-
-        // ── Regular byte → accumulate ──────────────────────────────────
-        inputBytes.push(byte);
-
-        // Echo.  Leading bytes of each UTF-8 code point are ASCII (< 0x80)
-        // or multi-byte starters (≥ 0xC0); continuation bytes are 0x80-0xBF.
-        if (masked) {
-          // One * per visual character (suppress on continuation bytes).
-          if (byte < 0x80 || byte >= 0xc0) {
-            displayCount++;
-            process.stdout.write(`${theme.muted}*${theme.reset}`);
-          }
-        } else {
-          // Visible echo: write every byte as-is.  Terminals assemble the
-          // UTF-8 glyph themselves, so this correctly renders multi-byte
-          // characters in real time.
-          process.stdout.write(Buffer.from([byte]));
-          if (byte < 0x80 || byte >= 0xc0) displayCount++;
-        }
-      }
-    };
-
-    stdin.resume();
-    stdin.on("data", onData);
-  });
-}
-
-/**
- * Fallback line-buffered read for environments where raw mode cannot be
- * engaged.  When masked, wraps the read in ANSI conceal codes so the typed
- * text isn't visible on VT-compatible terminals (Windows Terminal, Termux,
- * most modern emulators).  Older conhost without VT enabled will still show
- * the text — there's no universal way to hide it without raw mode.
- */
-function readLineFallback(opts: { masked: boolean; wasRaw: boolean }): Promise<string> {
-  const { masked, wasRaw } = opts;
-  const stdin = process.stdin;
-
-  return new Promise((resolve) => {
-    if (masked) process.stdout.write("\x1b[8m"); // conceal
-
-    const chunks: Buffer[] = [];
-
-    const cleanup = () => {
-      stdin.removeListener("data", onData);
-      stdin.removeListener("end", onEnd);
-      stdin.pause();
-      if (masked) process.stdout.write("\x1b[28m"); // reveal
-      if (stdin.isTTY) {
-        try { stdin.setRawMode(wasRaw); } catch {}
-      }
-    };
-
-    const deliver = () => {
-      const joined = Buffer.concat(chunks).toString("utf-8").normalize("NFC");
-      // Strip trailing CR/LF (handles CR, LF, and CRLF from any platform).
-      const value = joined.replace(/\r?\n?$/, "");
-      cleanup();
-      if (masked) process.stdout.write("\n");
-      resolve(value);
-    };
-
-    const onData = (data: Buffer) => {
-      chunks.push(data);
-      // Resolve as soon as we see a line terminator — terminals in cooked
-      // mode deliver the whole line on Enter, so this is effectively atomic.
-      const joined = Buffer.concat(chunks).toString("utf-8");
-      if (joined.includes("\n") || joined.includes("\r")) {
-        deliver();
-      }
-    };
-
-    const onEnd = () => deliver();
-
-    stdin.resume();
-    stdin.on("data", onData);
-    stdin.on("end", onEnd);
   });
 }
