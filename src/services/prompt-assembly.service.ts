@@ -3977,6 +3977,18 @@ function buildParameters(
     }
   }
 
+  // Authoritative off-switch: when the user has disabled API reasoning, strip every
+  // provider-specific reasoning field — including anything a customBody spread in —
+  // so native thinking is never requested. Omitting these params is the documented
+  // "no extended thinking" default for every provider we target.
+  if (reasoningSettings && reasoningSettings.apiReasoning === false) {
+    delete params.thinking;
+    delete params.output_config;
+    delete params.thinkingConfig;
+    delete params.reasoning;
+    delete params.reasoning_effort;
+  }
+
   return params;
 }
 

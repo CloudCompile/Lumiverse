@@ -2061,6 +2061,14 @@ async function prepareQuietCall(
     if (effort !== "auto") {
       injectReasoningParams(mergedParams, provider.name, effort, connection.model || undefined, reasoningSetting.value.thinkingDisplay);
     }
+  } else if (reasoningSetting?.value && reasoningSetting.value.apiReasoning === false) {
+    // Authoritative off-switch: strip any reasoning fields that may have been
+    // spread in from preset.parameters so native thinking is never requested.
+    delete (mergedParams as any).thinking;
+    delete (mergedParams as any).output_config;
+    delete (mergedParams as any).thinkingConfig;
+    delete (mergedParams as any).reasoning;
+    delete (mergedParams as any).reasoning_effort;
   }
 
   // Inject connection-level metadata flags into parameters (e.g. use_responses_api)
