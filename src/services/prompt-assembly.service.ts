@@ -379,6 +379,15 @@ interface PendingAppend {
  * Falls back to legacy simple message mapping if no preset/blocks are found.
  */
 export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResult> {
+  // Macrotask yield + abort check at the entry point so the event loop can
+  // process pending HTTP requests (crucially `/generate/stop`) before we
+  // enter the long stretch of synchronous block iteration, macro evaluation,
+  // and regex script application below. Without this, a stop clicked during
+  // the first ~200ms of assembly stayed queued behind our sync work and the
+  // user perceived the stop button as unresponsive.
+  await new Promise<void>(r => setTimeout(r, 0));
+  if (ctx.signal?.aborted) throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
+
   const pf = ctx.prefetched; // shorthand for prefetched data
 
   // ---- Load data (use prefetched when available, fallback to DB) ----

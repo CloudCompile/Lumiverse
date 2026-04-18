@@ -380,6 +380,15 @@ async function runPromptPipeline(opts: {
   regenFeedbackPosition?: "system" | "user";
   signal?: AbortSignal;
 }): Promise<PromptPipelineResult> {
+  // Yield to the event loop before entering the assembly pipeline so a stop
+  // clicked in the first few ticks after the generation starts can actually
+  // be processed. Without this yield the pipeline runs back-to-back from the
+  // caller's await through contextHandlerChain and the dynamic prefetch
+  // import, synchronously blocking the HTTP server from picking up the stop
+  // request.
+  await new Promise<void>(r => setTimeout(r, 0));
+  if (opts.signal?.aborted) throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
+
   // Build spindle context
   let spindleContext: SpindleContext = {
     chatId: opts.chatId,
@@ -409,7 +418,9 @@ async function runPromptPipeline(opts: {
     messages = opts.inputMessages;
   } else {
     // Batch-prefetch all data the assembly pipeline needs in ~7 queries
-    // instead of the ~35-40 scattered individual calls inside assemblePrompt
+    // instead of the ~35-40 scattered individual calls inside assemblePrompt.
+    // Thread the signal so prefetch yields + bails out if the user aborts
+    // during its synchronous DB reads.
     const { prefetchAssemblyData } = await import("./prompt-assembly-prefetch");
     const prefetched = await prefetchAssemblyData({
       userId: opts.userId,
@@ -420,6 +431,7 @@ async function runPromptPipeline(opts: {
       generationType: opts.generationType as GenerationType,
       excludeMessageId: opts.excludeMessageId,
       targetCharacterId: opts.targetCharacterId,
+      signal: opts.signal,
     });
 
     // All presets (classic and lumi) go through the same assembly path
@@ -1134,6 +1146,12 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     if (preset) lifecycle.presetName = preset.name;
   }
 
+  // Final abort checkpoint between assembly completion and runGeneration
+  // entry. If the user stopped while prompt assembly was winding down,
+  // bail out here instead of emitting GENERATION_STARTED (with breakdown)
+  // and then tearing the stream down on the first iter.next() race.
+  checkAborted();
+
   // Run generation in the background
   runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools, pipeline.assistantPrefill, pipeline.macroEnv);
 
@@ -1510,6 +1528,7 @@ async function runGeneration(
   const poolEntry = pool.getPoolEntry(generationId);
   if (poolEntry) poolEntry.wasStreaming = useStreaming;
 
+  let emittedStopped = false;
   try {
     // Non-streaming path: call generate() once, then synthesize a single-chunk stream
     const stream: AsyncGenerator<StreamChunk, void, unknown> = useStreaming
@@ -1525,11 +1544,34 @@ async function runGeneration(
           };
         })();
 
-    for await (const chunk of stream) {
+    // Drive the iterator manually so each `.next()` can be raced against the
+    // abort signal. Providers intentionally don't pass the signal into
+    // `fetch()` (a Bun-Windows stream-cancel workaround), which means a stop
+    // clicked during the initial fetch wait — before any chunk arrives —
+    // would otherwise stall until the upstream LLM responds. Racing at this
+    // level unwinds immediately on abort; the in-flight fetch completes
+    // silently in the background and the generator's own finally cancels
+    // the reader.
+    const iter = stream[Symbol.asyncIterator]();
+    while (true) {
+      let result: IteratorResult<StreamChunk, void>;
+      try {
+        result = await raceWithSignal(iter.next(), signal);
+      } catch (err) {
+        // Signal won the race. Tell the generator to clean up (best-effort)
+        // and rethrow so the outer catch handles emission.
+        try { await iter.return?.(undefined); } catch { /* best-effort */ }
+        throw err;
+      }
+      if (result.done) break;
+      const chunk = result.value;
+
       if (signal.aborted) {
         const persisted = await persistPartialContent();
         pool.stopPool(generationId);
         eventBus.emit(EventType.GENERATION_STOPPED, { generationId, chatId, content: persisted.content }, userId);
+        emittedStopped = true;
+        try { await iter.return?.(undefined); } catch { /* best-effort */ }
         break;
       }
 
@@ -1559,6 +1601,17 @@ async function runGeneration(
       if (chunk.finish_reason) {
         break;
       }
+    }
+
+    // Clean exit after abort — the stream may have returned done:true via
+    // readWithAbort without ever re-entering the for-await body, so the
+    // in-loop STOPPED emission above never fired. Emit now so the frontend
+    // gets its completion signal and can unblock its streaming UI.
+    if (signal.aborted && !emittedStopped) {
+      const persisted = await persistPartialContent();
+      pool.stopPool(generationId);
+      eventBus.emit(EventType.GENERATION_STOPPED, { generationId, chatId, content: persisted.content }, userId);
+      emittedStopped = true;
     }
 
     if (!signal.aborted) {
@@ -1751,24 +1804,30 @@ async function runGeneration(
     // user-initiated stop, not an error. On Bun for Windows the thrown value
     // may be `null` in this case, which is why errorMessage() is used.
     if (signal.aborted) {
-      // Persist whatever was already streamed — same recovery as the
-      // non-abort error path. Without this, cancelling mid-stream wiped the
-      // message even though the tokens had already rendered for the user.
-      // Yield a macrotask first so the provider's stream teardown finishes
-      // before we kick off SQLite writes; on Bun-Windows, interleaving DB
-      // work with ReadableStream teardown was a reproducible panic trigger.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      let savedContent = fullContent;
-      try {
-        const persisted = await persistPartialContent();
-        savedContent = persisted.content;
-      } catch { /* best-effort; fall back to in-memory content */ }
-      pool.stopPool(generationId);
-      eventBus.emit(EventType.GENERATION_STOPPED, {
-        generationId,
-        chatId,
-        content: savedContent,
-      }, userId);
+      // Skip if the post-loop / in-loop branch already emitted — catches
+      // the case where a later .next() race threw AFTER the loop body's
+      // STOPPED emission had already fired.
+      if (!emittedStopped) {
+        // Persist whatever was already streamed — same recovery as the
+        // non-abort error path. Without this, cancelling mid-stream wiped the
+        // message even though the tokens had already rendered for the user.
+        // Yield a macrotask first so the provider's stream teardown finishes
+        // before we kick off SQLite writes; on Bun-Windows, interleaving DB
+        // work with ReadableStream teardown was a reproducible panic trigger.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        let savedContent = fullContent;
+        try {
+          const persisted = await persistPartialContent();
+          savedContent = persisted.content;
+        } catch { /* best-effort; fall back to in-memory content */ }
+        pool.stopPool(generationId);
+        eventBus.emit(EventType.GENERATION_STOPPED, {
+          generationId,
+          chatId,
+          content: savedContent,
+        }, userId);
+        emittedStopped = true;
+      }
     } else {
       const msg = errorMessage(err);
       // Socket drops, provider 5xx mid-stream, etc. — persist whatever was

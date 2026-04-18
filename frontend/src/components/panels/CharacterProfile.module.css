@@ -17,6 +17,11 @@
   overflow: hidden;
   mask-image: linear-gradient(to bottom, black 55%, rgba(0, 0, 0, 0.5) 75%, transparent 95%);
   -webkit-mask-image: linear-gradient(to bottom, black 55%, rgba(0, 0, 0, 0.5) 75%, transparent 95%);
+  pointer-events: none;
+}
+
+.heroImage * {
+  pointer-events: none;
 }
 
 .heroMeta {
