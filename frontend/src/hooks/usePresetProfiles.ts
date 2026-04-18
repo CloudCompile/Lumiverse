@@ -20,6 +20,7 @@ export function usePresetProfiles(
 ) {
   const activeChatId = useStore((s) => s.activeChatId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const isGroupChat = useStore((s) => s.isGroupChat)
   const addToast = useStore((s) => s.addToast)
 
   const [defaults, setDefaults] = useState<PresetProfileBinding | null>(null)
@@ -116,7 +117,7 @@ export function usePresetProfiles(
 
   // Bind to current character
   const bindToCharacter = useCallback(async () => {
-    if (!presetId || !blocks || !activeCharacterId) return
+    if (!presetId || !blocks || !activeCharacterId || isGroupChat) return
     setIsLoading(true)
     try {
       const binding = await presetProfilesApi.setCharacterBinding(activeCharacterId, presetId, snapshotBlockStates(blocks))
@@ -127,11 +128,11 @@ export function usePresetProfiles(
     } finally {
       setIsLoading(false)
     }
-  }, [presetId, blocks, activeCharacterId, addToast])
+  }, [presetId, blocks, activeCharacterId, isGroupChat, addToast])
 
   // Unbind from current character
   const unbindCharacter = useCallback(async () => {
-    if (!activeCharacterId) return
+    if (!activeCharacterId || isGroupChat) return
     setIsLoading(true)
     try {
       await presetProfilesApi.deleteCharacterBinding(activeCharacterId)
@@ -142,32 +143,37 @@ export function usePresetProfiles(
     } finally {
       setIsLoading(false)
     }
-  }, [activeCharacterId, addToast])
+  }, [activeCharacterId, isGroupChat, addToast])
+
+  // Character bindings are skipped in group chats (per-member bindings are
+  // ambiguous — backend resolveProfile applies the same gate).
+  const characterBindingEnabled = !isGroupChat
 
   // Resolved active binding (chat > character > defaults > none)
   const activeBinding = useMemo(() => {
     if (chatBinding && chatBinding.preset_id === presetId) return chatBinding
-    if (characterBinding && characterBinding.preset_id === presetId) return characterBinding
+    if (characterBindingEnabled && characterBinding && characterBinding.preset_id === presetId) return characterBinding
     if (defaults && defaults.preset_id === presetId) return defaults
     return null
-  }, [chatBinding, characterBinding, defaults, presetId])
+  }, [chatBinding, characterBinding, defaults, presetId, characterBindingEnabled])
 
   // Determine active source
   const activeSource: 'chat' | 'character' | 'defaults' | 'none' = (() => {
     if (chatBinding && chatBinding.preset_id === presetId) return 'chat'
-    if (characterBinding && characterBinding.preset_id === presetId) return 'character'
+    if (characterBindingEnabled && characterBinding && characterBinding.preset_id === presetId) return 'character'
     if (defaults && defaults.preset_id === presetId) return 'defaults'
     return 'none'
   })()
 
   const hasChatBinding = chatBinding !== null && chatBinding.preset_id === presetId
-  const hasCharacterBinding = characterBinding !== null && characterBinding.preset_id === presetId
+  const hasCharacterBinding = characterBindingEnabled && characterBinding !== null && characterBinding.preset_id === presetId
 
   return {
     // State
     hasDefaults,
     hasChatBinding,
     hasCharacterBinding,
+    characterBindingEnabled,
     activeSource,
     activeBinding,
     isLoading,

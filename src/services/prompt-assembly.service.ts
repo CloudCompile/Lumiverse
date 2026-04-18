@@ -408,7 +408,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       ctx.userId,
       resolvedPresetId,
       chat.id,
-      characterId
+      characterId,
+      { isGroup: chat.metadata?.group === true }
     );
     if (resolved.binding) {
       presetProfilesSvc.applyProfileToBlocks(blocks, resolved.binding);

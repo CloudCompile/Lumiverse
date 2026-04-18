@@ -1219,7 +1219,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     if (changed) {
       saveBlocksRef.current(updatedBlocks)
     }
-  }, [presetProfiles.activeBinding])
+  }, [presetProfiles.activeBinding, activePreset?.id])
 
   const [view, setView] = useState<'list' | 'edit'>('list')
   const [editingBlock, setEditingBlock] = useState<PromptBlock | null>(null)
@@ -1504,8 +1504,8 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
               </button>
             )}
 
-            {/* Bind / unbind character */}
-            {!presetProfiles.hasCharacterBinding ? (
+            {/* Bind / unbind character — hidden in group chats (chat-only) */}
+            {presetProfiles.characterBindingEnabled && (!presetProfiles.hasCharacterBinding ? (
               <button
                 className={s.profileBtn}
                 onClick={presetProfiles.bindToCharacter}
@@ -1534,7 +1534,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                   <X size={8} />
                 </span>
               </button>
-            )}
+            ))}
 
             {/* Bind / unbind chat */}
             {!presetProfiles.hasChatBinding ? (
