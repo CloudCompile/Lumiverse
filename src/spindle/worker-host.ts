@@ -17,6 +17,7 @@ import type {
   ThemeOverrideDTO,
   SpindleCommandDTO,
   SpindleCommandContextDTO,
+  CouncilMemberContext,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
@@ -529,11 +530,19 @@ export class WorkerHost {
   /**
    * Invoke an extension-registered tool and wait for the result.
    * Used by council execution to route tool calls to the owning extension.
+   *
+   * `councilMember` — when provided by the council execution path — is a
+   * trusted, host-built snapshot of the assigned member's identity and
+   * personality fields. It is delivered alongside the invocation args so the
+   * extension handler can personalise its tool output. The context is sourced
+   * entirely server-side and kept on a separate top-level field so user-space
+   * `args` cannot collide with or spoof it.
    */
   invokeExtensionTool(
     toolName: string,
     args: Record<string, unknown>,
-    timeoutMs = 30_000
+    timeoutMs = 30_000,
+    councilMember?: CouncilMemberContext
   ): Promise<string> {
     const requestId = crypto.randomUUID();
 
@@ -552,6 +561,7 @@ export class WorkerHost {
       requestId,
       toolName,
       args: sanitizedArgs,
+      ...(councilMember ? { councilMember } : {}),
     });
 
     return new Promise((resolve, reject) => {

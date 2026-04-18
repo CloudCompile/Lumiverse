@@ -1661,11 +1661,15 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       }
 
       try {
+        const payload = {
+          toolName: msg.toolName,
+          args: msg.args,
+          requestId: msg.requestId,
+          ...(msg.councilMember ? { councilMember: msg.councilMember } : {}),
+        };
         let result: string | undefined;
         for (const handler of handlers) {
-          const val = await Promise.resolve(
-            handler({ toolName: msg.toolName, args: msg.args, requestId: msg.requestId })
-          );
+          const val = await Promise.resolve(handler(payload));
           if (val !== undefined && val !== null && result === undefined) {
             result = String(val);
           }
