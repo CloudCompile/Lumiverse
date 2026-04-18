@@ -1697,6 +1697,10 @@ async function runGeneration(
       // Persist whatever was already streamed — same recovery as the
       // non-abort error path. Without this, cancelling mid-stream wiped the
       // message even though the tokens had already rendered for the user.
+      // Yield a macrotask first so the provider's stream teardown finishes
+      // before we kick off SQLite writes; on Bun-Windows, interleaving DB
+      // work with ReadableStream teardown was a reproducible panic trigger.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       let savedContent = fullContent;
       try {
         const persisted = await persistPartialContent();
