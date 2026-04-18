@@ -81,6 +81,31 @@ export function isChatHistoryMessage(msg: LlmMessage): boolean {
   return (msg as any)[CHAT_HISTORY_KEY] === true;
 }
 
+/**
+ * Strip whitespace-only text parts from any multipart message. Strict providers
+ * (Anthropic, some OpenAI-compat) reject text content blocks that contain only
+ * whitespace; filtering at the assembly boundary keeps every downstream provider
+ * safe without per-provider defensive code.
+ *
+ * If a multipart message ends up with zero parts after filtering (all text was
+ * blank and no media survived), the message is collapsed to a string so the
+ * outbound request at least carries an empty-but-valid content field.
+ */
+function stripEmptyTextParts(result: LlmMessage[]): void {
+  for (let i = 0; i < result.length; i++) {
+    const msg = result[i];
+    if (!Array.isArray(msg.content)) continue;
+    const parts = msg.content as import("../llm/types").LlmMessagePart[];
+    const cleaned = parts.filter((p) => p.type !== "text" || p.text.trim().length > 0);
+    if (cleaned.length === parts.length) continue;
+    const replacement: LlmMessage = cleaned.length > 0
+      ? { ...msg, content: cleaned }
+      : { ...msg, content: "" };
+    if (isChatHistoryMessage(msg)) markAsChatHistory(replacement);
+    result[i] = replacement;
+  }
+}
+
 function rtrimLastHistoryAssistant(result: LlmMessage[]): void {
   for (let i = result.length - 1; i >= 0; i--) {
     const msg = result[i];
@@ -912,8 +937,13 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         historyParts.push(resolvedContent);
         const attachments = Array.isArray(msg.extra?.attachments) ? msg.extra.attachments : [];
         if (attachments.length > 0) {
-          // Build multipart content: text + attachment parts
-          const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolvedContent }];
+          // Build multipart content: text + attachment parts. Skip the text part
+          // when it's blank so strict providers (Anthropic et al) don't reject
+          // the request for empty content blocks.
+          const parts: import("../llm/types").LlmMessagePart[] = [];
+          if (resolvedContent.trim().length > 0) {
+            parts.push({ type: "text", text: resolvedContent });
+          }
           for (const att of attachments) {
             const b64 = attachmentCache.get(att.image_id) ?? null;
             if (!b64) continue;
@@ -923,7 +953,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
               parts.push({ type: "audio", data: b64, mime_type: att.mime_type });
             }
           }
-          result.push(markAsChatHistory({ role, content: parts }));
+          if (parts.length > 0) {
+            result.push(markAsChatHistory({ role, content: parts }));
+          } else {
+            result.push(markAsChatHistory({ role, content: resolvedContent }));
+          }
         } else {
           result.push(markAsChatHistory({ role, content: resolvedContent }));
         }
@@ -1306,6 +1340,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // Anthropic (and other strict providers) reject turns ending in whitespace;
   // explicit prefills are left alone so users can intentionally seed responses.
   rtrimLastHistoryAssistant(result);
+
+  // Drop blank text parts from multipart messages — caption-less attachments,
+  // fully-stripped regex output, etc. can otherwise produce empty content blocks
+  // that Anthropic/Vertex-Anthropic reject with "text content blocks must
+  // contain non-whitespace text".
+  stripEmptyTextParts(result);
 
   // ---- Collapse all messages into a single user message (if enabled) ----
   const advSettings: AdvancedSettings | undefined = prompts.advancedSettings;
@@ -4235,7 +4275,10 @@ async function legacyAssembly(
     legacyHistoryParts.push(resolved);
     const attachments = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];
     if (attachments.length > 0) {
-      const parts: import("../llm/types").LlmMessagePart[] = [{ type: "text", text: resolved }];
+      const parts: import("../llm/types").LlmMessagePart[] = [];
+      if (resolved.trim().length > 0) {
+        parts.push({ type: "text", text: resolved });
+      }
       for (const att of attachments) {
         if (!att.image_id || !userId) continue;
         const b64 = legacyAttachmentCache.get(att.image_id as string) ?? null;
@@ -4248,7 +4291,7 @@ async function legacyAssembly(
       }
       llmMessages.push({
         role: (m.is_user ? "user" : "assistant") as LlmMessage["role"],
-        content: parts,
+        content: parts.length > 0 ? parts : resolved,
       });
     } else {
       llmMessages.push({
