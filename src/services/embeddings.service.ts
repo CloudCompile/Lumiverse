@@ -1218,6 +1218,18 @@ export async function updateEmbeddingConfig(
  * Parse embedding responses from OpenAI-compatible, Ollama /api/embed, and Ollama /api/embeddings formats.
  */
 function parseEmbeddingResponse(payload: any, expectedCount: number): number[][] {
+  // Some providers (notably OpenRouter) return HTTP 200 with an error envelope
+  // like `{ error: { message, code } }` when the request was shaped correctly
+  // but couldn't be served (unsupported model, no routing provider, etc.).
+  // Surface that instead of the generic "Unrecognized" error.
+  if (payload && typeof payload === "object" && payload.error) {
+    const err = payload.error;
+    const msg = typeof err === "string"
+      ? err
+      : (err.message || err.code || JSON.stringify(err));
+    throw new Error(`Embedding provider returned an error: ${msg}`);
+  }
+
   // OpenAI format: { data: [{ embedding: number[] }, ...] }
   if (Array.isArray(payload.data) && payload.data.length > 0 && payload.data[0].embedding) {
     const vectors = payload.data.map((d: any) => d.embedding || []);
@@ -1243,7 +1255,15 @@ function parseEmbeddingResponse(payload: any, expectedCount: number): number[][]
     return [payload.embedding];
   }
 
-  throw new Error("Unrecognized embedding response format");
+  const preview = (() => {
+    try {
+      const s = JSON.stringify(payload);
+      return s.length > 400 ? `${s.slice(0, 400)}…` : s;
+    } catch {
+      return String(payload);
+    }
+  })();
+  throw new Error(`Unrecognized embedding response format — payload: ${preview}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,10 +1492,23 @@ function getModelFingerprint(cfg: EmbeddingConfig): ModelFingerprint {
 }
 
 /**
- * In-flight dedup: prevents concurrent requestEmbeddings() calls for the
- * same text. Key = cache key (model-aware), Value = pending promise.
+ * In-flight dedup with ref-counted abort: prevents concurrent
+ * requestEmbeddings() calls for the same text AND lets the shared upstream
+ * fetch be torn down when every caller has aborted.
+ *
+ * - `controller` aborts the shared upstream fetch.
+ * - `liveJoiners` is the number of joiners that haven't aborted yet.
+ * - `hasUncancellableJoiner` pins the fetch as unabortable when at least
+ *   one joiner passed no signal — otherwise an aborting joiner could
+ *   starve a no-signal caller (e.g. a background vectorization batch).
  */
-const inflightEmbeddings = new Map<string, Promise<number[]>>();
+interface InflightEmbeddingEntry {
+  promise: Promise<number[]>;
+  controller: AbortController;
+  liveJoiners: number;
+  hasUncancellableJoiner: boolean;
+}
+const inflightEmbeddings = new Map<string, InflightEmbeddingEntry>();
 
 /**
  * Cache-aware embedding. Checks in-memory LRU cache first, batches only
@@ -1500,25 +1533,8 @@ export async function cachedEmbedTexts(
     const cached = embeddingCache.get(key);
     if (cached) return [cached];
 
-    // Join an in-flight request for the same text instead of making a duplicate API call.
-    // If the caller has a signal, race against it so this caller's await
-    // rejects on abort without cancelling the shared upstream request.
-    const inflight = inflightEmbeddings.get(key);
-    if (inflight) return [await raceWithSignal(inflight, options?.signal)];
-
-    // Share a long-lived upstream request across dedup joiners — don't forward
-    // the individual caller's signal into the shared promise.
-    const promise = requestEmbeddings(userId, texts).then(vecs => {
-      const vec = vecs[0];
-      embeddingCache.set(key, vec);
-      inflightEmbeddings.delete(key);
-      return vec;
-    }, err => {
-      inflightEmbeddings.delete(key);
-      throw err;
-    });
-    inflightEmbeddings.set(key, promise);
-    return [await raceWithSignal(promise, options?.signal)];
+    const vec = await joinOrStartInflight(userId, texts, key, options?.signal);
+    return [vec];
   }
 
   // Multi-text path: LRU cache check, batch uncached
@@ -1546,6 +1562,86 @@ export async function cachedEmbedTexts(
   }
 
   return results as number[][];
+}
+
+/**
+ * Attach to an in-flight shared fetch or start a new one. The shared fetch's
+ * own AbortController is aborted only when every cancellable joiner has
+ * aborted AND no uncancellable joiner is attached.
+ */
+function joinOrStartInflight(
+  userId: string,
+  texts: string[],
+  key: string,
+  signal: AbortSignal | undefined,
+): Promise<number[]> {
+  const existing = inflightEmbeddings.get(key);
+  if (existing) {
+    return attachJoiner(existing, signal);
+  }
+
+  const controller = new AbortController();
+  const entry: InflightEmbeddingEntry = {
+    promise: null as unknown as Promise<number[]>,
+    controller,
+    liveJoiners: 0,
+    hasUncancellableJoiner: false,
+  };
+
+  entry.promise = requestEmbeddings(userId, texts, { signal: controller.signal }).then(
+    (vecs) => {
+      const vec = vecs[0];
+      embeddingCache.set(key, vec);
+      inflightEmbeddings.delete(key);
+      return vec;
+    },
+    (err) => {
+      inflightEmbeddings.delete(key);
+      throw err;
+    },
+  );
+  inflightEmbeddings.set(key, entry);
+
+  return attachJoiner(entry, signal);
+}
+
+function attachJoiner(
+  entry: InflightEmbeddingEntry,
+  signal: AbortSignal | undefined,
+): Promise<number[]> {
+  if (!signal) {
+    entry.hasUncancellableJoiner = true;
+    return entry.promise;
+  }
+
+  entry.liveJoiners++;
+  const onAbort = () => {
+    entry.liveJoiners--;
+    // Tear down the shared upstream only when every cancellable joiner has
+    // aborted and no uncancellable joiner is waiting on the result.
+    if (!entry.hasUncancellableJoiner && entry.liveJoiners <= 0) {
+      entry.controller.abort();
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  // Wrap the shared promise so this caller's await rejects on their own abort
+  // without waiting for the shared work. The shared work may still continue
+  // for other joiners; refcount decides when to actually cancel upstream.
+  return new Promise<number[]>((resolve, reject) => {
+    const onLocalAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onLocalAbort, { once: true });
+    entry.promise.then(
+      (v) => {
+        signal.removeEventListener("abort", onLocalAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onLocalAbort);
+        reject(e);
+      },
+    );
+  });
 }
 
 /** Race a shared promise against an abort signal so the caller's await can
@@ -1934,9 +2030,11 @@ export async function searchWorldBookEntriesHybridWithVector(
   worldBookId: string,
   queryText: string,
   vector: number[],
-  limit = 8
+  limit = 8,
+  signal?: AbortSignal,
 ): Promise<WorldBookSearchCandidate[]> {
   await ensureWorldBookVectorVersion(userId);
+  if (signal?.aborted) return [];
   const table = await getTableIfExists();
   if (!table) {
     console.debug("[embeddings] WI vector search: no LanceDB table exists yet (entries may not be indexed)");
@@ -1955,7 +2053,7 @@ export async function searchWorldBookEntriesHybridWithVector(
     .limit(effectiveLimit) as any;
   // Refine with full vectors after PQ approximate search for better accuracy
   if (vectorIndexReady) query.refineFactor(5);
-  const vectorRows = await query.toArray();
+  const vectorRows = await raceWithSignal(query.toArray() as Promise<any[]>, signal);
 
   if (vectorRows.length === 0) {
     console.debug("[embeddings] WI vector search: 0 rows from LanceDB for book=%s (limit=%d)", worldBookId.slice(0, 8), effectiveLimit);
@@ -1975,15 +2073,18 @@ export async function searchWorldBookEntriesHybridWithVector(
     });
   }
 
-  if (trimmedQuery) {
+  if (trimmedQuery && !signal?.aborted) {
     try {
-      const lexicalRows = await table
-        .query()
-        .fullTextSearch(trimmedQuery)
-        .where(filter)
-        .select(["source_id", "content", "_score", "metadata_json"])
-        .limit(effectiveLimit)
-        .toArray();
+      const lexicalRows = await raceWithSignal(
+        table
+          .query()
+          .fullTextSearch(trimmedQuery)
+          .where(filter)
+          .select(["source_id", "content", "_score", "metadata_json"])
+          .limit(effectiveLimit)
+          .toArray() as Promise<any[]>,
+        signal,
+      );
 
       for (const row of lexicalRows) {
         const entryId = String(row.source_id);
@@ -2360,7 +2461,9 @@ export async function searchChatChunks(
   queryText?: string,
   hybridWeightMode?: "keyword_first" | "balanced" | "vector_first",
   allowedChunkIds?: Set<string>,
+  signal?: AbortSignal,
 ): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+  if (signal?.aborted) return [];
   const table = await getTableIfExists();
   if (!table) return [];
 
@@ -2393,8 +2496,9 @@ export async function searchChatChunks(
         .rerank(reranker)
         .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json", "vector"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     } catch {
+      if (signal?.aborted) return [];
       // FTS index may not exist yet — fall back to vector-only
       const q = table
         .query()
@@ -2402,7 +2506,7 @@ export async function searchChatChunks(
         .where(filter)
         .select(["source_id", "content", "_distance", "metadata_json", "vector"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     }
   } else {
     const q = table
@@ -2411,7 +2515,7 @@ export async function searchChatChunks(
       .where(filter)
       .select(["source_id", "content", "_distance", "metadata_json", "vector"])
       .limit(fetchLimit);
-    rows = await applyRefineFactor(q).toArray();
+    rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
   }
 
   // Parse rows and collect metadata
@@ -2719,8 +2823,10 @@ export async function searchDatabankChunks(
   vector: number[],
   limit = 4,
   queryText?: string,
+  signal?: AbortSignal,
 ): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
   if (databankIds.length === 0) return [];
+  if (signal?.aborted) return [];
 
   const table = await getTableIfExists();
   if (!table) return [];
@@ -2744,15 +2850,16 @@ export async function searchDatabankChunks(
         .rerank(reranker)
         .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     } catch {
+      if (signal?.aborted) return [];
       const q = table
         .query()
         .nearestTo(vector)
         .where(filter)
         .select(["source_id", "content", "_distance", "metadata_json"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     }
   } else {
     const q = table
@@ -2761,7 +2868,7 @@ export async function searchDatabankChunks(
       .where(filter)
       .select(["source_id", "content", "_distance", "metadata_json"])
       .limit(fetchLimit);
-    rows = await applyRefineFactor(q).toArray();
+    rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
   }
 
   const results: Array<{ chunk_id: string; score: number; content: string; metadata: any }> = [];

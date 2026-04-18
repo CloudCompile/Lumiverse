@@ -33,6 +33,7 @@ import * as summarizePool from "./summarize-pool.service";
 import { detectExpression, detectMultiCharacterExpression, getExpressionDetectionSettings } from "./expression-detection.service";
 import { hasExpressions, getExpressionConfig, getExpressionGroups } from "./expressions.service";
 import { getSidecarSettings } from "./sidecar-settings.service";
+import { abortChatBackground, abortUserBackgrounds, abortAllBackgrounds } from "./chat-background.service";
 
 interface GenerateInput {
   userId: string;
@@ -604,6 +605,12 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     activeGenerations.delete(existingGenId);
     activeChatGenerations.delete(chatKey);
   }
+
+  // Tear down any fire-and-forget background work (cortex cache warming,
+  // databank retrieval) left over from prior generations on this chat.
+  // Successful completions don't abort their own controllers, so without
+  // this, slow embedding APIs can accumulate orphan tasks across sends.
+  abortChatBackground(input.userId, input.chat_id);
 
   // Register this generation early (before council) so it can be tracked and aborted
   const abortController = new AbortController();
@@ -1927,6 +1934,10 @@ export function stopGeneration(generationId: string): boolean {
   const entry = activeGenerations.get(generationId);
   if (!entry) return false;
   entry.controller.abort();
+  // Tear down any fire-and-forget background work for this chat too —
+  // the user asked to stop, so cache-warming cortex/databank queries
+  // should die with the visible generation.
+  abortChatBackground(entry.userId, entry.chatId);
   return true;
 }
 
@@ -1936,6 +1947,7 @@ export function stopUserGenerations(userId: string): void {
       entry.controller.abort();
     }
   }
+  abortUserBackgrounds(userId);
 }
 
 export function stopChatGenerations(userId: string, chatId: string): void {
@@ -1945,6 +1957,7 @@ export function stopChatGenerations(userId: string, chatId: string): void {
     const entry = activeGenerations.get(genId);
     if (entry) entry.controller.abort();
   }
+  abortChatBackground(userId, chatId);
 }
 
 export function stopAllGenerations(): void {
@@ -1953,6 +1966,7 @@ export function stopAllGenerations(): void {
   }
   activeGenerations.clear();
   activeChatGenerations.clear();
+  abortAllBackgrounds();
 }
 
 /** Returns the active generationId for a chat, if any. */

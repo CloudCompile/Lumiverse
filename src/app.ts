@@ -86,7 +86,7 @@ app.use("/api/*", async (c, next) => {
 
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path.startsWith("/api/v1/world-books/import") || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip") || path === "/api/v1/stt/transcribe") {
+  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path.startsWith("/api/v1/world-books/import") || path === "/api/v1/images" || path.endsWith("/expressions/upload-zip") || path === "/api/v1/stt/transcribe" || path === "/api/v1/chats/import" || path === "/api/v1/chats/import-st") {
     return next();
   }
   return bodyLimit({

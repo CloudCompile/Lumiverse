@@ -50,6 +50,7 @@ import { buildEmotionalContext } from "./memory-cortex";
 import * as databankSvc from "./databank";
 import { getCharacterDatabankIds } from "../utils/character-databanks";
 import { getSidecarSettings } from "./sidecar-settings.service";
+import { getChatBackgroundSignal } from "./chat-background.service";
 
 // ---------------------------------------------------------------------------
 // Chat history identity marker
@@ -472,8 +473,18 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       ? Promise.resolve(pf.embeddingConfig)
       : embeddingsSvc.getEmbeddingConfig(ctx.userId);
 
+    // Combine the generation's own abort with the chat-scoped background
+    // signal. Either firing tears down the fire-and-forget task: stop on
+    // the current gen OR a newer gen arriving on this chat aborts any
+    // orphan cortex/databank work left over from prior gens.
+    const chatBgSignal = getChatBackgroundSignal(ctx.userId, ctx.chatId);
+    const cortexSignal = ctx.signal
+      ? AbortSignal.any([ctx.signal, chatBgSignal])
+      : chatBgSignal;
+
     void (async () => {
       const embCfg = await embCfgPromise;
+      if (cortexSignal.aborted) return;
       const effective = cortexChatMemSettings
         ? embeddingsSvc.resolveEffectiveChatMemorySettings(cortexChatMemSettings, embCfg)
         : embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS;
@@ -482,7 +493,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       const recentContent = messages.slice(-6).map(m => m.content).join(" ");
       const emotionalContext = buildEmotionalContext(recentContent);
 
-      // Fire main cortex query + linked cortex queries in parallel
+      // Fire main cortex query + linked cortex queries in parallel. The
+      // combined signal is threaded through so a user-initiated stop OR a
+      // newer generation on this chat tears down the embedding API call
+      // and LanceDB retrieval instead of letting the background task live
+      // on as an orphan.
       const mainQuery = memoryCortex.queryCortex({
         chatId: ctx.chatId,
         userId: ctx.userId,
@@ -493,15 +508,16 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
         includeConsolidations: cortexConfig.consolidation.enabled,
         includeRelationships: cortexConfig.retrieval.relationshipInjection,
         excludeMessageIds: ctx.excludeMessageId ? [ctx.excludeMessageId] : undefined,
-      }, cortexConfig);
+      }, cortexConfig, cortexSignal);
 
       // Linked cortex queries use the same queryText for semantic relevance
       const linkedQuery = memoryCortex.queryLinkedCortex(
-        ctx.chatId, ctx.userId, cortexConfig, cortexQueryText,
+        ctx.chatId, ctx.userId, cortexConfig, cortexQueryText, cortexSignal,
       );
 
       await Promise.all([mainQuery, linkedQuery]);
     })().catch(err => {
+      if (cortexSignal.aborted) return;
       console.warn("[prompt-assembly] Background cortex query failed:", err);
     });
   }
@@ -514,12 +530,19 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   {
     const dbIds = databankSvc.resolveActiveDatabankIds(ctx.userId, ctx.chatId, character?.id ? [character.id] : [], databankCrossRefs);
     if (dbIds.length > 0) {
+      const chatBgSignal = getChatBackgroundSignal(ctx.userId, ctx.chatId);
+      const dbSignal = ctx.signal
+        ? AbortSignal.any([ctx.signal, chatBgSignal])
+        : chatBgSignal;
+
       void (async () => {
         const embCfg = pf?.embeddingConfig ?? await embeddingsSvc.getEmbeddingConfig(ctx.userId);
         if (!embCfg.enabled) return;
+        if (dbSignal.aborted) return;
         const queryText = messages.slice(-6).map(m => m.content).join(" ");
-        await databankSvc.searchDatabanks(ctx.userId, ctx.chatId, dbIds, queryText, 4);
+        await databankSvc.searchDatabanks(ctx.userId, ctx.chatId, dbIds, queryText, 4, dbSignal);
       })().catch(err => {
+        if (dbSignal.aborted) return;
         console.warn("[prompt-assembly] Background databank query failed:", err);
       });
     }
@@ -2950,7 +2973,7 @@ export async function collectVectorActivatedWorldInfoDetailed(
 
     const searchResults = await Promise.allSettled(
       worldBookIds.map((worldBookId) =>
-        embeddingsSvc.searchWorldBookEntriesHybridWithVector(userId, worldBookId, queryText, queryVector, fetchLimit)
+        embeddingsSvc.searchWorldBookEntriesHybridWithVector(userId, worldBookId, queryText, queryVector, fetchLimit, signal)
       )
     );
 
