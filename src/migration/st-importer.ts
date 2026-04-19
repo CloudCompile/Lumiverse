@@ -286,7 +286,7 @@ export async function importChats(
       continue;
     }
 
-    const chatPayloads = await readChatsForCharacter(stDataDir, charDirName, personaNameToId, logger, fs);
+    const chatPayloads = await readChatsForCharacter(stDataDir, charDirName, personaNameToId, filenameToId, logger, fs);
 
     for (const chatData of chatPayloads) {
       try {
@@ -366,7 +366,7 @@ export async function importGroupChats(
     }
 
     for (const chatId of group.chatIds) {
-      const chatData = await readGroupChatFile(stDataDir, chatId, personaNameToId, fs);
+      const chatData = await readGroupChatFile(stDataDir, chatId, personaNameToId, filenameToId, fs);
 
       if (!chatData) {
         processedChats++;

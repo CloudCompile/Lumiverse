@@ -211,6 +211,18 @@ export function parseMessageDate(msg: any): number {
   return Math.floor(Date.now() / 1000);
 }
 
+export function resolveOriginalAvatarToCharacterId(
+  originalAvatar: unknown,
+  filenameToId?: Map<string, string>,
+): string | undefined {
+  if (!filenameToId || filenameToId.size === 0) return undefined;
+  if (typeof originalAvatar !== "string" || originalAvatar.length === 0) return undefined;
+  const stem = originalAvatar.toLowerCase().endsWith(".png")
+    ? originalAvatar.slice(0, -4)
+    : originalAvatar;
+  return filenameToId.get(stem);
+}
+
 // ─── Directory scanners ─────────────────────────────────────────────────────
 
 export async function scanSTData(stDataDir: string, fs: FileSystem = defaultFs): Promise<STDataCounts> {
@@ -384,6 +396,7 @@ export async function readChatsForCharacter(
   stDataDir: string,
   charDirName: string,
   personaNameToId: Map<string, string>,
+  filenameToId?: Map<string, string>,
   logger?: MigrationLogger,
   fs: FileSystem = defaultFs,
 ): Promise<ChatPayload[]> {
@@ -446,6 +459,13 @@ export async function readChatsForCharacter(
             }
           }
 
+          if (!isUser) {
+            const charId = resolveOriginalAvatarToCharacterId(msg.original_avatar, filenameToId);
+            if (charId) {
+              extra = { ...(extra || {}), character_id: charId };
+            }
+          }
+
           messages.push({
             is_user: isUser,
             name: msgName,
@@ -501,6 +521,7 @@ export async function readGroupChatFile(
   stDataDir: string,
   chatId: string,
   personaNameToId: Map<string, string>,
+  filenameToId?: Map<string, string>,
   fs: FileSystem = defaultFs,
 ): Promise<{ messages: ChatMessage[]; createdAt?: number } | null> {
   const chatFilePath = fs.join(stDataDir, "group chats", `${chatId}.jsonl`);
@@ -549,6 +570,13 @@ export async function readGroupChatFile(
           const personaId = personaNameToId.get(msgName) || (chatUserName ? personaNameToId.get(chatUserName) : undefined);
           if (personaId) {
             extra = { ...(extra || {}), persona_id: personaId };
+          }
+        }
+
+        if (!isUser) {
+          const charId = resolveOriginalAvatarToCharacterId(msg.original_avatar, filenameToId);
+          if (charId) {
+            extra = { ...(extra || {}), character_id: charId };
           }
         }
 
