@@ -252,12 +252,13 @@ export default function ManageChatsModal() {
 
   const handleImportStFile = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = e.target.files
-      if (!files || files.length === 0) return
+      // Snapshot the FileList before clearing — setting input.value = '' mutates
+      // the same FileList reference in Chromium, emptying it in place.
+      const fileList = Array.from(e.target.files || [])
       e.target.value = ''
+      if (fileList.length === 0) return
 
       setImportingSt(true)
-      const fileList = Array.from(files)
       let imported = 0
       const failures: { name: string; reason: string }[] = []
       for (const file of fileList) {
