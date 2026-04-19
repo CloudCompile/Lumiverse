@@ -4,6 +4,7 @@ import { useStore } from '@/store'
 import { ttsConnectionsApi } from '@/api/tts-connections'
 import { ttsApi } from '@/api/tts'
 import { Toggle } from '@/components/shared/Toggle'
+import SearchableSelect from '@/components/shared/SearchableSelect'
 import { speak, stop, setTTSVolume, setTTSSpeed, isSpeaking } from '@/lib/ttsAudio'
 import { isWebSpeechAvailable } from '@/lib/sttEngine'
 import styles from './VoiceSettings.module.css'
@@ -30,10 +31,10 @@ export default function VoiceSettings() {
     }).catch(() => {})
   }, [setTtsProfiles, setTtsProviders])
 
-  const connectionOptions = useMemo(() => [
-    { value: '', label: 'Select a connection...' },
-    ...ttsProfiles.map((p) => ({ value: p.id, label: `${p.name} (${p.provider})` })),
-  ], [ttsProfiles])
+  const connectionOptions = useMemo(
+    () => ttsProfiles.map((p) => ({ value: p.id, label: `${p.name} (${p.provider})` })),
+    [ttsProfiles],
+  )
 
   const activeConnection = useMemo(
     () => ttsProfiles.find((p) => p.id === voiceSettings.ttsConnectionId) || null,
@@ -113,16 +114,18 @@ export default function VoiceSettings() {
 
         <div className={styles.row}>
           <span className={styles.label}>Connection</span>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <select
-              className={styles.select}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 1, minWidth: 0 }}>
+            <SearchableSelect
               value={voiceSettings.ttsConnectionId || ''}
-              onChange={(e) => setVoiceSettings({ ttsConnectionId: e.target.value || null })}
-            >
-              {connectionOptions.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+              onChange={(val) => setVoiceSettings({ ttsConnectionId: val || null })}
+              options={connectionOptions}
+              placeholder="Select a connection…"
+              searchPlaceholder="Search connections…"
+              ariaLabel="TTS connection"
+              emptyMessage="No TTS connections configured"
+              clearable
+              clearLabel="No connection"
+            />
             <button
               className={styles.actionBtn}
               onClick={() => openDrawer?.('connections')}

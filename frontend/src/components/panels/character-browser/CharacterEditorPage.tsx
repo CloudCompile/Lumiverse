@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, ImagePlus, Download, Code2, ChevronDown } from 'lucide-react'
+import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, ImagePlus, Download, Code2 } from 'lucide-react'
 import { IconNotebook } from '@tabler/icons-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Spinner } from '@/components/shared/Spinner'
@@ -24,6 +24,7 @@ import type { Character, CharacterGalleryItem } from '@/types/api'
 import type { RegexScript } from '@/types/regex'
 import { toast } from '@/lib/toast'
 import { Button } from '@/components/shared/FormComponents'
+import SearchableSelect from '@/components/shared/SearchableSelect'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from '@/utils/character-world-books'
@@ -577,20 +578,6 @@ export default function CharacterEditorPage() {
     [character?.extensions]
   )
 
-  const handleToggleWorldBook = useCallback(
-    (worldBookId: string) => {
-      mutateExtensions((ext) => {
-        const currentIds = getCharacterWorldBookIds(ext)
-        const nextIds = currentIds.includes(worldBookId)
-          ? currentIds.filter((id) => id !== worldBookId)
-          : [...currentIds, worldBookId]
-        if (nextIds.length === 0) clearActivatedWorldInfo()
-        return setCharacterWorldBookIds(ext, nextIds)
-      }, true)
-    },
-    [mutateExtensions, clearActivatedWorldInfo]
-  )
-
   const handleRemoveWorldBook = useCallback(
     (worldBookId: string) => {
       mutateExtensions((ext) => {
@@ -603,42 +590,13 @@ export default function CharacterEditorPage() {
     [mutateExtensions, clearActivatedWorldInfo]
   )
 
-  // World book popover state
-  const [wbPopoverOpen, setWbPopoverOpen] = useState(false)
-  const wbAddBtnRef = useRef<HTMLButtonElement>(null)
-  const wbPopoverRef = useRef<HTMLDivElement>(null)
-  const wbFieldGroupRef = useRef<HTMLDivElement>(null)
-  const [wbPopoverPos, setWbPopoverPos] = useState<{ top: number; left: number; width: number } | null>(null)
-
-  useEffect(() => {
-    if (!wbPopoverOpen) return
-    const handleClick = (e: MouseEvent) => {
-      if (
-        wbPopoverRef.current && !wbPopoverRef.current.contains(e.target as Node) &&
-        wbAddBtnRef.current && !wbAddBtnRef.current.contains(e.target as Node)
-      ) {
-        setWbPopoverOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [wbPopoverOpen])
-
-  const openWbPopover = useCallback(() => {
-    setWbPopoverOpen((prev) => {
-      const next = !prev
-      if (next && wbAddBtnRef.current && wbFieldGroupRef.current) {
-        const btnRect = wbAddBtnRef.current.getBoundingClientRect()
-        const containerRect = wbFieldGroupRef.current.getBoundingClientRect()
-        setWbPopoverPos({
-          top: btnRect.bottom + 4,
-          left: containerRect.left,
-          width: containerRect.width,
-        })
-      }
-      return next
-    })
-  }, [])
+  const handleWorldBookIdsChange = useCallback(
+    (ids: string[]) => {
+      mutateExtensions((ext) => setCharacterWorldBookIds(ext, ids), true)
+      if (ids.length === 0) clearActivatedWorldInfo()
+    },
+    [mutateExtensions, clearActivatedWorldInfo]
+  )
 
   // Avatar
   const handleCropComplete = useCallback(
@@ -1182,50 +1140,24 @@ export default function CharacterEditorPage() {
 
                   {activeTab === 'advanced' && (
                     <>
-                      <div ref={wbFieldGroupRef} className={styles.fieldGroup}>
+                      <div className={styles.fieldGroup}>
                         <span className={styles.fieldLabel}>Attached World Books</span>
                         <span className={styles.fieldHelper}>Used by prompt assembly for world info activation. Attach multiple for richer lore.</span>
                         <div className={styles.charWbHeader}>
-                          <button
-                            ref={wbAddBtnRef}
-                            type="button"
-                            className={styles.charWbAddBtn}
-                            onClick={openWbPopover}
-                          >
-                            <Plus size={11} />
-                            <span>Add</span>
-                            <ChevronDown
-                              size={10}
-                              className={clsx(styles.chevron, wbPopoverOpen && styles.chevronOpen)}
-                            />
-                          </button>
-                          {wbPopoverOpen && wbPopoverPos && createPortal(
-                            <div
-                              ref={wbPopoverRef}
-                              className={styles.charWbPopover}
-                              style={{ top: wbPopoverPos.top, left: wbPopoverPos.left, width: wbPopoverPos.width }}
-                            >
-                              {worldBooks.length === 0 ? (
-                                <div className={styles.charWbPopoverEmpty}>No world books available</div>
-                              ) : (
-                                worldBooks.map((wb) => {
-                                  const isActive = attachedWorldBookIds.includes(wb.id)
-                                  return (
-                                    <button
-                                      key={wb.id}
-                                      type="button"
-                                      className={clsx(styles.charWbPopoverItem, isActive && styles.charWbPopoverItemActive)}
-                                      onClick={() => handleToggleWorldBook(wb.id)}
-                                    >
-                                      <span className={styles.charWbPopoverCheck}>{isActive ? '\u2713' : ''}</span>
-                                      <span className={styles.charWbPopoverName}>{wb.name}</span>
-                                    </button>
-                                  )
-                                })
-                              )}
-                            </div>,
-                            document.body
-                          )}
+                          <SearchableSelect
+                            multi
+                            value={attachedWorldBookIds}
+                            onChange={handleWorldBookIdsChange}
+                            options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name }))}
+                            placeholder="Add world books…"
+                            triggerLabel="Add"
+                            triggerIcon={<Plus size={11} />}
+                            searchPlaceholder="Search world books…"
+                            emptyMessage="No world books available"
+                            className={styles.charWbSelect}
+                            portal
+                            minWidth={260}
+                          />
                         </div>
                         {attachedWorldBookIds.length > 0 ? (
                           <div className={styles.charWbPills}>
@@ -1328,20 +1260,18 @@ export default function CharacterEditorPage() {
                           }
                           if (unboundGlobals.length === 0) return null
                           return (
-                            <select
-                              className={styles.fieldInput}
+                            <SearchableSelect
                               value=""
-                              onChange={(e) => {
-                                if (e.target.value) handleBindRegex(e.target.value)
-                              }}
-                            >
-                              <option value="">Bind a global regex to this character...</option>
-                              {unboundGlobals.map((s) => (
-                                <option key={s.id} value={s.id}>
-                                  {s.name} ({s.target})
-                                </option>
-                              ))}
-                            </select>
+                              onChange={(v) => { if (v) handleBindRegex(v) }}
+                              options={unboundGlobals.map((s) => ({
+                                value: s.id,
+                                label: s.name,
+                                sublabel: s.target,
+                              }))}
+                              placeholder="Bind a global regex to this character…"
+                              searchPlaceholder="Search regex scripts…"
+                              emptyMessage="No unbound global regex scripts"
+                            />
                           )
                         })()}
                       </div>

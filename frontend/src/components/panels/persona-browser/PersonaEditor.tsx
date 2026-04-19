@@ -13,6 +13,7 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { Spinner } from '@/components/shared/Spinner'
 import { Button } from '@/components/shared/FormComponents'
 import FolderDropdown from '@/components/shared/FolderDropdown'
+import SearchableSelect from '@/components/shared/SearchableSelect'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { useFolders } from '@/hooks/useFolders'
 import { resolveBinding } from '@/store/slices/personas'
@@ -478,18 +479,17 @@ export default function PersonaEditor({
           <span>Default</span>
         </button>
         <div className={styles.lorebookRow}>
-          <select
-            className={styles.lorebookSelect}
+          <SearchableSelect
             value={persona.attached_world_book_id || ''}
-            onChange={(e) => handleLorebookChange(e.target.value)}
-          >
-            <option value="">No lorebook</option>
-            {worldBooks.map((wb) => (
-              <option key={wb.id} value={wb.id}>
-                {wb.name}
-              </option>
-            ))}
-          </select>
+            onChange={handleLorebookChange}
+            options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name }))}
+            placeholder="No lorebook"
+            searchPlaceholder="Search world books…"
+            emptyMessage="No world books available"
+            clearable
+            clearLabel="No lorebook"
+            className={styles.lorebookSelectWrapper}
+          />
           <Button
             size="icon-sm" variant="ghost"
             onClick={() =>

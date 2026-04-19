@@ -319,16 +319,8 @@
   min-width: 0;
 }
 
-.lorebookSelect {
+.lorebookSelectWrapper {
   flex: 1;
-  background: var(--lumiverse-bg);
-  border: 1px solid var(--lumiverse-border);
-  border-radius: 6px;
-  padding: 5px 8px;
-  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
-  color: var(--lumiverse-text);
-  outline: none;
-  cursor: pointer;
   min-width: 0;
 }
 

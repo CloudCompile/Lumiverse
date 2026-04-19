@@ -3,8 +3,9 @@ import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu } from
 import { useStore } from '@/store'
 import { settingsApi } from '@/api/settings'
 import { Toggle } from '@/components/shared/Toggle'
-import { Button, EditorSection, FormField, TextInput, Select } from '@/components/shared/FormComponents'
+import { Button, EditorSection, FormField, TextInput } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
+import SearchableSelect from '@/components/shared/SearchableSelect'
 import CouncilMemberItem from './council/CouncilMemberItem'
 import AddMemberDropdown from './council/AddMemberDropdown'
 import QuickAddPackDropdown from './council/QuickAddPackDropdown'
@@ -153,10 +154,15 @@ export default function CouncilManager() {
         </div>
 
         <FormField label="Connection Profile">
-          <Select
+          <SearchableSelect
             value={sidecarConfig.connectionProfileId}
             onChange={(val) => saveSidecar({ connectionProfileId: val })}
-            options={[{ value: '', label: 'Select a connection...' }, ...profileOptions]}
+            options={profileOptions}
+            placeholder="Select a connection…"
+            searchPlaceholder="Search connections…"
+            emptyMessage="No connection profiles configured"
+            clearable
+            clearLabel="No connection"
           />
         </FormField>
 
