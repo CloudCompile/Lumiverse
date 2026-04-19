@@ -58,6 +58,14 @@
   opacity: 1;
 }
 
+.avatarOverlayActive {
+  opacity: 1;
+}
+
+.avatarZoneUploading {
+  cursor: wait;
+}
+
 .hiddenInput {
   display: none;
 }

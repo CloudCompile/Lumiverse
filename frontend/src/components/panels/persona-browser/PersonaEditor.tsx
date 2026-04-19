@@ -10,6 +10,7 @@ import useImageCropFlow from '@/hooks/useImageCropFlow'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { Spinner } from '@/components/shared/Spinner'
 import { Button } from '@/components/shared/FormComponents'
 import FolderDropdown from '@/components/shared/FolderDropdown'
 import NumberStepper from '@/components/shared/NumberStepper'
@@ -93,6 +94,7 @@ export default function PersonaEditor({
   const [showReattributeConfirm, setShowReattributeConfirm] = useState(false)
   const [reattributing, setReattributing] = useState(false)
   const [avatarKey, setAvatarKey] = useState(0)
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const nameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const titleTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const descTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -225,8 +227,13 @@ export default function PersonaEditor({
   // Avatar crop flow — upload both cropped (for avatar display) and original (for full viewing)
   const handleCropComplete = useCallback(
     async (croppedFile: File, originalFile: File) => {
-      await onUploadAvatar(persona.id, croppedFile, originalFile)
-      setAvatarKey((k) => k + 1)
+      setUploadingAvatar(true)
+      try {
+        await onUploadAvatar(persona.id, croppedFile, originalFile)
+        setAvatarKey((k) => k + 1)
+      } finally {
+        setUploadingAvatar(false)
+      }
     },
     [persona.id, onUploadAvatar]
   )
@@ -234,8 +241,9 @@ export default function PersonaEditor({
   const { cropModalProps, openCropFlow } = useImageCropFlow(handleCropComplete)
 
   const handleAvatarClick = useCallback(() => {
+    if (uploadingAvatar) return
     fileRef.current?.click()
-  }, [])
+  }, [uploadingAvatar])
 
   const handleFileSelected = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -250,10 +258,11 @@ export default function PersonaEditor({
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault()
+      if (uploadingAvatar) return
       const file = e.dataTransfer.files?.[0]
       if (file && file.type.startsWith('image/')) openCropFlow(file)
     },
-    [openCropFlow]
+    [openCropFlow, uploadingAvatar]
   )
 
   const handleReattributeChat = useCallback(async () => {
@@ -318,11 +327,12 @@ export default function PersonaEditor({
       {/* Avatar zone */}
       <div className={styles.topRow}>
         <div
-          className={styles.avatarZone}
+          className={clsx(styles.avatarZone, uploadingAvatar && styles.avatarZoneUploading)}
           onClick={handleAvatarClick}
           onDrop={handleDrop}
           onDragOver={(e) => e.preventDefault()}
-          title="Click or drop to change avatar"
+          title={uploadingAvatar ? 'Uploading avatar...' : 'Click or drop to change avatar'}
+          aria-busy={uploadingAvatar}
         >
           <LazyImage
             key={avatarKey}
@@ -335,8 +345,8 @@ export default function PersonaEditor({
               </div>
             }
           />
-          <div className={styles.avatarOverlay}>
-            <Upload size={16} />
+          <div className={clsx(styles.avatarOverlay, uploadingAvatar && styles.avatarOverlayActive)}>
+            {uploadingAvatar ? <Spinner size={20} /> : <Upload size={16} />}
           </div>
           <input
             ref={fileRef}
