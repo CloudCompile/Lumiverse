@@ -185,6 +185,44 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
   throw new Error("HuggingFace tokenizer requires either 'package' or 'url' in config");
 }
 
+/**
+ * Detect the OpenAI-canonical tiktoken `.model` format: many lines of
+ * `<base64_token> <rank>`. js-tiktoken ships its own compressed format instead,
+ * so we probe the first non-empty line to decide whether to convert.
+ */
+function looksLikeStandardTiktokenFormat(bpe: string): boolean {
+  const firstLineEnd = bpe.indexOf("\n");
+  if (firstLineEnd < 0) return false; // single line — already compressed
+  const firstLine = bpe.slice(0, firstLineEnd).trim();
+  // Standard row: exactly two whitespace-separated fields, second is an integer.
+  const parts = firstLine.split(/\s+/);
+  return parts.length === 2 && /^\d+$/.test(parts[1]);
+}
+
+/**
+ * Convert the OpenAI standard `<base64> <rank>\n` format into the single-line
+ * compressed format js-tiktoken's `Tiktoken` constructor parses. Ranks must be
+ * contiguous starting at 0 (standard tiktoken files already satisfy this).
+ */
+function convertStandardToCompressedBpe(standard: string): string {
+  const lines = standard.split("\n");
+  const tokens: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    const sp = line.indexOf(" ");
+    if (sp < 0) continue;
+    const tok = line.slice(0, sp);
+    const rank = Number.parseInt(line.slice(sp + 1), 10);
+    if (!Number.isFinite(rank)) continue;
+    if (rank !== tokens.length) {
+      throw new Error(`tiktoken model ranks are non-contiguous at index ${tokens.length} (got rank ${rank})`);
+    }
+    tokens.push(tok);
+  }
+  // Leading `! 0` is the sentinel + starting offset js-tiktoken's parser expects.
+  return `! 0 ${tokens.join(" ")}`;
+}
+
 async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance> {
   const { Tiktoken } = await import("js-tiktoken/lite");
   const cfg = config.config;
@@ -193,7 +231,16 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   await validateTokenizerUrl(cfg.url, "tiktoken model url");
   const resp = await fetch(cfg.url);
   if (!resp.ok) throw new Error(`Failed to fetch tiktoken model from ${cfg.url}`);
-  const bpeData = await resp.text();
+  const rawBpe = await resp.text();
+
+  // js-tiktoken's constructor expects its own compressed rank format
+  // (`<sentinel> <offset> <tok0> <tok1> ...` on a single line — see
+  // `js-tiktoken/dist/ranks/o200k_base.js`). The standard OpenAI tiktoken
+  // format (one `<base64> <rank>` pair per line, shipped by e.g. Moonshot's
+  // Kimi-K2.5/tiktoken.model) is different, so we transparently convert it.
+  const bpeData = looksLikeStandardTiktokenFormat(rawBpe)
+    ? convertStandardToCompressedBpe(rawBpe)
+    : rawBpe;
 
   // Parse special tokens from tokenizer_config.json if provided
   let specialTokens: Record<string, number> = {};
