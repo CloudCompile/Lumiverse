@@ -3025,24 +3025,31 @@ export class WorkerHost {
       this.enforceScopedUser(userId);
 
       const messages = getChatMessages(userId, chatId).map((m) => {
-        const role = this.mapChatRole(m.is_user, (m.extra || {}) as Record<string, unknown>);
-        const extra = (m.extra || {}) as Record<string, unknown>;
+        const rawExtra = (m.extra || {}) as Record<string, unknown>;
+        const role = this.mapChatRole(m.is_user, rawExtra);
+
+        // Split spindle_metadata out of extra so it's surfaced as `metadata`
+        // and not echoed twice on the wire.
+        const { spindle_metadata, ...extra } = rawExtra;
         const metadata =
-          typeof extra.spindle_metadata === "object" && extra.spindle_metadata
-            ? (extra.spindle_metadata as Record<string, unknown>)
+          typeof spindle_metadata === "object" && spindle_metadata
+            ? (spindle_metadata as Record<string, unknown>)
             : undefined;
 
         const swipes = Array.isArray(m.swipes) ? m.swipes.slice() : [];
         const swipeId =
           typeof m.swipe_id === "number" && Number.isFinite(m.swipe_id) ? m.swipe_id : 0;
+        const swipeDates = Array.isArray(m.swipe_dates) ? [...m.swipe_dates] : [];
 
         return {
           id: m.id,
           role,
           content: m.content,
+          extra,
           metadata,
           swipe_id: swipeId,
           swipes,
+          swipe_dates: swipeDates,
         };
       });
 
@@ -3105,7 +3112,14 @@ export class WorkerHost {
     requestId: string,
     chatId: string,
     messageId: string,
-    patch: { content?: string; metadata?: Record<string, unknown> }
+    patch: {
+      content?: string;
+      metadata?: Record<string, unknown>;
+      swipes?: string[];
+      swipe_id?: number;
+      swipe_dates?: number[];
+      reasoning?: { text?: string | null; duration?: number | null };
+    }
   ): void {
     try {
       if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
@@ -3122,13 +3136,33 @@ export class WorkerHost {
       }
 
       const extra = { ...(current.extra || {}) } as Record<string, unknown>;
+      let extraDirty = false;
+
       if (patch.metadata !== undefined) {
         extra.spindle_metadata = patch.metadata;
+        extraDirty = true;
+      }
+
+      if (patch.reasoning && typeof patch.reasoning === "object") {
+        const r = patch.reasoning;
+        if (r.text !== undefined) {
+          if (r.text === null) delete extra.reasoning;
+          else extra.reasoning = r.text;
+          extraDirty = true;
+        }
+        if (r.duration !== undefined) {
+          if (r.duration === null) delete extra.reasoning_duration;
+          else extra.reasoning_duration = r.duration;
+          extraDirty = true;
+        }
       }
 
       updateChatMessage(userId, messageId, {
         content: patch.content,
-        extra: patch.metadata !== undefined ? extra : undefined,
+        extra: extraDirty ? extra : undefined,
+        swipes: patch.swipes,
+        swipe_id: patch.swipe_id,
+        swipe_dates: patch.swipe_dates,
       });
 
       this.postToWorker({ type: "response", requestId, result: true });

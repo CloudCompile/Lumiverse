@@ -643,18 +643,65 @@ export function updateMessage(userId: string, id: string, input: UpdateMessageIn
   const existing = getMessage(userId, id);
   if (!existing) return null;
 
+  const patchedContent = input.content !== undefined;
+  const patchedSwipes = input.swipes !== undefined;
+  const patchedSwipeId = input.swipe_id !== undefined;
+  const patchedDates = input.swipe_dates !== undefined;
+  const swipeShapeTouched = patchedSwipes || patchedSwipeId || patchedDates;
+
+  let newSwipes = patchedSwipes ? [...input.swipes!] : [...existing.swipes];
+  let newSwipeId = patchedSwipeId ? input.swipe_id! : existing.swipe_id;
+  let newDates = patchedDates ? [...input.swipe_dates!] : [...existing.swipe_dates];
+
+  // If the swipes array was rewritten without an accompanying swipe_dates
+  // rewrite, auto-align dates: pad new slots with the current timestamp,
+  // truncate trailing dates if the array shrank. Keeps the REST-route
+  // contract (lengths always match) without forcing every caller to
+  // recompute dates themselves.
+  if (patchedSwipes && !patchedDates) {
+    const now = Math.floor(Date.now() / 1000);
+    if (newSwipes.length > newDates.length) {
+      while (newDates.length < newSwipes.length) newDates.push(now);
+    } else if (newSwipes.length < newDates.length) {
+      newDates = newDates.slice(0, newSwipes.length);
+    }
+  }
+
+  if (patchedContent) {
+    if (!Number.isFinite(newSwipeId) || newSwipeId < 0 || newSwipeId >= newSwipes.length) {
+      throw new Error("updateMessage: swipe_id out of range");
+    }
+    newSwipes[newSwipeId] = input.content!;
+  }
+
+  if (newSwipes.length === 0) throw new Error("updateMessage: swipes must be non-empty");
+  if (!Number.isFinite(newSwipeId) || newSwipeId < 0 || newSwipeId >= newSwipes.length) {
+    throw new Error("updateMessage: swipe_id out of range");
+  }
+  if (newSwipes.length !== newDates.length) {
+    throw new Error("updateMessage: swipes and swipe_dates length mismatch");
+  }
+
+  const newContent = patchedContent
+    ? input.content!
+    : swipeShapeTouched
+      ? newSwipes[newSwipeId]
+      : undefined;
+
   const fields: string[] = [];
   const values: any[] = [];
 
-  if (input.content !== undefined) {
+  if (newContent !== undefined) {
     fields.push("content = ?");
-    values.push(input.content);
-
-    // Update current swipe content too
-    const swipes = [...existing.swipes];
-    swipes[existing.swipe_id] = input.content;
+    values.push(newContent);
+  }
+  if (patchedContent || swipeShapeTouched) {
     fields.push("swipes = ?");
-    values.push(JSON.stringify(swipes));
+    values.push(JSON.stringify(newSwipes));
+    fields.push("swipe_dates = ?");
+    values.push(JSON.stringify(newDates));
+    fields.push("swipe_id = ?");
+    values.push(newSwipeId);
   }
   if (input.name !== undefined) { fields.push("name = ?"); values.push(input.name); }
   if (input.extra !== undefined) { fields.push("extra = ?"); values.push(JSON.stringify(input.extra)); }
@@ -665,14 +712,28 @@ export function updateMessage(userId: string, id: string, input: UpdateMessageIn
   getDb().query(`UPDATE messages SET ${fields.join(", ")} WHERE id = ?`).run(...values);
   const updated = getMessage(userId, id)!;
   eventBus.emit(EventType.MESSAGE_EDITED, { chatId: updated.chat_id, message: updated }, userId);
+  if (swipeShapeTouched) {
+    eventBus.emit(
+      EventType.SWIPE_EDITED,
+      {
+        chatId: updated.chat_id,
+        message: updated,
+        previousSwipeId: existing.swipe_id,
+      },
+      userId,
+    );
+  }
   invalidateChatMemoryCache(updated.chat_id);
 
-  // Only rebuild chunks when content changes — chunks are built from message
-  // content, so extra-only or name-only updates don't affect chunk data.
-  // Skipping unnecessary rebuilds prevents a cascade of DELETE + INSERT + vectorize
-  // operations that can stall the server (especially after generation, which
-  // persists reasoning/usage/metrics as extra-only writes).
-  if (input.content !== undefined) {
+  // Rebuild chunks when the active swipe's content changed. Chunks are built
+  // from message content, so extra-only or name-only updates don't affect
+  // chunk data. A swipes[] rewrite can also change the active slot's text,
+  // even without a `content` patch — check the resolved active content
+  // against the prior active content to catch that case.
+  const activeContentChanged =
+    patchedContent ||
+    (swipeShapeTouched && newSwipes[newSwipeId] !== existing.swipes[existing.swipe_id]);
+  if (activeContentChanged) {
     rebuildChatChunks(userId, updated.chat_id).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message edit:", err);
     });

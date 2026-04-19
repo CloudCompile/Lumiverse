@@ -724,9 +724,11 @@ const spindleApi: SpindleAPI = {
         id: string;
         role: "system" | "user" | "assistant";
         content: string;
+        extra: Record<string, unknown>;
         metadata?: Record<string, unknown>;
         swipe_id: number;
         swipes: string[];
+        swipe_dates: number[];
       }>;
     },
     async appendMessage(chatId: string, message) {
