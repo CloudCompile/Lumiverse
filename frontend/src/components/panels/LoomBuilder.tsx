@@ -73,7 +73,9 @@ import {
   DEFAULT_COMPLETION_SETTINGS,
   DEFAULT_ADVANCED_SETTINGS,
 } from '@/lib/loom/constants'
-import type { PromptBlock, LoomConnectionProfile, SamplerParam, MacroGroup } from '@/lib/loom/types'
+import type { PromptBlock, PromptVariableDef, LoomConnectionProfile, SamplerParam, MacroGroup } from '@/lib/loom/types'
+import { PromptVariablesModal } from '@/components/shared/PromptVariablesModal'
+import { VariablesEditor } from './PromptVariablesEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { useStore as __contextMeterStore } from '@/store'
@@ -256,6 +258,9 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
   const [isLocked, setIsLocked] = useState(block.isLocked || false)
   const [injectionTrigger, setInjectionTrigger] = useState<string[]>(block.injectionTrigger || [])
   const [categoryMode, setCategoryMode] = useState<PromptBlock['categoryMode']>(block.categoryMode ?? null)
+  const [variables, setVariables] = useState<PromptVariableDef[]>(
+    Array.isArray(block.variables) ? block.variables : [],
+  )
   const [showMacros, setShowMacros] = useState(false)
   const [macroSearch, setMacroSearch] = useState('')
   const [showPreview, setShowPreview] = useState(false)
@@ -301,12 +306,14 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
 
   const handleSave = () => {
     const isAppend = role === 'user_append' || role === 'assistant_append'
+    const cleanedVariables = variables.filter((v) => v && v.name?.trim().length > 0)
     onSave({
       name, role, content,
       position: isAppend ? 'pre_history' : position,
       depth: (position === 'in_history' || isAppend) ? depth : 0,
       isLocked, injectionTrigger,
       categoryMode: block.marker === 'category' ? categoryMode : null,
+      variables: cleanedVariables.length ? cleanedVariables : undefined,
     })
   }
 
@@ -491,6 +498,8 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
                 : `Block only fires on: ${injectionTrigger.join(', ')}`}
             </span>
           </div>
+
+          <VariablesEditor variables={variables} onChange={setVariables} />
         </div>
       </div>
       {showExpandedEditor && (
@@ -1172,6 +1181,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     savePromptBehavior,
     saveCompletionSettings,
     saveAdvancedSettings,
+    savePromptVariableValues,
     importFromFile,
     importFromST,
     exportInternal,
@@ -1240,7 +1250,14 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
   const [markerMenuOpen, setMarkerMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [showLegacyExportConfirm, setShowLegacyExportConfirm] = useState(false)
+  const [showPromptVariablesModal, setShowPromptVariablesModal] = useState(false)
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
+
+  const hasConfigurableVariables = useMemo(() => {
+    return (activePreset?.blocks ?? []).some(
+      (b) => b.enabled && Array.isArray(b.variables) && b.variables.length > 0,
+    )
+  }, [activePreset?.blocks])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importTypeRef = useRef<string>('json')
   const lastCollapsedPresetRef = useRef<string | null>(null)
@@ -1619,6 +1636,19 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} onSave={saveAdvancedSettings} />}
         {activePreset && <ContextMeter />}
 
+        {activePreset && hasConfigurableVariables && (
+          <div style={{ padding: '0 12px 8px' }}>
+            <button
+              type="button"
+              className={clsx(s.btn)}
+              style={{ width: '100%', justifyContent: 'center' }}
+              onClick={() => setShowPromptVariablesModal(true)}
+            >
+              <Settings2 size={14} /> Configure Prompt Variables
+            </button>
+          </div>
+        )}
+
         {/* Block list or empty state */}
         <div className={s.blockList}>
           {isLoading ? (
@@ -1762,6 +1792,16 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
           onConfirm={confirmDeleteBlock}
           onCancel={() => setConfirmDelete(null)}
         />
+
+        {activePreset && (
+          <PromptVariablesModal
+            isOpen={showPromptVariablesModal}
+            blocks={activePreset.blocks}
+            values={activePreset.promptVariables ?? {}}
+            onSave={savePromptVariableValues}
+            onClose={() => setShowPromptVariablesModal(false)}
+          />
+        )}
       </div>
     </PanelFadeIn>
   )

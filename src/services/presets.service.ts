@@ -1,12 +1,45 @@
 import { getDb } from "../db/connection";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
-import type { Preset, CreatePresetInput, UpdatePresetInput } from "../types/preset";
+import type { Preset, CreatePresetInput, UpdatePresetInput, PromptBlock, PromptVariableValue } from "../types/preset";
 import type { ConnectionProfile } from "../types/connection-profile";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import { deleteRegexScriptsByPresetId } from "./regex-scripts.service";
 import * as settingsSvc from "./settings.service";
+
+/**
+ * Drop entries in metadata.promptVariables that no longer correspond to a
+ * variable defined on some block in prompt_order. Keeps the JSON tidy and
+ * prevents stale overrides from resurfacing if a creator re-adds a variable
+ * with the same name later.
+ */
+function prunePromptVariableOrphans(
+  promptOrder: unknown,
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!metadata || typeof metadata !== "object") return metadata;
+  const raw = (metadata as any).promptVariables;
+  if (!raw || typeof raw !== "object") return metadata;
+
+  const blocks = Array.isArray(promptOrder) ? (promptOrder as PromptBlock[]) : [];
+  const blockById = new Map<string, PromptBlock>();
+  for (const b of blocks) if (b && typeof b === "object" && b.id) blockById.set(b.id, b);
+
+  const cleaned: Record<string, Record<string, PromptVariableValue>> = {};
+  for (const [blockId, bucket] of Object.entries(raw as Record<string, Record<string, PromptVariableValue>>)) {
+    const block = blockById.get(blockId);
+    if (!block || !block.variables?.length) continue;
+    const validNames = new Set(block.variables.map((v) => v.name));
+    const kept: Record<string, PromptVariableValue> = {};
+    for (const [name, value] of Object.entries(bucket || {})) {
+      if (validNames.has(name)) kept[name] = value;
+    }
+    if (Object.keys(kept).length) cleaned[blockId] = kept;
+  }
+
+  return { ...(metadata as Record<string, unknown>), promptVariables: cleaned };
+}
 export interface PresetRegistryRow {
   id: string;
   name: string;
@@ -120,6 +153,8 @@ export function createPreset(userId: string, input: CreatePresetInput): Preset {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
+  const cleanedMetadata = prunePromptVariableOrphans(input.prompt_order, input.metadata) || {};
+
   getDb()
     .query(
       "INSERT INTO presets (id, name, provider, engine, parameters, prompt_order, prompts, metadata, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -129,7 +164,7 @@ export function createPreset(userId: string, input: CreatePresetInput): Preset {
       JSON.stringify(input.parameters || {}),
       JSON.stringify(input.prompt_order || []),
       JSON.stringify(input.prompts || {}),
-      JSON.stringify(input.metadata || {}),
+      JSON.stringify(cleanedMetadata),
       userId, now, now
     );
 
@@ -143,13 +178,28 @@ export function updatePreset(userId: string, id: string, input: UpdatePresetInpu
   const fields: string[] = [];
   const values: any[] = [];
 
+  // Orphan-GC: if prompt_order or metadata is being written, re-derive a cleaned
+  // metadata.promptVariables so stale values (orphaned by a removed def) don't stick.
+  // When prompt_order changes alone, persist the cleaned metadata even if the
+  // caller didn't touch it — otherwise the orphans would live forever.
+  let writeMetadata: Record<string, any> | undefined;
+  if (input.metadata !== undefined) {
+    const resolvedOrder = input.prompt_order !== undefined ? input.prompt_order : existing.prompt_order;
+    writeMetadata = (prunePromptVariableOrphans(resolvedOrder, input.metadata) as Record<string, any>) ?? input.metadata;
+  } else if (input.prompt_order !== undefined) {
+    const cleaned = prunePromptVariableOrphans(input.prompt_order, existing.metadata as Record<string, unknown>);
+    if (cleaned && JSON.stringify(cleaned) !== JSON.stringify(existing.metadata)) {
+      writeMetadata = cleaned as Record<string, any>;
+    }
+  }
+
   if (input.name !== undefined) { fields.push("name = ?"); values.push(input.name); }
   if (input.provider !== undefined) { fields.push("provider = ?"); values.push(input.provider); }
   if (input.engine !== undefined) { fields.push("engine = ?"); values.push(input.engine); }
   if (input.parameters !== undefined) { fields.push("parameters = ?"); values.push(JSON.stringify(input.parameters)); }
   if (input.prompt_order !== undefined) { fields.push("prompt_order = ?"); values.push(JSON.stringify(input.prompt_order)); }
   if (input.prompts !== undefined) { fields.push("prompts = ?"); values.push(JSON.stringify(input.prompts)); }
-  if (input.metadata !== undefined) { fields.push("metadata = ?"); values.push(JSON.stringify(input.metadata)); }
+  if (writeMetadata !== undefined) { fields.push("metadata = ?"); values.push(JSON.stringify(writeMetadata)); }
 
   if (fields.length === 0) return existing;
 

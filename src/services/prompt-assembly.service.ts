@@ -1,6 +1,6 @@
 import { getTextContent, type LlmMessage, type AssemblyContext, type AssemblyResult, type AssemblyBreakdownEntry, type GenerationType, type ActivatedWorldInfoEntry, type MemoryStats, type ContextClipStats } from "../llm/types";
 import { resolveCounter, APPROXIMATE_TOKENIZER_NAME } from "./tokenizer.service";
-import type { PromptBlock, PromptBehavior, CompletionSettings, SamplerOverrides, AuthorsNote, AdvancedSettings } from "../types/preset";
+import type { PromptBlock, PromptBehavior, CompletionSettings, SamplerOverrides, AuthorsNote, AdvancedSettings, PromptVariableDef, PromptVariableValue } from "../types/preset";
 import type { WorldInfoCache } from "../types/world-book";
 import type { Character } from "../types/character";
 import { getEffectiveCharacterName } from "../types/character";
@@ -361,6 +361,85 @@ function appendBaseRole(role: string): 'user' | 'assistant' {
   return role === 'user_append' ? 'user' : 'assistant';
 }
 
+/**
+ * Walk enabled prompt blocks, merge stored overrides over creator defaults,
+ * coerce + clamp per variable type, and publish the result on env.extra so
+ * {{var::name}} / {{hasVar::name}} / {{varDefault::name}} resolve consistently
+ * across every block in the assembly.
+ *
+ * Policy: disabled blocks are skipped entirely — their variables aren't "in play"
+ * for this generation. Values in preset.metadata.promptVariables persist so they
+ * reappear on re-enable. On a variable-name collision across enabled blocks the
+ * last block in prompt_order wins; the UI warns creators about shadowing.
+ */
+function resolvePromptVariables(env: MacroEnv, blocks: PromptBlock[], preset: Preset | null): void {
+  const stored = (preset?.metadata?.promptVariables ?? {}) as Record<string, Record<string, PromptVariableValue>>;
+
+  const values: Record<string, PromptVariableValue> = {};
+  const defaults: Record<string, PromptVariableValue> = {};
+  const byBlock: Record<string, Record<string, PromptVariableValue>> = {};
+
+  for (const block of blocks) {
+    if (!block.enabled || !block.variables?.length) continue;
+    const bucket = stored[block.id] ?? {};
+    const perBlock: Record<string, PromptVariableValue> = {};
+    for (const def of block.variables) {
+      if (!def?.name) continue;
+      const override = Object.prototype.hasOwnProperty.call(bucket, def.name)
+        ? bucket[def.name]
+        : undefined;
+      const resolved = coercePromptVariableValue(def, override);
+      perBlock[def.name] = resolved;
+      values[def.name] = resolved;
+      defaults[def.name] = coercePromptVariableValue(def, undefined);
+    }
+    if (Object.keys(perBlock).length) byBlock[block.id] = perBlock;
+  }
+
+  env.extra.promptVariables = values;
+  env.extra.promptVariablesByBlock = byBlock;
+  env.extra.promptVariableDefaults = defaults;
+
+  // Seed the local-variables Map so {{getvar::name}} resolves to the same
+  // value as {{var::name}}. Seeding happens before any block renders, so
+  // in-prompt {{setvar::name::…}} can still override mid-assembly (setvar
+  // wins because it runs later during block evaluation).
+  for (const [name, value] of Object.entries(values)) {
+    if (!env.variables.local.has(name)) {
+      env.variables.local.set(name, String(value));
+    }
+  }
+}
+
+function coercePromptVariableValue(def: PromptVariableDef, raw: unknown): PromptVariableValue {
+  switch (def.type) {
+    case 'text':
+    case 'textarea': {
+      if (raw === undefined || raw === null) return def.defaultValue ?? '';
+      return String(raw);
+    }
+    case 'number': {
+      const fallback = typeof def.defaultValue === 'number' ? def.defaultValue : 0;
+      const n = raw === undefined || raw === null ? fallback : Number(raw);
+      const v = Number.isFinite(n) ? n : fallback;
+      return clampNumber(v, def.min, def.max);
+    }
+    case 'slider': {
+      const fallback = typeof def.defaultValue === 'number' ? def.defaultValue : def.min;
+      const n = raw === undefined || raw === null ? fallback : Number(raw);
+      const v = Number.isFinite(n) ? n : fallback;
+      return clampNumber(v, def.min, def.max);
+    }
+  }
+}
+
+function clampNumber(value: number, min: number | undefined, max: number | undefined): number {
+  let v = value;
+  if (typeof min === 'number' && v < min) v = min;
+  if (typeof max === 'number' && v > max) v = max;
+  return v;
+}
+
 interface PendingAppend {
   baseRole: 'user' | 'assistant';
   depth: number;
@@ -700,6 +779,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     targetCharacterId: ctx.targetCharacterId,
     targetCharacterName: ctx.targetCharacterId ? getEffectiveCharacterName(effectiveCharacter) : undefined,
   });
+
+  // Prompt variables — resolve creator-defined schemas + end-user overrides and
+  // surface them on env.extra so {{var::name}} / {{hasVar::name}} / {{varDefault::name}}
+  // can read consistent values across every block in this assembly.
+  resolvePromptVariables(macroEnv, blocks, preset);
 
   // Use prefetched settings or batch-load all needed settings in a single query
   const settingsMap = pf?.allSettings ?? settingsSvc.getSettingsByKeys(ctx.userId, [

@@ -1,6 +1,7 @@
 import type { Preset, CreatePresetInput, UpdatePresetInput } from '@/types/api'
 import type {
   PromptBlock,
+  PromptVariableValue,
   LoomPreset,
   LoomRegistryEntry,
   LoomConnectionProfile,
@@ -175,6 +176,7 @@ export function marshalPreset(loom: LoomPreset): CreatePresetInput {
       description: loom.description,
       isDefault: loom.isDefault,
       lastProfileKey: loom.lastProfileKey,
+      promptVariables: pruneOrphanPromptVariables(loom.promptVariables, blocks),
     },
   }
 }
@@ -201,6 +203,9 @@ export function unmarshalPreset(preset: Preset): LoomPreset {
     advancedSettings: prompts.advancedSettings || { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: meta.modelProfiles || {},
     lastProfileKey: meta.lastProfileKey || null,
+    promptVariables: meta.promptVariables && typeof meta.promptVariables === 'object'
+      ? meta.promptVariables
+      : {},
   }
 
   return migratePreset(loom)
@@ -227,8 +232,29 @@ export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
       description: loom.description,
       isDefault: loom.isDefault,
       lastProfileKey: loom.lastProfileKey,
+      promptVariables: pruneOrphanPromptVariables(loom.promptVariables, blocks),
     },
   }
+}
+
+function pruneOrphanPromptVariables(
+  values: LoomPreset['promptVariables'] | undefined,
+  blocks: PromptBlock[],
+): LoomPreset['promptVariables'] {
+  if (!values || typeof values !== 'object') return {}
+  const out: LoomPreset['promptVariables'] = {}
+  const blockById = new Map(blocks.map((b) => [b.id, b]))
+  for (const [blockId, bucket] of Object.entries(values)) {
+    const block = blockById.get(blockId)
+    if (!block || !block.variables?.length) continue
+    const validNames = new Set(block.variables.map((v) => v.name))
+    const kept: Record<string, PromptVariableValue> = {}
+    for (const [name, value] of Object.entries(bucket || {})) {
+      if (validNames.has(name)) kept[name] = value
+    }
+    if (Object.keys(kept).length) out[blockId] = kept
+  }
+  return out
 }
 
 // ============================================================================
@@ -559,6 +585,7 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
     advancedSettings: { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: {},
     lastProfileKey: null,
+    promptVariables: {},
   }
 }
 
@@ -712,5 +739,6 @@ export function createNewLoomPreset(name: string, description = ''): LoomPreset 
     advancedSettings: { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: {},
     lastProfileKey: null,
+    promptVariables: {},
   }
 }

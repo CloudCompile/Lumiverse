@@ -6,7 +6,7 @@ import { ApiError } from '@/api/client'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
 import { getMacroCatalog } from '@/api/macros'
-import type { LoomPreset, PromptBlock, LoomConnectionProfile, MacroGroup } from '@/lib/loom/types'
+import type { LoomPreset, PromptBlock, LoomConnectionProfile, MacroGroup, PromptVariableValues } from '@/lib/loom/types'
 import {
   DEFAULT_SAMPLER_OVERRIDES,
   DEFAULT_CUSTOM_BODY,
@@ -232,6 +232,7 @@ export function useLoomBuilder() {
       copy.completionSettings = { ...loom.completionSettings }
       copy.advancedSettings = { ...loom.advancedSettings }
       copy.modelProfiles = { ...loom.modelProfiles }
+      copy.promptVariables = JSON.parse(JSON.stringify(loom.promptVariables || {}))
       copy.source = loom.source ? { ...loom.source } : null
 
       const created = await presetsApi.create(marshalPreset(copy))
@@ -335,6 +336,22 @@ export function useLoomBuilder() {
     setActivePreset(updated)
     debouncedSavePreset(updated)
   }, [activePreset, debouncedSavePreset])
+
+  // Persist the full promptVariables map in one shot. Used by the end-user
+  // "Configure Prompt Variables" modal — saves are infrequent and user-driven
+  // so we bypass the debouncer and wait for the network round-trip so errors
+  // surface immediately.
+  const savePromptVariableValues = useCallback(async (values: PromptVariableValues) => {
+    if (!activePreset) return
+    const updated = { ...activePreset, promptVariables: values, updatedAt: Date.now() }
+    setActivePreset(updated)
+    try {
+      await presetsApi.update(updated.id, marshalUpdate(updated))
+    } catch (err) {
+      console.warn('[LoomBuilder] Failed to save prompt variable values:', err)
+      throw err
+    }
+  }, [activePreset])
 
   // Import from legacy preset JSON
   const importFromST = useCallback(async (stData: any, fileName: string) => {
@@ -505,6 +522,7 @@ export function useLoomBuilder() {
     savePromptBehavior,
     saveCompletionSettings,
     saveAdvancedSettings,
+    savePromptVariableValues,
 
     // Import/Export
     importFromFile,
