@@ -182,6 +182,10 @@ export interface UISlice {
   // Regen feedback text retention
   lastRegenFeedback: string
   setLastRegenFeedback: (text: string) => void
+
+  // Message editing (globally single-slot)
+  editingMessageId: string | null
+  setEditingMessageId: (id: string | null) => void
 }
 
 // ---- OOC Style Type ----

@@ -48,6 +48,7 @@ import * as imageGenConnSvc from "../services/image-gen-connections.service";
 import { getImageProvider, getImageProviderList } from "../image-gen/registry";
 import "../image-gen/index";
 import { getEphemeralPoolConfig } from "./ephemeral-pool.service";
+import { getTextContent, type LlmMessage } from "../llm/types";
 import { getDb } from "../db/connection";
 import {
   getMessages as getChatMessages,
@@ -537,12 +538,19 @@ export class WorkerHost {
    * extension handler can personalise its tool output. The context is sourced
    * entirely server-side and kept on a separate top-level field so user-space
    * `args` cannot collide with or spoof it.
+   *
+   * `contextMessages` — when provided — are the structured chat messages that
+   * were also flattened into `args.context` for backwards compatibility.
+   * Forwarded on its own top-level field (same rationale as `councilMember`:
+   * host-provided truth that must not collide with user-space `args`).
+   * Multipart content is flattened to its text portion via `getTextContent`.
    */
   invokeExtensionTool(
     toolName: string,
     args: Record<string, unknown>,
     timeoutMs = 30_000,
-    councilMember?: CouncilMemberContext
+    councilMember?: CouncilMemberContext,
+    contextMessages?: LlmMessage[]
   ): Promise<string> {
     const requestId = crypto.randomUUID();
 
@@ -556,12 +564,21 @@ export class WorkerHost {
       sanitizedArgs[key] = value;
     }
 
+    const contextMessagesDTO: LlmMessageDTO[] | undefined = contextMessages?.map(
+      (m) => ({
+        role: m.role,
+        content: getTextContent(m),
+        ...(m.name ? { name: m.name } : {}),
+      })
+    );
+
     this.postToWorker({
       type: "tool_invocation",
       requestId,
       toolName,
       args: sanitizedArgs,
       ...(councilMember ? { councilMember } : {}),
+      ...(contextMessagesDTO ? { contextMessages: contextMessagesDTO } : {}),
     });
 
     return new Promise((resolve, reject) => {

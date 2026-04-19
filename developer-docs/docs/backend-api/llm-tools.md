@@ -60,10 +60,15 @@ When your tool is invoked during Council execution, the host sends a `TOOL_INVOC
 
 ```ts
 spindle.on('TOOL_INVOCATION', async (payload) => {
-  const { toolName, args, councilMember } = payload
+  const { toolName, args, councilMember, contextMessages } = payload
 
   if (toolName === 'search_knowledge_base') {
     const results = await searchMyKnowledgeBase(args.query, args.limit)
+
+    // Inspect the structured chat context if you need role boundaries
+    const lastAssistant = contextMessages
+      ?.filter(m => m.role === 'assistant')
+      .pop()
 
     // When invoked via council, tailor the output to the assigned member's voice
     if (councilMember) {
@@ -94,12 +99,13 @@ The handler receives a `ToolInvocationPayloadDTO`:
 | `args` | `Record<string, unknown>` | Arguments matching your tool's `parameters` schema, plus the host-supplied fields below |
 | `requestId` | `string` | Host-side correlation id for this invocation |
 | `councilMember` | `CouncilMemberContext \| undefined` | Assigned member snapshot when invoked via council — see below. Undefined for non-council invocation paths |
+| `contextMessages` | `LlmMessageDTO[] \| undefined` | Structured chat context for council invocations — the same content as the flattened `args.context` string, but with role boundaries preserved. See below. Undefined for non-council invocation paths |
 
 Host-supplied fields inside `args` for council invocations:
 
 | Field | Type | Description |
 |---|---|---|
-| `context` | `string` | Formatted chat context (character info, world info, recent messages) — the same context sidecar tools see |
+| `context` | `string` | Formatted chat context (character info, world info, recent messages) — the same context sidecar tools see. Kept for backwards compatibility; use `contextMessages` (top-level) when you need role boundaries |
 | `__deadlineMs` | `number` | Timestamp by which the tool must respond (derived from `timeoutMs` setting) |
 
 !!! note "No `__userId` in args"
@@ -127,6 +133,22 @@ interface CouncilMemberContext {
 ```
 
 The context is built entirely host-side from the user's council settings row and the backing Lumia item. It is delivered as a separate top-level field on the payload so user-space `args` cannot collide with or spoof it. `councilMember` is `undefined` for any non-council invocation path (future inline function calling, etc.) — guard on presence before reading.
+
+### Structured context messages
+
+Council invocations also deliver the assembled chat context as a structured `contextMessages: LlmMessageDTO[]` field. This is the same content that populates `args.context` (kept for backwards compatibility), but with role boundaries preserved so you can filter by role, extract the last user/assistant turn, or re-render the context in your own format.
+
+```ts
+interface LlmMessageDTO {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+  name?: string
+}
+```
+
+Multi-part message content (multimodal text+image/audio parts) is flattened to its text portion before being forwarded — non-text parts are dropped.
+
+Like `councilMember`, `contextMessages` is delivered as a separate top-level payload field so it cannot collide with or be spoofed by user-space `args`. It is `undefined` for any non-council invocation path — guard on presence before reading.
 
 ### Tool lifecycle
 

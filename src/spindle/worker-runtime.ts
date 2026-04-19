@@ -1666,6 +1666,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
           args: msg.args,
           requestId: msg.requestId,
           ...(msg.councilMember ? { councilMember: msg.councilMember } : {}),
+          ...(msg.contextMessages ? { contextMessages: msg.contextMessages } : {}),
         };
         let result: string | undefined;
         for (const handler of handlers) {

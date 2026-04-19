@@ -273,6 +273,15 @@ async function executeMemberTools(
           // Extension tools receive the exact same context as sidecar tools —
           // system enrichment (character, persona, world info) plus the full
           // chat history governed by the sidecar context window setting.
+          //
+          // Context is delivered two ways for the same invocation:
+          //   1. `args.context` — flattened string (role prefixes elided for
+          //      system messages, multipart content dropped). Kept for
+          //      backwards compatibility with extensions already reading it.
+          //   2. `contextMessages` (top-level payload field) — structured
+          //      LlmMessageDTO[], role boundaries preserved, multipart text
+          //      extracted. Delivered via worker-host so it can't collide
+          //      with user-space `args` (same rationale as `councilMember`).
           const bareToolName = extToolReg!.name;
           const contextSummary = contextMessages
             .map((m) => {
@@ -293,7 +302,8 @@ async function executeMemberTools(
               __deadlineMs: Date.now() + settings.toolsSettings.timeoutMs,
             },
             settings.toolsSettings.timeoutMs,
-            memberContext
+            memberContext,
+            contextMessages
           );
         } else {
           content = await invokeSidecarTool(
@@ -363,13 +373,14 @@ async function invokeExtensionToolViaWorker(
   toolName: string,
   args: Record<string, unknown>,
   timeoutMs: number,
-  councilMember?: CouncilMemberContext
+  councilMember?: CouncilMemberContext,
+  contextMessages?: LlmMessage[]
 ): Promise<string> {
   const host = getWorkerHost(extensionId);
   if (!host) {
     throw new Error(`Extension worker '${extensionId}' is not running`);
   }
-  return host.invokeExtensionTool(toolName, args, timeoutMs, councilMember);
+  return host.invokeExtensionTool(toolName, args, timeoutMs, councilMember, contextMessages);
 }
 
 /**

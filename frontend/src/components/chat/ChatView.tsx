@@ -13,6 +13,7 @@ import { personasApi } from '@/api/personas'
 import { resolveBinding } from '@/store/slices/personas'
 import type { WallpaperRef } from '@/types/store'
 import useSwipeKeyboard from '@/hooks/useSwipeKeyboard'
+import useEditKeyboard from '@/hooks/useEditKeyboard'
 import MessageList from './MessageList'
 import MessageSelectBar from './MessageSelectBar'
 import InputArea from './InputArea'
@@ -47,6 +48,7 @@ export default function ChatView() {
   }, [messageSelectMode, setMessageSelectMode])
 
   useSwipeKeyboard()
+  useEditKeyboard()
 
   const innerStyle = useMemo(() => {
     switch (chatWidthMode) {
