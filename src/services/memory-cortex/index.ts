@@ -24,14 +24,14 @@ import * as entityGraph from "./entity-graph";
 import * as entityContext from "./entity-context";
 import * as consolidation from "./consolidation";
 import { buildEmotionalContext } from "./emotional-context";
-import { queryCortex as queryCortexImpl } from "./retrieval";
+import { queryCortex as queryCortexImpl, queryVaultCortex as queryVaultCortexImpl } from "./retrieval";
 import { formatShadowPrompt, type FormatterMode, type ShadowPromptResult } from "./shadow-formatter";
 import { getCortexUsageStats, runMaintenance, debouncedVectorize } from "./gc";
 import { processChunkFontColors, formatColorMapForPrompt, deleteColorMapForChat, getColorMap, recordColorAttribution } from "./font-attribution";
 import { extractRelationshipsHeuristic } from "./relationship-extractor";
 import { extractNPsFromChunk } from "./np-chunker";
 import { stripLoomTags, stripDetailsBlocks } from "../../utils/content-sanitizer";
-import { getLinkedCortexData } from "./vault";
+import { getLinkedCortexData, reindexVault, getVaultRow } from "./vault";
 import type {
   ChunkIngestionData,
   CortexQuery,
@@ -88,11 +88,13 @@ export {
 } from "./entity-graph";
 export type { MigrationResult } from "./entity-graph";
 export {
-  createVault, listVaults, getVault, deleteVault, renameVault,
+  createVault, listVaults, getVault, getVaultRow, deleteVault, renameVault,
   attachLink, getChatLinks, removeLink, toggleLink,
   getVaultDataForAssembly, getLinkedCortexData,
+  reindexVault, getVaultChunks,
 } from "./vault";
-export type { Vault, VaultEntity, VaultRelation, ChatLink } from "./vault";
+export { queryVaultCortex } from "./retrieval";
+export type { Vault, VaultEntity, VaultRelation, VaultChunk, ChatLink } from "./vault";
 export type { LinkedCortexResult, VaultCortexData, InterlinkCortexData } from "./types";
 
 // ─── Result Cache ─────────────────────────────────────────────
@@ -188,6 +190,29 @@ interface CachedLinkedEntry {
 
 const linkedCortexResultCache = new Map<string, CachedLinkedEntry>();
 
+// Track in-flight vault auto-reindex jobs so queryLinkedCortex doesn't
+// fire duplicate rebuilds on every generation while the first one runs.
+// Keyed by vaultId.
+const autoReindexInFlight = new Set<string>();
+
+/** Fire an auto-reindex for a vault that has no chunk snapshot yet.
+ *  Runs in the background; the current generation falls back to structural-
+ *  only retrieval. Subsequent generations pick up the populated vault. */
+function scheduleVaultAutoReindex(userId: string, vaultId: string): void {
+  if (autoReindexInFlight.has(vaultId)) return;
+  autoReindexInFlight.add(vaultId);
+  void (async () => {
+    try {
+      const result = await reindexVault(userId, vaultId);
+      console.info(`[cortex] Auto-reindexed vault ${vaultId}: mode=${result.mode} chunks=${result.chunkCount}`);
+    } catch (err) {
+      console.warn(`[cortex] Auto-reindex failed for vault ${vaultId}:`, err);
+    } finally {
+      autoReindexInFlight.delete(vaultId);
+    }
+  })();
+}
+
 export function getCachedLinkedCortexResult(chatId: string): LinkedCortexResult | null {
   const entry = linkedCortexResultCache.get(chatId);
   if (!entry) return null;
@@ -200,6 +225,17 @@ export function getCachedLinkedCortexResult(chatId: string): LinkedCortexResult 
 
 export function invalidateLinkedCortexCache(chatId: string): void {
   linkedCortexResultCache.delete(chatId);
+}
+
+/** Invalidate every linked-cortex cache entry whose linked data set includes
+ *  the given vault. Used after a reindex so every target chat that attached
+ *  the vault picks up the refreshed snapshot on the next generation. */
+export function invalidateLinkedCortexCacheForVault(vaultId: string): void {
+  const db = getDb();
+  const rows = db.query(
+    `SELECT DISTINCT chat_id FROM cortex_chat_links WHERE vault_id = ?`,
+  ).all(vaultId) as Array<{ chat_id: string }>;
+  for (const r of rows) linkedCortexResultCache.delete(r.chat_id);
 }
 
 /**
@@ -224,33 +260,50 @@ export async function queryLinkedCortex(
   const topK = cfg.retrieval?.maxEntitySnapshots ?? 10;
   const includeRelationships = cfg.retrieval?.relationshipInjection ?? true;
 
-  // Fire all linked queries in parallel (vault memory enrichment + interlinks)
+  // Fire all linked queries in parallel (vault self-contained retrieval + interlinks)
   const promises: Promise<void>[] = [];
 
-  // Vault data is resolved from SQLite; optionally enrich with source chat memories
+  // Vault structural data (entities/relations) is already populated from SQLite.
+  // Enrich each vault with its own vault-scoped retrieval so memories come from
+  // the vault snapshot, not the live source chat. This:
+  //   - works even if the source chat is deleted,
+  //   - doesn't pollute the source chat's cortexResultCache,
+  //   - keeps the target chat's own cortex build-up independent.
   const vaults = linked.vaults;
   if (queryText) {
     for (const vault of vaults) {
-      if (!vault.sourceChatId) continue;
-      const sourceChatId = vault.sourceChatId;
+      const vaultId = vault.vaultId;
       promises.push(
         (async () => {
           try {
-            const result = await queryCortex({
-              chatId: sourceChatId,
+            // Auto-reindex trigger for vaults with no chunk snapshot (created
+            // before migration 061 OR wiped by a LanceDB reset). -1 is the
+            // "tried and source chat is gone" sentinel — don't retry.
+            const row = getVaultRow(userId, vaultId);
+            if (row && row.chunkCount === 0) {
+              scheduleVaultAutoReindex(userId, vaultId);
+              return; // structural-only for this generation
+            }
+            if (row && row.chunkCount < 0) return; // sentinel — skip retrieval
+
+            const result = await queryVaultCortexImpl({
               userId,
+              vaultId,
               queryText,
-              generationType: "normal",
               topK,
-              includeConsolidations: false,
               includeRelationships,
-            }, cfg, signal);
-            // Enrich vault with retrieved memories from source chat
+              signal,
+            }, cfg);
             vault.memories = result.memories;
             vault.arcContext = result.arcContext;
+            // Prefer the richer entity/relation context from retrieval (it
+            // prioritises entities mentioned in selected memories); fall back
+            // to the structural snapshot when retrieval returned none.
+            if (result.entityContext.length > 0) vault.entities = result.entityContext;
+            if (result.activeRelationships.length > 0) vault.relations = result.activeRelationships;
           } catch (err) {
             if (signal?.aborted) return;
-            console.warn(`[cortex] Vault memory enrichment failed for vault ${vault.vaultId} (source chat ${sourceChatId}):`, err);
+            console.warn(`[cortex] Vault retrieval failed for vault ${vaultId}:`, err);
           }
         })(),
       );

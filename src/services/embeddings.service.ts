@@ -2732,6 +2732,217 @@ export async function deleteChunkVector(userId: string, chunkId: string): Promis
   });
 }
 
+// ─── Vault Chunk Vector Operations ─────────────────────────────
+// Vaults are self-contained salience sources. Their embedding rows live in
+// the same LanceDB table with source_type='vault_chunk' and owner_id=vaultId.
+// Copy-from-chat reuses existing chat_chunk vectors (no re-embedding cost),
+// while rebuild-from-content handles recovery after forceResetLanceDB wipes
+// the table out from under us.
+
+/**
+ * Copy chat_chunk LanceDB rows into vault_chunk rows for a new vault.
+ * Reuses existing vectors — no re-embedding. `chunkIdMap` maps the source
+ * chat_chunk id → the newly-minted cortex_vault_chunks row id.
+ */
+export async function copyChunksToVault(
+  userId: string,
+  sourceChatId: string,
+  vaultId: string,
+  chunkIdMap: Map<string, string>,
+): Promise<{ copied: number }> {
+  if (chunkIdMap.size === 0) return { copied: 0 };
+
+  const table = await getTableIfExists();
+  if (!table) return { copied: 0 };
+
+  const sourceIds = [...chunkIdMap.keys()];
+  const now = Math.floor(Date.now() / 1000);
+  let copied = 0;
+
+  // Read source rows in batches to avoid blowing up the filter string.
+  for (let i = 0; i < sourceIds.length; i += 200) {
+    const batch = sourceIds.slice(i, i + 200);
+    const sourceIdFilter = batch.map((id) => sqlValue(id)).join(", ");
+    const filter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(sourceChatId)} AND source_id IN (${sourceIdFilter})`;
+
+    const rows = await table
+      .query()
+      .where(filter)
+      .select(["source_id", "content", "vector", "metadata_json"])
+      .toArray();
+
+    const outRows: EmbeddingRow[] = [];
+    for (const row of rows as any[]) {
+      const sourceId = String(row.source_id);
+      const vaultChunkId = chunkIdMap.get(sourceId);
+      if (!vaultChunkId) continue;
+      const rawVec = row.vector;
+      const vector = rawVec instanceof Float32Array ? Array.from(rawVec) : (rawVec as number[] | null);
+      if (!vector || vector.length === 0) continue;
+
+      let meta: any = {};
+      const rawMeta = row.metadata_json;
+      try {
+        if (typeof rawMeta === "string") meta = JSON.parse(rawMeta);
+        else if (rawMeta && typeof rawMeta === "object") meta = rawMeta;
+      } catch { /* ignore — use empty metadata */ }
+
+      outRows.push({
+        id: rowId(userId, "vault_chunk", vaultChunkId, 0),
+        user_id: userId,
+        source_type: "vault_chunk",
+        source_id: vaultChunkId,
+        owner_id: vaultId,
+        chunk_index: 0,
+        content: String(row.content || ""),
+        vector,
+        metadata_json: JSON.stringify({ ...meta, sourceChatId, sourceChunkId: sourceId, vaultId }),
+        updated_at: now,
+      });
+    }
+
+    if (outRows.length === 0) continue;
+
+    await withWriteLock(async () => {
+      const t = await getOrCreateTable(outRows);
+      await ensureVectorIndex(t);
+      await ensureScalarIndexes(t);
+      await ensureFtsIndex(t);
+      await t
+        .mergeInsert("id")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute(asLanceRows(outRows));
+    });
+    copied += outRows.length;
+  }
+
+  if (copied > 0) scheduleOptimize();
+  return { copied };
+}
+
+/**
+ * Re-embed vault chunks from their stored content. Used when LanceDB was
+ * reset (e.g. embedding config change) but the cortex_vault_chunks SQLite
+ * rows survived. Caller passes (vaultChunkId, content) pairs.
+ */
+export async function rebuildVaultEmbeddings(
+  userId: string,
+  vaultId: string,
+  chunks: Array<{ vaultChunkId: string; content: string }>,
+): Promise<{ embedded: number }> {
+  if (chunks.length === 0) return { embedded: 0 };
+
+  const cfg = await getEmbeddingConfig(userId);
+  if (!cfg.enabled) return { embedded: 0 };
+
+  const valid = chunks.filter((c) => c.content.trim().length > 0);
+  if (valid.length === 0) return { embedded: 0 };
+
+  const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
+  let embedded = 0;
+
+  for (let i = 0; i < valid.length; i += batchSize) {
+    const batch = valid.slice(i, i + batchSize);
+    try {
+      const texts = batch.map((c) => c.content.trim());
+      const vectors = await cachedEmbedTexts(userId, texts);
+      const now = Math.floor(Date.now() / 1000);
+
+      const rows: EmbeddingRow[] = batch.map((c, idx) => ({
+        id: rowId(userId, "vault_chunk", c.vaultChunkId, 0),
+        user_id: userId,
+        source_type: "vault_chunk",
+        source_id: c.vaultChunkId,
+        owner_id: vaultId,
+        chunk_index: 0,
+        content: c.content.trim(),
+        vector: vectors[idx],
+        metadata_json: JSON.stringify({ vaultId, rebuiltAt: now }),
+        updated_at: now,
+      }));
+
+      await withWriteLock(async () => {
+        const t = await getOrCreateTable(rows);
+        await ensureVectorIndex(t);
+        await ensureScalarIndexes(t);
+        await ensureFtsIndex(t);
+        await t
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
+      embedded += rows.length;
+    } catch (err) {
+      console.warn("[embeddings] Batch vault rebuild failed:", err);
+    }
+  }
+
+  if (embedded > 0) scheduleOptimize();
+  return { embedded };
+}
+
+/**
+ * Search vault chunks in LanceDB scoped to a single vault. Mirrors
+ * searchChatChunks but filters on source_type='vault_chunk' AND owner_id.
+ */
+export async function searchVaultChunks(
+  userId: string,
+  vaultId: string,
+  vector: number[],
+  limit = 8,
+  allowedChunkIds?: Set<string>,
+  signal?: AbortSignal,
+): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+  if (signal?.aborted) return [];
+  const table = await getTableIfExists();
+  if (!table) return [];
+
+  const baseFilter = `user_id = ${sqlValue(userId)} AND source_type = 'vault_chunk' AND owner_id = ${sqlValue(vaultId)}`;
+  const sourceFilter = buildAllowedChunkFilter(allowedChunkIds);
+  const filter = sourceFilter ? `${baseFilter} AND ${sourceFilter}` : baseFilter;
+
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady) q.refineFactor(5); return q; };
+  const q = table
+    .query()
+    .nearestTo(vector)
+    .where(filter)
+    .select(["source_id", "content", "_distance", "metadata_json"])
+    .limit(Math.max(1, Math.min(limit * 3, 200)));
+
+  const rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
+
+  return (rows as any[]).map((row) => {
+    let meta: any = {};
+    try {
+      const raw = row.metadata_json;
+      if (typeof raw === "string") meta = JSON.parse(raw);
+      else if (raw && typeof raw === "object") meta = raw;
+    } catch { /* use empty */ }
+    return {
+      chunk_id: String(row.source_id),
+      score: typeof row._distance === "number" ? row._distance : 0,
+      content: String(row.content || ""),
+      metadata: meta,
+    };
+  });
+}
+
+/**
+ * Delete all LanceDB rows belonging to a vault. Called during vault deletion
+ * and before a reindex replaces the snapshot.
+ */
+export async function deleteVaultChunks(userId: string, vaultId: string): Promise<void> {
+  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'vault_chunk' AND owner_id = ${sqlValue(vaultId)}`;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists();
+    if (!table) return;
+    await table.delete(filter);
+  });
+  scheduleOptimize();
+}
+
 // ─── Databank Vector Operations ─────────────────────────────────
 
 /**

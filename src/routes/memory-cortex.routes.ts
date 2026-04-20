@@ -1081,6 +1081,27 @@ app.delete("/vaults/:id", (c) => {
   return c.json({ success: true });
 });
 
+/** POST /vaults/:id/reindex — Rebuild the vault's chunk snapshot.
+ *  Either re-snapshots from the live source chat (when it still exists and
+ *  has vectorized chunks) or re-embeds the vault's existing stored content
+ *  against the current embedding config. Idempotent. */
+app.post("/vaults/:id/reindex", async (c) => {
+  const userId = c.get("userId");
+  const vaultId = c.req.param("id");
+  try {
+    const result = await memoryCortex.reindexVault(userId, vaultId);
+    // Invalidate linked-cortex cache on every chat this vault is attached to
+    // so the next generation picks up the refreshed snapshot.
+    memoryCortex.invalidateLinkedCortexCacheForVault(vaultId);
+    eventBus.emit(EventType.CORTEX_VAULT_REINDEXED, {
+      vaultId, mode: result.mode, chunkCount: result.chunkCount,
+    }, userId);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message ?? "Reindex failed" }, err.message === "Vault not found" ? 404 : 500);
+  }
+});
+
 // ─── Chat Links ──────────────────────────────────────────────
 
 /** POST /chats/:chatId/links — Attach a vault or interlink to a chat */
