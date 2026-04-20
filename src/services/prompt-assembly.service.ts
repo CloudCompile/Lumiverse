@@ -612,12 +612,20 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   }
 
   // ---- Pre-flight: kick off databank retrieval ----
+  // When chat.metadata.memory_isolation is set, the chat opts out of every
+  // character-scoped memory source so a "fresh" chat can share a character
+  // without inheriting prior conversation knowledge. We still honour chat-scoped
+  // and global databanks, world books remain untouched (they read as lore, not
+  // memory), and the character's own prompt fields (description, personality,
+  // scenario, etc.) are always used — isolation only hides long-term recall.
+  const memoryIsolated = chat.metadata?.memory_isolation === true;
+  const databankCharIds = memoryIsolated || !character?.id ? [] : [character.id];
   const databankCrossRefs = {
-    characterDatabankIds: getCharacterDatabankIds(character?.extensions),
+    characterDatabankIds: memoryIsolated ? [] : getCharacterDatabankIds(character?.extensions),
     chatDatabankIds: (chat.metadata?.chat_databank_ids as string[] | undefined) ?? [],
   };
   {
-    const dbIds = databankSvc.resolveActiveDatabankIds(ctx.userId, ctx.chatId, character?.id ? [character.id] : [], databankCrossRefs);
+    const dbIds = databankSvc.resolveActiveDatabankIds(ctx.userId, ctx.chatId, databankCharIds, databankCrossRefs);
     if (dbIds.length > 0) {
       const chatBgSignal = getChatBackgroundSignal(ctx.userId, ctx.chatId);
       const dbSignal = ctx.signal
@@ -890,7 +898,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   const activeDatabankIds = databankSvc.resolveActiveDatabankIds(
     ctx.userId,
     ctx.chatId,
-    character?.id ? [character.id] : [],
+    databankCharIds,
     databankCrossRefs,
   );
   macroEnv.extra.databank = {
@@ -916,7 +924,9 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // This handles queued messages, regen, swipe, and dry-run correctly.
   let databankMentionAppendix = "";
   {
-    const charIds = character?.id ? [character.id] : [];
+    // Isolated chats don't resolve character-scoped document mentions either —
+    // the user can still reference chat-scoped or global docs by slug.
+    const charIds = databankCharIds;
     let lastUserIdx = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].is_user) { lastUserIdx = i; break; }

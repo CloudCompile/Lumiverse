@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import { Check, MessageSquare, Plus, MoreHorizontal, Pencil, Download, Trash2 } from 'lucide-react'
+import { Check, MessageSquare, Plus, MoreHorizontal, Pencil, Download, Trash2, Sparkles } from 'lucide-react'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
@@ -159,10 +159,11 @@ export default function ChatPickerModal({
     setDeleteTarget(null)
   }
 
-  const handleNewChat = async () => {
+  const handleNewChat = async (options?: { memoryIsolation?: boolean }) => {
     try {
       setLoading(true)
-      const chat = await chatsApi.create({ character_id: characterId })
+      const metadata = options?.memoryIsolation ? { memory_isolation: true } : undefined
+      const chat = await chatsApi.create({ character_id: characterId, metadata })
       onSelect(chat.id)
     } catch (err) {
       console.error('[Lumiverse] Failed to create new chat:', err)
@@ -193,7 +194,7 @@ export default function ChatPickerModal({
           <button
             type="button"
             className={clsx(styles.card, styles.newChatCard)}
-            onClick={handleNewChat}
+            onClick={() => handleNewChat()}
             disabled={loading}
           >
             <div className={styles.newChatIcon}>
@@ -201,6 +202,23 @@ export default function ChatPickerModal({
             </div>
             <div className={styles.cardHeader}>
               <span className={styles.cardLabel}>Start New Chat</span>
+            </div>
+          </button>
+
+          {/* Action Card: Fresh Chat — no character-scoped long-term memory */}
+          <button
+            type="button"
+            className={clsx(styles.card, styles.freshChatCard)}
+            onClick={() => handleNewChat({ memoryIsolation: true })}
+            disabled={loading}
+            title="Starts a new chat that does not pull in documents or memory from this character's other chats. World books and personality still apply."
+          >
+            <div className={styles.freshChatIcon}>
+              <Sparkles size={14} strokeWidth={2.5} />
+            </div>
+            <div className={clsx(styles.cardHeader, styles.freshChatHeader)}>
+              <span className={styles.cardLabel}>Start Fresh Chat</span>
+              <span className={styles.freshChatSubtitle}>No long-term memories from prior chats</span>
             </div>
           </button>
 
