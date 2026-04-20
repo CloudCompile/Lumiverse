@@ -107,5 +107,41 @@ The `context` parameter is an object containing metadata about the current gener
 
 The context is read-only for informational purposes. To influence the generation, return modified messages or parameters.
 
-!!! note "Timeout"
-    Interceptors that take longer than 10 seconds are skipped, and the previous messages are passed through.
+## Timeout
+
+Interceptors run inside a wall-clock budget. When the budget is exceeded, the interceptor is skipped and the pre-interceptor messages are passed through unchanged — the generation still proceeds.
+
+The budget is resolved **per run**, immediately before each invocation, in this order:
+
+1. **`interceptorTimeoutMs` in your `spindle.json`** — a per-extension override shipped with the manifest
+2. **`spindleSettings.interceptorTimeoutMs`** — the user's global setting (adjustable in the Spindle panel)
+3. **Default `10000` ms** — applied when neither of the above is set
+
+All values are clamped to **`[1000, 300000]` ms** (1 second to 5 minutes).
+
+Because resolution is per-run, users can change their global Spindle timeout in settings and the new value takes effect on the next generation — your extension does not need to re-register.
+
+### Picking a timeout
+
+The default 10 s covers simple prompt shaping. If your interceptor does real pre-generation work — multi-step retrieval, graph traversal, controller-driven context assembly, or external API calls — bump the manifest value to match your expected worst-case latency:
+
+```json
+{
+  "identifier": "my_retrieval_extension",
+  "permissions": ["interceptor"],
+  "interceptorTimeoutMs": 45000
+}
+```
+
+!!! warning "Users notice the wait"
+    The interceptor runs **before** the LLM call, so every millisecond of interceptor work is a millisecond of visible silence before the first streamed token. Ship the tightest timeout that still accommodates your worst case, not the largest value you can get away with.
+
+### What happens on timeout
+
+When your handler exceeds the budget, the host:
+
+1. Rejects the pending RPC with an `Interceptor timeout from <your_id> (Ns)` error
+2. Logs `[Spindle] Interceptor error from <your_id>:` with the rejection
+3. **Passes the last-known message list through** to the next interceptor (or to the LLM if you were last)
+
+This means a partial failure in your extension will never block the user's generation — it just means your modifications didn't land. Design your interceptor so that a timeout is a graceful no-op rather than a corrupted prompt.

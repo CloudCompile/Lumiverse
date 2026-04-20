@@ -1,7 +1,16 @@
 import { join } from "path";
 import { existsSync, rmSync } from "fs";
 import { runGit, getUpstreamRef, getCurrentBranch } from "./lib/git.js";
-import { PROJECT_ROOT, AVAILABLE_BRANCHES } from "./lib/constants.js";
+import {
+  PROJECT_ROOT,
+  AVAILABLE_BRANCHES,
+  TIMEOUT_GIT_FETCH_MS,
+  TIMEOUT_GIT_PULL_MS,
+  TIMEOUT_GIT_CHECKOUT_MS,
+  TIMEOUT_BUN_INSTALL_MS,
+  TIMEOUT_BUN_BUILD_MS,
+} from "./lib/constants.js";
+import { spawnAsync } from "./lib/spawn-async.js";
 
 export interface UpdateState {
   available: boolean;
@@ -23,14 +32,14 @@ export async function checkForUpdates(): Promise<UpdateState> {
     return { available: false, commitsBehind: 0, latestMessage: "" };
   }
 
-  // Async git fetch
-  const fetchProc = Bun.spawn(["git", "fetch", "--quiet"], {
+  // Bounded fetch — a dead remote must not stall the periodic update check.
+  const fetch = await spawnAsync(["git", "fetch", "--quiet"], {
     cwd: PROJECT_ROOT,
-    stdout: "ignore",
-    stderr: "ignore",
+    timeoutMs: TIMEOUT_GIT_FETCH_MS,
+    ignoreStdout: true,
   });
-  const fetchCode = await fetchProc.exited;
-  if (fetchCode !== 0) {
+  if (fetch.exitCode !== 0) {
+    if (fetch.timedOut) log("Update check: git fetch timed out.");
     return { available: false, commitsBehind: 0, latestMessage: "" };
   }
 
@@ -87,30 +96,21 @@ export async function applyUpdate(
 
   // Pull latest
   log("Pulling latest changes...");
-  const pullProc = Bun.spawn(["git", "pull", "--ff-only"], {
+  const pull = await spawnAsync(["git", "pull", "--ff-only"], {
     cwd: PROJECT_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs: TIMEOUT_GIT_PULL_MS,
   });
-  const pullOut = await new Response(pullProc.stdout).text();
-  const pullErr = await new Response(pullProc.stderr).text();
-  const pullCode = await pullProc.exited;
 
-  if (pullCode !== 0) {
-    log(`Update failed: ${pullErr.trim() || pullOut.trim()}`);
-    // Rebuild frontend to restore deleted dist
-    log("Rebuilding frontend to restore dist...");
-    const recoveryBuild = Bun.spawn(["bun", "run", "build"], {
-      cwd: frontendDir,
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    await recoveryBuild.exited;
-    await startServer();
-    throw new Error(`git pull failed: ${pullErr.trim() || pullOut.trim()}`);
+  if (pull.exitCode !== 0) {
+    const reason = pull.timedOut
+      ? `git pull timed out after ${TIMEOUT_GIT_PULL_MS / 1000}s`
+      : pull.stderr.trim() || pull.stdout.trim();
+    log(`Update failed: ${reason}`);
+    await recoverFrontendAndStart(frontendDir, startServer);
+    throw new Error(`git pull failed: ${reason}`);
   }
 
-  for (const line of pullOut.trim().split("\n")) {
+  for (const line of pull.stdout.trim().split("\n")) {
     if (line.trim()) log(`  ${line.trim()}`);
   }
 
@@ -151,51 +151,49 @@ export async function switchBranch(
   Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
 
   // Delete frontend/dist
-  const frontendDistDir = join(PROJECT_ROOT, "frontend", "dist");
+  const frontendDir = join(PROJECT_ROOT, "frontend");
+  const frontendDistDir = join(frontendDir, "dist");
   if (existsSync(frontendDistDir)) {
     log("Removing frontend/dist...");
     rmSync(frontendDistDir, { recursive: true, force: true });
   }
 
-  // Checkout
-  const checkout = runGit("checkout", target);
-  if (!checkout.ok) {
-    log(`Failed to checkout '${target}': ${checkout.out}`);
-    // Rebuild frontend to restore deleted dist
-    log("Rebuilding frontend to restore dist...");
-    const recoveryBuild = Bun.spawn(["bun", "run", "build"], {
-      cwd: join(PROJECT_ROOT, "frontend"),
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    await recoveryBuild.exited;
-    await startServer();
-    throw new Error(`git checkout failed: ${checkout.out}`);
+  // Checkout (bounded — a dirty working tree shouldn't have survived the
+  // stash above, but a stuck index lock or slow disk could still hang).
+  const checkout = await spawnAsync(["git", "checkout", target], {
+    cwd: PROJECT_ROOT,
+    timeoutMs: TIMEOUT_GIT_CHECKOUT_MS,
+  });
+  if (checkout.exitCode !== 0) {
+    const reason = checkout.timedOut
+      ? `git checkout timed out after ${TIMEOUT_GIT_CHECKOUT_MS / 1000}s`
+      : checkout.stderr.trim() || checkout.stdout.trim();
+    log(`Failed to checkout '${target}': ${reason}`);
+    await recoverFrontendAndStart(frontendDir, startServer);
+    throw new Error(`git checkout failed: ${reason}`);
   }
 
   log(`Checked out '${target}'.`);
 
-  // Pull latest
+  // Pull latest (non-fatal — checkout already succeeded)
   log("Pulling latest changes...");
-  const pullProc = Bun.spawn(["git", "pull", "--ff-only"], {
+  const pull = await spawnAsync(["git", "pull", "--ff-only"], {
     cwd: PROJECT_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs: TIMEOUT_GIT_PULL_MS,
   });
-  const pullOut = await new Response(pullProc.stdout).text();
-  const pullErr = await new Response(pullProc.stderr).text();
-  const pullCode = await pullProc.exited;
 
-  if (pullCode !== 0) {
-    log(`Pull failed (non-fatal): ${pullErr.trim() || pullOut.trim()}`);
+  if (pull.exitCode !== 0) {
+    const reason = pull.timedOut
+      ? `git pull timed out after ${TIMEOUT_GIT_PULL_MS / 1000}s`
+      : pull.stderr.trim() || pull.stdout.trim();
+    log(`Pull failed (non-fatal): ${reason}`);
   } else {
-    for (const line of pullOut.trim().split("\n").filter((l: string) => l.trim())) {
+    for (const line of pull.stdout.trim().split("\n").filter((l: string) => l.trim())) {
       log(`  ${line.trim()}`);
     }
   }
 
   // Install and rebuild
-  const frontendDir = join(PROJECT_ROOT, "frontend");
   await installAndBuild(frontendDir);
 
   log(`Branch switch complete. Now on '${target}'. Restarting server...`);
@@ -204,36 +202,58 @@ export async function switchBranch(
 
 async function installAndBuild(frontendDir: string): Promise<void> {
   log("Installing backend dependencies...");
-  const backendInstall = Bun.spawn(["bun", "install"], {
+  const backend = await spawnAsync(["bun", "install"], {
     cwd: PROJECT_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs: TIMEOUT_BUN_INSTALL_MS,
   });
-  await backendInstall.exited;
-  log("Backend dependencies updated.");
+  if (backend.exitCode !== 0) {
+    const reason = backend.timedOut
+      ? `timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
+      : backend.stderr.trim() || backend.stdout.trim() || "unknown error";
+    log(`Backend install failed: ${reason}`);
+  } else {
+    log("Backend dependencies updated.");
+  }
 
   log("Installing frontend dependencies...");
-  const feInstall = Bun.spawn(["bun", "install"], {
+  const frontend = await spawnAsync(["bun", "install"], {
     cwd: frontendDir,
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs: TIMEOUT_BUN_INSTALL_MS,
   });
-  await feInstall.exited;
-  log("Frontend dependencies updated.");
+  if (frontend.exitCode !== 0) {
+    const reason = frontend.timedOut
+      ? `timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
+      : frontend.stderr.trim() || frontend.stdout.trim() || "unknown error";
+    log(`Frontend install failed: ${reason}`);
+  } else {
+    log("Frontend dependencies updated.");
+  }
 
   log("Rebuilding frontend...");
-  const buildProc = Bun.spawn(["bun", "run", "build"], {
+  const build = await spawnAsync(["bun", "run", "build"], {
     cwd: frontendDir,
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs: TIMEOUT_BUN_BUILD_MS,
   });
-  const buildOut = await new Response(buildProc.stdout).text();
-  const buildErr = await new Response(buildProc.stderr).text();
-  const buildCode = await buildProc.exited;
-
-  if (buildCode !== 0) {
-    log(`Frontend build failed: ${buildErr.trim() || buildOut.trim()}`);
+  if (build.exitCode !== 0) {
+    const reason = build.timedOut
+      ? `timed out after ${TIMEOUT_BUN_BUILD_MS / 1000}s`
+      : build.stderr.trim() || build.stdout.trim() || "unknown error";
+    log(`Frontend build failed: ${reason}`);
   } else {
     log("Frontend rebuilt successfully.");
   }
+}
+
+/** Rebuild frontend (best-effort) and restart the server after a git failure. */
+async function recoverFrontendAndStart(
+  frontendDir: string,
+  startServer: () => Promise<void>
+): Promise<void> {
+  log("Rebuilding frontend to restore dist...");
+  await spawnAsync(["bun", "run", "build"], {
+    cwd: frontendDir,
+    timeoutMs: TIMEOUT_BUN_BUILD_MS,
+    ignoreStdout: true,
+  });
+  await startServer();
 }

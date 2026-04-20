@@ -1,4 +1,5 @@
 import type { LlmMessageDTO } from "lumiverse-spindle-types";
+import { DEFAULT_INTERCEPTOR_TIMEOUT_MS } from "../services/spindle-settings.service";
 
 export interface InterceptorResult {
   messages: LlmMessageDTO[];
@@ -9,6 +10,14 @@ export interface Interceptor {
   extensionId: string;
   userId?: string | null;
   priority: number; // lower = runs first
+  /**
+   * Called immediately before each invocation to determine the wall-clock
+   * budget for this interceptor. Resolving per-run (instead of at
+   * registration) lets user-level `spindleSettings.interceptorTimeoutMs`
+   * changes propagate live without requiring extensions to re-register.
+   * Falls back to `DEFAULT_INTERCEPTOR_TIMEOUT_MS` if omitted.
+   */
+  resolveTimeoutMs?: () => number;
   handler: (
     messages: LlmMessageDTO[],
     context: unknown
@@ -46,6 +55,18 @@ class InterceptorPipeline {
       if (interceptor.userId && interceptor.userId !== userId) {
         continue;
       }
+      let timeoutMs = DEFAULT_INTERCEPTOR_TIMEOUT_MS;
+      if (interceptor.resolveTimeoutMs) {
+        try {
+          const resolved = interceptor.resolveTimeoutMs();
+          if (Number.isFinite(resolved) && resolved > 0) timeoutMs = resolved;
+        } catch (err) {
+          console.warn(
+            `[Spindle] Interceptor timeout resolver threw for ${interceptor.extensionId}:`,
+            err
+          );
+        }
+      }
       try {
         const output = await Promise.race([
           interceptor.handler(result, context),
@@ -54,10 +75,10 @@ class InterceptorPipeline {
               () =>
                 reject(
                   new Error(
-                    `Interceptor from ${interceptor.extensionId} timed out (10s)`
+                    `Interceptor from ${interceptor.extensionId} timed out (${Math.round(timeoutMs / 1000)}s)`
                   )
                 ),
-              10_000
+              timeoutMs
             )
           ),
         ]);

@@ -34,6 +34,7 @@ Every extension needs a `spindle.json` at the repository root.
 | `entry_frontend` | No | Path to frontend entry. Default: `"dist/frontend.js"` |
 | `minimum_lumiverse_version` | No | Minimum Lumiverse version required |
 | `storage_seed_files` | No | Files/directories to copy into extension storage on install (see below) |
+| `interceptorTimeoutMs` | No | Per-extension override (in milliseconds) for how long the host will wait for this extension's interceptor to return. See [Interceptor Timeout](#interceptor-timeout) below |
 
 ## Storage Seed Files
 
@@ -55,3 +56,25 @@ Seed files let you ship default data (config templates, databases, assets) that 
 | `to` | `string` | same as `from` | Destination path relative to extension storage root |
 | `overwrite` | `boolean` | `false` | If `true`, overwrite existing files on update |
 | `required` | `boolean` | `false` | If `true`, fail installation when the source file is missing |
+
+## Interceptor Timeout
+
+Extensions that register a pre-generation interceptor are bound by a wall-clock budget. The host resolves this budget **per run**, so both the manifest value and the user's global Spindle setting take effect on the next generation without requiring the extension to re-register.
+
+Resolution order (highest priority first):
+
+1. `interceptorTimeoutMs` in your manifest
+2. The user's `spindleSettings.interceptorTimeoutMs` setting (configurable in the Spindle panel)
+3. Default: `10000` ms
+
+All values are clamped to `[1000, 300000]` ms (1 second to 5 minutes).
+
+```json
+{
+  "identifier": "my_retrieval_extension",
+  "permissions": ["interceptor"],
+  "interceptorTimeoutMs": 45000
+}
+```
+
+Use this when your interceptor performs real work before the LLM call — multi-step retrieval, graph traversal, external API lookups, or controller-driven context assembly — and needs a larger budget than the 10 second default. See [Interceptors → Timeout](../backend-api/interceptors.md#timeout) for the full behavior, including what happens when the budget is exceeded.

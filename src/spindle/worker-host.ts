@@ -40,6 +40,7 @@ import {
 import * as worldBooksSvc from "../services/world-books.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
+import { resolveInterceptorTimeout } from "../services/spindle-settings.service";
 import * as colorExtractionSvc from "../services/color-extraction.service";
 import { generateThemeVariables as generateThemeVariablesFn } from "../utils/theme-engine";
 import * as promptAssemblySvc from "../services/prompt-assembly.service";
@@ -1397,13 +1398,25 @@ export class WorkerHost {
       return;
     }
 
+    const scopedUserId = this.getScopedUserId();
+    // Resolve per-run so user-level spindleSettings changes (and any future
+    // hot-reloaded manifest changes) propagate without requiring the
+    // extension to tear down and re-register its interceptor.
+    const resolveTimeoutMs = () =>
+      resolveInterceptorTimeout(
+        this.manifest.interceptorTimeoutMs,
+        this.getScopedUserId(),
+      );
+
     this.interceptorUnregister?.();
     this.interceptorUnregister = interceptorPipeline.register({
       extensionId: this.extensionId,
-      userId: this.getScopedUserId(),
+      userId: scopedUserId,
       priority: priority ?? 100,
+      resolveTimeoutMs,
       handler: async (messages, context) => {
         const requestId = crypto.randomUUID();
+        const timeoutMs = resolveTimeoutMs();
 
         this.postToWorker({
           type: "intercept_request",
@@ -1417,10 +1430,10 @@ export class WorkerHost {
             this.pendingRequests.delete(requestId);
             reject(
               new Error(
-                `Interceptor timeout from ${this.manifest.identifier}`
+                `Interceptor timeout from ${this.manifest.identifier} (${Math.round(timeoutMs / 1000)}s)`
               )
             );
-          }, 10_000);
+          }, timeoutMs);
 
           this.pendingRequests.set(requestId, {
             resolve: (val) => {

@@ -3,7 +3,14 @@ import { existsSync, rmSync } from "fs";
 import { sendToServer, stopServer, startServer, restartServer } from "./server-manager.js";
 import { checkForUpdates, applyUpdate, switchBranch } from "./git-ops.js";
 import { readEnvConfig, writeTrustAnyOrigin } from "./env-config.js";
-import { PROJECT_ROOT } from "./lib/constants.js";
+import {
+  PROJECT_ROOT,
+  AVAILABLE_BRANCHES,
+  TIMEOUT_BUN_CACHE_MS,
+  TIMEOUT_BUN_INSTALL_MS,
+  TIMEOUT_BUN_BUILD_MS,
+} from "./lib/constants.js";
+import { spawnAsync } from "./lib/spawn-async.js";
 
 /** Cached update state from the last check. */
 let lastUpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
@@ -65,6 +72,11 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         break;
       }
       operationInProgress = "update";
+      // Ack before killing the server. The fetch that initiated this request
+      // will otherwise die along with the old server process — the frontend
+      // relies on WS reconnect to drive the rest of the UX, so an early
+      // success is what an "expected" restart looks like on the wire.
+      respond(id, true, { message: "Applying update..." });
       try {
         progress(id, "update", "Starting update...");
         await applyUpdate(
@@ -72,9 +84,6 @@ export async function handleIPCMessage(msg: any): Promise<void> {
           () => { startServer(isDev); return Promise.resolve(); }
         );
         lastUpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
-        // Note: the server was restarted, so this response goes to the NEW process.
-        // The old HTTP request will have been abandoned when the server stopped.
-        // The new server will not have the pending request. This is expected.
       } catch (err) {
         // Server should be back up after error recovery in applyUpdate
       } finally {
@@ -93,7 +102,15 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         respond(id, false, undefined, "No target branch specified");
         break;
       }
+      // Validate the target before killing the server. The inner switchBranch()
+      // has the same guard, but throwing from inside would leave the IPC
+      // request hanging the full 5-minute timeout with no user feedback.
+      if (!AVAILABLE_BRANCHES.includes(target)) {
+        respond(id, false, undefined, `Invalid branch: ${target}. Available: ${AVAILABLE_BRANCHES.join(", ")}`);
+        break;
+      }
       operationInProgress = "branch-switch";
+      respond(id, true, { message: `Switching to ${target}...` });
       try {
         progress(id, "branch-switch", `Switching to ${target}...`);
         await switchBranch(
@@ -101,7 +118,6 @@ export async function handleIPCMessage(msg: any): Promise<void> {
           () => stopServer(),
           () => { startServer(isDev); return Promise.resolve(); }
         );
-        // Same note as apply-update: response goes to new server process
       } catch (err) {
         // Server should be back up after error recovery
       } finally {
@@ -121,14 +137,16 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         break;
       }
       operationInProgress = "remote-toggle";
+      // Ack before .env write + restart so the caller isn't left waiting on
+      // a dead socket; the frontend will pick up the WS disconnect.
+      respond(id, true, { enabled: enable, message: enable ? "Enabling remote mode..." : "Disabling remote mode..." });
       try {
         progress(id, "remote-toggle", enable ? "Enabling remote mode..." : "Disabling remote mode...");
         await writeTrustAnyOrigin(enable);
         // Restart for .env changes to take effect
         await restartServer(isDev);
-        // Response goes to new process after restart
       } catch (err) {
-        respond(id, false, undefined, err instanceof Error ? err.message : "Toggle failed");
+        // Restart paths handle their own recovery; the ack already went out.
       } finally {
         operationInProgress = null;
       }
@@ -162,15 +180,16 @@ export async function handleIPCMessage(msg: any): Promise<void> {
     case "clear-cache": {
       try {
         progress(id, "clear-cache", "Clearing package cache...");
-        const proc = Bun.spawn(["bun", "pm", "cache", "rm"], {
+        const result = await spawnAsync(["bun", "pm", "cache", "rm"], {
           cwd: PROJECT_ROOT,
-          stdout: "ignore",
-          stderr: "pipe",
+          timeoutMs: TIMEOUT_BUN_CACHE_MS,
+          ignoreStdout: true,
         });
-        const stderr = await new Response(proc.stderr).text();
-        const code = await proc.exited;
-        if (code !== 0) {
-          respond(id, false, undefined, stderr.trim() || "Cache clear failed");
+        if (result.exitCode !== 0) {
+          const reason = result.timedOut
+            ? `timed out after ${TIMEOUT_BUN_CACHE_MS / 1000}s`
+            : result.stderr.trim() || "Cache clear failed";
+          respond(id, false, undefined, reason);
         } else {
           respond(id, true, { message: "Package cache cleared" });
         }
@@ -183,23 +202,31 @@ export async function handleIPCMessage(msg: any): Promise<void> {
     case "ensure-deps": {
       try {
         progress(id, "ensure-deps", "Installing backend dependencies...");
-        const backendInstall = Bun.spawn(["bun", "install"], {
+        const backend = await spawnAsync(["bun", "install"], {
           cwd: PROJECT_ROOT,
-          stdout: "pipe",
-          stderr: "pipe",
+          timeoutMs: TIMEOUT_BUN_INSTALL_MS,
         });
-        await new Response(backendInstall.stdout).text();
-        await backendInstall.exited;
+        if (backend.exitCode !== 0) {
+          const reason = backend.timedOut
+            ? `backend install timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
+            : backend.stderr.trim() || "backend install failed";
+          respond(id, false, undefined, reason);
+          break;
+        }
 
         progress(id, "ensure-deps", "Installing frontend dependencies...");
         const frontendDir = join(PROJECT_ROOT, "frontend");
-        const frontendInstall = Bun.spawn(["bun", "install"], {
+        const frontend = await spawnAsync(["bun", "install"], {
           cwd: frontendDir,
-          stdout: "pipe",
-          stderr: "pipe",
+          timeoutMs: TIMEOUT_BUN_INSTALL_MS,
         });
-        await new Response(frontendInstall.stdout).text();
-        await frontendInstall.exited;
+        if (frontend.exitCode !== 0) {
+          const reason = frontend.timedOut
+            ? `frontend install timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
+            : frontend.stderr.trim() || "frontend install failed";
+          respond(id, false, undefined, reason);
+          break;
+        }
 
         respond(id, true, { message: "Dependencies installed successfully" });
       } catch (err) {
@@ -214,6 +241,10 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         break;
       }
       operationInProgress = "rebuild";
+      // Ack now so the caller's fetch resolves before we kill the server.
+      // Without this, the HTTP request dies along with the old server and
+      // the frontend only finds out via the WS reconnect path.
+      respond(id, true, { message: "Rebuilding frontend..." });
       try {
         const frontendDir = join(PROJECT_ROOT, "frontend");
         const distDir = join(frontendDir, "dist");
@@ -225,23 +256,21 @@ export async function handleIPCMessage(msg: any): Promise<void> {
           rmSync(distDir, { recursive: true, force: true });
         }
 
-        const buildProc = Bun.spawn(["bun", "run", "build"], {
+        const build = await spawnAsync(["bun", "run", "build"], {
           cwd: frontendDir,
-          stdout: "pipe",
-          stderr: "pipe",
+          timeoutMs: TIMEOUT_BUN_BUILD_MS,
         });
-        const buildOut = await new Response(buildProc.stdout).text();
-        const buildErr = await new Response(buildProc.stderr).text();
-        const buildCode = await buildProc.exited;
 
-        if (buildCode !== 0) {
-          console.error(`Frontend build failed: ${buildErr.trim() || buildOut.trim()}`);
+        if (build.exitCode !== 0) {
+          const reason = build.timedOut
+            ? `timed out after ${TIMEOUT_BUN_BUILD_MS / 1000}s`
+            : build.stderr.trim() || build.stdout.trim() || "unknown error";
+          console.error(`Frontend build failed: ${reason}`);
         }
 
         startServer(isDev);
-        // Response goes to new server process after restart
       } catch (err) {
-        // Try to restart anyway
+        // Try to restart anyway so the server doesn't stay down.
         try { startServer(isDev); } catch {}
       } finally {
         operationInProgress = null;
