@@ -19,6 +19,12 @@ import type {
 /** Category marker character used in ST preset names */
 export const CATEGORY_MARKER = '\u2501' // ━
 
+/** NemoPresetExt wiki-style category pattern: ===Name=== */
+export const WIKI_CATEGORY_PATTERN = /^===(.+)===$/
+
+/** NemoPresetExt wiki-style subcategory pattern: <Name> */
+export const WIKI_SUBCATEGORY_PATTERN = /^<([^>]+)>$/
+
 /** Maps ST preset well-known identifiers → internal marker types */
 export const ST_IDENTIFIER_TO_MARKER: Record<string, string> = {
   chatHistory: 'chat_history',

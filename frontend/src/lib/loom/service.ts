@@ -21,6 +21,8 @@ import {
   PROVIDER_PARAMS,
   DEFAULT_PROVIDER_PARAMS,
   CATEGORY_MARKER,
+  WIKI_CATEGORY_PATTERN,
+  WIKI_SUBCATEGORY_PATTERN,
   ST_IDENTIFIER_TO_MARKER,
   MARKER_TO_ST_IDENTIFIER,
 } from './constants'
@@ -453,7 +455,17 @@ function convertSTPromptToBlock(p: STPrompt, enabled: boolean): PromptBlock {
     return block
   }
 
-  const isCategory = p.name?.startsWith(CATEGORY_MARKER)
+  // NemoPresetExt wiki subcategories (<Name>) flatten to category blocks —
+  // Lumiverse has only one level of category nesting.
+  const rawName = p.name || 'Untitled'
+  const wikiCategoryMatch = rawName.match(WIKI_CATEGORY_PATTERN)
+  const wikiSubCategoryMatch = !wikiCategoryMatch ? rawName.match(WIKI_SUBCATEGORY_PATTERN) : null
+  const isLegacyCategory = rawName.startsWith(CATEGORY_MARKER)
+  const isCategory = isLegacyCategory || !!wikiCategoryMatch || !!wikiSubCategoryMatch
+
+  let displayName = rawName
+  if (wikiCategoryMatch) displayName = wikiCategoryMatch[1].trim()
+  else if (wikiSubCategoryMatch) displayName = wikiSubCategoryMatch[1].trim()
 
   let position: PromptBlock['position'] = 'pre_history'
   let depth = 0
@@ -463,7 +475,7 @@ function convertSTPromptToBlock(p: STPrompt, enabled: boolean): PromptBlock {
   }
 
   return createBlock({
-    name: p.name || 'Untitled',
+    name: displayName,
     content: p.content || '',
     role: (p.role as PromptBlock['role']) || 'system',
     enabled,
