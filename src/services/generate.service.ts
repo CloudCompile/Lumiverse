@@ -2142,6 +2142,12 @@ async function prepareQuietCall(
     delete (mergedParams as any).thinkingConfig;
     delete (mergedParams as any).reasoning;
     delete (mergedParams as any).reasoning_effort;
+    // NanoGPT: the `:thinking` model suffix activates reasoning server-side
+    // regardless of parameters. Explicitly set `reasoning.exclude` so both
+    // `delta.reasoning` and `message.reasoning` are omitted from the response.
+    if (provider.name === "nanogpt") {
+      (mergedParams as any).reasoning = { exclude: true };
+    }
   }
 
   // Inject connection-level metadata flags into parameters (e.g. use_responses_api)

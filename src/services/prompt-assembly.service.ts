@@ -4138,6 +4138,13 @@ function buildParameters(
     delete params.thinkingConfig;
     delete params.reasoning;
     delete params.reasoning_effort;
+    // NanoGPT: the `:thinking` model suffix activates reasoning server-side
+    // regardless of parameters, so deletion alone is not enough to suppress
+    // it. Explicitly set `reasoning.exclude` so both `delta.reasoning` and
+    // `message.reasoning` are omitted from the response.
+    if (providerName === "nanogpt") {
+      params.reasoning = { exclude: true };
+    }
   }
 
   return params;
@@ -4156,7 +4163,11 @@ function buildParameters(
  *                unset, so users must opt in to 'summarized' to receive summary text.
  * - Google:      thinkingConfig.thinkingLevel (3.x) or thinkingBudget (2.5)
  * - OpenRouter:  reasoning: { effort } with values: none/minimal/low/medium/high/xhigh
- * - NanoGPT:     reasoning_effort (OpenAI-compat) with values: none/minimal/low/medium/high
+ * - NanoGPT:     reasoning: { effort } with values: none/minimal/low/medium/high.
+ *                Object form is used so `reasoning.exclude = true` can suppress
+ *                thinking on `:thinking`-suffixed models when the user disables
+ *                API reasoning (the `:thinking` suffix activates reasoning
+ *                server-side regardless of `reasoning_effort`).
  * - Moonshot:    thinking: { type: "enabled" } — toggle-only, effort ignored
  * - Z.AI:        thinking: { type: "enabled" } — toggle-only, effort ignored
  * - Others:      reasoning: { effort } (generic OpenAI-compatible passthrough)
@@ -4216,12 +4227,19 @@ export function injectReasoningParams(
       params.reasoning = { effort: validEfforts.has(effort) ? effort : "high" };
     }
   } else if (providerName === "nanogpt") {
-    // NanoGPT: OpenAI-compatible reasoning_effort parameter
-    // Valid: none, minimal, low, medium, high
-    if (!params.reasoning_effort) {
-      const validEfforts = new Set(["none", "minimal", "low", "medium", "high"]);
-      params.reasoning_effort = validEfforts.has(effort) ? effort : "high";
+    // NanoGPT: object form `reasoning: { effort }` — docs state top-level
+    // `reasoning_effort` and nested `reasoning.effort` are equivalent, but the
+    // object form is the only one that also exposes `exclude` (strip reasoning
+    // from the response) and `delta_field` (legacy `reasoning_content` streams).
+    // Valid efforts: none, minimal, low, medium, high.
+    const validEfforts = new Set(["none", "minimal", "low", "medium", "high"]);
+    const mappedEffort = validEfforts.has(effort) ? effort : "high";
+    const existing = (params.reasoning && typeof params.reasoning === "object") ? params.reasoning : {};
+    if (existing.effort === undefined) {
+      params.reasoning = { ...existing, effort: mappedEffort };
     }
+    // Avoid sending both forms — the object form we just set is authoritative.
+    delete params.reasoning_effort;
   } else if (providerName === "moonshot" || providerName === "zai") {
     // Toggle-only providers: thinking is enabled/disabled, no effort granularity.
     // The "Request Reasoning" toggle controls this — effort is ignored.
