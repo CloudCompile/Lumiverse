@@ -29,7 +29,9 @@ const NAME_VAR_KEYS = ['--char-name-dark', '--char-name-light']
 
 export function useCharacterTheme() {
   const characterAware = useStore((s) => (s.theme as ThemeConfig | null)?.characterAware === true)
-  const hasExtensionOverrides = useStore((s) => Object.keys(s.extensionThemeOverrides).length > 0)
+  const hasExtensionOverrides = useStore((s) =>
+    Object.keys(s.extensionThemeOverrides).some((id) => !s.mutedExtensionThemes[id])
+  )
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const characters = useStore((s) => s.characters)

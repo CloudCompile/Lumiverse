@@ -4,10 +4,30 @@ import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/loader'
 
+const MUTED_THEMES_KEY = 'lumiverse:mutedExtensionThemes'
+
+function loadMutedThemes(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(MUTED_THEMES_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const result: Record<string, boolean> = {}
+    for (const [id, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (v === true) result[id] = true
+    }
+    return result
+  } catch { return {} }
+}
+
+function saveMutedThemes(muted: Record<string, boolean>) {
+  try { localStorage.setItem(MUTED_THEMES_KEY, JSON.stringify(muted)) } catch {}
+}
+
 export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
   extensionThemeOverrides: {},
-  mutedExtensionThemes: {},
+  mutedExtensionThemes: loadMutedThemes(),
   extensionOperationStatus: null,
   bulkUpdateStatus: null,
   spindlePrivileged: false,
@@ -60,9 +80,16 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   removeExtension: async (id: string) => {
     await spindleApi.remove(id)
     await unloadFrontendExtension(id)
-    set((state) => ({
-      extensions: state.extensions.filter((e) => e.id !== id),
-    }))
+    set((state) => {
+      const { [id]: _o, ...overridesRest } = state.extensionThemeOverrides
+      const { [id]: _m, ...mutedRest } = state.mutedExtensionThemes
+      if (id in state.mutedExtensionThemes) saveMutedThemes(mutedRest)
+      return {
+        extensions: state.extensions.filter((e) => e.id !== id),
+        extensionThemeOverrides: overridesRest,
+        mutedExtensionThemes: mutedRest,
+      }
+    })
   },
 
   enableExtension: async (id: string) => {
@@ -265,17 +292,16 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   muteExtensionTheme: (extensionId: string) => {
     set((state) => {
-      const { [extensionId]: _, ...rest } = state.extensionThemeOverrides
-      return {
-        mutedExtensionThemes: { ...state.mutedExtensionThemes, [extensionId]: true },
-        extensionThemeOverrides: rest,
-      }
+      const next = { ...state.mutedExtensionThemes, [extensionId]: true }
+      saveMutedThemes(next)
+      return { mutedExtensionThemes: next }
     })
   },
 
   unmuteExtensionTheme: (extensionId: string) => {
     set((state) => {
       const { [extensionId]: _, ...rest } = state.mutedExtensionThemes
+      saveMutedThemes(rest)
       return { mutedExtensionThemes: rest }
     })
   },

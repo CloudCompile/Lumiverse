@@ -15,7 +15,9 @@ import styles from './ThemePanel.module.css'
 export default function ThemePanel() {
   const theme = useStore((s) => s.theme) as ThemeConfig | null
   const setTheme = useStore((s) => s.setTheme)
-  const hasExtensionOverrides = useStore((s) => Object.keys(s.extensionThemeOverrides).length > 0)
+  const hasExtensionOverrides = useStore((s) =>
+    Object.keys(s.extensionThemeOverrides).some((id) => !s.mutedExtensionThemes[id])
+  )
 
   const openModal = useStore((s) => s.openModal)
   const current = theme ?? DEFAULT_THEME

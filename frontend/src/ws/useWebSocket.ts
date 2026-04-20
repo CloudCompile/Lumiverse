@@ -678,9 +678,10 @@ export function useWebSocket() {
       }),
 
       wsClient.on(EventType.SPINDLE_THEME_OVERRIDES, (payload: { extensionId: string; extensionName: string; overrides: { paletteAccent?: { h: number; s: number; l: number }; variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } } | null }) => {
-        // If the user has muted this extension's theme, silently drop the update
-        if (store.getState().mutedExtensionThemes[payload.extensionId]) return
-
+        // Always record the latest payload so re-enabling a muted theme applies
+        // immediately without waiting for the extension to re-fire. The theme
+        // applicator skips overrides whose extensionId is in mutedExtensionThemes,
+        // so muted entries stay invisible until the user re-enables them.
         const hasVars = payload.overrides?.variables && Object.keys(payload.overrides.variables).length > 0
         const hasModeVars = payload.overrides?.variablesByMode && (
           Object.keys(payload.overrides.variablesByMode.dark ?? {}).length > 0 ||
