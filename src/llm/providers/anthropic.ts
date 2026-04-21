@@ -276,8 +276,10 @@ export class AnthropicProvider implements LlmProvider {
     if (params.thinking) {
       body.thinking = params.thinking;
     }
-    // Adaptive thinking effort: { effort: "low" | "medium" | "high" | "max" }
-    if (params.output_config) {
+    // `output_config` only applies to Anthropic's native thinking modes. If a
+    // caller bypasses the higher-level reasoning sanitizers, drop stray
+    // `output_config` so prompt-level CoTs can still pass through as plain text.
+    if (params.output_config && body.thinking) {
       body.output_config = params.output_config;
     }
 
