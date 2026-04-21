@@ -37,11 +37,26 @@ export function createDrawerTabHandle(
     id: tabId,
     extensionId,
     title: options.title,
+    shortName: options.shortName,
+    description: options.description,
+    keywords: options.keywords,
+    headerTitle: options.headerTitle,
     iconUrl: options.iconUrl,
     iconSvg: options.iconSvg,
     badge: null,
     root,
   })
+
+  const unsubStore = useStore.subscribe(
+    (s) => s.drawerTab,
+    (current, previous) => {
+      if (current === tabId && previous !== tabId) {
+        for (const handler of activateHandlers) {
+          try { handler() } catch { /* no-op */ }
+        }
+      }
+    },
+  )
 
   return {
     root,
@@ -59,11 +74,9 @@ export function createDrawerTabHandle(
       const store = getStore()
       store.setDrawerTab(tabId)
       store.openDrawer(tabId)
-      for (const handler of activateHandlers) {
-        try { handler() } catch { /* no-op */ }
-      }
     },
     destroy() {
+      unsubStore()
       getStore().unregisterDrawerTab(tabId)
       activateHandlers.clear()
     },
