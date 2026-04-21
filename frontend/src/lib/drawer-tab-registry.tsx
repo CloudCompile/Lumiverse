@@ -197,12 +197,12 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
   },
   {
     id: 'prompt',
-    shortName: 'Prompt',
-    tabName: 'Prompt Inspector',
-    tabDescription: 'View the assembled prompt and token breakdown',
+    shortName: 'Compose',
+    tabName: 'Composition',
+    tabDescription: 'Pick Lumia and Loom content, Sovereign Hand, and context filters',
     tabIcon: FileText,
-    tabHeaderTitle: 'Prompt',
-    keywords: ['prompt', 'context', 'tokens', 'breakdown', 'inspect', 'debug', 'assembly', 'dry run', 'preview', 'system', 'blocks'],
+    tabHeaderTitle: 'Composition',
+    keywords: ['composition', 'compose', 'lumia', 'loom', 'sovereign hand', 'context filters', 'narrative', 'selection', 'modes'],
     component: () => <PromptPanel />,
   },
   {
