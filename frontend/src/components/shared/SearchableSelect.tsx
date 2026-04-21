@@ -136,10 +136,17 @@ export default function SearchableSelect(props: SearchableSelectProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMulti, props.onChange])
 
-  // Close on outside pointer-down
+  // Close on outside pointer-down. `pointerdown` (not `mousedown`) is the
+  // unified event for mouse/touch/pen — Android Chrome dispatches synthetic
+  // mousedown events at coordinates that no longer match the trigger after
+  // the on-screen keyboard pushes the layout, causing the popover to dismiss
+  // the instant it opened. The openedAt guard kills the "same gesture closes
+  // what it just opened" race that some Android browsers fall into.
   useEffect(() => {
     if (!open) return
-    const handle = (e: MouseEvent) => {
+    const openedAt = performance.now()
+    const handle = (e: PointerEvent) => {
+      if (performance.now() - openedAt < 100) return
       const target = e.target as Node
       if (
         triggerRef.current &&
@@ -151,8 +158,8 @@ export default function SearchableSelect(props: SearchableSelectProps) {
         setSearch('')
       }
     }
-    document.addEventListener('mousedown', handle)
-    return () => document.removeEventListener('mousedown', handle)
+    document.addEventListener('pointerdown', handle)
+    return () => document.removeEventListener('pointerdown', handle)
   }, [open])
 
   const reposition = useCallback(() => {
