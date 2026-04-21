@@ -1,5 +1,6 @@
 import * as apiClient from './client'
 import type { ComfyUICapabilities } from './image-gen'
+import { generateUUID } from '@/lib/uuid'
 
 export interface DreamWeaverAlternateField {
   id: string
@@ -306,7 +307,7 @@ function normalizeAltFields(value: unknown): DreamWeaverAlternateField[] {
   return value.map((entry, index) => {
     const next = isRecord(entry) ? entry : null
     return {
-      id: typeof next?.id === 'string' && next.id.trim() ? next.id : crypto.randomUUID(),
+      id: typeof next?.id === 'string' && next.id.trim() ? next.id : generateUUID(),
       label:
         coerceString(next?.label).trim()
           ? coerceString(next?.label).trim()
@@ -322,7 +323,7 @@ function normalizeGreetings(value: unknown): DreamWeaverGreeting[] {
   return value.map((entry, index) => {
     const next = isRecord(entry) ? entry : null
     return {
-      id: typeof next?.id === 'string' && next.id.trim() ? next.id : crypto.randomUUID(),
+      id: typeof next?.id === 'string' && next.id.trim() ? next.id : generateUUID(),
       label:
         coerceString(next?.label).trim()
           ? coerceString(next?.label).trim()

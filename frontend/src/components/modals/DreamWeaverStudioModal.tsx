@@ -20,6 +20,7 @@ import { CloseButton } from '@/components/shared/CloseButton'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { Button } from '@/components/shared/FormComponents'
 import { ModalShell } from '@/components/shared/ModalShell'
+import { generateUUID } from '@/lib/uuid'
 import { toast } from '@/lib/toast'
 import { useStore } from '@/store'
 import type { ConnectionProfile, Persona } from '@/types/api'
@@ -82,7 +83,7 @@ function normalizeAltFields(value: unknown): DreamWeaverAlternateField[] {
   return value.map((entry, index) => {
     const next = entry as Partial<DreamWeaverAlternateField> | null
     return {
-      id: next?.id || crypto.randomUUID(),
+      id: next?.id || generateUUID(),
       label: next?.label?.trim() || `Variant ${index + 1}`,
       content: next?.content || '',
     }
@@ -94,7 +95,7 @@ function normalizeGreetings(value: unknown): DreamWeaverGreeting[] {
   return value.map((entry, index) => {
     const next = entry as Partial<DreamWeaverGreeting> | null
     return {
-      id: next?.id || crypto.randomUUID(),
+      id: next?.id || generateUUID(),
       label: next?.label?.trim() || `Greeting ${index + 1}`,
       content: next?.content || '',
     }
@@ -331,7 +332,7 @@ function VariantListEditor({
     onChange([
       ...items,
       {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         label: addLabel,
         content: '',
       },
