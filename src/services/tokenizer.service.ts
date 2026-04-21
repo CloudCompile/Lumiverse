@@ -3,6 +3,11 @@ import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCou
 import { getTextContent, type AssemblyBreakdownEntry, type LlmMessage } from "../llm/types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
 
+export interface TokenCountMessageLike {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
 /**
  * Validate a tokenizer resource URL before fetching. Owner-supplied, but still
  * should not reach private/internal hosts.
@@ -307,6 +312,17 @@ export async function countWithTokenizer(tokenizerId: string, text: string): Pro
   return instance.count(text);
 }
 
+export function flattenMessagesForTokenCount(messages: TokenCountMessageLike[]): string {
+  return messages.map((msg) => `${msg.role}\n${msg.content || ""}`).join("\n");
+}
+
+export async function countMessagesForModel(
+  modelId: string,
+  messages: TokenCountMessageLike[]
+): Promise<number | null> {
+  return await countForModel(modelId, flattenMessagesForTokenCount(messages));
+}
+
 export async function countBreakdown(
   modelId: string,
   breakdown: AssemblyBreakdownEntry[],
@@ -327,9 +343,9 @@ export async function countBreakdown(
       // Concatenate all messages into a single string and tokenize once.
       // Per-message encode() calls have significant per-call overhead (regex
       // preprocessing, BPE merges, array alloc) that compounds on slower runtimes.
-      const bulk = chatHistoryMessages
-        .map(msg => `${msg.role}\n${getTextContent(msg)}`)
-        .join("\n");
+      const bulk = flattenMessagesForTokenCount(
+        chatHistoryMessages.map((msg) => ({ role: msg.role, content: getTextContent(msg) }))
+      );
       tokens = countText(bulk);
     } else {
       tokens = countText(entry.content || "");

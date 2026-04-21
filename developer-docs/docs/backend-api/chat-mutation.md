@@ -115,6 +115,9 @@ A reasoning patch with no `metadata` patch still persists — the host writes th
 
 ## Hidden Messages
 
+!!! tip
+    `spindle.chat.getMessages(chatId)` returns normalized `{ role, content }` fields, so you can pass its result directly to [`spindle.tokens.countMessages()`](tokens.md#spindletokenscountmessagesmessages-options) when you want a server-side token count for the current chat transcript.
+
 The `hidden` flag is the same field that the built-in chat UI's "exclude from context" toggle controls. It lives on `message.extra.hidden` and is mirrored on every chat message event (`MESSAGE_SENT` / `MESSAGE_EDITED` / `MESSAGE_SWIPED`) inside the message's `extra` bag.
 
 **What hiding currently does:**

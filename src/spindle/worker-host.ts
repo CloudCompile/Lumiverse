@@ -41,10 +41,12 @@ import * as worldBooksSvc from "../services/world-books.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
 import { resolveInterceptorTimeout } from "../services/spindle-settings.service";
+import { getSidecarSettings } from "../services/sidecar-settings.service";
 import * as colorExtractionSvc from "../services/color-extraction.service";
 import { generateThemeVariables as generateThemeVariablesFn } from "../utils/theme-engine";
 import * as promptAssemblySvc from "../services/prompt-assembly.service";
 import * as embeddingsSvc from "../services/embeddings.service";
+import * as tokenizerSvc from "../services/tokenizer.service";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
 import { getImageProvider, getImageProviderList } from "../image-gen/registry";
 import "../image-gen/index";
@@ -81,6 +83,41 @@ import https from "node:https";
 import { join, resolve, relative, sep } from "path";
 
 const EPHEMERAL_MAX_FILES = 250;
+
+type TokenModelSource = "main" | "sidecar";
+
+type TokenCountResult = {
+  total_tokens: number;
+  model: string;
+  modelSource: TokenModelSource;
+  tokenizer_id: string | null;
+  tokenizer_name: string;
+  approximate: boolean;
+};
+
+type RuntimeWorkerToHost =
+  | WorkerToHost
+  | {
+      type: "tokens_count_text";
+      requestId: string;
+      text: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_messages";
+      requestId: string;
+      messages: Array<Pick<LlmMessageDTO, "role" | "content">>;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_chat";
+      requestId: string;
+      chatId: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    };
 
 let cachedBackendVersion: string | null = null;
 let cachedFrontendVersion: string | null = null;
@@ -376,7 +413,7 @@ export class WorkerHost {
     });
 
     this.worker.onmessage = (event) => {
-      this.handleMessage(event.data as WorkerToHost);
+      this.handleMessage(event.data as RuntimeWorkerToHost);
     };
 
     this.worker.onerror = (event) => {
@@ -649,7 +686,7 @@ export class WorkerHost {
     });
   }
 
-  private handleMessage(msg: WorkerToHost): void {
+  private handleMessage(msg: RuntimeWorkerToHost): void {
     switch (msg.type) {
       case "subscribe_event":
         this.handleSubscribeEvent(msg.event);
@@ -1084,6 +1121,16 @@ export class WorkerHost {
         break;
       case "version_get_frontend":
         this.handleVersionGetFrontend(msg.requestId);
+        break;
+      // ─── Token Counting (free tier) ───────────────────────────────────
+      case "tokens_count_text":
+        this.handleTokensCountText(msg.requestId, msg.text, msg.modelSource, msg.userId);
+        break;
+      case "tokens_count_messages":
+        this.handleTokensCountMessages(msg.requestId, msg.messages, msg.modelSource, msg.userId);
+        break;
+      case "tokens_count_chat":
+        this.handleTokensCountChat(msg.requestId, msg.chatId, msg.modelSource, msg.userId);
         break;
       // ─── Push Notifications (gated: "push_notification") ──────────────
       case "push_send":
@@ -5054,6 +5101,152 @@ export class WorkerHost {
         requestId,
         result: eventBus.isUserVisible(resolvedUserId),
       });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Token Counting (free tier) ─────────────────────────────────────
+
+  private normalizeTokenCountMessages(
+    messages: Array<Pick<LlmMessageDTO, "role" | "content">>
+  ): tokenizerSvc.TokenCountMessageLike[] {
+    if (!Array.isArray(messages)) {
+      throw new Error("messages must be an array");
+    }
+
+    return messages.map((message, index) => {
+      const role = message?.role;
+      const content = message?.content;
+      if (role !== "system" && role !== "user" && role !== "assistant") {
+        throw new Error(`messages[${index}].role must be system, user, or assistant`);
+      }
+      if (typeof content !== "string") {
+        throw new Error(`messages[${index}].content must be a string`);
+      }
+      return { role, content };
+    });
+  }
+
+  private async resolveTokenCountModel(
+    userId: string,
+    modelSource: TokenModelSource = "main"
+  ): Promise<{ model: string; modelSource: TokenModelSource }> {
+    if (modelSource === "sidecar") {
+      const sidecar = getSidecarSettings(userId);
+      if (!sidecar.connectionProfileId) {
+        throw new Error("No sidecar connection configured");
+      }
+
+      const connection = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
+      if (!connection) {
+        throw new Error("Selected sidecar connection not found");
+      }
+
+      const model = String(sidecar.model || connection.model || "").trim();
+      if (!model) {
+        throw new Error("Selected sidecar connection does not have a model configured");
+      }
+
+      return { model, modelSource: "sidecar" };
+    }
+
+    const connection = connectionsSvc.getDefaultConnection(userId);
+    if (!connection) {
+      throw new Error("No default connection configured");
+    }
+
+    const model = String(connection.model || "").trim();
+    if (!model) {
+      throw new Error("Default connection does not have a model configured");
+    }
+
+    return { model, modelSource: "main" };
+  }
+
+  private async buildTokenCountResult(
+    userId: string,
+    input: string | tokenizerSvc.TokenCountMessageLike[],
+    modelSource: TokenModelSource = "main"
+  ): Promise<TokenCountResult> {
+    const { model, modelSource: resolvedSource } = await this.resolveTokenCountModel(userId, modelSource);
+    const tokenizerId = tokenizerSvc.getTokenizerIdForModel(model);
+    const { count, name } = await tokenizerSvc.resolveCounter(model);
+    const text = Array.isArray(input)
+      ? tokenizerSvc.flattenMessagesForTokenCount(input)
+      : input;
+
+    return {
+      total_tokens: count(text),
+      model,
+      modelSource: resolvedSource,
+      tokenizer_id: tokenizerId,
+      tokenizer_name: name,
+      approximate: name === tokenizerSvc.APPROXIMATE_TOKENIZER_NAME,
+    };
+  }
+
+  private async handleTokensCountText(
+    requestId: string,
+    text: string,
+    modelSource?: TokenModelSource,
+    userId?: string
+  ): Promise<void> {
+    try {
+      if (typeof text !== "string") {
+        throw new Error("text must be a string");
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const result = await this.buildTokenCountResult(resolvedUserId, text, modelSource);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleTokensCountMessages(
+    requestId: string,
+    messages: Array<Pick<LlmMessageDTO, "role" | "content">>,
+    modelSource?: TokenModelSource,
+    userId?: string
+  ): Promise<void> {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const normalized = this.normalizeTokenCountMessages(messages);
+      const result = await this.buildTokenCountResult(resolvedUserId, normalized, modelSource);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleTokensCountChat(
+    requestId: string,
+    chatId: string,
+    modelSource?: TokenModelSource,
+    userId?: string
+  ): Promise<void> {
+    try {
+      const chatOwnerId = this.getChatOwnerId(chatId);
+      if (!chatOwnerId) throw new Error("Chat not found");
+      this.enforceScopedUser(chatOwnerId);
+
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (resolvedUserId && resolvedUserId !== chatOwnerId) {
+        throw new Error("chatId does not belong to the requested userId");
+      }
+
+      const messages = getChatMessages(chatOwnerId, chatId).map((message) => ({
+        role: this.mapChatRole(message.is_user, (message.extra || {}) as Record<string, unknown>),
+        content: message.content,
+      }));
+
+      const result = await this.buildTokenCountResult(chatOwnerId, messages, modelSource);
+      this.postToWorker({ type: "response", requestId, result });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }

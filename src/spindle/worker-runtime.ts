@@ -31,6 +31,52 @@ import type {
   StreamChunkDTO,
 } from "lumiverse-spindle-types";
 
+type TokenModelSource = "main" | "sidecar";
+
+type TokenCountResult = {
+  total_tokens: number;
+  model: string;
+  modelSource: TokenModelSource;
+  tokenizer_id: string | null;
+  tokenizer_name: string;
+  approximate: boolean;
+};
+
+type RuntimeWorkerToHost =
+  | WorkerToHost
+  | {
+      type: "tokens_count_text";
+      requestId: string;
+      text: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_messages";
+      requestId: string;
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_chat";
+      requestId: string;
+      chatId: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    };
+
+type RuntimeSpindleAPI = SpindleAPI & {
+  tokens: {
+    countText(text: string, options?: { modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
+    countMessages(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options?: { modelSource?: TokenModelSource; userId?: string }
+    ): Promise<TokenCountResult>;
+    countChat(chatId: string, options?: { modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
+  };
+};
+
 // ─── State ───────────────────────────────────────────────────────────────
 
 let manifest: SpindleManifest;
@@ -64,11 +110,11 @@ const extensionMacroHandlers = new Map<string, (ctx: unknown) => unknown | Promi
 
 // ─── Messaging ───────────────────────────────────────────────────────────
 
-function post(msg: WorkerToHost): void {
+function post(msg: RuntimeWorkerToHost): void {
   self.postMessage(msg);
 }
 
-function request(msg: WorkerToHost & { requestId: string }): Promise<unknown> {
+function request(msg: RuntimeWorkerToHost & { requestId: string }): Promise<unknown> {
   return new Promise((resolve, reject) => {
     pendingResponses.set(msg.requestId, { resolve, reject });
     post(msg);
@@ -227,7 +273,7 @@ function requestGenerationStream(input: any): AsyncGenerator<StreamChunkDTO, voi
 
 // ─── Spindle API (exposed to extensions as globalThis.spindle) ───────────
 
-const spindleApi: SpindleAPI = {
+const spindleApi: RuntimeSpindleAPI = {
   on(event: string, handler: (payload: any) => void): () => void {
     if (!eventHandlers.has(event)) {
       eventHandlers.set(event, new Set());
@@ -848,6 +894,45 @@ const spindleApi: SpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "connections_get", requestId, connectionId, userId });
       return result as ConnectionProfileDTO | null;
+    },
+  },
+
+  tokens: {
+    async countText(text: string, options?: { modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_text",
+        requestId,
+        text,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountResult;
+    },
+    async countMessages(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options?: { modelSource?: TokenModelSource; userId?: string }
+    ): Promise<TokenCountResult> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_messages",
+        requestId,
+        messages,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountResult;
+    },
+    async countChat(chatId: string, options?: { modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_chat",
+        requestId,
+        chatId,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountResult;
     },
   },
 
