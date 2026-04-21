@@ -186,6 +186,11 @@ export interface MacroEnv {
   /** Pre-normalized lowercase key → value map for O(1) dynamic macro lookup.
    *  Built automatically by buildEnv(); kept in sync if dynamicMacros changes. */
   _dynamicMacrosLower?: Map<string, string | MacroHandler | MacroDefinition>;
+  /** Optional abort signal. When present, the evaluator checks `aborted` between
+   *  top-level iteration passes so a user's /generate/stop can tear down a long
+   *  macro expansion (e.g. nested {{evalm}} / recursive custom macros) rather
+   *  than holding the event loop until the 5-pass loop converges. */
+  signal?: AbortSignal;
   extra: Record<string, any>;
 }
 

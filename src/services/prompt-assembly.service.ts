@@ -83,6 +83,24 @@ export function isChatHistoryMessage(msg: LlmMessage): boolean {
   return (msg as any)[CHAT_HISTORY_KEY] === true;
 }
 
+// ---------------------------------------------------------------------------
+// Cooperative cancellation helper
+// ---------------------------------------------------------------------------
+// Assembly runs several synchronous CPU-bound phases (macro evaluation across
+// 20+ blocks, Aho-Corasick keyword scanning, context-budget tokenization) that
+// would otherwise monopolise the event loop on constrained runtimes (Termux,
+// low-end mobile). Without periodic macrotask yields, a user's `/generate/stop`
+// HTTP request queues behind the work and the stop button feels dead.
+//
+// `yieldAndCheckAbort` performs a setTimeout(0) macrotask yield so Bun's HTTP
+// dispatcher can land a pending stop request on the AbortController, then
+// checks the signal. Cheap: roughly one event-loop tick per call (~0ms on
+// desktop, few-ms on Termux). Call at phase boundaries and inside tight loops.
+async function yieldAndCheckAbort(signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((r) => setTimeout(r, 0));
+  if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+}
+
 /**
  * Strip whitespace-only text parts from any multipart message. Strict providers
  * (Anthropic, some OpenAI-compat) reject text content blocks that contain only
@@ -538,7 +556,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
   // If no blocks, fall back to legacy mapping
   if (!blocks.length) {
-    return await legacyAssembly(messages, ctx.generationType, character, persona, chat, connection, ctx.userId);
+    return await legacyAssembly(messages, ctx.generationType, character, persona, chat, connection, ctx.userId, ctx.signal);
   }
 
   // ---- Pre-flight: kick off cortex query ----
@@ -786,6 +804,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     groupNotMutedNames,
     targetCharacterId: ctx.targetCharacterId,
     targetCharacterName: ctx.targetCharacterId ? getEffectiveCharacterName(effectiveCharacter) : undefined,
+    signal: ctx.signal,
   });
 
   // Prompt variables — resolve creator-defined schemas + end-user overrides and
@@ -969,6 +988,11 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     entry.content = (await evaluate(entry.content, macroEnv, registry)).text;
   }
 
+  // Yield before the main block iteration — WI macro evaluation above can run
+  // 100s of macro expansions back-to-back with only microtask yields between
+  // them. A macrotask yield here gives /generate/stop a window to land.
+  await yieldAndCheckAbort(ctx.signal);
+
   // ---- Assembly loop ----
   const result: LlmMessage[] = [];
   const breakdown: AssemblyBreakdownEntry[] = [];
@@ -980,10 +1004,21 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   let hasWiAfter = false;
   let firstChatIdx = -1;
   let jailbreakBlockResolved = false;
+  let blockYieldCounter = 0;
 
   for (const block of blocks) {
     // Skip disabled blocks
     if (!block.enabled) continue;
+
+    // Cooperative cancellation: yield every 4 enabled blocks so a pending
+    // /generate/stop can interrupt the chain of macro evaluations below.
+    // Microtask awaits in each handler don't drain Bun's HTTP queue on
+    // constrained runtimes — we need a real macrotask tick.
+    if ((blockYieldCounter++ & 3) === 0) {
+      await yieldAndCheckAbort(ctx.signal);
+    } else if (ctx.signal?.aborted) {
+      throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
 
     // Skip category markers only if they carry no content
     if (block.marker === "category" && !block.content?.trim()) continue;
@@ -1502,11 +1537,15 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   // Runs AFTER all WI / AN / depth / prefill insertions so fixed overhead is
   // accurately measured. The breakdown recompute below picks up the new
   // chat-history bounds from the mutated `result` array.
+  // Yield before the sync tokenization loop below — on long chats this can
+  // count thousands of messages in a tight loop and monopolise the event loop.
+  await yieldAndCheckAbort(ctx.signal);
   const contextClipStats = await clipToContextBudget(
     result,
     connection?.model ?? null,
     parameters.max_context_length as number | null | undefined,
     parameters.max_tokens as number | null | undefined,
+    ctx.signal,
   );
 
   // Build memory stats for dry-run diagnostics
@@ -3942,6 +3981,7 @@ async function clipToContextBudget(
   modelId: string | null,
   maxContext: number | null | undefined,
   maxResponseTokens: number | null | undefined,
+  signal?: AbortSignal,
 ): Promise<ContextClipStats> {
   const resolvedContext = typeof maxContext === "number" && maxContext > 0 ? maxContext : 0;
   const resolvedResponse = typeof maxResponseTokens === "number" && maxResponseTokens > 0
@@ -3975,6 +4015,14 @@ async function clipToContextBudget(
   let fixedTokens = 0;
   let chatHistoryTokensBefore = 0;
   for (let i = 0; i < n; i++) {
+    // Cooperative yield every 64 messages so a stop clicked during tokenization
+    // of a long chat can land before we finish. `counter.count()` is sync and
+    // can be ~0.5ms/message on Termux; a 2000-message chat would otherwise
+    // block the event loop for a full second.
+    if (i > 0 && (i & 63) === 0) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
     const msg = result[i];
     const text = `${msg.role}\n${getTextContent(msg)}`;
     const t = counter.count(text);
@@ -4330,6 +4378,7 @@ async function legacyAssembly(
   chat?: Chat | null,
   connection?: ConnectionProfile | null,
   userId?: string,
+  signal?: AbortSignal,
 ): Promise<AssemblyResult> {
   const llmMessages: LlmMessage[] = [];
   const breakdown: AssemblyBreakdownEntry[] = [];
@@ -4369,6 +4418,7 @@ async function legacyAssembly(
       groupCharacterNames: groupNames,
       groupNotMutedNames: legacyNotMuted,
       targetCharacterName: isGroup ? getEffectiveCharacterName(legacyEffectiveChar) : undefined,
+      signal,
     });
     // Populate reasoning macros
     if (userId) {

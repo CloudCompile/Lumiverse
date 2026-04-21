@@ -45,6 +45,7 @@ export async function evaluate(
   // (handles macros that resolve to text containing other macros)
   const MAX_ITERATIONS = 5;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+    if (env.signal?.aborted) throw env.signal.reason ?? new DOMException("Aborted", "AbortError");
     const ast = parse(text);
     const result = await evaluateNodes(ast, env, registry, 0, 0, diagnostics);
     if (result === text) break; // No change — converged

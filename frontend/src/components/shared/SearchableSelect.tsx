@@ -136,24 +136,45 @@ export default function SearchableSelect(props: SearchableSelectProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMulti, props.onChange])
 
+  // Tracks the last window/visualViewport resize so the outside-click handler
+  // can suppress dismissals while the Android soft keyboard is actively
+  // presenting (a transition that can last 300–500ms, well past the 100ms
+  // openedAt guard). See outside-click effect below.
+  const lastViewportChangeRef = useRef(0)
+
   // Close on outside pointer-down. `pointerdown` (not `mousedown`) is the
-  // unified event for mouse/touch/pen — Android Chrome dispatches synthetic
-  // mousedown events at coordinates that no longer match the trigger after
-  // the on-screen keyboard pushes the layout, causing the popover to dismiss
-  // the instant it opened. The openedAt guard kills the "same gesture closes
-  // what it just opened" race that some Android browsers fall into.
+  // unified event for mouse/touch/pen. Portal-mode popovers are detached
+  // from the trigger's DOM subtree, which makes them vulnerable to several
+  // Android-specific hazards that the inline variant naturally dodges:
+  //  - Synthetic pointerdowns with `target = document/<html>/<body>` are
+  //    dispatched during viewport transitions; those land outside *both*
+  //    refs and would otherwise dismiss.
+  //  - Android keyboard presentation takes 300–500ms, which blows past the
+  //    100ms openedAt grace. Suppress closes while a viewport change is
+  //    still propagating.
+  //  - `e.target` is sometimes reported as an ancestor of the real tap
+  //    point when an event passes through a portal boundary, so also
+  //    hit-test via `composedPath()`.
   useEffect(() => {
     if (!open) return
     const openedAt = performance.now()
     const handle = (e: PointerEvent) => {
+      if (!e.isTrusted) return
       if (performance.now() - openedAt < 100) return
-      const target = e.target as Node
+      if (performance.now() - lastViewportChangeRef.current < 350) return
+      const target = e.target as Node | null
+      if (!target) return
       if (
-        triggerRef.current &&
-        !triggerRef.current.contains(target) &&
-        popoverRef.current &&
-        !popoverRef.current.contains(target)
-      ) {
+        target === document ||
+        target === document.documentElement ||
+        target === document.body
+      ) return
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : []
+      const trigger = triggerRef.current
+      const popover = popoverRef.current
+      const inTrigger = !!trigger && (trigger.contains(target) || path.includes(trigger))
+      const inPopover = !!popover && (popover.contains(target) || path.includes(popover))
+      if (!inTrigger && !inPopover) {
         setOpen(false)
         setSearch('')
       }
@@ -177,18 +198,27 @@ export default function SearchableSelect(props: SearchableSelectProps) {
   // (mobile keyboard opens → viewport resize) or scrollIntoView inside the
   // option list would otherwise dismiss the popover the instant it opened.
   // Scrolls that originate inside the popover are ignored so the internal
-  // option list can scroll freely.
+  // option list can scroll freely. Resize is also tracked unconditionally
+  // so the outside-click handler's keyboard-transition grace window works
+  // for non-portal popovers too.
   useEffect(() => {
-    if (!open || !portal) return
+    if (!open) return
     const handleScroll = (e: Event) => {
+      if (!portal) return
       if (popoverRef.current && popoverRef.current.contains(e.target as Node)) return
       reposition()
     }
-    window.addEventListener('resize', reposition)
+    const handleResize = () => {
+      lastViewportChangeRef.current = performance.now()
+      if (portal) reposition()
+    }
+    window.addEventListener('resize', handleResize)
     window.addEventListener('scroll', handleScroll, true)
+    window.visualViewport?.addEventListener('resize', handleResize)
     return () => {
-      window.removeEventListener('resize', reposition)
+      window.removeEventListener('resize', handleResize)
       window.removeEventListener('scroll', handleScroll, true)
+      window.visualViewport?.removeEventListener('resize', handleResize)
     }
   }, [open, portal, reposition])
 

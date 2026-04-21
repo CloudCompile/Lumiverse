@@ -25,6 +25,8 @@ export interface BuildEnvContext {
   targetCharacterId?: string;
   /** Pre-resolved name of the target/focused character. Falls back to character.name if targetCharacterId is set. */
   targetCharacterName?: string;
+  /** Optional abort signal — threaded onto MacroEnv so the evaluator can cancel between iterations. */
+  signal?: AbortSignal;
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
@@ -102,6 +104,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     },
     dynamicMacros: ctx.dynamicMacros || {},
     _dynamicMacrosLower: buildDynamicLookup(ctx.dynamicMacros),
+    signal: ctx.signal,
     extra: {
       userId: ctx.userId ?? (chat as any).user_id as string | undefined,
       messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
