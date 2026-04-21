@@ -1001,6 +1001,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   for (const entry of wiCache.depth) {
     entry.content = (await evaluate(entry.content, macroEnv, registry)).text;
   }
+  pruneEmptyWorldInfoCacheEntries(wiCache);
 
   // Yield before the main block iteration — WI macro evaluation above can run
   // 100s of macro expansions back-to-back with only microtask yields between
@@ -3536,6 +3537,23 @@ function injectWorldInfoAt(
     idx++;
   }
   return entries.length;
+}
+
+function pruneEmptyWorldInfoEntriesInPlace<T extends { content: string }>(entries: T[]): void {
+  const filtered = entries.filter((entry) => entry.content.trim().length > 0);
+  if (filtered.length === entries.length) return;
+  entries.length = 0;
+  entries.push(...filtered);
+}
+
+function pruneEmptyWorldInfoCacheEntries(cache: WorldInfoCache): void {
+  pruneEmptyWorldInfoEntriesInPlace(cache.before);
+  pruneEmptyWorldInfoEntriesInPlace(cache.after);
+  pruneEmptyWorldInfoEntriesInPlace(cache.anBefore);
+  pruneEmptyWorldInfoEntriesInPlace(cache.anAfter);
+  pruneEmptyWorldInfoEntriesInPlace(cache.depth);
+  pruneEmptyWorldInfoEntriesInPlace(cache.emBefore);
+  pruneEmptyWorldInfoEntriesInPlace(cache.emAfter);
 }
 
 function injectPromptBlocksAt(

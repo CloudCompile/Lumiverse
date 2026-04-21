@@ -211,16 +211,17 @@ export function finalizeActivatedWorldInfoEntries(
   const afterGroups = options.skipGroupLogic
     ? [...entries]
     : applyGroupLogic([...entries]);
+  const insertableEntries = afterGroups.filter(hasMeaningfulWorldInfoContent);
 
   if (!options.preserveOrder) {
-    afterGroups.sort((a, b) => {
+    insertableEntries.sort((a, b) => {
       if (b.priority !== a.priority) return b.priority - a.priority;
       return a.order_value - b.order_value;
     });
   }
 
-  const activatedBeforeBudget = afterGroups.length;
-  const activatedEntries = enforceBudget(afterGroups, settings);
+  const activatedBeforeBudget = insertableEntries.length;
+  const activatedEntries = enforceBudget(insertableEntries, settings);
   const evictedByBudget = activatedBeforeBudget - activatedEntries.length;
 
   return {
@@ -512,7 +513,7 @@ function bucketByPosition(entries: WorldBookEntry[]): WorldInfoCache {
 
   for (const entry of entries) {
     const content = entry.content;
-    if (!content) continue;
+    if (!hasMeaningfulWorldInfoContent(entry)) continue;
     const role = normalizeRole(entry.role);
 
     switch (entry.position) {
@@ -549,6 +550,10 @@ function bucketByPosition(entries: WorldBookEntry[]): WorldInfoCache {
   }
 
   return cache;
+}
+
+function hasMeaningfulWorldInfoContent(entry: Pick<WorldBookEntry, "content">): boolean {
+  return typeof entry.content === "string" && entry.content.trim().length > 0;
 }
 
 function normalizeRole(role: string | null): "system" | "user" | "assistant" {
