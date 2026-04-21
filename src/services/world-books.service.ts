@@ -8,6 +8,7 @@ import type {
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
+import * as vectorizationQueue from "./vectorization-queue.service";
 
 function rowToBook(row: any): WorldBook {
   return { ...row, metadata: JSON.parse(row.metadata) };
@@ -74,6 +75,22 @@ function shouldResetVectorIndex(input: UpdateWorldBookEntryInput): boolean {
     input.keysecondary !== undefined ||
     input.disabled !== undefined
   );
+}
+
+function queueWorldBookEntriesForIndexing(userId: string, worldBookId: string): void {
+  const rows = getDb().query(
+    `SELECT id
+     FROM world_book_entries
+     WHERE world_book_id = ?
+       AND vectorized = 1
+       AND disabled = 0
+       AND length(trim(content)) > 0
+       AND vector_index_status IN ('pending', 'error', 'not_enabled')`
+  ).all(worldBookId) as Array<{ id: string }>;
+
+  for (const row of rows) {
+    vectorizationQueue.queueWorldBookEntryVectorization(userId, row.id);
+  }
 }
 
 // --- World Book CRUD ---
@@ -210,6 +227,8 @@ export function setWorldBookSemanticActivation(
         console.warn("[embeddings] Failed to remove world book entry vectors:", err);
       });
     }
+  } else if (updatedEntries > 0) {
+    queueWorldBookEntriesForIndexing(userId, worldBookId);
   }
 
   return {
@@ -270,6 +289,7 @@ export function convertToVectorized(
 
   if (converted > 0) {
     db.query("UPDATE world_books SET updated_at = ? WHERE id = ?").run(now, worldBookId);
+    queueWorldBookEntriesForIndexing(userId, worldBookId);
   }
 
   return {
@@ -482,9 +502,7 @@ export function createEntry(userId: string, worldBookId: string, input: CreateWo
   getDb().query("UPDATE world_books SET updated_at = ? WHERE id = ?").run(now, worldBookId);
   const created = getEntry(userId, id)!;
   if (created.vectorized) {
-    void embeddingsSvc.syncWorldBookEntryEmbedding(userId, created).catch((err: unknown) => {
-      console.warn("[embeddings] Failed to index world book entry:", err);
-    });
+    vectorizationQueue.queueWorldBookEntryVectorization(userId, created.id);
   }
   return created;
 }
@@ -538,9 +556,9 @@ export function updateEntry(userId: string, id: string, input: UpdateWorldBookEn
   getDb().query(`UPDATE world_book_entries SET ${fields.join(", ")} WHERE id = ?`).run(...values);
   const updated = getEntry(userId, id)!;
   if (updated.vectorized) {
-    void embeddingsSvc.syncWorldBookEntryEmbedding(userId, updated).catch((err: unknown) => {
-      console.warn("[embeddings] Failed to index world book entry:", err);
-    });
+    if (shouldResetVectorIndex(input) || updated.vector_index_status !== "indexed") {
+      vectorizationQueue.queueWorldBookEntryVectorization(userId, updated.id);
+    }
   } else {
     void embeddingsSvc.deleteWorldBookEntryEmbeddings(userId, updated.id).catch((err: unknown) => {
       console.warn("[embeddings] Failed to remove world book entry vectors:", err);

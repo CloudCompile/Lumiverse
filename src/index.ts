@@ -191,12 +191,13 @@ async function gracefulShutdown(signal: string) {
   const { stopTicketSweep } = await import("./ws/tickets");
   const { stopOAuthStateSweep } = await import("./spindle/oauth-state");
   const { stopPkceSweep } = await import("./routes/lumihub.routes");
-  const { stopQueryCacheCleanup } = await import("./services/vectorization-queue.service");
+  const { stopQueryCacheCleanup, stopWorldBookVectorizationSweep } = await import("./services/vectorization-queue.service");
   const { stopVersionCheckCleanup } = await import("./services/embeddings.service");
   stopTicketSweep();
   stopOAuthStateSweep();
   stopPkceSweep();
   stopQueryCacheCleanup();
+  stopWorldBookVectorizationSweep();
   stopVersionCheckCleanup();
 
   // 5b. Tear down the regex sandbox worker pool so we don't leak the worker

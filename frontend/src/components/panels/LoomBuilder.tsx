@@ -944,8 +944,9 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
   const [isExpanded, setIsExpanded] = useState(false)
   const settings = completionSettings || {}
   const defaults = DEFAULT_COMPLETION_SETTINGS
+  const visibleKeys = Object.keys(defaults).filter(key => key !== 'namesBehavior')
 
-  const activeCount = Object.keys(defaults).filter(key => {
+  const activeCount = visibleKeys.filter(key => {
     const current = settings[key] ?? defaults[key as keyof typeof defaults]
     return current !== defaults[key as keyof typeof defaults]
   }).length
@@ -983,12 +984,6 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
                 {CONTINUE_POSTFIX_OPTIONS.map(opt => <option key={opt.label} value={opt.value}>{opt.label}</option>)}
               </select>
             </div>
-            <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
-              <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Names in Messages</span>
-              <select className={s.settingsInput} style={{ cursor: 'pointer' }} value={settings.namesBehavior ?? defaults.namesBehavior} onChange={e => handleChange('namesBehavior', parseInt(e.target.value))}>
-                {NAMES_BEHAVIOR_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-              </select>
-            </div>
           </div>
           <hr className={s.menuDivider} />
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
@@ -1008,17 +1003,30 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
 // ADVANCED SETTINGS
 // ============================================================================
 
-function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings: any; onSave: (updates: Record<string, any>) => void }) {
+function AdvancedSettingsPanel({
+  advancedSettings,
+  completionSettings,
+  onSave,
+  onSaveCompletion,
+}: {
+  advancedSettings: any
+  completionSettings: any
+  onSave: (updates: Record<string, any>) => void
+  onSaveCompletion: (updates: Record<string, any>) => void
+}) {
   const [isExpanded, setIsExpanded] = useState(false)
   const [stopInput, setStopInput] = useState('')
   const settings = advancedSettings || {}
   const defaults = DEFAULT_ADVANCED_SETTINGS
+  const completion = completionSettings || {}
+  const completionDefaults = DEFAULT_COMPLETION_SETTINGS
 
   const seed = settings.seed ?? defaults.seed
   const stopStrings: string[] = settings.customStopStrings ?? defaults.customStopStrings
   const collapseMessages: boolean = settings.collapseMessages ?? defaults.collapseMessages
+  const namesBehavior = completion.namesBehavior ?? completionDefaults.namesBehavior
 
-  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages
+  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages || namesBehavior !== completionDefaults.namesBehavior
 
   const handleSeedChange = (value: string) => {
     const num = parseInt(value)
@@ -1041,11 +1049,18 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
       <div className={clsx(s.accordionHeader, isActive && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <Wrench size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
         <span className={s.accordionTitle}>Advanced</span>
-        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0)}</span>}
+        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0) + (namesBehavior !== completionDefaults.namesBehavior ? 1 : 0)}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
         <div className={s.accordionBody}>
+          <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Names in Messages</span>
+            <select className={s.settingsInput} style={{ cursor: 'pointer' }} value={namesBehavior} onChange={e => onSaveCompletion({ namesBehavior: parseInt(e.target.value) })}>
+              {NAMES_BEHAVIOR_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+            </select>
+            <span className={s.settingsHint}>Controls how speaker names are represented when formatting messages, including collapsed mode.</span>
+          </div>
           <div className={s.settingsField}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Seed</span>
@@ -1633,7 +1648,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         )}
         {activePreset && <PromptBehaviorSettings promptBehavior={activePreset.promptBehavior} onSave={savePromptBehavior} />}
         {activePreset && <CompletionSettingsPanel completionSettings={activePreset.completionSettings} onSave={saveCompletionSettings} />}
-        {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} onSave={saveAdvancedSettings} />}
+        {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} completionSettings={activePreset.completionSettings} onSave={saveAdvancedSettings} onSaveCompletion={saveCompletionSettings} />}
         {activePreset && <ContextMeter />}
 
         {activePreset && hasConfigurableVariables && (
