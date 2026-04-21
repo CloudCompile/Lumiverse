@@ -80,6 +80,10 @@ if (env.stMigrate) {
 const { seedTokenizers } = await import("./services/tokenizer-seed");
 seedTokenizers();
 
+// Start background vectorization maintenance only after the database is ready.
+const { startVectorizationQueueMaintenance } = await import("./services/vectorization-queue.service");
+startVectorizationQueueMaintenance();
+
 // Pre-warm tokenizers for configured connection models (fire-and-forget)
 import("./services/tokenizer.service").then(({ prewarm }) => prewarm()).catch(() => {});
 

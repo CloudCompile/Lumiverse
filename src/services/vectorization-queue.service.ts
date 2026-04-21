@@ -375,12 +375,21 @@ export function cleanupQueryCache() {
   }
 }
 
-let _queryCacheCleanupTimer: ReturnType<typeof setInterval> | null = setInterval(cleanupQueryCache, 3600_000);
-let _worldBookSweepTimer: ReturnType<typeof setInterval> | null = setInterval(sweepWorldBookVectorizationQueue, WORLD_BOOK_SWEEP_INTERVAL_MS);
+let _queryCacheCleanupTimer: ReturnType<typeof setInterval> | null = null;
+let _worldBookSweepTimer: ReturnType<typeof setInterval> | null = null;
 
-// Kick off a passive startup scan so pre-existing pending entries don't have to
-// wait for the first interval tick before being picked up.
-sweepWorldBookVectorizationQueue();
+export function startVectorizationQueueMaintenance(): void {
+  if (!_queryCacheCleanupTimer) {
+    _queryCacheCleanupTimer = setInterval(cleanupQueryCache, 3600_000);
+  }
+  if (!_worldBookSweepTimer) {
+    _worldBookSweepTimer = setInterval(sweepWorldBookVectorizationQueue, WORLD_BOOK_SWEEP_INTERVAL_MS);
+  }
+
+  // Kick off a passive startup scan so pre-existing pending entries don't have to
+  // wait for the first interval tick before being picked up.
+  sweepWorldBookVectorizationQueue();
+}
 
 export function stopQueryCacheCleanup(): void {
   if (_queryCacheCleanupTimer) {
