@@ -1,4 +1,5 @@
 import { get, post, type RequestOptions } from './client'
+import { flushSettingsNow } from '@/store/slices/settings'
 
 /** Generation requests go through prompt assembly + council + embedding calls
  *  which can legitimately take longer than the default 30s client timeout. */
@@ -178,7 +179,8 @@ export interface ActiveGenerationEntry {
 }
 
 export const generateApi = {
-  start(request: GenerateRequest) {
+  async start(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<GenerateResponse>('/generate', request, LONG)
   },
 
@@ -186,11 +188,13 @@ export const generateApi = {
     return post<void>('/generate/stop', generationId ? { generation_id: generationId } : {})
   },
 
-  regenerate(request: GenerateRequest) {
+  async regenerate(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<GenerateResponse>('/generate/regenerate', request, LONG)
   },
 
-  continueGeneration(request: GenerateRequest) {
+  async continueGeneration(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<GenerateResponse>('/generate/continue', request, LONG)
   },
 
@@ -210,7 +214,8 @@ export const generateApi = {
     return get<SummarizeStatusResponse>(`/generate/summarize/status/${chatId}`)
   },
 
-  dryRun(request: GenerateRequest) {
+  async dryRun(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<DryRunResponse>('/generate/dry-run', request, LONG)
   },
 

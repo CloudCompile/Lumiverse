@@ -115,16 +115,12 @@ const PENDING_SETTINGS_KEY = '__lumiverse_pending_settings'
 const dirtyKeys = new Map<string, any>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let flushInFlight = false
+let activeFlushPromise: Promise<void> | null = null
 
-function flushDirtyKeys() {
-  flushTimer = null
-  if (dirtyKeys.size === 0) return
-
-  const batch = Object.fromEntries(dirtyKeys)
-  dirtyKeys.clear()
+function persistBatch(batch: Record<string, any>): Promise<void> {
   flushInFlight = true
 
-  settingsApi.putMany(batch).then(() => {
+  const request = settingsApi.putMany(batch).then(() => {
     // Flush succeeded — clear localStorage bridge since DB is now up to date
     try { localStorage.removeItem(PENDING_SETTINGS_KEY) } catch {}
   }).catch((err) => {
@@ -134,9 +130,19 @@ function flushDirtyKeys() {
       if (!dirtyKeys.has(k)) dirtyKeys.set(k, v)
     }
     scheduleFlush()
+    throw err
   }).finally(() => {
     flushInFlight = false
+    if (activeFlushPromise === request) activeFlushPromise = null
   })
+
+  activeFlushPromise = request
+  return request
+}
+
+function flushDirtyKeys() {
+  flushTimer = null
+  void flushSettingsNow().catch(() => {})
 }
 
 function scheduleFlush() {
@@ -200,9 +206,25 @@ export function flushSettings() {
   }).catch(() => {})
 }
 
+/** Immediately persist all dirty settings and wait for the server commit. */
+export function flushSettingsNow(): Promise<void> {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+
+  if (dirtyKeys.size === 0) {
+    return activeFlushPromise ?? Promise.resolve()
+  }
+
+  const batch = Object.fromEntries(dirtyKeys)
+  dirtyKeys.clear()
+  return persistBatch(batch)
+}
+
 /** True when a flush is in flight or dirty keys are pending. */
 export function hasUnsavedSettings(): boolean {
-  return dirtyKeys.size > 0 || flushInFlight
+  return dirtyKeys.size > 0 || flushInFlight || activeFlushPromise !== null
 }
 
 /** Remove a key from the pending dirty-keys map so the next flush won't overwrite a direct PUT. */

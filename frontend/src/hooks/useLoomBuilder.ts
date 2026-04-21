@@ -159,6 +159,20 @@ export function useLoomBuilder() {
     }
   }, [])
 
+  const takePendingPreset = useCallback((presetId: string): LoomPreset | null => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+
+    const pending = pendingSaveRef.current?.id === presetId
+      ? pendingSaveRef.current
+      : null
+
+    pendingSaveRef.current = null
+    return pending
+  }, [])
+
   // Read activePreset through a ref so saveStructure stays reference-stable
   // across renders. When saveBlocks is captured by downstream effects, a
   // changing reference would either cause runaway effect loops or leak stale
@@ -344,7 +358,8 @@ export function useLoomBuilder() {
   // surface immediately.
   const savePromptVariableValues = useCallback(async (values: PromptVariableValues) => {
     if (!activePreset) return
-    const updated = { ...activePreset, promptVariables: values, updatedAt: Date.now() }
+    const base = takePendingPreset(activePreset.id) ?? activePreset
+    const updated = { ...base, promptVariables: values, updatedAt: Date.now() }
     setActivePreset(updated)
     try {
       await presetsApi.update(updated.id, marshalUpdate(updated))
@@ -352,7 +367,7 @@ export function useLoomBuilder() {
       console.warn('[LoomBuilder] Failed to save prompt variable values:', err)
       throw err
     }
-  }, [activePreset])
+  }, [activePreset, takePendingPreset])
 
   const persistImportedPreset = useCallback(async (payload: any, fileName?: string) => {
     setIsLoading(true)
