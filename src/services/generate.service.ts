@@ -34,6 +34,7 @@ import { detectExpression, detectMultiCharacterExpression, getExpressionDetectio
 import { hasExpressions, getExpressionConfig, getExpressionGroups } from "./expressions.service";
 import { getSidecarSettings } from "./sidecar-settings.service";
 import { abortChatBackground, abortUserBackgrounds, abortAllBackgrounds } from "./chat-background.service";
+import { createCooperativeYielder } from "../llm/stream-utils";
 
 interface GenerateInput {
   userId: string;
@@ -1563,6 +1564,7 @@ async function runGeneration(
     // silently in the background and the generator's own finally cancels
     // the reader.
     const iter = stream[Symbol.asyncIterator]();
+    const maybeYieldDuringStream = createCooperativeYielder(32, signal);
     while (true) {
       let result: IteratorResult<StreamChunk, void>;
       try {
@@ -1607,6 +1609,8 @@ async function runGeneration(
       if (chunk.usage) {
         streamUsage = chunk.usage;
       }
+
+      await maybeYieldDuringStream();
 
       if (chunk.finish_reason) {
         break;

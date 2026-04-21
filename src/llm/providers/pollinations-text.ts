@@ -1,6 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { readWithAbort } from "../stream-utils";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 
 export class PollinationsTextProvider extends OpenAICompatibleProvider {
   readonly name = "pollinations_text";
@@ -91,6 +91,7 @@ export class PollinationsTextProvider extends OpenAICompatibleProvider {
     const decoder = new TextDecoder();
     let buffer = "";
     let reasoningKey: "reasoning" | "reasoning_content" | null = null;
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     try {
       while (true) {
@@ -102,6 +103,7 @@ export class PollinationsTextProvider extends OpenAICompatibleProvider {
         buffer = lines.pop() || "";
 
         for (const line of lines) {
+          await maybeYield();
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith("data: ")) continue;
           const data = trimmed.slice(6);

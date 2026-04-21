@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { readWithAbort } from "../stream-utils";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
 
 const API_VERSION = "2023-06-01";
@@ -114,6 +114,7 @@ export class AnthropicProvider implements LlmProvider {
     const decoder = new TextDecoder();
     let buffer = "";
     let streamInputTokens = 0;
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     // Tool call accumulation — Anthropic streams tool_use as content blocks
     const pendingToolCalls: { id: string; name: string; inputJson: string }[] = [];
@@ -129,6 +130,7 @@ export class AnthropicProvider implements LlmProvider {
       buffer = lines.pop() || "";
 
       for (const line of lines) {
+        await maybeYield();
         const trimmed = line.trim();
         if (!trimmed || !trimmed.startsWith("data: ")) continue;
 

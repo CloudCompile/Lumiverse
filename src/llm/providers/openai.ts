@@ -1,6 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { readWithAbort } from "../stream-utils";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import type {
   GenerationRequest,
   GenerationResponse,
@@ -265,6 +265,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     // Tool call accumulation for Responses API function_call streaming
     const fnCallBuffer: Map<string, { name: string; argsJson: string; callId: string }> = new Map();
@@ -276,11 +277,12 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        for (const line of lines) {
+          await maybeYield();
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
         const payload = trimmed.slice(6);
         if (payload === "[DONE]") return;
 

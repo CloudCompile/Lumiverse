@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { readWithAbort } from "../stream-utils";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
 
 // ── Service account JWT → OAuth2 access token ──────────────────────────────
@@ -345,6 +345,7 @@ export class GoogleVertexProvider implements LlmProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     try {
       while (true) {
@@ -356,6 +357,7 @@ export class GoogleVertexProvider implements LlmProvider {
         buffer = lines.pop() || "";
 
         for (const line of lines) {
+          await maybeYield();
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith("data: ")) continue;
 

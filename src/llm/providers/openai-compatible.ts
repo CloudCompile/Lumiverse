@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import type { ProviderCapabilities } from "../param-schema";
-import { readWithAbort } from "../stream-utils";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import type { GenerationRequest, GenerationResponse, StreamChunk, ToolCallResult, LlmMessage, LlmMessagePart } from "../types";
 
 /**
@@ -111,6 +111,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
     // Auto-detect reasoning field: modern APIs use `reasoning`, legacy uses
     // `reasoning_content`. Lock to whichever key appears first so we don't
     // check both on every chunk.
@@ -129,6 +130,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       buffer = lines.pop() || "";
 
       for (const line of lines) {
+        await maybeYield();
         const trimmed = line.trim();
         if (!trimmed || !trimmed.startsWith("data: ")) continue;
         const data = trimmed.slice(6);
