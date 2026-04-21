@@ -69,12 +69,12 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
   },
   {
     id: 'presets',
-    shortName: 'Presets',
+    shortName: 'Reason',
     tabName: 'Reasoning',
-    tabDescription: 'Manage generation presets and parameters',
+    tabDescription: 'Configure reasoning, chain-of-thought, and prompt behavior',
     tabIcon: Wand2,
     tabHeaderTitle: 'Reasoning',
-    keywords: ['presets', 'parameters', 'temperature', 'sampler', 'generation', 'reasoning', 'top_p', 'settings', 'max tokens', 'penalty', 'frequency', 'prompt order'],
+    keywords: ['reasoning', 'cot', 'chain of thought', 'thinking', 'reasoning effort', 'api reasoning', 'prompt bias', 'start reply with', 'prefix', 'suffix'],
     component: () => <PresetManager />,
   },
   {
