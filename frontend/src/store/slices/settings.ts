@@ -17,6 +17,7 @@ export const REASONING_DEFAULTS: ReasoningSettings = {
 /** Keys that represent persisted data (not functions) */
 const DATA_KEYS: ReadonlySet<string> = new Set([
   'landingPageChatsDisplayed',
+  'landingPageLayoutMode',
   'charactersPerPage',
   'personasPerPage',
   'messagesPerPage',
@@ -216,6 +217,7 @@ if (typeof window !== 'undefined') {
 
 export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   landingPageChatsDisplayed: 12,
+  landingPageLayoutMode: 'cards',
   charactersPerPage: 50,
   personasPerPage: 24,
   messagesPerPage: 50,

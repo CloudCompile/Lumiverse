@@ -313,6 +313,7 @@ export interface CustomCSSSettings {
 // ---- Settings Slice ----
 export interface SettingsSlice {
   landingPageChatsDisplayed: number
+  landingPageLayoutMode: 'cards' | 'compact'
   charactersPerPage: number
   personasPerPage: number
   messagesPerPage: number

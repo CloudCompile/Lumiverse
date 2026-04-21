@@ -49,6 +49,12 @@ const TRUSTED_HOST_SOURCE_LABELS: Record<TrustedHostEntry['source'], string> = {
   configured: 'configured',
 }
 
+const IPC_REASON_COPY: Record<OperatorStatus['ipcReason'], string> = {
+  connected: 'Runner IPC connected.',
+  not_started_with_runner: 'Runner IPC not available. This server was started without the runner. Start Lumiverse with ./start.sh in an interactive terminal, or use bun run runner.',
+  runner_env_without_process_send: 'Runner IPC was requested, but Bun did not expose process.send in this server process. This usually means the server was relaunched outside the runner IPC channel.',
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function formatUptime(ms: number): string {
@@ -224,6 +230,7 @@ function LogViewer() {
 
 export default function OperatorPanel() {
   const [status, setStatus] = useState<OperatorStatus | null>(null)
+  const [statusError, setStatusError] = useState<string | null>(null)
   const [dbStatus, setDbStatus] = useState<OperatorDatabaseStatus | null>(null)
   const [dbTuning, setDbTuning] = useState<DatabaseTuningSettings>({ cacheMemoryPercent: null, mmapSizeBytes: null })
   const [dbMaintenanceSettings, setDbMaintenanceSettings] = useState<DatabaseMaintenanceSettings>({})
@@ -246,6 +253,7 @@ export default function OperatorPanel() {
 
   const effectiveBusy = reconnecting ? 'reconnecting' : (storeBusy || busy)
   const ipcAvailable = status?.ipcAvailable ?? false
+  const ipcHint = status ? IPC_REASON_COPY[status.ipcReason] : null
 
   // ── Fetch status helper ─────────────────────────────────────────────────
 
@@ -253,9 +261,11 @@ export default function OperatorPanel() {
     try {
       const s = await operatorApi.getStatus()
       setStatus(s)
+      setStatusError(null)
       setUptime(s.uptime)
       return s
-    } catch {
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : 'Failed to load operator status.')
       return null
     }
   }, [])
@@ -792,9 +802,14 @@ export default function OperatorPanel() {
           <span className={styles.sectionTitle}>Server Controls</span>
         </div>
         <div className={styles.sectionBody}>
-          {!ipcAvailable && (
+          {statusError && (
             <div className={styles.disabledHint}>
-              Runner IPC not available. Start Lumiverse with ./start.sh or bun run runner to enable server controls.
+              Operator status unavailable: {statusError}
+            </div>
+          )}
+          {!statusError && !ipcAvailable && ipcHint && (
+            <div className={styles.disabledHint}>
+              {ipcHint}
             </div>
           )}
           <div className={styles.controls}>
@@ -850,9 +865,14 @@ export default function OperatorPanel() {
           <span className={styles.sectionTitle}>Maintenance</span>
         </div>
         <div className={styles.sectionBody}>
-          {!ipcAvailable && (
+          {statusError && (
             <div className={styles.disabledHint}>
-              Runner IPC not available. Start Lumiverse with ./start.sh or bun run runner to enable maintenance tools.
+              Operator status unavailable: {statusError}
+            </div>
+          )}
+          {!statusError && !ipcAvailable && ipcHint && (
+            <div className={styles.disabledHint}>
+              {ipcHint}
             </div>
           )}
           <div className={styles.controls}>

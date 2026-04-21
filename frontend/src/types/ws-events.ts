@@ -166,6 +166,7 @@ export interface OperatorStatusPayload {
   commit: string
   remoteMode: boolean
   ipcAvailable: boolean
+  ipcReason: 'connected' | 'not_started_with_runner' | 'runner_env_without_process_send'
   updateAvailable: boolean
   commitsBehind: number
   latestUpdateMessage: string

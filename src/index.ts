@@ -51,6 +51,10 @@ const { operatorService } = await import("./services/operator.service");
 await seedOwner();
 backfillUserIds();
 
+console.log(
+  `[startup] Runner IPC: ${operatorService.ipcAvailable ? "connected" : `unavailable (${operatorService.ipcReason})`}`
+);
+
 // Load the operator-configured trusted host allowlist now that the owner is
 // known — the Host-header middleware in app.ts reads from this cache.
 const { load: loadTrustedHosts } = await import("./services/trusted-hosts.service");

@@ -140,6 +140,7 @@ function DisplaySettings() {
   const modalWidthMode = useStore((s) => s.modalWidthMode)
   const modalMaxWidth = useStore((s) => s.modalMaxWidth)
   const landingPageChatsDisplayed = useStore((s) => s.landingPageChatsDisplayed)
+  const landingPageLayoutMode = useStore((s) => s.landingPageLayoutMode)
   const toastPosition = useStore((s) => s.toastPosition)
   const chatHeadsEnabled = useStore((s) => s.chatHeadsEnabled)
   const chatHeadsSize = useStore((s) => s.chatHeadsSize)
@@ -384,6 +385,29 @@ function DisplaySettings() {
       )}
 
       <h3 className={styles.sectionTitle} style={{ marginTop: 8 }}>Pagination</h3>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>LANDING PAGE LAYOUT</label>
+        <div className={styles.segmented}>
+          <button
+            type="button"
+            className={clsx(styles.segmentedBtn, landingPageLayoutMode === 'cards' && styles.segmentedBtnActive)}
+            onClick={() => setSetting('landingPageLayoutMode', 'cards')}
+          >
+            Cards
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.segmentedBtn, landingPageLayoutMode === 'compact' && styles.segmentedBtnActive)}
+            onClick={() => setSetting('landingPageLayoutMode', 'compact')}
+          >
+            Compact List
+          </button>
+        </div>
+        <p className={styles.helperText} style={{ marginTop: 8 }}>
+          Switch the landing page between the current card gallery and a denser adaptive list of recent chats.
+        </p>
+      </div>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>LANDING PAGE CHATS PER BATCH</label>
@@ -2344,4 +2368,3 @@ function LumiHubSettings() {
     </div>
   )
 }
-

@@ -233,6 +233,13 @@
   gap: 20px;
 }
 
+.compactList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
 /* Card tilt wrapper — handles 3D tilt separately from framer-motion entry */
 .cardTilt {
   perspective: 800px;
@@ -302,13 +309,17 @@
 /* Image zoom on card hover */
 .cardImage img,
 .cardImage picture img,
+.listAvatar img,
+.listAvatar picture img,
 .mosaicCell img,
 .mosaicCell picture img {
   transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .card:hover .cardImage img,
-.card:hover .cardImage picture img {
+.card:hover .cardImage picture img,
+.listItem:hover .listAvatar img,
+.listItem:hover .listAvatar picture img {
   transform: scale(1.06);
 }
 
@@ -358,12 +369,16 @@
   }
   .cardImage img,
   .cardImage picture img,
+  .listAvatar img,
+  .listAvatar picture img,
   .mosaicCell img,
   .mosaicCell picture img {
     transition: none;
   }
   .card:hover .cardImage img,
   .card:hover .cardImage picture img,
+  .listItem:hover .listAvatar img,
+  .listItem:hover .listAvatar picture img,
   .cardTilt.tilting .cardImage img,
   .cardTilt.tilting .cardImage picture img,
   .cardTilt.tilting .mosaicCell img,
@@ -464,6 +479,10 @@
 
 .card:hover .cardAvatarFallback {
   transform: scale(1.06);
+}
+
+.listAvatarFallback {
+  font-size: calc(20px * var(--lumiverse-font-scale, 1));
 }
 
 .deleteBtn {
@@ -594,6 +613,206 @@
   white-space: nowrap;
 }
 
+.listItem {
+  position: relative;
+  border-radius: 18px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--lumiverse-primary) 4%, transparent), transparent 45%),
+    var(--lumiverse-card-bg);
+  border: 1px solid var(--lumiverse-border);
+  box-shadow: var(--lumiverse-shadow-sm);
+  transition:
+    border-color var(--lumiverse-transition-fast),
+    box-shadow var(--lumiverse-transition-fast),
+    transform var(--lumiverse-transition-fast);
+  animation: cardEntry 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.listItem:hover {
+  transform: translateY(-1px);
+  border-color: var(--lumiverse-primary-020);
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.22),
+    0 0 22px var(--lumiverse-primary-010);
+}
+
+.listItemGroup {
+  border-color: var(--lumiverse-primary-020);
+}
+
+.listBtn {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 14px;
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.listAvatar {
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--lumiverse-primary-010);
+  border: 1px solid var(--lumiverse-primary-020);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.listAvatar img,
+.listAvatar picture img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.listBody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.listTopRow,
+.listBottomRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.listName {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(14px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+
+.listTime {
+  flex-shrink: 0;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+}
+
+.listSubtitle {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-muted);
+}
+
+.listMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.listStatusPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--lumiverse-text-dim);
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid color-mix(in srgb, var(--lumiverse-border) 85%, transparent);
+  white-space: nowrap;
+}
+
+.listDeleteBtn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--lumiverse-bg-deep) 74%, transparent);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--lumiverse-transition-fast),
+    color var(--lumiverse-transition-fast),
+    border-color var(--lumiverse-transition-fast);
+}
+
+.listItem:hover .listDeleteBtn,
+.listItem:focus-within .listDeleteBtn {
+  opacity: 1;
+}
+
+.listDeleteBtn:hover {
+  color: var(--lumiverse-danger);
+  border-color: var(--lumiverse-danger-020);
+}
+
+.listSkeleton {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--lumiverse-card-bg);
+  border: 1px solid var(--lumiverse-border);
+}
+
+.listSkeletonAvatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.02) 25%, rgba(255, 255, 255, 0.06) 50%, rgba(255, 255, 255, 0.02) 75%);
+  background-size: 200% 100%;
+  animation: lumiverseShimmer 1.5s ease-in-out infinite;
+}
+
+.listSkeletonBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.listSkeletonTitle,
+.listSkeletonMeta {
+  border-radius: 4px;
+  background: var(--lumiverse-fill-subtle);
+}
+
+.listSkeletonTitle {
+  width: 72%;
+  height: 14px;
+}
+
+.listSkeletonMeta {
+  width: 46%;
+  height: 10px;
+}
+
 /* Skeleton */
 .skeletonCard {
   border-radius: 16px;
@@ -708,5 +927,27 @@
   .gridCards {
     grid-template-columns: repeat(2, 1fr);
     gap: 12px;
+  }
+  .compactList {
+    grid-template-columns: 1fr;
+  }
+  .listBtn {
+    gap: 12px;
+    padding: 12px;
+  }
+  .listAvatar,
+  .listSkeletonAvatar {
+    width: 52px;
+    height: 52px;
+    min-width: 52px;
+  }
+  .listTopRow,
+  .listBottomRow {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .listTime,
+  .listMeta {
+    flex-shrink: 1;
   }
 }
