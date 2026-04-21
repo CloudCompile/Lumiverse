@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react'
 import { Brain } from 'lucide-react'
 import { IconBolt } from '@tabler/icons-react'
 import { useStore } from '@/store'
+import { areReasoningSettingsEqual, getReasoningBindingSummary } from '@/lib/reasoning-binding'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import { Toggle } from '@/components/shared/Toggle'
 import type { ReasoningSettings, ReasoningEffort, ThinkingDisplay } from '@/types/store'
@@ -100,10 +101,12 @@ export default function PresetManager() {
   }, [activeProfileId, profiles])
   const activeProvider = activeProfile?.provider
   const activeModel = activeProfile?.model
+  const activeBinding = activeProfile?.metadata?.reasoningBindings?.settings
 
   const isToggleOnly = activeProvider ? TOGGLE_ONLY_PROVIDERS.has(activeProvider) : false
   const effortOptions = getEffortOptions(activeProvider, activeModel)
   const isAnthropic = activeProvider === 'anthropic'
+  const activeBindingMatchesPanel = activeBinding ? areReasoningSettingsEqual(activeBinding, reasoningSettings) : false
 
   const updateReasoning = useCallback(
     (partial: Partial<ReasoningSettings>) => {
@@ -123,6 +126,19 @@ export default function PresetManager() {
     <div className={styles.panel}>
       {/* ── Reasoning / CoT ── */}
       <CollapsibleSection title="Reasoning / CoT" icon={<Brain size={14} />} defaultExpanded>
+        {activeBinding && (
+          <div className={styles.bindingBanner}>
+            <div className={styles.bindingBannerTitle}>Saved on {activeProfile?.name}</div>
+            <div className={styles.bindingBannerText}>
+              {getReasoningBindingSummary(activeBinding)}
+            </div>
+            {!activeBindingMatchesPanel && (
+              <div className={styles.bindingBannerHint}>
+                The panel has been changed locally. Edit the connection and use Capture Current to update the saved snapshot.
+              </div>
+            )}
+          </div>
+        )}
         {/* Quick preset buttons */}
         <div className={styles.presetRow}>
           {REASONING_PRESETS.map((p) => (

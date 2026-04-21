@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Link2, Trash2, Edit3, Zap, Check, Star, BrainCircuit, Copy, LogIn, RefreshCw, MoreVertical } from 'lucide-react'
 import { connectionsApi } from '@/api/connections'
 import { openrouterApi, type OpenRouterCreditsInfo } from '@/api/openrouter'
+import { getReasoningBindingSummary, getReasoningBindingTitle } from '@/lib/reasoning-binding'
 import type { ConnectionProfile, ProviderInfo, CreateConnectionProfileInput } from '@/types/api'
 import ConnectionForm from './ConnectionForm'
 import { Spinner } from '@/components/shared/Spinner'
@@ -145,6 +146,9 @@ export default function ConnectionItem({ profile, isActive, providers, onSelect,
   }, [profile.id, onUpdate])
 
   const providerColor = PROVIDER_COLORS[profile.provider] || PROVIDER_COLORS.custom
+  const boundReasoning = profile.metadata?.reasoningBindings?.settings
+  const boundReasoningSummary = boundReasoning ? getReasoningBindingSummary(boundReasoning) : null
+  const boundReasoningTitle = boundReasoning ? getReasoningBindingTitle(boundReasoning) : undefined
 
   if (editing) {
     return (
@@ -172,16 +176,21 @@ export default function ConnectionItem({ profile, isActive, providers, onSelect,
           >
             <Link2 size={16} />
           </div>
-          <div className={styles.itemInfo}>
-            <span className={styles.itemName}>
-              {profile.name}
-              {profile.is_default && <Star size={11} className={styles.defaultStar} fill="#f5a623" />}
-              {profile.metadata?.reasoningBindings && <span title="Reasoning settings bound"><BrainCircuit size={11} className={styles.reasoningBound} /></span>}
-            </span>
-            <span className={styles.itemMeta}>
-              {profile.provider}{profile.model ? ` / ${profile.model}` : ''}
-            </span>
-          </div>
+            <div className={styles.itemInfo}>
+              <span className={styles.itemName}>
+                {profile.name}
+                {profile.is_default && <Star size={11} className={styles.defaultStar} fill="#f5a623" />}
+                {boundReasoning && <span title={boundReasoningTitle}><BrainCircuit size={11} className={styles.reasoningBound} /></span>}
+              </span>
+              <span className={styles.itemMeta}>
+                {profile.provider}{profile.model ? ` / ${profile.model}` : ''}
+              </span>
+              {boundReasoningSummary && (
+                <span className={styles.itemReasoningMeta} title={boundReasoningTitle}>
+                  {boundReasoningSummary}
+                </span>
+              )}
+            </div>
           {isActive && <Check size={14} className={styles.activeCheck} />}
         </button>
         <div className={styles.itemActions}>

@@ -3,10 +3,12 @@ import { FormField, TextInput, Select, Button } from '@/components/shared/FormCo
 import { Toggle } from '@/components/shared/Toggle'
 import { connectionsApi } from '@/api/connections'
 import { useStore } from '@/store'
+import { areReasoningSettingsEqual, getReasoningBindingSummary } from '@/lib/reasoning-binding'
 import ModelCombobox from './ModelCombobox'
 import OpenRouterSettings from './OpenRouterSettings'
 import type { ProviderInfo, ConnectionProfile, CreateConnectionProfileInput } from '@/types/api'
 import type { OpenRouterConnectionSettings } from '@/api/openrouter'
+import type { ReasoningSettings } from '@/types/store'
 import styles from '../ConnectionManager.module.css'
 
 interface ConnectionFormProps {
@@ -45,6 +47,9 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   const [useSubscriptionApi, setUseSubscriptionApi] = useState(profile?.metadata?.use_subscription_api || false)
   const [bindReasoning, setBindReasoning] = useState(!!profile?.metadata?.reasoningBindings)
   const reasoningSettings = useStore((s) => s.reasoningSettings)
+  const [boundReasoningSettings, setBoundReasoningSettings] = useState<ReasoningSettings>(
+    () => ({ ...(profile?.metadata?.reasoningBindings?.settings || reasoningSettings) })
+  )
   const [models, setModels] = useState<string[]>([])
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -179,6 +184,12 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   // Vertex AI derives its host from `metadata.vertex_region`, so the API URL
   // field has no purpose and we don't display it.
   const hideApiUrl = isOpenRouter || provider === 'nanogpt' || isVertexAI
+  const bindingMatchesCurrent = areReasoningSettingsEqual(boundReasoningSettings, reasoningSettings)
+
+  useEffect(() => {
+    setBindReasoning(!!profile?.metadata?.reasoningBindings)
+    setBoundReasoningSettings({ ...(profile?.metadata?.reasoningBindings?.settings || reasoningSettings) })
+  }, [profile?.id])
 
   const handlePollinationsSignIn = useCallback(async () => {
     setByopStatus(null)
@@ -243,7 +254,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       delete metadata.use_subscription_api
     }
     if (bindReasoning) {
-      metadata.reasoningBindings = { settings: { ...reasoningSettings } }
+      metadata.reasoningBindings = { settings: { ...boundReasoningSettings } }
     } else {
       delete metadata.reasoningBindings
     }
@@ -279,7 +290,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       is_default: isDefault,
       metadata,
     })
-  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, bindReasoning, reasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
+  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, bindReasoning, boundReasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
 
   return (
     <div className={styles.form}>
@@ -400,6 +411,29 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       <FormField label="">
         <Toggle.Checkbox checked={bindReasoning} onChange={setBindReasoning} label="Bind reasoning settings" hint="Save current reasoning settings and auto-apply when this connection is selected" />
       </FormField>
+      {bindReasoning && (
+        <div className={styles.bindingCard}>
+          <div className={styles.bindingCardHeader}>
+            <div>
+              <div className={styles.bindingCardTitle}>Saved reasoning snapshot</div>
+              <div className={styles.bindingCardSummary}>{getReasoningBindingSummary(boundReasoningSettings)}</div>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setBoundReasoningSettings({ ...reasoningSettings })}
+              title={bindingMatchesCurrent ? 'Snapshot already matches the current reasoning settings' : 'Replace the saved snapshot with the current reasoning settings'}
+            >
+              {bindingMatchesCurrent ? 'Captured' : 'Capture Current'}
+            </Button>
+          </div>
+          {!bindingMatchesCurrent && (
+            <div className={styles.bindingCardHint}>
+              Current panel values differ from this connection's saved snapshot.
+            </div>
+          )}
+        </div>
+      )}
       <div className={styles.formActions}>
         <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
         <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!name.trim()}>
