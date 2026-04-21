@@ -950,9 +950,15 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].is_user) { lastUserIdx = i; break; }
     }
+    let mentionYieldCounter = 0;
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       if (!msg.is_user || !msg.content.includes("#")) continue;
+      if ((mentionYieldCounter++ & 15) === 0) {
+        await yieldAndCheckAbort(ctx.signal);
+      } else if (ctx.signal?.aborted) {
+        throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       try {
         const isLast = i === lastUserIdx;
         const mentionResult = await databankSvc.resolveMentions(
@@ -1092,8 +1098,20 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
 
       let historyCount = 0;
       const historyParts: string[] = [];
+      let chatHistoryYieldCounter = 0;
       for (const msg of effectiveMessages) {
         if (msg.extra?.hidden === true) continue;
+        // Cooperative yield every 16 messages. The previous fix yielded once
+        // per block (≈30 times across the whole assembly), but long chats do
+        // all their macro work inside THIS single block and only yielded once
+        // before entering the loop. On a 200-message chat that's 200 sequential
+        // awaits on microtasks — Bun's HTTP queue never drains and the stop
+        // button is dead until the loop completes.
+        if ((chatHistoryYieldCounter++ & 15) === 0) {
+          await yieldAndCheckAbort(ctx.signal);
+        } else if (ctx.signal?.aborted) {
+          throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
+        }
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
         const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
         historyParts.push(resolvedContent);
@@ -4328,8 +4346,14 @@ async function onelinerImpersonation(
   // Chat history
   let messageCount = 0;
   const historyParts: string[] = [];
+  let impHistYieldCounter = 0;
   for (const msg of messages) {
     if (msg.extra?.hidden === true) continue;
+    if ((impHistYieldCounter++ & 15) === 0) {
+      await yieldAndCheckAbort(ctx.signal);
+    } else if (ctx.signal?.aborted) {
+      throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
     const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
     const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
     result.push({ role, content: resolvedContent });
@@ -4505,8 +4529,14 @@ async function legacyAssembly(
   const legacyFirstChatIdx = llmMessages.length;
   let legacyHistoryCount = 0;
   const legacyHistoryParts: string[] = [];
+  let legacyHistYieldCounter = 0;
   for (const m of messages) {
     if (m.extra?.hidden === true) continue;
+    if ((legacyHistYieldCounter++ & 15) === 0) {
+      await yieldAndCheckAbort(signal);
+    } else if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
     const resolved = await resolveMacros(m.content);
     legacyHistoryParts.push(resolved);
     const attachments = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];

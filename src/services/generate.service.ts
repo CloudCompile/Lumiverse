@@ -527,6 +527,16 @@ async function runPromptPipeline(opts: {
       }
 
       for (let i = 0; i < messages.length; i++) {
+        // Cooperative cancellation: applyRegexScripts runs every enabled
+        // prompt-target script against every message (N scripts × M messages
+        // regex executions). On long chats this can block the event loop for
+        // hundreds of ms; yield every 16 messages so /generate/stop lands.
+        if (i > 0 && (i & 15) === 0) {
+          await new Promise<void>((r) => setTimeout(r, 0));
+          if (opts.signal?.aborted) {
+            throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
+          }
+        }
         const msg = messages[i];
         const placement = msg.role === "user" ? "user_input" as const
           : msg.role === "assistant" ? "ai_output" as const
