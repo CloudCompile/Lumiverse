@@ -2,7 +2,7 @@ import type { ComponentType, ReactNode } from 'react'
 import {
   Sliders, MessageSquare, Users, PanelRight,
   Compass, Reply, HardDrive, Puzzle, Database, Hash, Activity,
-  Globe, Bell, Import, Brain, Terminal, Volume2, Plug, Search,
+  Globe, Bell, Import, Brain, Terminal, Volume2, Plug, Search, UserRound,
 } from 'lucide-react'
 import { useStore } from '@/store'
 import type { Command, CommandScope } from '@/lib/commands'
@@ -34,6 +34,15 @@ export interface SettingsTabEntry {
 const INLINE_SENTINEL = () => null
 
 export const SETTINGS_TABS: SettingsTabEntry[] = [
+  {
+    id: 'account',
+    shortName: 'Account',
+    tabName: 'Account Settings',
+    tabDescription: 'Manage your account details and password',
+    tabIcon: UserRound,
+    keywords: ['account', 'profile', 'password', 'credentials', 'security', 'me'],
+    component: INLINE_SENTINEL,
+  },
   {
     id: 'display',
     shortName: 'Display',

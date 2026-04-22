@@ -14,6 +14,7 @@ import { settingsApi } from '@/api/settings'
 import { webSearchApi, type WebSearchSettingsInput, type WebSearchTestResponse } from '@/api/web-search'
 import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
+import AccountSettings from '@/components/settings/AccountSettings'
 import UserManagement from '@/components/settings/UserManagement'
 import MigrationSettings from '@/components/settings/MigrationSettings'
 import TokenizerManager from '@/components/settings/TokenizerManager'
@@ -38,6 +39,12 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [activeView, setActiveView] = useState(settingsActiveView || 'display')
 
   const VIEWS = useMemo(() => getVisibleSettingsTabs(user?.role), [user?.role])
+
+  useEffect(() => {
+    if (!VIEWS.some((tab) => tab.id === activeView) && VIEWS.length > 0) {
+      setActiveView(VIEWS[0].id)
+    }
+  }, [VIEWS, activeView])
 
   return createPortal(
     <div className={styles.overlay} onClick={onClose}>
@@ -92,6 +99,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
 function SettingsView({ view }: { view: string }) {
   switch (view) {
+    case 'account':
+      return <AccountSettings />
     case 'display':
       return <DisplaySettings />
     case 'chat':
