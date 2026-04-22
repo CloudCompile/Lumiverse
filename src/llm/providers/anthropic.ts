@@ -48,9 +48,15 @@ export class AnthropicProvider implements LlmProvider {
     return /^claude-opus-4-7(?:$|[-:@])/.test((model || "").trim());
   }
 
+  private shouldSuppressThinking(request: GenerationRequest): boolean {
+    const thinking = request.parameters?.thinking;
+    return !!thinking && typeof thinking === "object" && (thinking as any).type === "disabled";
+  }
+
   async generate(apiKey: string, apiUrl: string, request: GenerationRequest): Promise<GenerationResponse> {
     const url = `${this.baseUrl(apiUrl)}/v1/messages`;
     const body = this.buildBody(request, false);
+    const suppressThinking = this.shouldSuppressThinking(request);
 
     const res = await fetch(url, {
       method: "POST",
@@ -72,6 +78,7 @@ export class AnthropicProvider implements LlmProvider {
       .map((c: any) => c.text)
       .join("");
     const thinkingContent = blocks
+      .filter((c: any) => !suppressThinking || c.type !== "thinking")
       .filter((c: any) => c.type === "thinking")
       .map((c: any) => c.thinking)
       .join("");
@@ -103,6 +110,7 @@ export class AnthropicProvider implements LlmProvider {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const url = `${this.baseUrl(apiUrl)}/v1/messages`;
     const body = this.buildBody(request, true);
+    const suppressThinking = this.shouldSuppressThinking(request);
 
     // NOTE: signal intentionally NOT passed to fetch — see src/llm/stream-utils.ts.
     // Abort is handled in-loop via readWithAbort() and a reader.cancel() in finally.
@@ -155,7 +163,9 @@ export class AnthropicProvider implements LlmProvider {
             }
           } else if (data.type === "content_block_delta") {
             if (data.delta?.type === "thinking_delta") {
-              yield { token: "", reasoning: data.delta.thinking };
+              if (!suppressThinking) {
+                yield { token: "", reasoning: data.delta.thinking };
+              }
             } else if (data.delta?.type === "text_delta") {
               yield { token: data.delta.text };
             } else if (data.delta?.type === "input_json_delta" && currentToolIdx >= 0) {
