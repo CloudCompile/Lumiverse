@@ -527,6 +527,7 @@
 @media (max-width: 768px) {
   .card {
     border-radius: var(--lcs-radius, 14px);
+    padding-top: 34px;
   }
 
   .header {
@@ -534,22 +535,31 @@
     gap: 8px;
   }
 
+  .headerLeft {
+    align-items: flex-start;
+    max-width: 100%;
+  }
+
   .content {
     padding: 10px 12px 14px;
   }
 
   .avatar {
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     border-radius: 10px;
   }
 
   .name {
-    font-size: calc(17px * var(--lumiverse-font-scale, 1));
+    font-size: calc(18px * var(--lumiverse-font-scale, 1));
+  }
+
+  .metaPill {
+    margin-top: 10px;
   }
 
   .actionsPill {
-    top: 12px;
+    top: 8px;
     right: 12px;
   }
 
@@ -564,6 +574,10 @@
 }
 
 @media (max-width: 480px) {
+  .card {
+    padding-top: 30px;
+  }
+
   .header {
     padding: 10px 10px 0;
     gap: 6px;
@@ -578,13 +592,13 @@
   }
 
   .avatar {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border-radius: 8px;
   }
 
   .name {
-    font-size: calc(15px * var(--lumiverse-font-scale, 1));
+    font-size: calc(16px * var(--lumiverse-font-scale, 1));
   }
 
   .metaDot {
@@ -592,11 +606,12 @@
   }
 
   .metaPill {
+    margin-top: 9px;
     padding: 3px 8px;
   }
 
   .actionsPill {
-    top: 10px;
+    top: 6px;
     right: 10px;
   }
 

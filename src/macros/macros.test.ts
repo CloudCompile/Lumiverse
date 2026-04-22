@@ -17,6 +17,7 @@ function makeEnv(opts: {
   chatCreatedAt?: number;
 } = {}): MacroEnv {
   const env: MacroEnv = {
+    commit: true,
     names: {
       user: "Alice",
       char: "Bob",
@@ -375,6 +376,44 @@ describe("Chat-scoped persisted variables", () => {
     const env = makeEnv({ chatVars: { x: "1" } });
     await ev("{{@x}}", env);
     expect(env._chatVarsDirty).toBeUndefined();
+  });
+});
+
+describe("Macro execution mode", () => {
+  test("custom macro sees committing execution by default", async () => {
+    const name = `test_commit_${crypto.randomUUID()}`;
+    registry.registerMacro({
+      name,
+      category: "Test",
+      description: "Returns current commit mode",
+      returnType: "string",
+      handler: (ctx) => (ctx.commit ? "commit" : "dry"),
+    });
+
+    try {
+      expect(await ev(`{{${name}}}`)).toBe("commit");
+    } finally {
+      registry.unregisterMacro(name);
+    }
+  });
+
+  test("custom macro sees dry execution when env.commit is false", async () => {
+    const name = `test_dry_${crypto.randomUUID()}`;
+    registry.registerMacro({
+      name,
+      category: "Test",
+      description: "Returns current commit mode",
+      returnType: "string",
+      handler: (ctx) => (ctx.commit ? "commit" : "dry"),
+    });
+
+    try {
+      const env = makeEnv();
+      env.commit = false;
+      expect(await ev(`{{${name}}}`, env)).toBe("dry");
+    } finally {
+      registry.unregisterMacro(name);
+    }
   });
 });
 

@@ -53,6 +53,15 @@ export class AnthropicProvider implements LlmProvider {
     return !!thinking && typeof thinking === "object" && (thinking as any).type === "disabled";
   }
 
+  private normalizeOutputConfig(outputConfig: unknown, thinking: unknown): Record<string, unknown> | undefined {
+    if (!outputConfig || typeof outputConfig !== "object" || Array.isArray(outputConfig)) return undefined;
+    const next = { ...(outputConfig as Record<string, unknown>) };
+    if (!thinking || typeof thinking !== "object" || Array.isArray(thinking) || (thinking as any).type === "disabled") {
+      delete next.effort;
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
+  }
+
   async generate(apiKey: string, apiUrl: string, request: GenerationRequest): Promise<GenerationResponse> {
     const url = `${this.baseUrl(apiUrl)}/v1/messages`;
     const body = this.buildBody(request, false);
@@ -386,12 +395,12 @@ export class AnthropicProvider implements LlmProvider {
     if (params.thinking) {
       body.thinking = params.thinking;
     }
-    // `output_config` only applies when Anthropic native thinking is enabled.
-    // If a caller disables thinking explicitly, or bypasses the higher-level
-    // reasoning sanitizers, drop stray `output_config` so prompt-level CoTs can
-    // still pass through as plain text.
-    if (params.output_config && body.thinking && body.thinking.type !== "disabled") {
-      body.output_config = params.output_config;
+    // Anthropic uses `output_config` for both structured output (`format`) and
+    // reasoning effort. Preserve non-reasoning keys even when thinking is off,
+    // but never leak `effort` alongside `thinking: disabled`.
+    const normalizedOutputConfig = this.normalizeOutputConfig(params.output_config, body.thinking);
+    if (normalizedOutputConfig) {
+      body.output_config = normalizedOutputConfig;
     }
 
     // Passthrough: include extra params (e.g. from custom body) not already

@@ -180,6 +180,19 @@ export function usePersonaBrowser() {
     [updatePersonaInStore]
   )
 
+  const renameFolder = useCallback(
+    async (oldName: string, newName: string) => {
+      const result = await personasApi.renameFolder(oldName, newName)
+      if (result.updated.length === 0) return result
+
+      const updatedById = new Map(result.updated.map((persona) => [persona.id, persona]))
+      const currentPersonas = useStore.getState().personas
+      setPersonas(currentPersonas.map((persona) => updatedById.get(persona.id) ?? persona))
+      return result
+    },
+    [setPersonas]
+  )
+
   const deletePersona = useCallback(
     async (id: string) => {
       await personasApi.delete(id)
@@ -309,6 +322,7 @@ export function usePersonaBrowser() {
     setSelectedPersonaId,
     createPersona,
     updatePersona,
+    renameFolder,
     deletePersona,
     duplicatePersona,
     uploadAvatar,

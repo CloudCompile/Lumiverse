@@ -10,6 +10,7 @@ import * as settingsSvc from "./settings.service";
 import * as personasSvc from "./personas.service";
 import {
   assemblePrompt,
+  applyProviderReasoningOffSwitch,
   injectReasoningParams,
   collectVectorActivatedWorldInfo,
   mergeActivatedWorldInfoEntries,
@@ -412,17 +413,7 @@ function applyApiReasoningOffSwitch(
   const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
   if (!reasoningSetting?.value || reasoningSetting.value.apiReasoning !== false) return;
 
-  delete (params as any).thinking;
-  delete (params as any).output_config;
-  delete (params as any).thinkingConfig;
-  delete (params as any).reasoning;
-  delete (params as any).reasoning_effort;
-
-  if (providerName === "nanogpt") {
-    (params as any).reasoning = { exclude: true };
-  } else if (providerName === "anthropic" && modelName && /claude-(opus|sonnet)-4[-.](6|7)/i.test(modelName)) {
-    (params as any).thinking = { type: "disabled" };
-  }
+  applyProviderReasoningOffSwitch(params as any, providerName, modelName);
 }
 
 /** Resolve provider and API key from a connection profile. */

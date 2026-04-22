@@ -124,6 +124,32 @@ export function updatePersona(userId: string, id: string, input: UpdatePersonaIn
   return updated;
 }
 
+export function renamePersonaFolder(userId: string, oldName: string, newName: string): Persona[] {
+  const source = oldName.trim();
+  const target = newName.trim();
+  if (!source || !target) return [];
+
+  const rows = getDb()
+    .query("SELECT * FROM personas WHERE user_id = ? AND folder = ?")
+    .all(userId, source) as any[];
+  if (rows.length === 0) return [];
+
+  if (source === target) {
+    return rows.map(rowToPersona);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  getDb()
+    .query("UPDATE personas SET folder = ?, updated_at = ? WHERE user_id = ? AND folder = ?")
+    .run(target, now, userId, source);
+
+  const updated = rows.map((row) => rowToPersona({ ...row, folder: target, updated_at: now }));
+  for (const persona of updated) {
+    eventBus.emit(EventType.PERSONA_CHANGED, { id: persona.id, persona }, userId);
+  }
+  return updated;
+}
+
 export function setPersonaAvatar(userId: string, id: string, avatarPath: string): boolean {
   const result = getDb()
     .query("UPDATE personas SET avatar_path = ?, updated_at = ? WHERE id = ? AND user_id = ?")

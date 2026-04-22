@@ -4236,22 +4236,7 @@ function buildParameters(
   // documented "no extended thinking" default; Claude 4.6/4.7 uses an explicit
   // `thinking: { type: "disabled" }` off-switch below.
   if (reasoningSettings && reasoningSettings.apiReasoning === false) {
-    delete params.thinking;
-    delete params.output_config;
-    delete params.thinkingConfig;
-    delete params.reasoning;
-    delete params.reasoning_effort;
-    // NanoGPT: the `:thinking` model suffix activates reasoning server-side
-    // regardless of parameters, so deletion alone is not enough to suppress
-    // it. Explicitly set `reasoning.exclude` so both `delta.reasoning` and
-    // `message.reasoning` are omitted from the response.
-    if (providerName === "nanogpt") {
-      params.reasoning = { exclude: true };
-    } else if (providerName === "anthropic" && modelName && /claude-(opus|sonnet)-4[-.](6|7)/i.test(modelName)) {
-      // Claude 4.6/4.7 models support an explicit disabled mode. Prefer that
-      // over omission so prompt-level CoTs can still come back as plain text.
-      params.thinking = { type: "disabled" };
-    }
+    applyProviderReasoningOffSwitch(params, providerName, modelName);
   }
 
   return params;
@@ -4299,7 +4284,12 @@ export function injectReasoningParams(
           ? new Set(["low", "medium", "high", "xhigh", "max"])
           : new Set(["low", "medium", "high", "max"]);
         const mappedEffort = validEfforts.has(effort) ? effort : "high";
-        params.output_config = { effort: mappedEffort };
+        const existingOutputConfig = (params.output_config && typeof params.output_config === "object" && !Array.isArray(params.output_config))
+          ? params.output_config
+          : {};
+        if (existingOutputConfig.effort === undefined) {
+          params.output_config = { ...existingOutputConfig, effort: mappedEffort };
+        }
       } else {
         // Legacy extended thinking for older Claude models
         const budgetMap: Record<string, number> = { low: 2048, medium: 8192, high: 16384, max: 32768 };
@@ -4359,6 +4349,41 @@ export function injectReasoningParams(
     if (!params.reasoning) {
       params.reasoning = { effort };
     }
+  }
+}
+
+function stripAnthropicReasoningOutputConfig(outputConfig: unknown): Record<string, any> | undefined {
+  if (!outputConfig || typeof outputConfig !== "object" || Array.isArray(outputConfig)) return undefined;
+  const next = { ...(outputConfig as Record<string, any>) };
+  delete next.effort;
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+export function applyProviderReasoningOffSwitch(
+  params: Record<string, any>,
+  providerName?: string | null,
+  modelName?: string | null,
+): void {
+  delete params.thinking;
+  delete params.thinkingConfig;
+  delete params.reasoning;
+  delete params.reasoning_effort;
+
+  if (providerName === "anthropic") {
+    const nextOutputConfig = stripAnthropicReasoningOutputConfig(params.output_config);
+    if (nextOutputConfig) params.output_config = nextOutputConfig;
+    else delete params.output_config;
+
+    if (modelName && /claude-(opus|sonnet)-4[-.](6|7)/i.test(modelName)) {
+      params.thinking = { type: "disabled" };
+    }
+    return;
+  }
+
+  delete params.output_config;
+
+  if (providerName === "nanogpt") {
+    params.reasoning = { exclude: true };
   }
 }
 

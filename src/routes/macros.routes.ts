@@ -197,6 +197,7 @@ function buildEnvFromIds(userId: string, body: {
   const connection = connectionsSvc.getDefaultConnection(userId);
 
   return {
+    commit: true,
     names: {
       user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
       charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", groupLastSpeaker: "",

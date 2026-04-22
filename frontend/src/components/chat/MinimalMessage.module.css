@@ -267,11 +267,6 @@
     padding: 8px;
     gap: 6px;
   }
-
-  .avatar {
-    width: 30px;
-    height: 30px;
-  }
 }
 
 /* ── Actions wrapper ── */
@@ -282,8 +277,28 @@
 
 /* ── Mobile: pull actions out of flex flow ── */
 @media (max-width: 768px) {
+  .card {
+    padding-top: 38px;
+  }
+
   .bubble {
     max-width: 100%;
+  }
+
+  .avatar {
+    width: 38px;
+    height: 38px;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+
+  .name {
+    font-size: calc(13px * var(--lumiverse-font-scale, 1));
   }
 
   .actionsWrap {
@@ -296,5 +311,20 @@
   .user .actionsWrap {
     left: auto;
     right: 52px;
+  }
+}
+
+@media (max-width: 480px) {
+  .card {
+    padding-top: 34px;
+  }
+
+  .avatar {
+    width: 34px;
+    height: 34px;
+  }
+
+  .name {
+    font-size: calc(14px * var(--lumiverse-font-scale, 1));
   }
 }

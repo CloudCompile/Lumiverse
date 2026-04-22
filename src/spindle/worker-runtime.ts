@@ -43,6 +43,10 @@ type TokenCountResult = {
   approximate: boolean;
 };
 
+type MacroInvocationState = {
+  commit: boolean;
+};
+
 type RuntimeWorkerToHost =
   | WorkerToHost
   | {
@@ -111,6 +115,7 @@ const permissionDeniedHandlers = new Set<(detail: PermissionDeniedDetail) => voi
 const permissionChangedHandlers = new Set<(detail: PermissionChangedDetail) => void>();
 const grantedPermissions = new Set<string>();
 const extensionMacroHandlers = new Map<string, (ctx: unknown) => unknown | Promise<unknown>>();
+const macroInvocationStack: MacroInvocationState[] = [];
 
 // ─── Messaging ───────────────────────────────────────────────────────────
 
@@ -123,6 +128,16 @@ function request(msg: RuntimeWorkerToHost & { requestId: string }): Promise<unkn
     pendingResponses.set(msg.requestId, { resolve, reject });
     post(msg);
   });
+}
+
+function getActiveMacroInvocation(): MacroInvocationState | null {
+  return macroInvocationStack.length > 0 ? macroInvocationStack[macroInvocationStack.length - 1]! : null;
+}
+
+function assertMutationAllowed(operation: string): void {
+  if (getActiveMacroInvocation()?.commit === false) {
+    throw new Error(`${operation} is not allowed during non-committing macro resolution`);
+  }
 }
 
 /** Build a real AbortError-shaped DOMException so `err.name === "AbortError"` works. */
@@ -295,6 +310,7 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   registerMacro(def): void {
+    assertMutationAllowed("spindle.registerMacro()");
     if (typeof def.handler === "function") {
       // Function handler — store directly, strip before posting (not serializable)
       extensionMacroHandlers.set(def.name.toLowerCase(), def.handler as (ctx: unknown) => unknown | Promise<unknown>);
@@ -329,24 +345,29 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   unregisterMacro(name: string): void {
+    assertMutationAllowed("spindle.unregisterMacro()");
     extensionMacroHandlers.delete(name.toLowerCase());
     post({ type: "unregister_macro", name });
   },
 
   updateMacroValue(name: string, value: string): void {
+    assertMutationAllowed("spindle.updateMacroValue()");
     post({ type: "update_macro_value", name, value: String(value ?? "") });
   },
 
   registerInterceptor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerInterceptor()");
     interceptHandler = handler;
     post({ type: "register_interceptor", priority });
   },
 
   registerTool(tool): void {
+    assertMutationAllowed("spindle.registerTool()");
     post({ type: "register_tool", tool });
   },
 
   unregisterTool(name: string): void {
+    assertMutationAllowed("spindle.unregisterTool()");
     post({ type: "unregister_tool", name });
   },
 
@@ -459,6 +480,7 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as string;
     },
     async write(path: string, data: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.write()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_write", requestId, path, data });
     },
@@ -472,10 +494,12 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as Uint8Array;
     },
     async writeBinary(path: string, data: Uint8Array): Promise<void> {
+      assertMutationAllowed("spindle.storage.writeBinary()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_write_binary", requestId, path, data });
     },
     async delete(path: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.delete()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_delete", requestId, path });
     },
@@ -494,10 +518,12 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as boolean;
     },
     async mkdir(path: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.mkdir()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_mkdir", requestId, path });
     },
     async move(from: string, to: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.move()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_move", requestId, from, to });
     },
@@ -537,6 +563,7 @@ const spindleApi: RuntimeSpindleAPI = {
       value: unknown,
       options?: { indent?: number }
     ): Promise<void> {
+      assertMutationAllowed("spindle.storage.setJson()");
       const indent = options?.indent ?? 2;
       await spindleApi.storage.write(path, JSON.stringify(value, null, indent));
     },
@@ -554,10 +581,12 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as string;
     },
     async write(path: string, data: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.write()");
       const requestId = crypto.randomUUID();
       await request({ type: "user_storage_write", requestId, path, data, userId });
     },
     async delete(path: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.delete()");
       const requestId = crypto.randomUUID();
       await request({ type: "user_storage_delete", requestId, path, userId });
     },
@@ -577,6 +606,7 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as boolean;
     },
     async mkdir(path: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.mkdir()");
       const requestId = crypto.randomUUID();
       await request({ type: "user_storage_mkdir", requestId, path, userId });
     },
@@ -599,6 +629,7 @@ const spindleApi: RuntimeSpindleAPI = {
       value: unknown,
       options?: { indent?: number; userId?: string }
     ): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.setJson()");
       const indent = options?.indent ?? 2;
       await spindleApi.userStorage.write(
         path,
@@ -610,6 +641,7 @@ const spindleApi: RuntimeSpindleAPI = {
 
   enclave: {
     async put(key: string, value: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.enclave.put()");
       const requestId = crypto.randomUUID();
       await request({ type: "enclave_put", requestId, key, value, userId });
     },
@@ -619,6 +651,7 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as string | null;
     },
     async delete(key: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.enclave.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "enclave_delete", requestId, key, userId });
       return result as boolean;
@@ -646,6 +679,7 @@ const spindleApi: RuntimeSpindleAPI = {
       data: string,
       options?: { ttlMs?: number; reservationId?: string }
     ): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.write()");
       const requestId = crypto.randomUUID();
       await request({
         type: "ephemeral_write",
@@ -670,6 +704,7 @@ const spindleApi: RuntimeSpindleAPI = {
       data: Uint8Array,
       options?: { ttlMs?: number; reservationId?: string }
     ): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.writeBinary()");
       const requestId = crypto.randomUUID();
       await request({
         type: "ephemeral_write_binary",
@@ -681,6 +716,7 @@ const spindleApi: RuntimeSpindleAPI = {
       });
     },
     async delete(path: string): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.delete()");
       const requestId = crypto.randomUUID();
       await request({ type: "ephemeral_delete", requestId, path });
     },
@@ -703,6 +739,7 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as { sizeBytes: number; createdAt: string; expiresAt?: string };
     },
     async clearExpired(): Promise<number> {
+      assertMutationAllowed("spindle.ephemeral.clearExpired()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "ephemeral_clear_expired", requestId });
       return result as number;
@@ -742,6 +779,7 @@ const spindleApi: RuntimeSpindleAPI = {
       sizeBytes: number;
       expiresAt: string;
     }> {
+      assertMutationAllowed("spindle.ephemeral.requestBlock()");
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "ephemeral_request_block",
@@ -757,6 +795,7 @@ const spindleApi: RuntimeSpindleAPI = {
       };
     },
     async releaseBlock(reservationId: string): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.releaseBlock()");
       const requestId = crypto.randomUUID();
       await request({
         type: "ephemeral_release_block",
@@ -782,6 +821,7 @@ const spindleApi: RuntimeSpindleAPI = {
       }>;
     },
     async appendMessage(chatId: string, message) {
+      assertMutationAllowed("spindle.chat.appendMessage()");
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "chat_append_message",
@@ -792,6 +832,7 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as { id: string };
     },
     async updateMessage(chatId: string, messageId: string, patch): Promise<void> {
+      assertMutationAllowed("spindle.chat.updateMessage()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_update_message",
@@ -802,6 +843,7 @@ const spindleApi: RuntimeSpindleAPI = {
       });
     },
     async deleteMessage(chatId: string, messageId: string): Promise<void> {
+      assertMutationAllowed("spindle.chat.deleteMessage()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_delete_message",
@@ -811,6 +853,7 @@ const spindleApi: RuntimeSpindleAPI = {
       });
     },
     async setMessageHidden(chatId: string, messageId: string, hidden: boolean): Promise<void> {
+      assertMutationAllowed("spindle.chat.setMessageHidden()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_set_message_hidden",
@@ -821,6 +864,7 @@ const spindleApi: RuntimeSpindleAPI = {
       });
     },
     async setMessagesHidden(chatId: string, messageIds: string[], hidden: boolean): Promise<void> {
+      assertMutationAllowed("spindle.chat.setMessagesHidden()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_set_messages_hidden",
@@ -844,6 +888,7 @@ const spindleApi: RuntimeSpindleAPI = {
 
   events: {
     async track(eventName, payload, options): Promise<void> {
+      assertMutationAllowed("spindle.events.track()");
       const requestId = crypto.randomUUID();
       await request({
         type: "events_track",
@@ -971,14 +1016,17 @@ const spindleApi: RuntimeSpindleAPI = {
 
   theme: {
     async apply(overrides: { variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } }): Promise<void> {
+      assertMutationAllowed("spindle.theme.apply()");
       const requestId = crypto.randomUUID();
       await request({ type: "theme_apply", requestId, overrides });
     },
     async applyPalette(palette, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.theme.applyPalette()");
       const requestId = crypto.randomUUID();
       await request({ type: "theme_apply_palette", requestId, palette, userId });
     },
     async clear(): Promise<void> {
+      assertMutationAllowed("spindle.theme.clear()");
       const requestId = crypto.randomUUID();
       await request({ type: "theme_clear", requestId });
     },
@@ -1034,10 +1082,12 @@ const spindleApi: RuntimeSpindleAPI = {
         return result as string;
       },
       async set(chatId: string, key: string, value: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.local.set()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_set_local", requestId, chatId, key, value });
       },
       async delete(chatId: string, key: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.local.delete()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_delete_local", requestId, chatId, key });
       },
@@ -1059,10 +1109,12 @@ const spindleApi: RuntimeSpindleAPI = {
         return result as string;
       },
       async set(key: string, value: string, userId?: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.global.set()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_set_global", requestId, key, value, userId });
       },
       async delete(key: string, userId?: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.global.delete()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_delete_global", requestId, key, userId });
       },
@@ -1084,10 +1136,12 @@ const spindleApi: RuntimeSpindleAPI = {
         return result as string;
       },
       async set(chatId: string, key: string, value: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.chat.set()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_set_chat", requestId, chatId, key, value });
       },
       async delete(chatId: string, key: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.chat.delete()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_delete_chat", requestId, chatId, key });
       },
@@ -1122,21 +1176,25 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as CharacterDTO | null;
     },
     async create(input: CharacterCreateDTO, userId?: string): Promise<CharacterDTO> {
+      assertMutationAllowed("spindle.characters.create()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_create", requestId, input, userId });
       return result as CharacterDTO;
     },
     async setAvatar(characterId: string, avatar: CharacterAvatarUploadDTO, userId?: string): Promise<CharacterDTO> {
+      assertMutationAllowed("spindle.characters.setAvatar()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_set_avatar", requestId, characterId, avatar, userId });
       return result as CharacterDTO;
     },
     async update(characterId: string, input: CharacterUpdateDTO, userId?: string): Promise<CharacterDTO> {
+      assertMutationAllowed("spindle.characters.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_update", requestId, characterId, input, userId });
       return result as CharacterDTO;
     },
     async delete(characterId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.characters.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_delete", requestId, characterId, userId });
       return result as boolean;
@@ -1167,11 +1225,13 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as ChatDTO | null;
     },
     async update(chatId: string, input: ChatUpdateDTO, userId?: string): Promise<ChatDTO> {
+      assertMutationAllowed("spindle.chats.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "chats_update", requestId, chatId, input, userId });
       return result as ChatDTO;
     },
     async delete(chatId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.chats.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "chats_delete", requestId, chatId, userId });
       return result as boolean;
@@ -1207,16 +1267,19 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as WorldBookDTO | null;
     },
     async create(input: WorldBookCreateDTO, userId?: string): Promise<WorldBookDTO> {
+      assertMutationAllowed("spindle.world_books.create()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_create", requestId, input, userId });
       return result as WorldBookDTO;
     },
     async update(worldBookId: string, input: WorldBookUpdateDTO, userId?: string): Promise<WorldBookDTO> {
+      assertMutationAllowed("spindle.world_books.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_update", requestId, worldBookId, input, userId });
       return result as WorldBookDTO;
     },
     async delete(worldBookId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.world_books.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_delete", requestId, worldBookId, userId });
       return result as boolean;
@@ -1240,16 +1303,19 @@ const spindleApi: RuntimeSpindleAPI = {
         return result as WorldBookEntryDTO | null;
       },
       async create(worldBookId: string, input: WorldBookEntryCreateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+        assertMutationAllowed("spindle.world_books.entries.create()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_create", requestId, worldBookId, input, userId });
         return result as WorldBookEntryDTO;
       },
       async update(entryId: string, input: WorldBookEntryUpdateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+        assertMutationAllowed("spindle.world_books.entries.update()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_update", requestId, entryId, input, userId });
         return result as WorldBookEntryDTO;
       },
       async delete(entryId: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.world_books.entries.delete()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_delete", requestId, entryId, userId });
         return result as boolean;
@@ -1295,21 +1361,25 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as PersonaDTO | null;
     },
     async create(input: PersonaCreateDTO, userId?: string): Promise<PersonaDTO> {
+      assertMutationAllowed("spindle.personas.create()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_create", requestId, input, userId });
       return result as PersonaDTO;
     },
     async update(personaId: string, input: PersonaUpdateDTO, userId?: string): Promise<PersonaDTO> {
+      assertMutationAllowed("spindle.personas.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_update", requestId, personaId, input, userId });
       return result as PersonaDTO;
     },
     async delete(personaId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.personas.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_delete", requestId, personaId, userId });
       return result as boolean;
     },
     async switchActive(personaId: string | null, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.personas.switchActive()");
       const requestId = crypto.randomUUID();
       await request({ type: "personas_switch", requestId, personaId, userId });
     },
@@ -1352,6 +1422,7 @@ const spindleApi: RuntimeSpindleAPI = {
       input: { title: string; body: string; tag?: string; url?: string; icon?: string; rawTitle?: boolean; image?: string },
       userId?: string,
     ): Promise<{ sent: number }> {
+      assertMutationAllowed("spindle.push.send()");
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "push_send",
@@ -1404,9 +1475,10 @@ const spindleApi: RuntimeSpindleAPI = {
   macros: {
     async resolve(
       template: string,
-      options?: { chatId?: string; characterId?: string; userId?: string },
+      options?: { chatId?: string; characterId?: string; userId?: string; commit?: boolean },
     ): Promise<{ text: string; diagnostics: Array<{ message: string; offset: number; length: number }> }> {
       const requestId = crypto.randomUUID();
+      const commit = options?.commit ?? getActiveMacroInvocation()?.commit ?? true;
       const result = await request({
         type: "macros_resolve",
         requestId,
@@ -1414,6 +1486,7 @@ const spindleApi: RuntimeSpindleAPI = {
         chatId: options?.chatId,
         characterId: options?.characterId,
         userId: options?.userId,
+        commit,
       } as any);
       return result as { text: string; diagnostics: Array<{ message: string; offset: number; length: number }> };
     },
@@ -1463,6 +1536,7 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   registerContextHandler(handler, priority?): void {
+    assertMutationAllowed("spindle.registerContextHandler()");
     contextHandlerFn = handler;
     post({ type: "register_context_handler", priority });
   },
@@ -1592,9 +1666,11 @@ const spindleApi: RuntimeSpindleAPI = {
 
   commands: {
     register(commands: any[]) {
+      assertMutationAllowed("spindle.commands.register()");
       post({ type: "commands_register", commands } as any);
     },
     unregister(commandIds?: string[]) {
+      assertMutationAllowed("spindle.commands.unregister()");
       post({ type: "commands_unregister", commandIds: commandIds ?? [] } as any);
     },
     onInvoked(handler: (commandId: string, context: any) => void | Promise<void>) {
@@ -1667,7 +1743,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
         const payload = (msg.payload ?? {}) as {
           requestId?: string;
           name?: string;
-          context?: unknown;
+          context?: { commit?: boolean } & Record<string, unknown>;
         };
         const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
         const name = typeof payload.name === "string" ? payload.name.toLowerCase() : "";
@@ -1684,6 +1760,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
         }
 
         try {
+          macroInvocationStack.push({ commit: payload.context?.commit !== false });
           const value = await Promise.resolve(handler(payload.context ?? {}));
           post({
             type: "macro_result",
@@ -1696,6 +1773,8 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
             requestId,
             error: err?.message || "Macro execution failed",
           });
+        } finally {
+          macroInvocationStack.pop();
         }
         break;
       }

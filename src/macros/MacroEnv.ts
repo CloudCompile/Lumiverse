@@ -14,6 +14,8 @@ export interface BuildEnvContext {
   chat: Chat;
   messages: Message[];
   generationType: GenerationType;
+  /** Defaults to true. False marks the evaluation as dry / non-committing. */
+  commit?: boolean;
   connection?: ConnectionProfile | null;
   userId?: string;
   dynamicMacros?: Record<string, string | MacroHandler | MacroDefinition>;
@@ -44,6 +46,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     : "";
 
   return {
+    commit: ctx.commit !== false,
     names: {
       user: persona?.name || "User",
       char: getEffectiveCharacterName(character),

@@ -17,7 +17,7 @@ describe("character card import format detection", () => {
       Buffer.from(cardJson, "utf-8").toString("base64"),
     );
 
-    const mislabeledFile = new File([pngWithCard], "mobile-upload.jpg", { type: "image/jpeg" });
+    const mislabeledFile = new File([new Uint8Array(pngWithCard)], "mobile-upload.jpg", { type: "image/jpeg" });
 
     expect(await detectCharacterImportFormat(mislabeledFile)).toBe("png");
     await expect(extractCardFromPng(mislabeledFile)).resolves.toMatchObject({ name: "Mobile PNG Test" });

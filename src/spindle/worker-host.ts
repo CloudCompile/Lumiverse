@@ -1169,7 +1169,14 @@ export class WorkerHost {
         break;
       // ─── Macro Resolution (free tier — no permission needed) ────────────
       case "macros_resolve":
-        this.handleMacrosResolve(msg.requestId, msg.template, msg.chatId, msg.characterId, msg.userId);
+        this.handleMacrosResolve(
+          msg.requestId,
+          msg.template,
+          msg.chatId,
+          msg.characterId,
+          msg.userId,
+          (msg as any).commit !== false,
+        );
         break;
       // ─── Image Generation (gated: "image_gen") ─────────────────────────
       case "image_gen_generate":
@@ -1398,6 +1405,7 @@ export class WorkerHost {
                   name: ctx.name,
                   args: ctx.args,
                   flags: ctx.flags,
+                  commit: ctx.commit !== false,
                   isScoped: ctx.isScoped,
                   body: ctx.body,
                   offset: ctx.offset,
@@ -5551,6 +5559,7 @@ export class WorkerHost {
     chatId?: string,
     characterId?: string,
     userId?: string,
+    commit = true,
   ): Promise<void> {
     try {
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5587,6 +5596,7 @@ export class WorkerHost {
               chat,
               messages,
               generationType: "normal",
+              commit,
               connection,
             });
           }
@@ -5605,6 +5615,7 @@ export class WorkerHost {
             chat: { id: "", character_id: character.id, name: "", metadata: {}, created_at: 0, updated_at: 0 } as any,
             messages: [],
             generationType: "normal",
+            commit,
             connection,
           });
         }
@@ -5615,6 +5626,7 @@ export class WorkerHost {
         const persona = personasSvc.getDefaultPersona(resolvedUserId);
         const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
         env = {
+          commit,
           names: {
             user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
             charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", groupLastSpeaker: "",

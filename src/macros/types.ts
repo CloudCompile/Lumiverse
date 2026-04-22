@@ -102,6 +102,8 @@ export interface MacroExecContext {
   args: string[];
   rawArgs: AstNode[][];
   flags: MacroFlags;
+  /** False when the caller explicitly requested a dry / non-committing resolve. */
+  commit: boolean;
   isScoped: boolean;
   body: string;
   bodyRaw: AstNode[];
@@ -118,6 +120,8 @@ export interface MacroExecContext {
 // ============================================================================
 
 export interface MacroEnv {
+  /** False when macro evaluation should avoid durable side effects. */
+  commit: boolean;
   names: {
     user: string;
     char: string;

@@ -465,6 +465,11 @@ export interface CreatePersonaInput {
 
 export type UpdatePersonaInput = Partial<CreatePersonaInput>;
 
+export interface RenamePersonaFolderResponse {
+  updated: Persona[];
+  count: number;
+}
+
 // ---- Preset ----
 export interface Preset {
   id: string;
