@@ -227,6 +227,11 @@ export function createChat(userId: string, input: CreateChatInput): Chat {
         is_user: false,
         name: getEffectiveCharacterName(character),
         content: greeting,
+        extra: {
+          greeting: true,
+          greeting_character_id: character.id,
+          greeting_index: input.greeting_index ?? 0,
+        },
       });
     }
   }
@@ -393,6 +398,11 @@ export function addGroupMember(
         is_user: false,
         name: getEffectiveCharacterName(character),
         content: greeting,
+        extra: {
+          greeting: true,
+          greeting_character_id: character.id,
+          greeting_index: options?.greeting_index ?? 0,
+        },
       }, userId);
     }
   }

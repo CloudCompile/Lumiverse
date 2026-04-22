@@ -78,7 +78,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       creatorNotes: character.creator_notes || "",
       version: (character.extensions?.version as string) || "",
       creator: character.creator || "",
-      firstMessage: character.first_mes || "",
+      firstMessage: resolveChatGreeting(character, chat, messages),
     },
     chat: {
       id: chat.id,
@@ -115,6 +115,28 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       characterTags: Array.isArray((character as any).tags) ? (character as any).tags : [],
     },
   };
+}
+
+function resolveChatGreeting(character: Character, chat: Chat, messages: Message[]): string {
+  const metadataOverride = chat.metadata?.greeting_override;
+  if (typeof metadataOverride === "string") return metadataOverride;
+
+  if (chat.metadata?.group) {
+    const taggedGreeting = messages.find((message) =>
+      !message.is_user
+      && message.extra?.greeting === true
+      && message.extra?.greeting_character_id === character.id,
+    );
+    return taggedGreeting?.content || character.first_mes || "";
+  }
+
+  const taggedGreeting = messages.find((message) => !message.is_user && message.extra?.greeting === true);
+  if (taggedGreeting?.content) return taggedGreeting.content;
+
+  const openingMessage = messages[0];
+  if (openingMessage && !openingMessage.is_user) return openingMessage.content;
+
+  return character.first_mes || "";
 }
 
 /** Build a lowercase-keyed Map from dynamicMacros for O(1) lookup. */
