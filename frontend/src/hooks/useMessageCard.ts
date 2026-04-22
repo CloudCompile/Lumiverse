@@ -5,6 +5,7 @@ import { messagesApi, chatsApi } from '@/api/chats'
 import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getCharacterAvatarUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
 import { imagesApi } from '@/api/images'
 import type { Message } from '@/types/api'
+import type { GenerationMetrics } from '@/types/ws-events'
 
 /**
  * Strip thinking/reasoning tags from content and extract the thoughts.
@@ -103,9 +104,7 @@ export function useMessageCard(message: Message, chatId: string) {
     ? (streamingReasoningStartedAt ?? undefined)
     : undefined
   const tokenCount = message.extra?.tokenCount as number | undefined
-  const generationMetrics = message.extra?.generationMetrics as
-    | { ttft?: number; tps?: number; durationMs: number; wasStreaming: boolean }
-    | undefined
+  const generationMetrics = message.extra?.generationMetrics as GenerationMetrics | undefined
 
   const isGroupChat = useStore((s) => s.isGroupChat)
 

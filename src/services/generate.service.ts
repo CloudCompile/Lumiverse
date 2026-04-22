@@ -1875,7 +1875,14 @@ async function runGeneration(
         } catch { /* non-fatal */ }
       }
 
-      let generationMetrics: { ttft?: number; tps?: number; durationMs: number; wasStreaming: boolean } | undefined;
+      let generationMetrics: {
+        ttft?: number;
+        tps?: number;
+        durationMs: number;
+        wasStreaming: boolean;
+        model?: string;
+        provider?: string;
+      } | undefined;
       if (finalPoolEntry) {
         const wasStreaming = finalPoolEntry.wasStreaming ?? true;
         const streamStart = finalPoolEntry.streamingStartedAt;
@@ -1898,7 +1905,14 @@ async function runGeneration(
           }
         }
 
-        generationMetrics = { durationMs, wasStreaming, ...(ttft != null ? { ttft } : {}), ...(tps != null ? { tps } : {}) };
+        generationMetrics = {
+          durationMs,
+          wasStreaming,
+          ...(ttft != null ? { ttft } : {}),
+          ...(tps != null ? { tps } : {}),
+          ...(lifecycle.model ? { model: lifecycle.model } : {}),
+          ...(lifecycle.providerName ? { provider: lifecycle.providerName } : {}),
+        };
       }
 
       // Persist all generation metadata (reasoning, usage, metrics) in a single

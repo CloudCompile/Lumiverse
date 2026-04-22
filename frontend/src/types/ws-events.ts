@@ -219,6 +219,8 @@ export interface GenerationMetrics {
   tps?: number
   durationMs: number
   wasStreaming: boolean
+  model?: string
+  provider?: string
 }
 
 export interface GenerationEndedPayload {
