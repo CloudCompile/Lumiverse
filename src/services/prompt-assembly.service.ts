@@ -286,13 +286,15 @@ const SAMPLER_KEY_MAP: Record<string, string> = {
  * Sampler keys where a value of 0 means "exclude from request".
  * This lets users disable individual samplers to avoid provider conflicts
  * (e.g. Claude rejects requests that set both temperature and top_p).
+ * topK is intentionally excluded here: the Loom Builder exposes an explicit
+ * include toggle for it, so users can choose between omitting `top_k` entirely
+ * and intentionally sending `top_k: 0`.
  * maxTokens and contextSize are excluded — 0 is never a valid intent for those.
  */
 const ZERO_EXCLUDES_SAMPLER = new Set([
   "temperature",
   "topP",
   "minP",
-  "topK",
   "frequencyPenalty",
   "presencePenalty",
   "repetitionPenalty",
@@ -4172,8 +4174,9 @@ function buildParameters(
   }
 
   // Sampler overrides — when enabled, apply user values (or defaults for core params).
-  // A value of 0 on sampling params means "exclude from request", allowing users to
-  // avoid provider conflicts (e.g. Claude rejects requests with both temperature and top_p).
+  // A value of 0 on selected sampling params means "exclude from request", allowing
+  // users to avoid provider conflicts (e.g. Claude rejects requests with both
+  // temperature and top_p). top_k is handled separately via an explicit UI toggle.
   if (overrides?.enabled) {
     for (const [camelKey, apiKey] of Object.entries(SAMPLER_KEY_MAP)) {
       const val = (overrides as any)[camelKey];

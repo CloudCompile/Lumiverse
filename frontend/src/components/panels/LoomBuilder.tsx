@@ -646,6 +646,8 @@ interface SamplerSliderProps {
 
 function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
   const isSet = value !== null && value !== undefined
+  const hasIncludeToggle = !!param.includeToggle
+  const isIncluded = hasIncludeToggle ? isSet : true
   const trackRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
   const dragValueRef = useRef<number | null>(null)
@@ -723,15 +725,35 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
     commitInput(localInput)
   }, [localInput, commitInput])
 
+  const handleToggleIncluded = useCallback((checked: boolean) => {
+    if (!hasIncludeToggle) return
+    if (!checked) {
+      onChange(param.key, null)
+      return
+    }
+
+    const nextValue = value ?? param.defaultHint
+    onChange(param.key, nextValue)
+  }, [hasIncludeToggle, onChange, param.defaultHint, param.key, value])
+
   const pct = ((currentValue - param.min) / (param.max - param.min)) * 100
 
   return (
     <div className={s.sliderRow}>
       <div className={s.sliderHeader}>
-        <span className={clsx(s.sliderLabel, isSet ? s.sliderLabelSet : s.sliderLabelUnset)}>{param.label}</span>
+        {hasIncludeToggle ? (
+          <Toggle.Checkbox
+            checked={isIncluded}
+            onChange={handleToggleIncluded}
+            label={<span className={clsx(s.sliderLabel, isSet ? s.sliderLabelSet : s.sliderLabelUnset)}>{param.label}</span>}
+            className={s.sliderToggle}
+          />
+        ) : (
+          <span className={clsx(s.sliderLabel, isSet ? s.sliderLabelSet : s.sliderLabelUnset)}>{param.label}</span>
+        )}
         <input
           type="number"
-          value={localInput}
+          value={isIncluded ? localInput : ''}
           onChange={handleInputChange}
           onBlur={handleInputBlur}
           className={clsx(s.sliderInput, isSet ? s.sliderInputSet : s.sliderInputUnset)}
@@ -739,17 +761,18 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
           max={param.max}
           step={param.step}
           placeholder={String(param.defaultHint)}
+          disabled={!isIncluded}
         />
       </div>
       <div
         ref={trackRef}
         className={s.sliderTrack}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
+        onPointerDown={isIncluded ? handlePointerDown : undefined}
+        onPointerMove={isIncluded ? handlePointerMove : undefined}
+        onPointerUp={isIncluded ? handlePointerUp : undefined}
         onDoubleClick={() => onChange(param.key, null)}
         title="Double-click to reset"
-        style={{ opacity: isSet ? 1 : 0.4 }}
+        style={{ opacity: !isIncluded ? 0.2 : isSet ? 1 : 0.4 }}
       >
         <div className={s.sliderFill} style={{ width: `${pct}%` }} />
         <div className={s.sliderThumb} style={{ left: `${pct}%` }} />

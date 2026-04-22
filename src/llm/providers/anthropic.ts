@@ -241,52 +241,14 @@ export class AnthropicProvider implements LlmProvider {
     });
   }
 
-  private isAnthropicSystemTextBlock(value: unknown): value is { type: "text"; text: string; [key: string]: unknown } {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-    const record = value as Record<string, unknown>;
-    return record.type === "text" && typeof record.text === "string";
-  }
-
-  private sanitizeCacheControl(value: unknown): { type: "ephemeral"; ttl?: "5m" | "1h" } | undefined {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    if (record.type !== "ephemeral") return undefined;
-    const ttl = record.ttl === "5m" || record.ttl === "1h" ? record.ttl : undefined;
-    return ttl ? { type: "ephemeral", ttl } : { type: "ephemeral" };
-  }
-
-  private sanitizeAnthropicSystemTextBlock(value: unknown): { type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" } } | undefined {
-    if (!this.isAnthropicSystemTextBlock(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    const text = record.text;
-    if (typeof text !== "string" || text.length === 0) return undefined;
-    const block: { type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" } } = {
-      type: "text",
-      text,
-    };
-    const cacheControl = this.sanitizeCacheControl(record.cache_control);
-    if (cacheControl) block.cache_control = cacheControl;
-    return block;
-  }
-
   /**
-   * Anthropic's `system` field accepts either a plain string or an array of
-   * Anthropic text blocks. Preserve valid Anthropic-native blocks as-is, and
-   * only flatten foreign/custom shapes into plain text.
+   * Anthropic accepts `system` as either a string or TextBlockParam[]. In
+   * practice, Lumiverse does not need block-level system features here, and the
+   * string form is the least error-prone across custom-body inputs and proxies.
    */
-  private normalizeSystemParam(value: unknown): string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" } }> | undefined {
+  private normalizeSystemParam(value: unknown): string | undefined {
     if (typeof value === "string") {
       return value || undefined;
-    }
-    const singleBlock = this.sanitizeAnthropicSystemTextBlock(value);
-    if (singleBlock) {
-      return [singleBlock];
-    }
-    if (Array.isArray(value) && value.length > 0) {
-      const blocks = value.map((item) => this.sanitizeAnthropicSystemTextBlock(item));
-      if (blocks.every((item): item is NonNullable<typeof item> => !!item)) {
-        return blocks;
-      }
     }
 
     const chunks: string[] = [];
@@ -303,10 +265,6 @@ export class AnthropicProvider implements LlmProvider {
       if (!input || typeof input !== "object") return;
 
       const record = input as Record<string, unknown>;
-      if (this.isAnthropicSystemTextBlock(record)) {
-        if (record.text) chunks.push(record.text);
-        return;
-      }
       if (typeof record.text === "string") {
         if (record.text) chunks.push(record.text);
         return;

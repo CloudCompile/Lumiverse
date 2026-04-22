@@ -640,6 +640,10 @@
   margin-bottom: 6px;
 }
 
+.sliderToggle {
+  gap: 6px;
+}
+
 .sliderLabel {
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   font-weight: 500;
@@ -1359,5 +1363,4 @@
   align-items: center;
   gap: 4px;
 }
-
 

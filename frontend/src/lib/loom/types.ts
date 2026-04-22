@@ -162,6 +162,7 @@ export interface SamplerParam {
   defaultHint: number
   unit?: string
   optIn?: boolean
+  includeToggle?: boolean
   apiKeyBySource?: Record<string, string>
 }
 
