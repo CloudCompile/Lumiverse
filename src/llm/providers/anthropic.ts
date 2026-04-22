@@ -6,6 +6,8 @@ import { getTextContent, type GenerationRequest, type GenerationResponse, type S
 const API_VERSION = "2023-06-01";
 
 export class AnthropicProvider implements LlmProvider {
+  private static readonly PROMPT_PLACEHOLDER = "Let's get started.";
+
   readonly name = "anthropic";
   readonly displayName = "Anthropic";
   readonly defaultUrl = "https://api.anthropic.com";
@@ -40,6 +42,10 @@ export class AnthropicProvider implements LlmProvider {
       "x-api-key": apiKey,
       "anthropic-version": API_VERSION,
     };
+  }
+
+  private isOpus47Model(model: string): boolean {
+    return /^claude-opus-4-7(?:$|[-:@])/.test((model || "").trim());
   }
 
   async generate(apiKey: string, apiUrl: string, request: GenerationRequest): Promise<GenerationResponse> {
@@ -323,28 +329,47 @@ export class AnthropicProvider implements LlmProvider {
 
   private buildBody(request: GenerationRequest, stream: boolean): any {
     const params = request.parameters || {};
+    const omitSampling = this.isOpus47Model(request.model);
+    const systemBlocks: Array<{ type: "text"; text: string }> = [];
+    const normalizedMessages: Array<{ role: "user" | "assistant"; content: string | any[] }> = [];
+    let sawNonSystem = false;
 
-    // Separate system message from the rest
-    const systemMessages = request.messages.filter((m) => m.role === "system");
-    const otherMessages = request.messages.filter((m) => m.role !== "system");
+    for (const message of request.messages) {
+      if (!sawNonSystem && message.role === "system") {
+        const text = this.finalizeSystemText([getTextContent(message)]);
+        if (text) systemBlocks.push({ type: "text", text });
+        continue;
+      }
+
+      sawNonSystem = true;
+      normalizedMessages.push({
+        role: message.role === "assistant" ? "assistant" : "user",
+        content: this.formatContent(message),
+      });
+    }
 
     const body: any = {
       model: request.model,
-      messages: otherMessages.map((m) => ({ role: m.role, content: this.formatContent(m) })),
+      messages: normalizedMessages,
       max_tokens: params.max_tokens || 4096,
       stream,
     };
 
     const normalizedParamSystem = this.normalizeSystemParam(params.system);
-    if (systemMessages.length > 0) {
-      body.system = this.finalizeSystemText(systemMessages.map((m) => getTextContent(m)));
-    } else if (normalizedParamSystem) {
-      body.system = normalizedParamSystem;
+    if (normalizedParamSystem) {
+      systemBlocks.push({ type: "text", text: normalizedParamSystem });
+    }
+    if (systemBlocks.length > 0) {
+      body.system = systemBlocks;
     }
 
-    if (params.temperature !== undefined) body.temperature = params.temperature;
-    if (params.top_p !== undefined) body.top_p = params.top_p;
-    if (params.top_k !== undefined) body.top_k = params.top_k;
+    if (body.messages.length === 0) {
+      body.messages = [{ role: "user", content: AnthropicProvider.PROMPT_PLACEHOLDER }];
+    }
+
+    if (!omitSampling && params.temperature !== undefined) body.temperature = params.temperature;
+    if (!omitSampling && params.top_p !== undefined) body.top_p = params.top_p;
+    if (!omitSampling && params.top_k !== undefined) body.top_k = params.top_k;
     if (params.stop) body.stop_sequences = params.stop;
 
     // Extended/adaptive thinking
@@ -364,6 +389,7 @@ export class AnthropicProvider implements LlmProvider {
       if (body[key] !== undefined) continue;
       if (AnthropicProvider.HANDLED_PARAMS.has(key)) continue;
       if (AnthropicProvider.INTERNAL_PARAMS.has(key)) continue;
+      if (omitSampling && (key === "temperature" || key === "top_p" || key === "top_k")) continue;
       body[key] = params[key];
     }
 

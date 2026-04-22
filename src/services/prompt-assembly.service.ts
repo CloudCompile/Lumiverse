@@ -156,6 +156,12 @@ function rtrimLastHistoryAssistant(result: LlmMessage[]): void {
   }
 }
 
+function isDecorativeNewChatSeparator(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed === "[Start a new Chat]") return true;
+  return /^\[Start a new group chat(?:\. Group members:.*)?\]$/i.test(trimmed);
+}
+
 // ---------------------------------------------------------------------------
 // Attachment resolution — read image/audio files from disk into base64
 // ---------------------------------------------------------------------------
@@ -1067,9 +1073,10 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       const newChatPrompt = promptBehavior.newChatPrompt;
       if (newChatPrompt) {
         const resolved = (await evaluate(newChatPrompt, macroEnv, registry)).text;
-        if (resolved) {
-          result.push({ role: "system", content: resolved });
-          breakdown.push({ type: "separator", name: "New Chat Prompt", role: "system", content: resolved });
+        const trimmed = resolved.trim();
+        if (trimmed && !isDecorativeNewChatSeparator(trimmed)) {
+          result.push({ role: "system", content: trimmed });
+          breakdown.push({ type: "separator", name: "New Chat Prompt", role: "system", content: trimmed });
         }
       }
 
