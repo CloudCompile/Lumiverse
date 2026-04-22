@@ -403,6 +403,28 @@ function resolveConnection(userId: string, connectionId?: string) {
   return connection;
 }
 
+function applyApiReasoningOffSwitch(
+  userId: string,
+  providerName: string,
+  modelName: string | undefined,
+  params: GenerationParameters,
+): void {
+  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
+  if (!reasoningSetting?.value || reasoningSetting.value.apiReasoning !== false) return;
+
+  delete (params as any).thinking;
+  delete (params as any).output_config;
+  delete (params as any).thinkingConfig;
+  delete (params as any).reasoning;
+  delete (params as any).reasoning_effort;
+
+  if (providerName === "nanogpt") {
+    (params as any).reasoning = { exclude: true };
+  } else if (providerName === "anthropic" && modelName && /claude-(opus|sonnet)-4[-.](6|7)/i.test(modelName)) {
+    (params as any).thinking = { type: "disabled" };
+  }
+}
+
 /** Resolve provider and API key from a connection profile. */
 async function resolveProviderAndKey(
   userId: string,
@@ -634,6 +656,8 @@ async function runPromptPipeline(opts: {
 
   // Merge parameters: assembled (from preset) < interceptor overrides < request overrides
   const parameters: GenerationParameters = { ...assembledParams, ...interceptorParameters, ...opts.inputParameters };
+  const effectiveConnection = resolveConnection(opts.userId, spindleContext.connectionId || opts.connectionId);
+  applyApiReasoningOffSwitch(opts.userId, effectiveConnection.provider, effectiveConnection.model, parameters);
 
   return { messages, parameters, breakdown, chatHistoryMessages, assistantPrefill, activatedWorldInfo, worldInfoStats, memoryStats, contextClipStats, deferredWiState, spindleContext, deliberationHandledByMacro, macroEnv };
 }
@@ -2306,25 +2330,7 @@ async function prepareQuietCall(
   } else if (reasoningSetting?.value && reasoningSetting.value.apiReasoning === false) {
     // Authoritative off-switch: strip any reasoning fields that may have been
     // spread in from preset.parameters so native thinking is never requested.
-    delete (mergedParams as any).thinking;
-    delete (mergedParams as any).output_config;
-    delete (mergedParams as any).thinkingConfig;
-    delete (mergedParams as any).reasoning;
-    delete (mergedParams as any).reasoning_effort;
-    // NanoGPT: the `:thinking` model suffix activates reasoning server-side
-    // regardless of parameters. Explicitly set `reasoning.exclude` so both
-    // `delta.reasoning` and `message.reasoning` are omitted from the response.
-    if (provider.name === "nanogpt") {
-      (mergedParams as any).reasoning = { exclude: true };
-    } else if (
-      provider.name === "anthropic"
-      && connection.model
-      && /claude-(opus|sonnet)-4[-.](6|7)/i.test(connection.model)
-    ) {
-      // Claude 4.6/4.7 models support an explicit disabled mode. Prefer that
-      // over omission so prompt-level CoTs can still come back as plain text.
-      (mergedParams as any).thinking = { type: "disabled" };
-    }
+    applyApiReasoningOffSwitch(userId, provider.name, connection.model, mergedParams);
   }
 
   // Inject connection-level metadata flags into parameters (e.g. use_responses_api)
