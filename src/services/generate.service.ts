@@ -2316,6 +2316,14 @@ async function prepareQuietCall(
     // `delta.reasoning` and `message.reasoning` are omitted from the response.
     if (provider.name === "nanogpt") {
       (mergedParams as any).reasoning = { exclude: true };
+    } else if (
+      provider.name === "anthropic"
+      && connection.model
+      && /claude-(opus|sonnet)-4[-.](6|7)/i.test(connection.model)
+    ) {
+      // Claude 4.6/4.7 models support an explicit disabled mode. Prefer that
+      // over omission so prompt-level CoTs can still come back as plain text.
+      (mergedParams as any).thinking = { type: "disabled" };
     }
   }
 

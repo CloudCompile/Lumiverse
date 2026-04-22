@@ -4232,8 +4232,9 @@ function buildParameters(
 
   // Authoritative off-switch: when the user has disabled API reasoning, strip every
   // provider-specific reasoning field — including anything a customBody spread in —
-  // so native thinking is never requested. Omitting these params is the documented
-  // "no extended thinking" default for every provider we target.
+  // so native thinking is never requested. Most providers use omission as their
+  // documented "no extended thinking" default; Claude 4.6/4.7 uses an explicit
+  // `thinking: { type: "disabled" }` off-switch below.
   if (reasoningSettings && reasoningSettings.apiReasoning === false) {
     delete params.thinking;
     delete params.output_config;
@@ -4246,6 +4247,10 @@ function buildParameters(
     // `message.reasoning` are omitted from the response.
     if (providerName === "nanogpt") {
       params.reasoning = { exclude: true };
+    } else if (providerName === "anthropic" && modelName && /claude-(opus|sonnet)-4[-.](6|7)/i.test(modelName)) {
+      // Claude 4.6/4.7 models support an explicit disabled mode. Prefer that
+      // over omission so prompt-level CoTs can still come back as plain text.
+      params.thinking = { type: "disabled" };
     }
   }
 

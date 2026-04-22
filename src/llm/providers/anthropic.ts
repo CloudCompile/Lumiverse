@@ -376,10 +376,11 @@ export class AnthropicProvider implements LlmProvider {
     if (params.thinking) {
       body.thinking = params.thinking;
     }
-    // `output_config` only applies to Anthropic's native thinking modes. If a
-    // caller bypasses the higher-level reasoning sanitizers, drop stray
-    // `output_config` so prompt-level CoTs can still pass through as plain text.
-    if (params.output_config && body.thinking) {
+    // `output_config` only applies when Anthropic native thinking is enabled.
+    // If a caller disables thinking explicitly, or bypasses the higher-level
+    // reasoning sanitizers, drop stray `output_config` so prompt-level CoTs can
+    // still pass through as plain text.
+    if (params.output_config && body.thinking && body.thinking.type !== "disabled") {
       body.output_config = params.output_config;
     }
 
