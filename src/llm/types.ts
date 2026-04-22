@@ -51,6 +51,8 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
+  strict?: boolean;
+  inputExamples?: Array<Record<string, unknown>>;
 }
 
 export interface GenerationParameters {

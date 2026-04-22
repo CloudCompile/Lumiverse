@@ -307,6 +307,10 @@ export default function CouncilManager() {
             label="Retain Results for Regens/Swipes"
           />
         </div>
+
+        <div className={styles.inlineHint} style={{ marginTop: 10 }}>
+          Configure <strong>Settings → Web Search</strong> to enable the Web Search council tool for inline or sidecar use.
+        </div>
       </EditorSection>
 
       {/* Council Members */}

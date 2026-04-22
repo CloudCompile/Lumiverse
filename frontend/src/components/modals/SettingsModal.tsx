@@ -10,6 +10,8 @@ import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import { embeddingsApi } from '@/api/embeddings'
 import { imagesApi } from '@/api/images'
+import { settingsApi } from '@/api/settings'
+import { webSearchApi, type WebSearchSettingsInput, type WebSearchTestResponse } from '@/api/web-search'
 import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
 import UserManagement from '@/components/settings/UserManagement'
@@ -106,6 +108,8 @@ function SettingsView({ view }: { view: string }) {
       return <AdvancedSettings />
     case 'embeddings':
       return <EmbeddingsSettings />
+    case 'webSearch':
+      return <WebSearchSettings />
     case 'lumihub':
       return <LumiHubSettings />
     case 'tokenizers':
@@ -1764,6 +1768,239 @@ function EmbeddingsSettings() {
           ? 'Testing verifies the inherited embedding connection without changing any settings.'
           : 'Testing auto-detects native model dimensions and applies them to this configuration.'}
       </p>
+    </div>
+  )
+}
+
+interface WebSearchSettingsState {
+  enabled: boolean
+  provider: 'searxng'
+  apiUrl: string
+  requestTimeoutMs: number
+  defaultResultCount: number
+  maxResultCount: number
+  maxPagesToScrape: number
+  maxCharsPerPage: number
+  language: string
+  safeSearch: 0 | 1 | 2
+  engines: string[]
+  hasApiKey: boolean
+}
+
+const WEB_SEARCH_DEFAULTS: WebSearchSettingsState = {
+  enabled: false,
+  provider: 'searxng',
+  apiUrl: '',
+  requestTimeoutMs: 15000,
+  defaultResultCount: 3,
+  maxResultCount: 5,
+  maxPagesToScrape: 3,
+  maxCharsPerPage: 3000,
+  language: 'all',
+  safeSearch: 1,
+  engines: [],
+  hasApiKey: false,
+}
+
+function WebSearchSettings() {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
+  const [cfg, setCfg] = useState<WebSearchSettingsState>(WEB_SEARCH_DEFAULTS)
+  const [apiKey, setApiKey] = useState('')
+  const [testQuery, setTestQuery] = useState('latest AI roleplay tools')
+  const [testResult, setTestResult] = useState<WebSearchTestResponse | null>(null)
+  const [enginesInput, setEnginesInput] = useState('')
+
+  useEffect(() => {
+    webSearchApi.getSettings()
+      .then((row) => {
+        const next = { ...WEB_SEARCH_DEFAULTS, ...(row || {}) }
+        setCfg(next)
+        setEnginesInput(Array.isArray(next.engines) ? next.engines.join(', ') : '')
+      })
+      .catch(() => {
+        setCfg(WEB_SEARCH_DEFAULTS)
+      })
+      .finally(() => setLoading(false))
+  }, [])
+
+  const update = (patch: Partial<WebSearchSettingsState>) => {
+    setCfg((prev) => ({ ...prev, ...patch }))
+  }
+
+  const buildPayload = (): WebSearchSettingsInput => ({
+    enabled: cfg.enabled,
+    provider: 'searxng',
+    apiUrl: cfg.apiUrl,
+    requestTimeoutMs: cfg.requestTimeoutMs,
+    defaultResultCount: cfg.defaultResultCount,
+    maxResultCount: cfg.maxResultCount,
+    maxPagesToScrape: cfg.maxPagesToScrape,
+    maxCharsPerPage: cfg.maxCharsPerPage,
+    language: cfg.language,
+    safeSearch: cfg.safeSearch,
+    engines: enginesInput.split(',').map((item) => item.trim()).filter(Boolean),
+  })
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    setSuccess(null)
+    try {
+      const payload = buildPayload()
+      const next = await webSearchApi.putSettings({
+        ...payload,
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+      })
+      setCfg(next)
+      setEnginesInput(next.engines.join(', '))
+      setApiKey('')
+      setSuccess('Web search settings saved')
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || 'Failed to save web search settings')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const test = async () => {
+    setTesting(true)
+    setError(null)
+    setSuccess(null)
+    setTestResult(null)
+    try {
+      const result = await webSearchApi.test(testQuery, buildPayload(), apiKey.trim() || undefined)
+      setTestResult(result)
+      setSuccess(`Web search test passed. Retrieved ${result.results.length} results and ${result.documents.length} extracted pages.`)
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || 'Web search test failed')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className={styles.settingsSection}>
+        <h3 className={styles.sectionTitle}>Web Search</h3>
+        <p className={styles.placeholder}>Loading web search settings...</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles.settingsSection}>
+      <h3 className={styles.sectionTitle}>Web Search</h3>
+      <p className={styles.placeholder}>Configure a SearXNG instance for the host-backed council web-search tool. The tool will appear in Council once search is enabled and an API URL is configured.</p>
+
+      {error && <p className={styles.errorText}>{error}</p>}
+      {success && <p className={styles.successText}>{success}</p>}
+
+      <Toggle.Checkbox
+        checked={cfg.enabled}
+        onChange={(checked) => update({ enabled: checked })}
+        label="Enable web search"
+      />
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>Provider</label>
+        <select className={styles.select} value={cfg.provider} onChange={() => update({ provider: 'searxng' })}>
+          <option value="searxng">SearXNG</option>
+        </select>
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>API URL</label>
+        <input className={styles.select} value={cfg.apiUrl} onChange={(e) => update({ apiUrl: e.target.value })} placeholder="https://your-searxng.example.com/search" />
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>API Key {cfg.hasApiKey ? '(configured)' : '(optional)'}</label>
+        <input
+          className={styles.select}
+          type="password"
+          value={apiKey}
+          placeholder="Paste a new key to replace"
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>Engines</label>
+        <input className={styles.select} value={enginesInput} onChange={(e) => setEnginesInput(e.target.value)} placeholder="google, brave, duckduckgo" />
+        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
+          Optional comma-separated engine allowlist passed through to SearXNG.
+        </span>
+      </div>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Language</label>
+          <input className={styles.select} value={cfg.language} onChange={(e) => update({ language: e.target.value })} placeholder="all or en-US" />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Safe Search</label>
+          <select className={styles.select} value={cfg.safeSearch} onChange={(e) => update({ safeSearch: Number(e.target.value) as 0 | 1 | 2 })}>
+            <option value={0}>Off</option>
+            <option value={1}>Moderate</option>
+            <option value={2}>Strict</option>
+          </select>
+        </div>
+      </div>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Timeout (ms)</label>
+          <input className={styles.numberInput} type="number" min={5000} max={120000} step={1000} value={cfg.requestTimeoutMs} onChange={(e) => update({ requestTimeoutMs: Math.max(5000, Math.min(120000, Number(e.target.value || 15000))) })} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Default Results</label>
+          <input className={styles.numberInput} type="number" min={1} max={10} value={cfg.defaultResultCount} onChange={(e) => update({ defaultResultCount: Math.max(1, Math.min(10, Number(e.target.value || 3))) })} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Max Results</label>
+          <input className={styles.numberInput} type="number" min={1} max={20} value={cfg.maxResultCount} onChange={(e) => update({ maxResultCount: Math.max(1, Math.min(20, Number(e.target.value || 5))) })} />
+        </div>
+      </div>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Pages to Scrape</label>
+          <input className={styles.numberInput} type="number" min={1} max={10} value={cfg.maxPagesToScrape} onChange={(e) => update({ maxPagesToScrape: Math.max(1, Math.min(10, Number(e.target.value || 3))) })} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Chars per Page</label>
+          <input className={styles.numberInput} type="number" min={500} max={20000} step={250} value={cfg.maxCharsPerPage} onChange={(e) => update({ maxCharsPerPage: Math.max(500, Math.min(20000, Number(e.target.value || 3000))) })} />
+        </div>
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>Test Query</label>
+        <input className={styles.select} value={testQuery} onChange={(e) => setTestQuery(e.target.value)} placeholder="Enter a query to validate this setup" />
+      </div>
+
+      <div className={styles.drawerRow}>
+        <Button size="sm" onClick={save} disabled={saving} loading={saving}>
+          {saving ? 'Saving...' : 'Save Web Search Settings'}
+        </Button>
+        <Button size="sm" onClick={test} disabled={testing || saving} loading={testing}>
+          {testing ? 'Testing...' : 'Test Web Search'}
+        </Button>
+      </div>
+
+      <p className={styles.placeholder}>Testing uses the current form values, including any unsaved API key override, so you can validate the instance before saving.</p>
+
+      {testResult && (
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Preview</label>
+          <div className={styles.placeholder} style={{ whiteSpace: 'pre-wrap', padding: '10px 12px', border: '1px solid var(--lumiverse-border-subtle)', borderRadius: 8, background: 'var(--lumiverse-surface-raised)', maxHeight: 280, overflowY: 'auto' }}>
+            {testResult.context}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -24,7 +24,7 @@ import { interceptorPipeline } from "../spindle/interceptor-pipeline";
 import { contextHandlerChain } from "../spindle/context-handler";
 import { executeCouncil, collectWorldInfoForCouncil, formatDeliberation, type CouncilEnrichment } from "./council/council-execution.service";
 import { activateWorldInfo } from "./world-info-activation.service";
-import type { CouncilExecutionResult, CachedCouncilResult } from "lumiverse-spindle-types";
+import type { CouncilExecutionResult, CachedCouncilResult, CouncilMember } from "lumiverse-spindle-types";
 import { getCouncilSettings, getAvailableTools } from "./council/council-settings.service";
 import * as tokenizerSvc from "./tokenizer.service";
 import * as breakdownSvc from "./breakdown.service";
@@ -38,6 +38,17 @@ import { abortChatBackground, abortUserBackgrounds, abortAllBackgrounds } from "
 import { createCooperativeYielder } from "../llm/stream-utils";
 import { getMcpClientManager } from "./mcp-client-manager";
 import { parseMcpToolName } from "./council/mcp-tools";
+import {
+  buildCouncilMemberContext,
+  getCouncilToolExecution,
+  getExtensionToolRegistration,
+  invokeExtensionCouncilTool,
+  isCouncilToolInlineCallable,
+  type RuntimeCouncilToolDefinition,
+  getCouncilToolArgsSchema,
+} from "./council/tool-runtime";
+import { executeHostCouncilTool } from "./council/host-tools";
+import * as packsSvc from "./packs.service";
 
 interface GenerateInput {
   userId: string;
@@ -223,10 +234,12 @@ interface PromptPipelineResult {
   macroEnv?: import("../macros/types").MacroEnv;
 }
 
-interface InlineMcpToolResult {
+interface InlineCouncilToolResult {
   callId: string;
   qualifiedName: string;
   toolName: string;
+  toolDisplayName: string;
+  memberName?: string;
   result: string;
 }
 
@@ -272,38 +285,106 @@ function errorMessage(err: unknown): string {
   try { return String(err); } catch { return "Unknown error"; }
 }
 
-function parseInlineQualifiedToolName(name: string): string | null {
+function parseInlineToolCallName(name: string): { memberIdPrefix: string; qualifiedName: string } | null {
   const splitIdx = name.indexOf("_");
   if (splitIdx <= 0 || splitIdx >= name.length - 1) return null;
-  return name.slice(splitIdx + 1);
+  return {
+    memberIdPrefix: name.slice(0, splitIdx),
+    qualifiedName: name.slice(splitIdx + 1),
+  };
 }
 
-async function executeInlineMcpToolCalls(
+async function executeInlineCouncilToolCalls(
   userId: string,
   toolCalls: ToolCallResult[],
   timeoutMs: number,
-): Promise<InlineMcpToolResult[]> {
-  const results: InlineMcpToolResult[] = [];
+  toolsByName: Map<string, RuntimeCouncilToolDefinition>,
+  membersByPrefix: Map<string, CouncilMember>,
+  contextMessages: LlmMessage[],
+): Promise<InlineCouncilToolResult[]> {
+  const results: InlineCouncilToolResult[] = [];
 
   for (const toolCall of toolCalls) {
-    const qualifiedName = parseInlineQualifiedToolName(toolCall.name);
-    if (!qualifiedName) continue;
+    const parsedName = parseInlineToolCallName(toolCall.name);
+    if (!parsedName) continue;
 
-    const mcpMatch = parseMcpToolName(userId, qualifiedName);
-    if (!mcpMatch) continue;
+    const { memberIdPrefix, qualifiedName } = parsedName;
+    const tool = toolsByName.get(qualifiedName);
+    const member = membersByPrefix.get(memberIdPrefix);
+    if (!tool || !member) continue;
 
-    const result = await getMcpClientManager().callTool(
-      userId,
-      mcpMatch.serverId,
-      mcpMatch.toolName,
-      toolCall.args ?? {},
-      timeoutMs,
-    );
+    const execution = getCouncilToolExecution(userId, tool);
+    if (execution === "llm") continue;
+
+    let result = "";
+
+    if (execution === "mcp") {
+      const mcpMatch = parseMcpToolName(userId, qualifiedName);
+      if (!mcpMatch) continue;
+
+      result = await getMcpClientManager().callTool(
+        userId,
+        mcpMatch.serverId,
+        mcpMatch.toolName,
+        toolCall.args ?? {},
+        timeoutMs,
+      );
+    } else if (execution === "extension") {
+      const extToolReg = getExtensionToolRegistration(qualifiedName);
+      if (!extToolReg) continue;
+
+      let lumiaItem: ReturnType<typeof packsSvc.getLumiaItem> = null;
+      try {
+        lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
+      } catch {
+        // Pack/item may have been removed mid-generation.
+      }
+
+      const memberContext = buildCouncilMemberContext(member, lumiaItem);
+      const contextSummary = contextMessages
+        .map((m) => {
+          const prefix = m.role === "system" ? "" : `${m.role}: `;
+          return `${prefix}${typeof m.content === "string" ? m.content : ""}`;
+        })
+        .join("\n\n");
+
+      result = await invokeExtensionCouncilTool(
+        extToolReg.extension_id,
+        extToolReg.name,
+        {
+          ...(toolCall.args ?? {}),
+          context: contextSummary,
+          __deadlineMs: Date.now() + timeoutMs,
+        },
+        timeoutMs,
+        memberContext,
+        contextMessages,
+      );
+    } else if (execution === "host") {
+      let lumiaItem: ReturnType<typeof packsSvc.getLumiaItem> = null;
+      try {
+        lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
+      } catch {
+        // Pack/item may have been removed mid-generation.
+      }
+
+      result = await executeHostCouncilTool({
+        userId,
+        tool,
+        args: toolCall.args ?? {},
+        member,
+        memberContext: buildCouncilMemberContext(member, lumiaItem),
+        contextMessages,
+        timeoutMs,
+      });
+    }
 
     results.push({
       callId: toolCall.call_id,
       qualifiedName,
-      toolName: mcpMatch.toolName,
+      toolName: tool.name,
+      toolDisplayName: tool.displayName,
+      memberName: member.itemName,
       result,
     });
   }
@@ -311,15 +392,15 @@ async function executeInlineMcpToolCalls(
   return results;
 }
 
-function formatInlineMcpToolResults(results: InlineMcpToolResult[]): string {
+function formatInlineCouncilToolResults(results: InlineCouncilToolResult[]): string {
   const lines = [
-    "## Inline MCP Tool Results",
-    "The model requested MCP tool calls during generation. Use these results to continue the reply naturally.",
+    "## Inline Council Tool Results",
+    "The model requested council tool calls during generation. Use these results to continue the reply naturally.",
     "",
   ];
 
   for (const result of results) {
-    lines.push(`### ${result.toolName}`);
+    lines.push(`### ${result.memberName ? `${result.memberName} - ` : ""}${result.toolDisplayName}`);
     lines.push(result.result || "(empty result)");
     lines.push("");
   }
@@ -881,6 +962,8 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   const councilSettings = getCouncilSettings(input.userId);
   let councilResult: CouncilExecutionResult | null = null;
   let inlineTools: ToolDefinition[] | undefined;
+  let inlineToolDefsByName: Map<string, RuntimeCouncilToolDefinition> | undefined;
+  let inlineMembersByPrefix: Map<string, CouncilMember> | undefined;
   let precomputedVectorEntries: VectorActivatedEntry[] | undefined;
 
   // Council is active when enabled with members. Tools run if any member has tools assigned.
@@ -904,18 +987,36 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         const availableTools = await getAvailableTools(input.userId);
         const activeMembers = councilSettings.members.filter((m) => m.tools.length > 0);
         inlineTools = [];
+        inlineToolDefsByName = new Map<string, RuntimeCouncilToolDefinition>();
+        inlineMembersByPrefix = new Map<string, CouncilMember>();
         for (const member of activeMembers) {
+          inlineMembersByPrefix.set(member.id.slice(0, 8), member);
           for (const toolName of member.tools) {
             const toolDef = availableTools.find((t) => t.name === toolName);
             if (!toolDef) continue;
+
+            if (!isCouncilToolInlineCallable(input.userId, toolDef)) {
+              continue;
+            }
+
+            const argsSchema = getCouncilToolArgsSchema(input.userId, toolDef);
+            if (!argsSchema) continue;
+
+            inlineToolDefsByName.set(toolDef.name, toolDef);
             inlineTools.push({
               name: `${member.id.slice(0, 8)}_${toolDef.name}`,
               description: `[${member.itemName}${member.role ? ` - ${member.role}` : ''}] ${toolDef.description}`,
-              parameters: toolDef.inputSchema,
+              parameters: argsSchema,
+              strict: toolDef.strict ?? true,
+              inputExamples: toolDef.inputExamples,
             });
           }
         }
-        if (inlineTools.length === 0) inlineTools = undefined;
+        if (inlineTools.length === 0) {
+          inlineTools = undefined;
+          inlineToolDefsByName = undefined;
+          inlineMembersByPrefix = undefined;
+        }
       }
     } else {
       // Check if we can reuse cached council results for regens/swipes/continues
@@ -1289,7 +1390,7 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   checkAborted();
 
   // Run generation in the background
-  runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools, pipeline.assistantPrefill, pipeline.macroEnv);
+  runGeneration(generationId, provider, apiKey, apiUrl, connection.model, messages, mergedParams, input.userId, input.chat_id, lifecycle, abortController.signal, inlineTools, inlineToolDefsByName, inlineMembersByPrefix, pipeline.assistantPrefill, pipeline.macroEnv);
 
     } catch (err: any) {
       // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted.
@@ -1430,6 +1531,8 @@ async function runGeneration(
   lifecycle: GenerationLifecycle,
   signal: AbortSignal,
   tools?: ToolDefinition[],
+  inlineToolDefsByName?: Map<string, RuntimeCouncilToolDefinition>,
+  inlineMembersByPrefix?: Map<string, CouncilMember>,
   assistantPrefill?: string,
   macroEnv?: import("../macros/types").MacroEnv,
 ): Promise<void> {
@@ -1758,18 +1861,30 @@ async function runGeneration(
         break;
       }
 
-      const inlineMcpResults = pendingToolCalls?.length
-        ? await executeInlineMcpToolCalls(userId, pendingToolCalls, inlineMcpTimeoutMs)
+      const inlineContextMessages = [
+        ...generationMessages,
+        ...(fullContent ? [{ role: "assistant", content: fullContent } satisfies LlmMessage] : []),
+      ];
+
+      const inlineCouncilResults = pendingToolCalls?.length && inlineToolDefsByName && inlineMembersByPrefix
+        ? await executeInlineCouncilToolCalls(
+            userId,
+            pendingToolCalls,
+            inlineMcpTimeoutMs,
+            inlineToolDefsByName,
+            inlineMembersByPrefix,
+            inlineContextMessages,
+          )
         : [];
 
-      if (inlineMcpResults.length === 0) {
+      if (inlineCouncilResults.length === 0) {
         break;
       }
 
       generationMessages = [
         ...generationMessages,
         ...(fullContent ? [{ role: "assistant", content: fullContent } satisfies LlmMessage] : []),
-        { role: "system", content: formatInlineMcpToolResults(inlineMcpResults) },
+        { role: "system", content: formatInlineCouncilToolResults(inlineCouncilResults) },
       ];
     }
 

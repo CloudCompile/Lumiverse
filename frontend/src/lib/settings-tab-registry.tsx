@@ -2,7 +2,7 @@ import type { ComponentType, ReactNode } from 'react'
 import {
   Sliders, MessageSquare, Users, PanelRight,
   Compass, Reply, HardDrive, Puzzle, Database, Hash, Activity,
-  Globe, Bell, Import, Brain, Terminal, Volume2, Plug,
+  Globe, Bell, Import, Brain, Terminal, Volume2, Plug, Search,
 } from 'lucide-react'
 import { useStore } from '@/store'
 import type { Command, CommandScope } from '@/lib/commands'
@@ -86,6 +86,15 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabDescription: 'Configure extension resource pool limits',
     tabIcon: HardDrive,
     keywords: ['extension', 'pools', 'resources', 'limits', 'storage'],
+    component: INLINE_SENTINEL,
+  },
+  {
+    id: 'webSearch',
+    shortName: 'Web Search',
+    tabName: 'Web Search',
+    tabDescription: 'Configure SearXNG-backed web search for council tools',
+    tabIcon: Search,
+    keywords: ['web search', 'searxng', 'search', 'browse', 'internet', 'web', 'council tool'],
     component: INLINE_SENTINEL,
   },
   {

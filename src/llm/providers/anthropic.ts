@@ -425,6 +425,8 @@ export class AnthropicProvider implements LlmProvider {
         name: t.name,
         description: t.description,
         input_schema: t.parameters,
+        ...(t.strict !== undefined ? { strict: t.strict } : {}),
+        ...(t.inputExamples ? { input_examples: t.inputExamples } : {}),
       }));
     }
 

@@ -298,6 +298,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
           name: t.name,
           description: t.description,
           parameters: t.parameters,
+          ...(t.strict !== undefined ? { strict: t.strict } : {}),
         },
       }));
     }

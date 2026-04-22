@@ -1,10 +1,8 @@
 import type {
   CouncilSettings,
   CouncilMember,
-  CouncilMemberContext,
   CouncilToolResult,
   CouncilExecutionResult,
-  CouncilToolDefinition,
 } from "lumiverse-spindle-types";
 import type { LlmMessage } from "../../llm/types";
 import { eventBus } from "../../ws/bus";
@@ -20,18 +18,23 @@ import * as settingsSvc from "../settings.service";
 import { activateWorldInfo } from "../world-info-activation.service";
 import { getCharacterWorldBookIds } from "../../utils/character-world-books";
 import { getCouncilSettings, getAvailableTools } from "./council-settings.service";
-import { BUILTIN_TOOLS_MAP } from "./builtin-tools";
 import { parseMcpToolName } from "./mcp-tools";
 import { getMcpClientManager } from "../mcp-client-manager";
-import { toolRegistry } from "../../spindle/tool-registry";
-import { getWorkerHost } from "../../spindle/lifecycle";
+import {
+  buildCouncilMemberContext,
+  getCouncilToolArgsSchema,
+  getCouncilToolExecution,
+  getExtensionToolRegistration,
+  invokeExtensionCouncilTool,
+  type RuntimeCouncilToolDefinition,
+} from "./tool-runtime";
+import { executeHostCouncilTool } from "./host-tools";
 import { getExpressionLabels, hasExpressions } from "../expressions.service";
 import { getSidecarSettings } from "../sidecar-settings.service";
 import { getToolChoiceParams } from "../memory-cortex/salience-sidecar";
 import type { SidecarConfig } from "lumiverse-spindle-types";
 
 const MAX_RETRIES = 3;
-
 /** Pre-computed enrichment context from the generation chain. When provided,
  *  council tools use this data instead of independently loading and activating
  *  character/persona/world info. This ensures world info resolution happens at
@@ -44,6 +47,8 @@ export interface CouncilEnrichment {
   /** World info entries activated via keyword matching at the top of the generation chain. */
   activatedWorldInfoEntries: import("../../types/world-book").WorldBookEntry[];
 }
+
+const GOOGLE_PLANNING_PROVIDERS = new Set(["google", "google_vertex"]);
 
 interface ExecuteInput {
   userId: string;
@@ -104,7 +109,7 @@ export async function executeCouncil(
   const namedResults = new Map<string, string>();
 
   // Build available tools map
-  const availableTools = new Map<string, CouncilToolDefinition>();
+  const availableTools = new Map<string, RuntimeCouncilToolDefinition>();
   for (const t of await getAvailableTools(input.userId)) {
     availableTools.set(t.name, t);
   }
@@ -207,7 +212,7 @@ async function executeMemberTools(
   settings: CouncilSettings,
   sidecar: SidecarConfig,
   member: CouncilMember,
-  tools: Map<string, CouncilToolDefinition>,
+  tools: Map<string, RuntimeCouncilToolDefinition>,
   contextMessages: LlmMessage[],
   namedResults: Map<string, string>
 ): Promise<CouncilToolResult[]> {
@@ -222,7 +227,7 @@ async function executeMemberTools(
     // Item may be missing (pack uninstalled mid-flight) — fall back to null.
   }
 
-  const memberContext = buildMemberContext(member, lumiaItem);
+  const memberContext = buildCouncilMemberContext(member, lumiaItem);
 
   // Build member identity context
   const identityMsg = buildMemberIdentity(member, lumiaItem);
@@ -247,18 +252,14 @@ async function executeMemberTools(
     let content = "";
     let error: string | undefined;
 
-    // Check if this tool belongs to an extension (route to worker instead of sidecar)
-    const extToolReg = toolRegistry.getTool(toolName);
-    const isExtensionTool = !!extToolReg?.extension_id;
-
-    // Check if this is an MCP tool (route to connected MCP server)
-    const mcpMatch = !isExtensionTool ? parseMcpToolName(input.userId, toolName) : null;
-    const isMcpTool = !!mcpMatch;
+    const execution = getCouncilToolExecution(input.userId, toolDef);
+    const extToolReg = execution === "extension" ? getExtensionToolRegistration(toolName) : undefined;
+    const mcpMatch = execution === "mcp" ? parseMcpToolName(input.userId, toolName) : null;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        if (isMcpTool) {
-          const plannedArgs = await planMcpToolArgs(
+        if (execution === "mcp") {
+          const plannedArgs = await planCallableToolArgs(
             input.userId,
             sidecar,
             toolDef,
@@ -276,7 +277,7 @@ async function executeMemberTools(
             plannedArgs,
             settings.toolsSettings.timeoutMs
           );
-        } else if (isExtensionTool) {
+        } else if (execution === "extension") {
           // Pass the bare tool name (not qualified) so extension handlers can
           // match easily, and forward the full chat context so tools can act on it.
           // Extension tools receive the exact same context as sidecar tools —
@@ -299,8 +300,7 @@ async function executeMemberTools(
             })
             .join("\n\n");
 
-          content = await invokeExtensionToolViaWorker(
-            input.userId,
+          content = await invokeExtensionCouncilTool(
             extToolReg!.extension_id,
             bareToolName,
             {
@@ -314,6 +314,28 @@ async function executeMemberTools(
             memberContext,
             contextMessages
           );
+        } else if (execution === "host") {
+          const plannedArgs = await planCallableToolArgs(
+            input.userId,
+            sidecar,
+            toolDef,
+            member,
+            identityMsg,
+            contextMessages,
+            settings.toolsSettings.timeoutMs,
+            input.signal,
+          );
+
+          content = await executeHostCouncilTool({
+            userId: input.userId,
+            tool: toolDef,
+            args: plannedArgs,
+            member,
+            memberContext,
+            contextMessages,
+            timeoutMs: settings.toolsSettings.timeoutMs,
+            signal: input.signal,
+          });
         } else {
           content = await invokeSidecarTool(
             input.userId,
@@ -333,7 +355,7 @@ async function executeMemberTools(
         error = err.message;
         // Don't retry if the generation was aborted — bail out immediately
         if (input.signal?.aborted) break;
-        if (isExtensionTool || isMcpTool) break;
+        if (execution === "extension" || execution === "mcp" || execution === "host") break;
         if (attempt < MAX_RETRIES - 1) {
           await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
         }
@@ -376,53 +398,11 @@ async function executeMemberTools(
  * identity/personality fields — delivered to the extension handler alongside
  * the invocation args so the tool can tailor its output to that member.
  */
-async function invokeExtensionToolViaWorker(
-  userId: string,
-  extensionId: string,
-  toolName: string,
-  args: Record<string, unknown>,
-  timeoutMs: number,
-  councilMember?: CouncilMemberContext,
-  contextMessages?: LlmMessage[]
-): Promise<string> {
-  const host = getWorkerHost(extensionId);
-  if (!host) {
-    throw new Error(`Extension worker '${extensionId}' is not running`);
-  }
-  return host.invokeExtensionTool(toolName, args, timeoutMs, councilMember, contextMessages);
-}
-
-/**
- * Build the CouncilMemberContext snapshot passed to extension tool invocations.
- * Sourced from the member's council-settings row plus (when available) the
- * backing Lumia item's personality fields. Missing item => personality fields
- * are empty strings, avatar is null, packName falls back to member.packName.
- */
-function buildMemberContext(
-  member: CouncilMember,
-  item: ReturnType<typeof packsSvc.getLumiaItem>
-): CouncilMemberContext {
-  return {
-    memberId: member.id,
-    itemId: member.itemId,
-    packId: member.packId,
-    packName: member.packName,
-    name: member.itemName,
-    role: member.role ?? "",
-    chance: member.chance,
-    avatarUrl: item?.avatar_url ?? null,
-    definition: item?.definition ?? "",
-    personality: item?.personality ?? "",
-    behavior: item?.behavior ?? "",
-    genderIdentity: item?.gender_identity ?? 0,
-  };
-}
-
 /** Call the sidecar LLM for a single tool. */
 async function invokeSidecarTool(
   userId: string,
   sidecar: SidecarConfig,
-  tool: CouncilToolDefinition,
+  tool: RuntimeCouncilToolDefinition,
   member: CouncilMember,
   identityMsg: string,
   contextMessages: LlmMessage[],
@@ -430,6 +410,10 @@ async function invokeSidecarTool(
   signal?: AbortSignal,
   enrichment?: CouncilEnrichment
 ): Promise<string> {
+  if (!tool.prompt) {
+    throw new Error(`LLM council tool \"${tool.displayName}\" is missing a prompt`);
+  }
+
   const brevityNote =
     toolsSettings.maxWordsPerTool > 0
       ? `\n\nIMPORTANT — BREVITY REQUIREMENT: Keep each tool response field under ${toolsSettings.maxWordsPerTool} words. Be direct, specific, and actionable. No preamble, filler, or repetition. Every word must earn its place.`
@@ -489,6 +473,29 @@ ${tool.prompt}${dynamicSuffix}${brevityNote}${userControlNote}`;
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
   if (!text) return null;
+  const trimmed = text.trim();
+
+  const direct = tryParseJsonObject(trimmed);
+  if (direct) return direct;
+
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
+  if (fenced) {
+    const parsedFenced = tryParseJsonObject(fenced);
+    if (parsedFenced) return parsedFenced;
+  }
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const embedded = tryParseJsonObject(trimmed.slice(firstBrace, lastBrace + 1));
+    if (embedded) return embedded;
+  }
+
+  return null;
+}
+
+function tryParseJsonObject(text: string): Record<string, unknown> | null {
+  if (!text) return null;
   try {
     const parsed = JSON.parse(text);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -499,29 +506,278 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   }
 }
 
-function toolSchemaRequiresArgs(tool: CouncilToolDefinition): boolean {
-  const schema = tool.inputSchema ?? {};
+function coerceScalarForSchema(value: string, schema: Record<string, unknown> | undefined): unknown {
+  const type = typeof schema?.type === "string" ? schema.type : "string";
+  if (type === "integer" || type === "number") {
+    const num = Number(value.trim());
+    return Number.isFinite(num) ? num : value.trim();
+  }
+  if (type === "boolean") {
+    if (/^(true|yes|on)$/i.test(value.trim())) return true;
+    if (/^(false|no|off)$/i.test(value.trim())) return false;
+  }
+  return value.trim();
+}
+
+function parseArgsFromTextFallback(
+  text: string,
+  schema: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const properties = ((schema as any)?.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const propertyNames = Object.keys(properties);
+  if (propertyNames.length === 0) return null;
+
+  const result: Record<string, unknown> = {};
+  for (const key of propertyNames) {
+    const pattern = new RegExp(`(?:^|\\n)\\s*${key}\\s*[:=]\\s*(.+)`, "i");
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const rawValue = match[1].split("\n")[0].trim();
+    if (!rawValue) continue;
+    result[key] = coerceScalarForSchema(rawValue, properties[key]);
+  }
+
+  if (Object.keys(result).length > 0) return result;
+
+  const required = Array.isArray((schema as any)?.required) ? (schema as any).required as string[] : [];
+  if (required.length === 1) {
+    const [onlyRequired] = required;
+    const prop = properties[onlyRequired];
+    if (prop?.type === "string" || typeof prop?.type !== "string") {
+      return { [onlyRequired]: text.trim() };
+    }
+  }
+
+  return null;
+}
+
+function sanitizeTopLevelArgs(
+  args: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const properties = ((schema as any)?.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(args)) {
+    const prop = properties[key];
+    if (typeof value === "string") {
+      sanitized[key] = coerceScalarForSchema(value, prop);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
+}
+
+function getInvalidRequiredFields(
+  args: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): string[] {
+  const properties = ((schema as any)?.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const required = Array.isArray((schema as any)?.required) ? (schema as any).required as string[] : [];
+  const invalid: string[] = [];
+
+  for (const key of required) {
+    const value = args[key];
+    const prop = properties[key] ?? {};
+    const type = typeof prop.type === "string" ? prop.type : undefined;
+
+    if (value === undefined || value === null) {
+      invalid.push(key);
+      continue;
+    }
+    if (type === "string" && (typeof value !== "string" || value.trim().length === 0)) {
+      invalid.push(key);
+    }
+  }
+
+  return invalid;
+}
+
+function normalizeWebSearchQueryText(text: string): string {
+  let value = text.trim();
+  if (!value) return "";
+
+  const fenced = value.match(/^```(?:text|md|markdown)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
+  if (fenced) value = fenced;
+
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^query\s*[:=-]\s*/i, "").trim())
+    .map((line) => line.replace(/^['"`]+|['"`]+$/g, "").trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return "";
+
+  const explanationLike = /^(because|based on|the user|this|i should|we should|use |search for )/i;
+  const queryLines: string[] = [];
+
+  for (const line of lines.slice(0, 3)) {
+    if (queryLines.length > 0 && explanationLike.test(line)) break;
+    queryLines.push(line);
+  }
+
+  return queryLines.join(" ").replace(/\s+/g, " ").trim();
+}
+
+async function planWebSearchArgs(
+  userId: string,
+  conn: ReturnType<typeof connectionsSvc.getConnection>,
+  sidecar: SidecarConfig,
+  tool: RuntimeCouncilToolDefinition,
+  contextMessages: LlmMessage[],
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  if (!conn) throw new Error("Sidecar connection not found");
+
+  const guidanceBlock = tool.planningGuidance
+    ? `\n## Search Guidance\n${tool.planningGuidance}`
+    : "";
+
+  const messages: LlmMessage[] = [
+    {
+      role: "system",
+      content: `You are preparing a web search query.
+
+## Tool
+${tool.displayName}
+${tool.description}${guidanceBlock}
+
+Read the context and produce exactly one short search-engine query.
+
+Rules:
+- Return only the query text.
+- No JSON.
+- No explanation.
+- No quotes.
+- No prefixes like 'query:' or 'search for'.
+- Keep it short, concrete, and keyword-heavy.
+- Do not imitate any character, council member, narrator, or roleplay voice from the context.
+- Ignore stylistic quirks in the chat history and extract only the factual subject that should be searched.`,
+    },
+    ...contextMessages,
+    {
+      role: "user",
+      content: `Based on the context above, what should be searched on the web? Return only the query.`,
+    },
+  ];
+
+  const response = await rawGenerate(userId, {
+    provider: conn.provider,
+    model: sidecar.model,
+    connection_id: sidecar.connectionProfileId,
+    messages,
+    parameters: {
+      temperature: 0,
+      top_p: sidecar.topP,
+      max_tokens: Math.min(sidecar.maxTokens, 96),
+    },
+    signal,
+  });
+
+  const query = normalizeWebSearchQueryText(response.content || "");
+  console.debug("[council] Web Search planner output raw=%j normalized=%j", response.content || "", query);
+  if (!query) {
+    throw new Error("Failed to plan web search query");
+  }
+
+  return { query };
+}
+
+async function repairCallableToolArgs(
+  userId: string,
+  conn: ReturnType<typeof connectionsSvc.getConnection>,
+  sidecar: SidecarConfig,
+  tool: RuntimeCouncilToolDefinition,
+  planningMessages: LlmMessage[],
+  argsSchema: Record<string, unknown>,
+  invalidFields: string[],
+  signal?: AbortSignal,
+): Promise<Record<string, unknown> | null> {
+  if (!conn) return null;
+
+  const repairMessages: LlmMessage[] = [
+    ...planningMessages,
+    {
+      role: "user",
+      content: `The previous tool call was invalid because these required fields were missing or empty: ${invalidFields.join(", ")}.
+Return only a JSON object that matches the schema exactly and ensures those fields are present and non-empty. Do not answer in prose.`,
+    },
+  ];
+
+  const repairResponse = await rawGenerate(userId, {
+    provider: conn.provider,
+    model: sidecar.model,
+    connection_id: sidecar.connectionProfileId,
+    messages: repairMessages,
+    parameters: {
+      temperature: 0,
+      top_p: sidecar.topP,
+      max_tokens: Math.min(sidecar.maxTokens, 192),
+    },
+    signal,
+  });
+
+  const parsed = parseJsonObject(repairResponse.content);
+  if (!parsed) return null;
+
+  const sanitized = sanitizeTopLevelArgs(parsed, argsSchema);
+  return getInvalidRequiredFields(sanitized, argsSchema).length === 0 ? sanitized : null;
+}
+
+function buildArgsSchemaGuide(schema: Record<string, unknown>): string {
+  const properties = ((schema as any)?.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const required = new Set(Array.isArray((schema as any)?.required) ? (schema as any).required as string[] : []);
+  const names = Object.keys(properties);
+  if (names.length === 0) return "";
+
+  const lines = ["## Required Argument Contract"];
+  lines.push("When you call the tool, fill the arguments using these exact field names:");
+  for (const name of names) {
+    const prop = properties[name] ?? {};
+    const type = typeof prop.type === "string" ? prop.type : "any";
+    const desc = typeof prop.description === "string" ? prop.description : "";
+    lines.push(`- ${name}${required.has(name) ? " (required)" : ""} — ${type}${desc ? ` — ${desc}` : ""}`);
+  }
+  lines.push("Do not leave required string fields empty. Use concise JSON-style argument values, not narrative prose. Call the tool exactly once.");
+  return lines.join("\n");
+}
+
+function buildInputExamplesGuide(examples: Array<Record<string, unknown>> | undefined): string {
+  if (!examples || examples.length === 0) return "";
+
+  const lines = ["## Valid Input Examples", "Use these as format examples when constructing the tool arguments:"];
+  for (const example of examples.slice(0, 3)) {
+    lines.push(JSON.stringify(example));
+  }
+  return lines.join("\n");
+}
+
+function toolSchemaRequiresArgs(userId: string, tool: RuntimeCouncilToolDefinition): boolean {
+  const schema = getCouncilToolArgsSchema(userId, tool) ?? {};
   const required = Array.isArray((schema as any).required) ? (schema as any).required : [];
   const properties = (schema as any).properties;
   return required.length > 0 || (properties && Object.keys(properties).length > 0);
 }
 
-async function planMcpToolArgs(
+async function planCallableToolArgs(
   userId: string,
   sidecar: SidecarConfig,
-  tool: CouncilToolDefinition,
+  tool: RuntimeCouncilToolDefinition,
   member: CouncilMember,
   identityMsg: string,
   contextMessages: LlmMessage[],
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  if (!toolSchemaRequiresArgs(tool)) {
+  const argsSchema = getCouncilToolArgsSchema(userId, tool) ?? { type: "object", properties: {}, required: [] };
+  if (!toolSchemaRequiresArgs(userId, tool)) {
     return {};
   }
 
   if (!sidecar.connectionProfileId || !sidecar.model) {
-    throw new Error(`Sidecar connection is required to plan MCP tool arguments for "${tool.displayName}"`);
+    throw new Error(`Sidecar connection is required to plan arguments for \"${tool.displayName}\"`);
   }
 
   const conn = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
@@ -531,56 +787,133 @@ async function planMcpToolArgs(
     ? `\nYour role on the council is: ${member.role}\nUse that perspective when selecting tool arguments.`
     : "";
 
+  const execution = getCouncilToolExecution(userId, tool);
+  const executionLabel = execution === "host"
+    ? "host tool"
+    : execution === "mcp"
+      ? "MCP tool"
+      : execution === "extension"
+        ? "extension tool"
+        : "tool";
+
   const planningTool = {
-    name: "call_mcp_tool",
-    description: `Prepare the arguments for the MCP tool \"${tool.displayName}\".`,
-    parameters: tool.inputSchema ?? { type: "object", properties: {}, required: [] },
+    name: "call_tool",
+    description: `Prepare the arguments for the ${executionLabel} \"${tool.displayName}\". Return only a valid function call with complete, non-empty arguments that match the schema exactly.`,
+    parameters: argsSchema,
+    strict: true,
+    inputExamples: tool.inputExamples,
   };
+
+  const guidanceBlock = tool.planningGuidance
+    ? `\n## Tool-Specific Guidance\n${tool.planningGuidance}`
+    : "";
+  const examplesBlock = buildInputExamplesGuide(tool.inputExamples);
+
+  const instructionBlock = `${identityMsg}${roleNote}
+
+You are preparing arguments for a tool call.
+
+## Tool
+${tool.displayName}
+${tool.description}
+
+${buildArgsSchemaGuide(argsSchema)}
+
+${examplesBlock}${guidanceBlock}
+
+Select the most appropriate arguments from the story context and call the provided tool exactly once. You are not answering the user or continuing the roleplay; you are only selecting tool arguments. Build arguments the way a careful operator would fill out a form for a downstream API. Prefer short, literal values over full sentences. Do not answer in prose.`;
+
+  const planningMessages: LlmMessage[] = [
+    {
+      role: "system",
+      content: instructionBlock,
+    },
+    ...contextMessages,
+    {
+      role: "user",
+      content: `Review the story context above and prepare the arguments for ${tool.displayName}.`,
+    },
+  ];
+
+  const planningParameters: Record<string, unknown> = {
+    temperature: Math.min(sidecar.temperature, 0.2),
+    top_p: sidecar.topP,
+    max_tokens: Math.min(sidecar.maxTokens, Math.max(128, timeoutMs / 100)),
+  };
+
+  if (tool.name === "web_search") {
+    return planWebSearchArgs(
+      userId,
+      conn,
+      sidecar,
+      tool,
+      contextMessages,
+      signal,
+    );
+  }
+
+  if (GOOGLE_PLANNING_PROVIDERS.has(conn.provider)) {
+    // Gemini's forced ANY mode is documented to be more brittle for argument
+    // inference than AUTO. Keep the council tool mandatory at the host layer,
+    // but let Google/Vertex use AUTO for the planner step so the model can
+    // reason its way to better arguments before emitting the function call.
+    planningParameters.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+  } else {
+    Object.assign(planningParameters, getToolChoiceParams(conn.provider));
+  }
 
   const response = await rawGenerate(userId, {
     provider: conn.provider,
     model: sidecar.model,
     connection_id: sidecar.connectionProfileId,
-    messages: [
-      {
-        role: "system",
-        content: `${identityMsg}${roleNote}
-
-You are preparing arguments for an MCP tool call.
-
-## MCP Tool
-${tool.displayName}
-${tool.description}
-
-Select the most appropriate arguments from the story context and call the provided tool exactly once. If the schema allows an empty object, use it when no arguments are needed. Do not answer in prose.`,
-      },
-      ...contextMessages,
-      {
-        role: "user",
-        content: `Review the story context above and prepare the arguments for ${tool.displayName}.`,
-      },
-    ],
-    parameters: {
-      temperature: sidecar.temperature,
-      top_p: sidecar.topP,
-      max_tokens: Math.min(sidecar.maxTokens, Math.max(128, timeoutMs / 100)),
-      ...getToolChoiceParams(conn.provider),
-    },
+    messages: planningMessages,
+    parameters: planningParameters,
     tools: [planningTool],
     signal,
   });
 
   const plannedCall = response.tool_calls?.find((call) => call.name === planningTool.name);
   if (plannedCall) {
-    return plannedCall.args ?? {};
+    const sanitized = sanitizeTopLevelArgs(plannedCall.args ?? {}, argsSchema);
+    const invalidFields = getInvalidRequiredFields(sanitized, argsSchema);
+    if (invalidFields.length === 0) {
+      return sanitized;
+    }
+    console.warn("[council] Planner returned invalid required args for '%s': %s", tool.displayName, invalidFields.join(", "));
+    const repaired = await repairCallableToolArgs(
+      userId,
+      conn,
+      sidecar,
+      tool,
+      planningMessages,
+      argsSchema,
+      invalidFields,
+      signal,
+    );
+    if (repaired) {
+      return repaired;
+    }
   }
 
   const parsed = parseJsonObject(response.content);
   if (parsed) {
-    return parsed;
+    const sanitized = sanitizeTopLevelArgs(parsed, argsSchema);
+    const invalidFields = getInvalidRequiredFields(sanitized, argsSchema);
+    if (invalidFields.length === 0) {
+      return sanitized;
+    }
   }
 
-  throw new Error(`Failed to plan arguments for MCP tool "${tool.displayName}"`);
+  const textFallback = parseArgsFromTextFallback(response.content || "", argsSchema);
+  if (textFallback) {
+    const sanitized = sanitizeTopLevelArgs(textFallback, argsSchema);
+    const invalidFields = getInvalidRequiredFields(sanitized, argsSchema);
+    if (invalidFields.length === 0) {
+      return sanitized;
+    }
+  }
+
+  throw new Error(`Failed to plan arguments for tool \"${tool.displayName}\"`);
 }
 
 /** Build the shared context messages (chat history, character info, world info, etc.).
@@ -705,7 +1038,7 @@ function buildMemberIdentity(
 /** Format tool results into the Markdown deliberation block. */
 export function formatDeliberation(
   results: CouncilToolResult[],
-  tools: Map<string, CouncilToolDefinition>
+  tools: Map<string, RuntimeCouncilToolDefinition>
 ): string {
   if (results.length === 0) {
     return "## Council Deliberation\n\nNo tools were executed for this generation.";
