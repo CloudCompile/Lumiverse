@@ -3,7 +3,11 @@ import { FormField, TextInput, Select, Button } from '@/components/shared/FormCo
 import { Toggle } from '@/components/shared/Toggle'
 import { connectionsApi } from '@/api/connections'
 import { useStore } from '@/store'
-import { areReasoningSettingsEqual, getReasoningBindingSummary } from '@/lib/reasoning-binding'
+import {
+  areReasoningSettingsEqual,
+  getReasoningBindingSummary,
+  normalizeReasoningSettingsForProvider,
+} from '@/lib/reasoning-binding'
 import ModelCombobox from './ModelCombobox'
 import OpenRouterSettings from './OpenRouterSettings'
 import type { ProviderInfo, ConnectionProfile, CreateConnectionProfileInput } from '@/types/api'
@@ -184,7 +188,9 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   // Vertex AI derives its host from `metadata.vertex_region`, so the API URL
   // field has no purpose and we don't display it.
   const hideApiUrl = isOpenRouter || provider === 'nanogpt' || isVertexAI
-  const bindingMatchesCurrent = areReasoningSettingsEqual(boundReasoningSettings, reasoningSettings)
+  const normalizedBoundReasoningSettings = normalizeReasoningSettingsForProvider(boundReasoningSettings, provider, model)
+  const normalizedCurrentReasoningSettings = normalizeReasoningSettingsForProvider(reasoningSettings, provider, model)
+  const bindingMatchesCurrent = areReasoningSettingsEqual(normalizedBoundReasoningSettings, normalizedCurrentReasoningSettings)
 
   useEffect(() => {
     setBindReasoning(!!profile?.metadata?.reasoningBindings)
@@ -254,7 +260,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       delete metadata.use_subscription_api
     }
     if (bindReasoning) {
-      metadata.reasoningBindings = { settings: { ...boundReasoningSettings } }
+      metadata.reasoningBindings = { settings: normalizedBoundReasoningSettings }
     } else {
       delete metadata.reasoningBindings
     }
@@ -416,7 +422,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           <div className={styles.bindingCardHeader}>
             <div>
               <div className={styles.bindingCardTitle}>Saved reasoning snapshot</div>
-              <div className={styles.bindingCardSummary}>{getReasoningBindingSummary(boundReasoningSettings)}</div>
+              <div className={styles.bindingCardSummary}>{getReasoningBindingSummary(normalizedBoundReasoningSettings)}</div>
             </div>
             <Button
               variant="ghost"

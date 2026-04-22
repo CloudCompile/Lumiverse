@@ -598,12 +598,8 @@ export default function MessageContent({
     [interceptorCleanedContent, risuAssetMap],
   )
 
-  const applyRegex = useDisplayRegex()
   const macroCtx = useMemo(() => ({ charName, userName }), [charName, userName])
-  const regexAppliedContent = useMemo(
-    () => applyRegex(risuResolvedContent, isUser, depth, macroCtx),
-    [applyRegex, risuResolvedContent, isUser, depth, macroCtx],
-  )
+  const regexAppliedContent = useDisplayRegex(risuResolvedContent, isUser, depth, macroCtx)
   const resolvedContent = useMemo(
     () => resolveDisplayMacros(regexAppliedContent, { charName, userName }),
     [regexAppliedContent, charName, userName],

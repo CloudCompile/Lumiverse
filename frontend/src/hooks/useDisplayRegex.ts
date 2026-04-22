@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useStore } from '@/store'
-import { applyDisplayRegex } from '@/lib/regex/compiler'
+import { applyDisplayRegex, applyDisplayRegexAsync } from '@/lib/regex/compiler'
 import { resolveMacrosBatch } from '@/api/macros'
 import type { DisplayMacroContext } from '@/lib/resolveDisplayMacros'
 
@@ -14,7 +14,13 @@ interface DisplayRegexCacheEntry {
   promise?: Promise<ResolvedDisplayRegexTemplates>
 }
 
+interface DisplayRegexContentCacheEntry {
+  value?: string
+  promise?: Promise<string>
+}
+
 const displayRegexResolutionCache = new Map<string, DisplayRegexCacheEntry>()
+const displayRegexContentCache = new Map<string, DisplayRegexContentCacheEntry>()
 const displayRegexCacheListeners = new Set<() => void>()
 let displayRegexCacheVersion = 0
 
@@ -42,10 +48,36 @@ function getDisplayRegexCacheVersion(): number {
 export function invalidateDisplayRegexCache(): void {
   displayRegexCacheVersion += 1
   displayRegexResolutionCache.clear()
+  displayRegexContentCache.clear()
   for (const listener of displayRegexCacheListeners) listener()
 }
 
-export function useDisplayRegex(): (content: string, isUser: boolean, depth: number, macroCtx?: DisplayMacroContext) => string {
+async function resolveMacrosBatchChunked(
+  templates: Record<string, string>,
+  context: {
+    chat_id?: string
+    character_id?: string
+    persona_id?: string
+  },
+): Promise<Record<string, string>> {
+  const entries = Object.entries(templates)
+  if (entries.length === 0) return {}
+
+  const chunkPromises: Array<Promise<Record<string, string>>> = []
+  for (let i = 0; i < entries.length; i += 100) {
+    chunkPromises.push(
+      resolveMacrosBatch({
+        templates: Object.fromEntries(entries.slice(i, i + 100)),
+        ...context,
+      }).then((res) => res.resolved),
+    )
+  }
+
+  const chunks = await Promise.all(chunkPromises)
+  return Object.assign({}, ...chunks)
+}
+
+export function useDisplayRegex(content: string, isUser: boolean, depth: number, macroCtx?: DisplayMacroContext): string {
   const regexScripts = useStore((s) => s.regexScripts)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
@@ -81,6 +113,7 @@ export function useDisplayRegex(): (content: string, isUser: boolean, depth: num
   // Pre-resolve find patterns and non-raw replacement strings via the backend macro engine.
   // Raw replacements stay per-match so capture groups remain available before macro evaluation.
   const [resolvedTemplates, setResolvedTemplates] = useState<ResolvedDisplayRegexTemplates>(createEmptyResolvedTemplates)
+  const [resolvedContent, setResolvedContent] = useState<string | null>(null)
 
   useEffect(() => {
     if (scriptsNeedingResolution.length === 0) {
@@ -170,8 +203,8 @@ export function useDisplayRegex(): (content: string, isUser: boolean, depth: num
     return () => { cancelled = true }
   }, [scriptsNeedingResolution, activeChatId, activeCharacterId, activePersonaId, cacheVersion])
 
-  return useCallback(
-    (content: string, isUser: boolean, depth: number, macroCtx?: DisplayMacroContext) => {
+  const fallbackContent = useMemo(
+    () => {
       if (displayScripts.length === 0) return content
       return applyDisplayRegex(content, displayScripts, {
         isUser,
@@ -181,6 +214,111 @@ export function useDisplayRegex(): (content: string, isUser: boolean, depth: num
         resolvedReplacements: resolvedTemplates.resolvedReplacements,
       })
     },
-    [displayScripts, resolvedTemplates],
+    [content, displayScripts, isUser, depth, macroCtx, resolvedTemplates],
   )
+
+  const hasRawMacroScripts = useMemo(
+    () => displayScripts.some((s) => s.substitute_macros === 'raw'),
+    [displayScripts],
+  )
+
+  const resolvedTemplateKey = useMemo(
+    () => JSON.stringify({
+      find: Array.from(resolvedTemplates.resolvedFindPatterns.entries()),
+      replace: Array.from(resolvedTemplates.resolvedReplacements.entries()),
+    }),
+    [resolvedTemplates],
+  )
+
+  useEffect(() => {
+    if (displayScripts.length === 0 || !hasRawMacroScripts) {
+      setResolvedContent((current) => current === null ? current : null)
+      return
+    }
+
+    const cacheKey = JSON.stringify({
+      cacheVersion,
+      activeChatId,
+      activeCharacterId,
+      activePersonaId,
+      isUser,
+      depth,
+      userName: macroCtx?.userName ?? null,
+      charName: macroCtx?.charName ?? null,
+      content,
+      resolvedTemplateKey,
+      scripts: displayScripts.map((s) => [
+        s.id,
+        s.updated_at,
+        s.find_regex,
+        s.replace_string,
+        s.flags,
+        s.placement,
+        s.min_depth,
+        s.max_depth,
+        s.trim_strings,
+        s.substitute_macros,
+      ]),
+    })
+
+    let cancelled = false
+    const applyResolvedContent = (next: string) => {
+      if (!cancelled) setResolvedContent(next)
+    }
+
+    const cached = displayRegexContentCache.get(cacheKey)
+    if (cached?.value !== undefined) {
+      applyResolvedContent(cached.value)
+      return () => { cancelled = true }
+    }
+
+    if (!cached?.promise) {
+      const promise = applyDisplayRegexAsync(
+        content,
+        displayScripts,
+        {
+          isUser,
+          depth,
+          macroCtx,
+          resolvedFindPatterns: resolvedTemplates.resolvedFindPatterns,
+          resolvedReplacements: resolvedTemplates.resolvedReplacements,
+        },
+        (templates) => resolveMacrosBatchChunked(templates, {
+          chat_id: activeChatId ?? undefined,
+          character_id: activeCharacterId ?? undefined,
+          persona_id: activePersonaId ?? undefined,
+        }),
+      )
+        .then((next) => {
+          displayRegexContentCache.set(cacheKey, { value: next })
+          return next
+        })
+        .catch(() => {
+          displayRegexContentCache.delete(cacheKey)
+          return fallbackContent
+        })
+
+      displayRegexContentCache.set(cacheKey, { promise })
+    }
+
+    displayRegexContentCache.get(cacheKey)?.promise?.then(applyResolvedContent)
+
+    return () => { cancelled = true }
+  }, [
+    content,
+    isUser,
+    depth,
+    macroCtx,
+    fallbackContent,
+    displayScripts,
+    hasRawMacroScripts,
+    resolvedTemplateKey,
+    resolvedTemplates,
+    activeChatId,
+    activeCharacterId,
+    activePersonaId,
+    cacheVersion,
+  ])
+
+  return resolvedContent ?? fallbackContent
 }

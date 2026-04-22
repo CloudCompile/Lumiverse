@@ -2,7 +2,13 @@ import { useCallback, useMemo } from 'react'
 import { Brain } from 'lucide-react'
 import { IconBolt } from '@tabler/icons-react'
 import { useStore } from '@/store'
-import { areReasoningSettingsEqual, getReasoningBindingSummary } from '@/lib/reasoning-binding'
+import {
+  areReasoningSettingsEqual,
+  getEffortOptions,
+  getReasoningBindingSummary,
+  normalizeReasoningSettingsForProvider,
+  TOGGLE_ONLY_PROVIDERS,
+} from '@/lib/reasoning-binding'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import { Toggle } from '@/components/shared/Toggle'
 import type { ReasoningSettings, ReasoningEffort, ThinkingDisplay } from '@/types/store'
@@ -14,78 +20,6 @@ const REASONING_PRESETS: { label: string; prefix: string; suffix: string }[] = [
   { label: 'Claude', prefix: '<thinking>\n', suffix: '\n</thinking>' },
   { label: 'o1', prefix: '<reasoning>\n', suffix: '\n</reasoning>' },
 ]
-
-// ── Provider-specific reasoning effort configurations ──
-
-interface EffortOption { value: ReasoningEffort; label: string }
-
-/** Providers where reasoning is toggle-only (enabled/disabled) with no effort granularity. */
-const TOGGLE_ONLY_PROVIDERS = new Set(['moonshot', 'zai'])
-
-const OPENROUTER_EFFORTS: EffortOption[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'none', label: 'None (disabled)' },
-  { value: 'minimal', label: 'Minimal' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra High' },
-]
-
-const GOOGLE_EFFORTS: EffortOption[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'minimal', label: 'Minimal' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-]
-
-const ANTHROPIC_EFFORTS: EffortOption[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'max', label: 'Max' },
-]
-
-// Opus 4.7 supports an additional "Extra High" tier between High and Max.
-const ANTHROPIC_OPUS_47_EFFORTS: EffortOption[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra High' },
-  { value: 'max', label: 'Max' },
-]
-
-const NANOGPT_EFFORTS: EffortOption[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'none', label: 'None (disabled)' },
-  { value: 'minimal', label: 'Minimal' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-]
-
-const GENERIC_EFFORTS: EffortOption[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'max', label: 'Max' },
-]
-
-function getEffortOptions(provider: string | undefined, model: string | undefined): EffortOption[] {
-  switch (provider) {
-    case 'openrouter': return OPENROUTER_EFFORTS
-    case 'google':
-    case 'google_vertex': return GOOGLE_EFFORTS
-    case 'anthropic':
-      return model && /claude-opus-4[-.]7/i.test(model) ? ANTHROPIC_OPUS_47_EFFORTS : ANTHROPIC_EFFORTS
-    case 'nanogpt': return NANOGPT_EFFORTS
-    default: return GENERIC_EFFORTS
-  }
-}
 
 export default function PresetManager() {
   const reasoningSettings = useStore((s) => s.reasoningSettings)
@@ -102,17 +36,27 @@ export default function PresetManager() {
   const activeProvider = activeProfile?.provider
   const activeModel = activeProfile?.model
   const activeBinding = activeProfile?.metadata?.reasoningBindings?.settings
+  const normalizedActiveBinding = activeBinding
+    ? normalizeReasoningSettingsForProvider(activeBinding, activeProvider, activeModel)
+    : null
 
   const isToggleOnly = activeProvider ? TOGGLE_ONLY_PROVIDERS.has(activeProvider) : false
   const effortOptions = getEffortOptions(activeProvider, activeModel)
   const isAnthropic = activeProvider === 'anthropic'
-  const activeBindingMatchesPanel = activeBinding ? areReasoningSettingsEqual(activeBinding, reasoningSettings) : false
+  const activeBindingMatchesPanel = normalizedActiveBinding
+    ? areReasoningSettingsEqual(normalizedActiveBinding, reasoningSettings)
+    : false
 
   const updateReasoning = useCallback(
     (partial: Partial<ReasoningSettings>) => {
-      setSetting('reasoningSettings', { ...reasoningSettings, ...partial })
+      const next = normalizeReasoningSettingsForProvider(
+        { ...reasoningSettings, ...partial },
+        activeProvider,
+        activeModel,
+      )
+      setSetting('reasoningSettings', next)
     },
-    [reasoningSettings, setSetting]
+    [activeModel, activeProvider, reasoningSettings, setSetting]
   )
 
   const activePreset = REASONING_PRESETS.find(
@@ -126,11 +70,11 @@ export default function PresetManager() {
     <div className={styles.panel}>
       {/* ── Reasoning / CoT ── */}
       <CollapsibleSection title="Reasoning / CoT" icon={<Brain size={14} />} defaultExpanded>
-        {activeBinding && (
+        {normalizedActiveBinding && (
           <div className={styles.bindingBanner}>
             <div className={styles.bindingBannerTitle}>Saved on {activeProfile?.name}</div>
             <div className={styles.bindingBannerText}>
-              {getReasoningBindingSummary(activeBinding)}
+              {getReasoningBindingSummary(normalizedActiveBinding)}
             </div>
             {!activeBindingMatchesPanel && (
               <div className={styles.bindingBannerHint}>

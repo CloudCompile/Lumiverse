@@ -1,12 +1,23 @@
 import type { RegexScript, RegexPlacement, RegexMacroMode } from '@/types/regex'
 import type { DisplayMacroContext } from '@/lib/resolveDisplayMacros'
 
+interface DisplayRegexMatch {
+  fullMatch: string
+  groups: Array<string | undefined>
+  offset: number
+  namedGroups?: Record<string, string>
+}
+
 export function compileRegex(pattern: string, flags: string): RegExp | null {
   try {
     return new RegExp(pattern, flags)
   } catch {
     return null
   }
+}
+
+function hasMacroSyntax(value: string): boolean {
+  return value.includes('{{') || value.includes('<USER>') || value.includes('<BOT>') || value.includes('<CHAR>')
 }
 
 /**
@@ -88,18 +99,48 @@ function substituteRegexCaptures(
   })
 }
 
+function collectRegexMatches(input: string, regex: RegExp): DisplayRegexMatch[] {
+  const matches: DisplayRegexMatch[] = []
+
+  input.replace(regex, (fullMatch, ...args) => {
+    const hasNamedGroups = typeof args[args.length - 1] === 'object' && args[args.length - 1] !== null
+    const namedGroups = hasNamedGroups ? args.pop() as Record<string, string> : undefined
+    args.pop() as string
+    const offset = args.pop() as number
+    const groups = args as Array<string | undefined>
+    matches.push({ fullMatch, groups, offset, namedGroups })
+    return fullMatch
+  })
+
+  return matches
+}
+
+function rebuildFromMatches(input: string, matches: DisplayRegexMatch[], replacements: string[]): string {
+  let output = ''
+  let lastIndex = 0
+
+  for (let i = 0; i < matches.length; i += 1) {
+    output += input.slice(lastIndex, matches[i].offset)
+    output += replacements[i]
+    lastIndex = matches[i].offset + matches[i].fullMatch.length
+  }
+
+  output += input.slice(lastIndex)
+  return output
+}
+
+interface ApplyDisplayRegexContext {
+  isUser: boolean
+  depth: number
+  macroCtx?: DisplayMacroContext
+  resolvedFindPatterns?: Map<string, string>
+  resolvedReplacements?: Map<string, string>
+}
+
 export function applyDisplayRegex(
   content: string,
   scripts: RegexScript[],
-  context: {
-    isUser: boolean
-    depth: number
-    macroCtx?: DisplayMacroContext
-    /** Pre-resolved find patterns keyed by script ID (from backend macro engine). */
-    resolvedFindPatterns?: Map<string, string>
-    /** Pre-resolved replacement strings keyed by script ID (from backend macro engine). */
-    resolvedReplacements?: Map<string, string>
-  },
+  context: ApplyDisplayRegexContext,
 ): string {
   let result = content
 
@@ -158,6 +199,93 @@ export function applyDisplayRegex(
       }
 
       // Apply trim_strings
+      for (const trim of script.trim_strings) {
+        while (result.includes(trim)) {
+          result = result.replaceAll(trim, '')
+        }
+      }
+    } catch {
+      // Skip invalid regex silently
+    }
+  }
+
+  return result
+}
+
+export async function applyDisplayRegexAsync(
+  content: string,
+  scripts: RegexScript[],
+  context: ApplyDisplayRegexContext,
+  resolveRawTemplates: (templates: Record<string, string>) => Promise<Record<string, string>>,
+): Promise<string> {
+  let result = content
+
+  for (const script of scripts) {
+    const placement: RegexPlacement = context.isUser ? 'user_input' : 'ai_output'
+    if (!script.placement.includes(placement)) continue
+
+    if (script.min_depth !== null && context.depth < script.min_depth) continue
+    if (script.max_depth !== null && context.depth > script.max_depth) continue
+
+    let findRegex = script.find_regex
+    if (script.substitute_macros !== 'none') {
+      const preResolvedFind = context.resolvedFindPatterns?.get(script.id)
+      if (preResolvedFind !== undefined) {
+        findRegex = preResolvedFind
+      } else if (context.macroCtx) {
+        findRegex = resolveRegexStringMacros(findRegex, context.macroCtx)
+      }
+    }
+
+    const regex = compileRegex(findRegex, script.flags)
+    if (!regex) continue
+
+    try {
+      if (script.substitute_macros === 'raw') {
+        const matches = collectRegexMatches(result, regex)
+        if (matches.length > 0) {
+          const templates: Record<string, string> = {}
+          const fallbackReplacements = matches.map((match, index) => {
+            const withCaptures = substituteRegexCaptures(
+              script.replace_string,
+              match.fullMatch,
+              match.groups,
+              match.offset,
+              result,
+              match.namedGroups,
+            )
+            if (hasMacroSyntax(withCaptures)) {
+              templates[`${script.id}:${index}`] = withCaptures
+            }
+            return withCaptures
+          })
+
+          const resolvedTemplates = Object.keys(templates).length > 0
+            ? await resolveRawTemplates(templates)
+            : {}
+
+          result = rebuildFromMatches(
+            result,
+            matches,
+            fallbackReplacements.map((value, index) => resolvedTemplates[`${script.id}:${index}`] ?? value),
+          )
+        }
+      } else {
+        let replaceString = script.replace_string
+        if (script.substitute_macros !== 'none') {
+          const preResolved = context.resolvedReplacements?.get(script.id)
+          if (preResolved !== undefined) {
+            replaceString = script.substitute_macros === 'escaped'
+              ? preResolved.replace(/\$/g, '$$$$')
+              : preResolved
+          } else if (context.macroCtx) {
+            replaceString = resolveReplacementMacros(replaceString, script.substitute_macros, context.macroCtx)
+          }
+        }
+
+        result = result.replace(regex, replaceString)
+      }
+
       for (const trim of script.trim_strings) {
         while (result.includes(trim)) {
           result = result.replaceAll(trim, '')

@@ -57,11 +57,28 @@ function validateFlags(flags: string): boolean {
   return new Set(flags).size === flags.length;
 }
 
-function validateRegex(pattern: string, flags: string): string | null {
+function hasMacroSyntax(pattern: string): boolean {
+  return pattern.includes("{{") || pattern.includes("<USER>") || pattern.includes("<BOT>") || pattern.includes("<CHAR>");
+}
+
+function sanitizeRegexPatternForValidation(pattern: string): string {
+  return pattern
+    .replace(/\{\{[\s\S]*?\}\}/g, "x")
+    .replace(/<USER>|<BOT>|<CHAR>/g, "x");
+}
+
+function validateRegex(
+  pattern: string,
+  flags: string,
+  substituteMacros: RegexScript["substitute_macros"] = "none",
+): string | null {
   if (pattern.length > MAX_PATTERN_LENGTH) return "find_regex exceeds maximum length";
   if (!validateFlags(flags)) return "Invalid flags — allowed: g, i, m, s, u";
   try {
-    new RegExp(pattern, flags);
+    const compilePattern = substituteMacros !== "none" && hasMacroSyntax(pattern)
+      ? sanitizeRegexPatternForValidation(pattern)
+      : pattern;
+    new RegExp(compilePattern, flags);
     return null;
   } catch (e: any) {
     return `Invalid regex: ${e.message}`;
@@ -80,12 +97,6 @@ function validateInput(input: CreateRegexScriptInput | UpdateRegexScriptInput, i
   }
   if (input.flags !== undefined && !validateFlags(input.flags)) {
     return "Invalid flags — allowed: g, i, m, s, u";
-  }
-  if (input.find_regex !== undefined || input.flags !== undefined) {
-    const pattern = input.find_regex ?? "";
-    const flags = input.flags ?? "gi";
-    const err = validateRegex(pattern, flags);
-    if (err) return err;
   }
   if (input.placement !== undefined) {
     if (!Array.isArray(input.placement)) return "placement must be an array";
@@ -176,6 +187,9 @@ export function createRegexScript(userId: string, input: CreateRegexScriptInput)
   const err = validateInput(input, true);
   if (err) return err;
 
+  const regexErr = validateRegex(input.find_regex, input.flags ?? "gi", input.substitute_macros ?? "none");
+  if (regexErr) return regexErr;
+
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
@@ -222,10 +236,11 @@ export function updateRegexScript(userId: string, id: string, input: UpdateRegex
   if (!existing) return null;
 
   // If updating regex or flags, validate together
-  if (input.find_regex !== undefined || input.flags !== undefined) {
+  if (input.find_regex !== undefined || input.flags !== undefined || input.substitute_macros !== undefined) {
     const pattern = input.find_regex ?? existing.find_regex;
     const flags = input.flags ?? existing.flags;
-    const regexErr = validateRegex(pattern, flags);
+    const substituteMacros = input.substitute_macros ?? existing.substitute_macros;
+    const regexErr = validateRegex(pattern, flags, substituteMacros);
     if (regexErr) return regexErr;
   }
 

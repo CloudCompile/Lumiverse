@@ -2,7 +2,11 @@ import { useState, useEffect, useCallback } from 'react'
 import { Link2, Trash2, Edit3, Zap, Check, Star, BrainCircuit, Copy, LogIn, RefreshCw, MoreVertical } from 'lucide-react'
 import { connectionsApi } from '@/api/connections'
 import { openrouterApi, type OpenRouterCreditsInfo } from '@/api/openrouter'
-import { getReasoningBindingSummary, getReasoningBindingTitle } from '@/lib/reasoning-binding'
+import {
+  getReasoningBindingSummary,
+  getReasoningBindingTitle,
+  normalizeReasoningSettingsForProvider,
+} from '@/lib/reasoning-binding'
 import type { ConnectionProfile, ProviderInfo, CreateConnectionProfileInput } from '@/types/api'
 import ConnectionForm from './ConnectionForm'
 import { Spinner } from '@/components/shared/Spinner'
@@ -147,8 +151,11 @@ export default function ConnectionItem({ profile, isActive, providers, onSelect,
 
   const providerColor = PROVIDER_COLORS[profile.provider] || PROVIDER_COLORS.custom
   const boundReasoning = profile.metadata?.reasoningBindings?.settings
-  const boundReasoningSummary = boundReasoning ? getReasoningBindingSummary(boundReasoning) : null
-  const boundReasoningTitle = boundReasoning ? getReasoningBindingTitle(boundReasoning) : undefined
+  const normalizedBoundReasoning = boundReasoning
+    ? normalizeReasoningSettingsForProvider(boundReasoning, profile.provider, profile.model)
+    : null
+  const boundReasoningSummary = normalizedBoundReasoning ? getReasoningBindingSummary(normalizedBoundReasoning) : null
+  const boundReasoningTitle = normalizedBoundReasoning ? getReasoningBindingTitle(normalizedBoundReasoning) : undefined
 
   if (editing) {
     return (
