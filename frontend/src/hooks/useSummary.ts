@@ -19,6 +19,7 @@ export function useSummary() {
   const setSummarization = useStore((s) => s.setSummarization)
   const isSummarizing = useStore((s) => s.isSummarizing)
   const setIsSummarizing = useStore((s) => s.setIsSummarizing)
+  const lastSummaryMutation = useStore((s) => s.lastSummaryMutation)
 
   const [summaryText, setSummaryText] = useState('')
   const [originalText, setOriginalText] = useState('')
@@ -64,6 +65,13 @@ export function useSummary() {
   useEffect(() => {
     loadSummary()
   }, [loadSummary])
+
+  useEffect(() => {
+    if (!activeChatId) return
+    if (!lastSummaryMutation || lastSummaryMutation.chatId !== activeChatId) return
+    setSummaryText(lastSummaryMutation.summaryText)
+    setOriginalText(lastSummaryMutation.summaryText)
+  }, [activeChatId, lastSummaryMutation])
 
   // Generate summary
   const generate = useCallback(async (isManual = true) => {

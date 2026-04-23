@@ -180,6 +180,51 @@ export function listChatSummaries(userId: string, characterId: string): ChatSumm
   }));
 }
 
+export function listGroupChatSummaries(userId: string, characterIds?: string[]): ChatSummary[] {
+  const db = getDb();
+  const normalizedIds = Array.isArray(characterIds)
+    ? Array.from(new Set(characterIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)))
+    : [];
+
+  const selectClause = `
+    SELECT
+      c.id,
+      c.name,
+      c.created_at,
+      c.updated_at,
+      (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) as message_count
+    FROM chats c
+  `;
+
+  const rows = normalizedIds.length > 0
+    ? db.query(`
+        ${selectClause}
+        WHERE c.user_id = ?
+          AND json_extract(c.metadata, '$.group') = 1
+          AND json_array_length(c.metadata, '$.character_ids') = ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM json_each(c.metadata, '$.character_ids') AS member
+            WHERE member.value NOT IN (${normalizedIds.map(() => "?").join(", ")})
+          )
+        ORDER BY c.updated_at DESC
+      `).all(userId, normalizedIds.length, ...normalizedIds) as any[]
+    : db.query(`
+        ${selectClause}
+        WHERE c.user_id = ?
+          AND json_extract(c.metadata, '$.group') = 1
+        ORDER BY c.updated_at DESC
+      `).all(userId) as any[];
+
+  return rows.map((row: any) => ({
+    id: row.id,
+    name: row.name || '',
+    message_count: row.message_count || 0,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+}
+
 // Prepared statement for hot-path chat fetch. We re-bind whenever the DB
 // generation token changes (e.g. test teardown or migration reopens the
 // database) — a statement bound to a closed Database silently fails.

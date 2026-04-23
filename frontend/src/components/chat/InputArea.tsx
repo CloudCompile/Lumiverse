@@ -1469,7 +1469,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   setOpenPopover(null)
                   openModal('manageChats', {
                     characterId: activeCharacterId,
-                    characterName: characterName || 'Character',
+                    characterName: isGroupChat ? 'Group Chat' : (characterName || 'Character'),
+                    isGroupChat,
+                    groupCharacterIds,
                   })
                 }}
               >

@@ -1,5 +1,6 @@
 import { generateApi } from '@/api/generate'
 import { chatsApi, messagesApi } from '@/api/chats'
+import { useStore } from '@/store'
 import {
   buildSummarizationPrompt,
   FALLBACK_SUMMARIZATION_SYSTEM_PROMPT,
@@ -129,6 +130,7 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
       timestamp: Date.now(),
     } satisfies LastSummarizedInfo,
   })
+  useStore.getState().setLastSummaryMutation({ chatId, summaryText })
 
   return summaryText
 }
@@ -137,9 +139,11 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
  * Save a manually edited summary to chat metadata.
  */
 export async function saveSummary(chatId: string, summaryText: string): Promise<void> {
+  const normalized = summaryText.trim()
   await chatsApi.patchMetadata(chatId, {
-    [LOOM_SUMMARY_KEY]: summaryText.trim() || null,
+    [LOOM_SUMMARY_KEY]: normalized || null,
   })
+  useStore.getState().setLastSummaryMutation({ chatId, summaryText: normalized })
 }
 
 /**
@@ -150,6 +154,7 @@ export async function clearSummary(chatId: string): Promise<void> {
     [LOOM_SUMMARY_KEY]: null,
     [LOOM_LAST_SUMMARIZED_KEY]: null,
   })
+  useStore.getState().setLastSummaryMutation({ chatId, summaryText: '' })
 }
 
 /**

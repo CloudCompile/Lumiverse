@@ -34,6 +34,15 @@ app.get("/character-chats/:characterId", (c) => {
   return c.json(svc.listChatSummaries(userId, characterId));
 });
 
+app.get("/group-chats", (c) => {
+  const userId = c.get("userId");
+  const rawCharacterIds = c.req.query("character_ids");
+  const characterIds = rawCharacterIds
+    ? rawCharacterIds.split(",").map((id) => id.trim()).filter(Boolean)
+    : undefined;
+  return c.json(svc.listGroupChatSummaries(userId, characterIds));
+});
+
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();

@@ -44,13 +44,17 @@ function formatChatName(chat: ChatSummary): string {
 export default function ManageChatsModal() {
   const navigate = useNavigate()
   const closeModal = useStore((s) => s.closeModal)
+  const characters = useStore((s) => s.characters)
   const modalProps = useStore((s) => s.modalProps) as {
     characterId: string
     characterName: string
+    isGroupChat?: boolean
+    groupCharacterIds?: string[]
   }
   const activeChatId = useStore((s) => s.activeChatId)
 
-  const { characterId, characterName } = modalProps
+  const { characterId, characterName, isGroupChat = false, groupCharacterIds = [] } = modalProps
+  const isGroupContext = isGroupChat && groupCharacterIds.length > 1
 
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -66,18 +70,29 @@ export default function ManageChatsModal() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const stFileInputRef = useRef<HTMLInputElement>(null)
 
-  // Fetch chats for this character
+  const groupLabel = useMemo(() => {
+    if (!isGroupContext) return null
+    const names = groupCharacterIds
+      .map((id) => characters.find((character) => character.id === id)?.name)
+      .filter((name): name is string => Boolean(name))
+    if (names.length === 0) return `Group Chat · ${groupCharacterIds.length} members`
+    return `${names.join(', ')} · ${groupCharacterIds.length} members`
+  }, [characters, groupCharacterIds, isGroupContext])
+
+  // Fetch chats for this character or exact group composition.
   const fetchChats = useCallback(async () => {
     try {
       setLoading(true)
-      const data = await get<ChatSummary[]>('/chats/character-chats/' + characterId)
+      const data = isGroupContext
+        ? await chatsApi.listGroupChats({ characterIds: groupCharacterIds })
+        : await get<ChatSummary[]>('/chats/character-chats/' + characterId)
       setChats(data)
     } catch (err) {
       console.error('[ManageChats] Failed to fetch chats:', err)
     } finally {
       setLoading(false)
     }
-  }, [characterId])
+  }, [characterId, groupCharacterIds, isGroupContext])
 
   useEffect(() => {
     fetchChats()
@@ -204,13 +219,18 @@ export default function ManageChatsModal() {
 
   const handleNewChat = useCallback(async () => {
     try {
-      const chat = await chatsApi.create({ character_id: characterId })
+      const chat = isGroupContext
+        ? await chatsApi.createGroup({
+            character_ids: groupCharacterIds,
+            greeting_character_id: characterId,
+          })
+        : await chatsApi.create({ character_id: characterId })
       closeModal()
       navigate('/chat/' + chat.id)
     } catch (err) {
       console.error('[ManageChats] Failed to create chat:', err)
     }
-  }, [characterId, closeModal, navigate])
+  }, [characterId, closeModal, groupCharacterIds, isGroupContext, navigate])
 
   const handleImportClick = useCallback(() => {
     fileInputRef.current?.click()
@@ -294,7 +314,7 @@ export default function ManageChatsModal() {
             <div className={styles.headerLeft}>
               <h3 className={styles.title}>Manage Chats</h3>
               <span className={styles.subtitle}>
-                {characterName} &middot; {chats.length} chat{chats.length !== 1 ? 's' : ''}
+                {(groupLabel || characterName)} &middot; {chats.length} chat{chats.length !== 1 ? 's' : ''}
               </span>
             </div>
           </div>
@@ -329,23 +349,27 @@ export default function ManageChatsModal() {
               style={{ display: 'none' }}
               onChange={handleImportFile}
             />
-            <Button
-              size="sm"
-              icon={importingSt ? <Spinner size={13} /> : <Upload size={13} />}
-              onClick={handleImportStClick}
-              disabled={importingSt}
-              title="Import chat from SillyTavern JSONL"
-            >
-              Import ST
-            </Button>
-            <input
-              ref={stFileInputRef}
-              type="file"
-              accept=".jsonl"
-              multiple
-              style={{ display: 'none' }}
-              onChange={handleImportStFile}
-            />
+            {!isGroupContext && (
+              <>
+                <Button
+                  size="sm"
+                  icon={importingSt ? <Spinner size={13} /> : <Upload size={13} />}
+                  onClick={handleImportStClick}
+                  disabled={importingSt}
+                  title="Import chat from SillyTavern JSONL"
+                >
+                  Import ST
+                </Button>
+                <input
+                  ref={stFileInputRef}
+                  type="file"
+                  accept=".jsonl"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleImportStFile}
+                />
+              </>
+            )}
           </div>
 
           <div className={styles.body}>

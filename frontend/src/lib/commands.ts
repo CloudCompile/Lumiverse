@@ -189,12 +189,14 @@ export const COMMANDS: Command[] = [
     group: 'Actions',
     scope: 'chat',
     run: () => {
-      const { activeCharacterId, characters, openModal } = useStore.getState()
+      const { activeCharacterId, characters, isGroupChat, groupCharacterIds, openModal } = useStore.getState()
       if (!activeCharacterId) return
       const char = characters.find((c) => c.id === activeCharacterId)
       openModal('manageChats', {
         characterId: activeCharacterId,
-        characterName: char?.name || 'Character',
+        characterName: isGroupChat ? 'Group Chat' : (char?.name || 'Character'),
+        isGroupChat,
+        groupCharacterIds,
       })
     },
   },

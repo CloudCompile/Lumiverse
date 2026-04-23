@@ -22,6 +22,12 @@ export const chatsApi = {
     return get<ChatSummary[]>('/chats/character-chats/' + characterId)
   },
 
+  listGroupChats(params?: { characterIds?: string[] }) {
+    return get<ChatSummary[]>('/chats/group-chats', params?.characterIds?.length
+      ? { character_ids: params.characterIds.join(',') }
+      : undefined)
+  },
+
   get(id: string, params?: { messages?: boolean }) {
     return get<Chat>(`/chats/${id}`, params)
   },

@@ -710,8 +710,10 @@ import type { SummarizationSettings } from '@/lib/summary/types'
 export interface SummarySlice {
   summarization: SummarizationSettings
   isSummarizing: boolean
+  lastSummaryMutation: { chatId: string; summaryText: string } | null
   setSummarization: (settings: Partial<SummarizationSettings>) => void
   setIsSummarizing: (value: boolean) => void
+  setLastSummaryMutation: (value: { chatId: string; summaryText: string } | null) => void
 }
 
 // ---- Auth Slice ----
