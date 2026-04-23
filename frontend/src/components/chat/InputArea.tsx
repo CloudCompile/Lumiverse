@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect, type CSSProperties, type KeyboardEvent } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect, type CSSProperties, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
 import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText, Braces, Globe } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
@@ -32,6 +32,7 @@ interface InputAreaProps {
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform)
 const queueModLabel = isMac ? 'Cmd' : 'Ctrl'
+const TEXTAREA_MAX_HEIGHT = 180
 
 // Slugify a character name into a stable @mention token. Matches the
 // databank `#` convention (lowercase, hyphen-separated, diacritics stripped).
@@ -80,6 +81,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [atResults, setAtResults] = useState<Array<{ id: string; name: string; slug: string; muted: boolean; image_id: string | null }>>([])
   const [atActiveIdx, setAtActiveIdx] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
+  const pendingSelectionRef = useRef<{ start: number; end: number; direction?: 'forward' | 'backward' | 'none' } | null>(null)
   const sendingRef = useRef(false)
   const generationNonceRef = useRef(0)
   const queueLockRef = useRef(false)
@@ -266,6 +268,37 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const screenCornerRadius = useDeviceFrameRadius()
   const [inputFocused, setInputFocused] = useState(false)
 
+  const syncTextareaMirrorScroll = useCallback(() => {
+    const ta = textareaRef.current
+    const mirror = mirrorRef.current
+    if (!ta || !mirror) return
+    mirror.scrollTop = ta.scrollTop
+    mirror.scrollLeft = ta.scrollLeft
+  }, [])
+
+  const resizeTextarea = useCallback((ta: HTMLTextAreaElement | null) => {
+    if (!ta) return
+    ta.style.height = 'auto'
+    ta.style.height = `${Math.min(ta.scrollHeight, TEXTAREA_MAX_HEIGHT)}px`
+    syncTextareaMirrorScroll()
+  }, [syncTextareaMirrorScroll])
+
+  const queueTextareaSelection = useCallback((start: number, end = start, direction: 'forward' | 'backward' | 'none' = 'none') => {
+    pendingSelectionRef.current = { start, end, direction }
+  }, [])
+
+  useLayoutEffect(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    resizeTextarea(ta)
+    const pendingSelection = pendingSelectionRef.current
+    if (!pendingSelection) return
+    pendingSelectionRef.current = null
+    ta.focus()
+    ta.setSelectionRange(pendingSelection.start, pendingSelection.end, pendingSelection.direction)
+    syncTextareaMirrorScroll()
+  }, [text, resizeTextarea, syncTextareaMirrorScroll])
+
   // ── Draft input persistence ──────────────────────────────────────────
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const DRAFT_KEY_PREFIX = 'lumiverse:chatDraft:'
@@ -278,12 +311,6 @@ export default function InputArea({ chatId }: InputAreaProps) {
       const saved = localStorage.getItem(DRAFT_KEY_PREFIX + chatId)
       if (saved) {
         setText(saved)
-        requestAnimationFrame(() => {
-          if (textareaRef.current) {
-            textareaRef.current.style.height = 'auto'
-            textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 180) + 'px'
-          }
-        })
       }
     } catch {}
   }, [chatId, saveDraftInput])
@@ -588,7 +615,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     requestAnimationFrame(() => {
       if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
+        resizeTextarea(textareaRef.current)
         textareaRef.current.focus()
       }
     })
@@ -615,7 +642,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activePersonaId, personas, sendPersonaId, pendingAttachments, addMessage, saveDraftInput])
+  }, [text, chatId, isStreaming, activePersonaId, personas, sendPersonaId, pendingAttachments, addMessage, saveDraftInput, resizeTextarea])
 
   const handleSend = useCallback(async () => {
     if (sendingRef.current || isStreaming) return
@@ -636,7 +663,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     // Reset textarea height
     requestAnimationFrame(() => {
       if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
+        resizeTextarea(textareaRef.current)
         textareaRef.current.focus()
       }
     })
@@ -744,7 +771,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages, isGroupChat, groupCharacterIds, mutedCharacterIds, characters, setMentionQueue])
+  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages, isGroupChat, groupCharacterIds, mutedCharacterIds, characters, setMentionQueue, resizeTextarea])
 
   const doRegenerate = useCallback(async (feedback?: string | null) => {
     if (isStreaming) return
@@ -863,7 +890,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setLastImpersonateInput(impersonateInput)
       setText('')
       try { localStorage.removeItem(DRAFT_KEY_PREFIX + chatId) } catch {}
-      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      requestAnimationFrame(() => resizeTextarea(textareaRef.current))
     }
     try {
       const forcedPresetId = mode === 'oneliner' ? impersonationPresetId : null
@@ -887,7 +914,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setStreamingError(msg)
       toast.error(msg, { title: 'Impersonation Failed' })
     }
-  }, [chatId, isStreaming, text, activeProfileId, activePersonaId, impersonationPresetId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, text, activeProfileId, activePersonaId, impersonationPresetId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides, resizeTextarea])
 
   const handleStop = useCallback(async () => {
     if (!isStreaming) return
@@ -981,6 +1008,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       if (res.text === text) {
         toast.info('No macros found to resolve')
       } else {
+        queueTextareaSelection(res.text.length)
         setText(res.text)
         const warns = res.diagnostics.filter((d) => d.level === 'warning' || d.level === 'error')
         if (warns.length > 0) {
@@ -988,7 +1016,6 @@ export default function InputArea({ chatId }: InputAreaProps) {
         } else {
           toast.success('Macros resolved')
         }
-        requestAnimationFrame(() => textareaRef.current?.focus())
       }
     } catch (err: any) {
       console.error('[InputArea] Macro resolution failed:', err)
@@ -997,27 +1024,27 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       setResolvingMacros(false)
     }
-  }, [text, chatId, resolvingMacros, isStreaming, activeCharacterId, activePersonaId, activeProfileId])
+  }, [text, chatId, resolvingMacros, isStreaming, activeCharacterId, activePersonaId, activeProfileId, queueTextareaSelection])
 
   const handleHashSelect = useCallback((result: { slug: string; name: string }) => {
     const before = text.slice(0, hashStartIndex)
     const afterCursor = text.slice(hashStartIndex + 1 + (hashQuery?.length ?? 0))
     const newText = `${before}#${result.slug} ${afterCursor}`
+    queueTextareaSelection(before.length + result.slug.length + 2)
     setText(newText)
     setHashQuery(null)
     setOpenPopover(null)
-    requestAnimationFrame(() => textareaRef.current?.focus())
-  }, [text, hashStartIndex, hashQuery])
+  }, [text, hashStartIndex, hashQuery, queueTextareaSelection])
 
   const handleAtSelect = useCallback((result: { slug: string; name: string }) => {
     const before = text.slice(0, atStartIndex)
     const afterCursor = text.slice(atStartIndex + 1 + (atQuery?.length ?? 0))
     const newText = `${before}@${result.slug} ${afterCursor}`
+    queueTextareaSelection(before.length + result.slug.length + 2)
     setText(newText)
     setAtQuery(null)
     setOpenPopover(null)
-    requestAnimationFrame(() => textareaRef.current?.focus())
-  }, [text, atStartIndex, atQuery])
+  }, [text, atStartIndex, atQuery, queueTextareaSelection])
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1143,8 +1170,6 @@ export default function InputArea({ chatId }: InputAreaProps) {
     const val = e.target.value
     setText(val)
     const ta = e.target
-    ta.style.height = 'auto'
-    ta.style.height = Math.min(ta.scrollHeight, 180) + 'px'
 
     // Skip trigger detection while an IME is composing (Android predictive
     // text, CJK input, etc.). `selectionStart` is unreliable mid-composition
@@ -1214,11 +1239,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
   // Keep the mirror's scroll position locked to the textarea so pills stay
   // aligned with the caret once content overflows the 180px max-height.
   const handleTextareaScroll = useCallback(() => {
-    const ta = textareaRef.current
-    const mirror = mirrorRef.current
-    if (!ta || !mirror) return
-    mirror.scrollTop = ta.scrollTop
-  }, [])
+    syncTextareaMirrorScroll()
+  }, [syncTextareaMirrorScroll])
 
   const toggleGuide = useCallback((id: string) => {
     const next = guidedGenerations.map((g) => (g.id === id ? { ...g, enabled: !g.enabled } : g))
@@ -1395,9 +1417,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
                       type="button"
                       className={styles.popRowBtn}
                       onClick={() => {
+                        queueTextareaSelection(reply.message.length)
                         setText(reply.message)
                         setOpenPopover(null)
-                        requestAnimationFrame(() => textareaRef.current?.focus())
                       }}
                     >
                       <span>{reply.label || 'Untitled reply'}</span>
@@ -1595,15 +1617,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     title={lastImpersonateInput}
                     onClick={() => {
                       setOpenPopover(null)
-                      setText((prev) => prev ? `${prev}\n${lastImpersonateInput}` : lastImpersonateInput)
+                      const nextText = text ? `${text}\n${lastImpersonateInput}` : lastImpersonateInput
+                      queueTextareaSelection(nextText.length)
+                      setText(nextText)
                       setLastImpersonateInput('')
-                      requestAnimationFrame(() => {
-                        if (textareaRef.current) {
-                          textareaRef.current.style.height = 'auto'
-                          textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 180) + 'px'
-                          textareaRef.current.focus()
-                        }
-                      })
                     }}
                   >
                     <span className={styles.personaMain}>
