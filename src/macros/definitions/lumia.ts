@@ -45,7 +45,7 @@ function normalizeLumiaItem(item: any): LumiaItemData | null {
     definition: String(item.definition ?? item.lumiaDefinition ?? ""),
     personality: String(item.personality ?? item.lumiaPersonality ?? ""),
     behavior: String(item.behavior ?? item.lumiaBehavior ?? ""),
-    gender_identity: Number(item.gender_identity ?? item.genderIdentity ?? 0),
+    gender_identity: Number(item.gender_identity ?? item.genderIdentity ?? 3),
   };
 }
 

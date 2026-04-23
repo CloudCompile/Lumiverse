@@ -869,7 +869,7 @@ export interface LumiaItem {
   definition: string;
   personality: string;
   behavior: string;
-  gender_identity: 0 | 1 | 2;
+  gender_identity: 0 | 1 | 2 | 3;
   version: string;
   sort_order: number;
   created_at: number;
@@ -933,7 +933,7 @@ export interface CreateLumiaItemInput {
   definition?: string;
   personality?: string;
   behavior?: string;
-  gender_identity?: 0 | 1 | 2;
+  gender_identity?: 0 | 1 | 2 | 3;
   version?: string;
   sort_order?: number;
 }

@@ -55,7 +55,7 @@ export function buildCouncilMemberContext(
     definition?: string | null;
     personality?: string | null;
     behavior?: string | null;
-    gender_identity?: 0 | 1 | 2 | null;
+    gender_identity?: 0 | 1 | 2 | 3 | null;
   } | null,
 ): CouncilMemberContext {
   return {
@@ -70,7 +70,9 @@ export function buildCouncilMemberContext(
     definition: item?.definition ?? "",
     personality: item?.personality ?? "",
     behavior: item?.behavior ?? "",
-    genderIdentity: item?.gender_identity ?? 0,
+    // The shared spindle types package still narrows this field to 0|1|2.
+    // Runtime values now allow 3 for "any", so cast at the boundary until the package catches up.
+    genderIdentity: (item?.gender_identity ?? 3) as CouncilMemberContext["genderIdentity"],
   };
 }
 

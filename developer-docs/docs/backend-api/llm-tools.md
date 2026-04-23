@@ -128,7 +128,7 @@ interface CouncilMemberContext {
   definition: string            // Lumia "definition" field
   personality: string           // Lumia "personality" field
   behavior: string              // Lumia "behavior" field
-  genderIdentity: 0 | 1 | 2     // 0=unspecified, 1=feminine, 2=masculine
+  genderIdentity: 0 | 1 | 2 | 3 // 0=feminine, 1=masculine, 2=neutral, 3=any
 }
 ```
 
