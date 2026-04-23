@@ -51,7 +51,7 @@ export default function ModelCombobox({ value, onChange, models, modelLabels, lo
           onFocus={() => models.length > 0 && setOpen(true)}
         />
         {onRefresh && (
-          <button type="button" className={styles.refreshBtn} onClick={onRefresh} disabled={loading || disabled} title={disabled ? 'Save connection to fetch models' : 'Refresh models'}>
+          <button type="button" className={styles.refreshBtn} onClick={onRefresh} disabled={loading || disabled} title="Refresh models">
             {loading ? <Spinner size={14} /> : <RefreshCw size={14} />}
           </button>
         )}

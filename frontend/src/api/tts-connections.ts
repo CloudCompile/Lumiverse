@@ -6,6 +6,7 @@ import type {
   TtsConnectionTestResult,
   TtsConnectionModelsResult,
   TtsConnectionVoicesResult,
+  TtsConnectionVoicesPreviewInput,
   TtsProviderInfo,
   PaginatedResult,
 } from '@/types/api'
@@ -45,6 +46,10 @@ export const ttsConnectionsApi = {
 
   voices(id: string) {
     return get<TtsConnectionVoicesResult>(`/tts-connections/${id}/voices`)
+  },
+
+  previewVoices(input: TtsConnectionVoicesPreviewInput) {
+    return post<TtsConnectionVoicesResult>('/tts-connections/voices/preview', input)
   },
 
   setApiKey(id: string, apiKey: string) {

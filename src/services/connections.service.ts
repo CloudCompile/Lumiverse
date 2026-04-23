@@ -22,6 +22,14 @@ export interface ConnectionTestResult {
   error: string | null;
 }
 
+export interface ConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  metadata?: Record<string, any>;
+  api_key?: string;
+}
+
 function describeConnectionTestError(err: unknown): string {
   if (err instanceof Error && err.message.trim()) return err.message;
   if (typeof err === "string" && err.trim()) return err;
@@ -364,21 +372,43 @@ export async function listConnectionModels(userId: string, id: string): Promise<
   const profile = getConnection(userId, id);
   if (!profile) return { models: [], provider: "", error: "Connection not found" };
 
-  const provider = getProvider(profile.provider);
-  if (!provider) return { models: [], provider: profile.provider, error: `Unknown provider: ${profile.provider}` };
-
   const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
-  if (!apiKey && provider.capabilities.apiKeyRequired) {
-    return { models: [], provider: profile.provider, error: "No API key" };
+  return listConnectionModelsPreview(userId, {
+    connection_id: id,
+    provider: profile.provider,
+    api_url: profile.api_url,
+    metadata: profile.metadata,
+    api_key: apiKey || undefined,
+  });
+}
+
+export async function listConnectionModelsPreview(
+  userId: string,
+  input: ConnectionModelsPreviewInput
+): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: string; error?: string }> {
+  const existing = input.connection_id ? getConnection(userId, input.connection_id) : null;
+  const providerId = input.provider;
+  const metadata = input.metadata ?? existing?.metadata ?? {};
+  const apiUrl = resolveEffectiveApiUrl({
+    provider: providerId,
+    api_url: input.api_url ?? existing?.api_url ?? "",
+    metadata,
+  });
+
+  let apiKey = input.api_key;
+  if (apiKey === undefined && existing && existing.provider === providerId) {
+    apiKey = (await secretsSvc.getSecret(userId, connectionSecretKey(existing.id))) || undefined;
   }
 
+  const provider = getProvider(providerId);
+  if (!provider) return { models: [], provider: providerId, error: `Unknown provider: ${providerId}` };
+
   try {
-    const apiUrl = resolveEffectiveApiUrl(profile);
     const models = await provider.listModels(apiKey || "", apiUrl);
 
     // For providers that expose human-readable names, build a label map
     let model_labels: Record<string, string> | undefined;
-    if (profile.provider === "openrouter") {
+    if (providerId === "openrouter") {
       const { OpenRouterProvider } = await import("../llm/providers/openrouter");
       if (provider instanceof OpenRouterProvider) {
         const richModels = await provider.fetchModelsWithMetadata(apiKey || "", apiUrl);
@@ -389,9 +419,9 @@ export async function listConnectionModels(userId: string, id: string): Promise<
       }
     }
 
-    return { models, model_labels, provider: profile.provider };
+    return { models, model_labels, provider: providerId };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: providerId, error: err.message || "Failed to fetch models" };
   }
 }
 

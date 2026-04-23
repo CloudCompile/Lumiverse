@@ -36,6 +36,14 @@ app.post("/", async (c) => {
   return c.json(conn, 201);
 });
 
+app.post("/models/preview", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+  if (!body?.provider) return c.json({ error: "provider is required" }, 400);
+  const result = await svc.listConnectionModelsPreview(userId, body);
+  return c.json(result);
+});
+
 /** Get image gen connection by ID */
 app.get("/:id", (c) => {
   const userId = c.get("userId");

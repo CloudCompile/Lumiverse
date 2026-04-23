@@ -17,6 +17,13 @@ export function ttsConnectionSecretKey(id: string): string {
   return `tts_connection_${id}_api_key`;
 }
 
+export interface TtsConnectionVoicesPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
+}
+
 function rowToProfile(row: any): TtsConnectionProfile {
   return {
     ...row,
@@ -279,20 +286,36 @@ export async function listConnectionVoices(
   const profile = getConnection(userId, id);
   if (!profile) return { voices: [], provider: "", error: "Connection not found" };
 
-  const provider = getTtsProvider(profile.provider);
-  if (!provider) {
-    return { voices: [], provider: profile.provider, error: `Unknown provider: ${profile.provider}` };
+  const apiKey = await secretsSvc.getSecret(userId, ttsConnectionSecretKey(id));
+  return listConnectionVoicesPreview(userId, {
+    connection_id: id,
+    provider: profile.provider,
+    api_url: profile.api_url,
+    api_key: apiKey || undefined,
+  });
+}
+
+export async function listConnectionVoicesPreview(
+  userId: string,
+  input: TtsConnectionVoicesPreviewInput
+): Promise<{ voices: TtsVoice[]; provider: string; error?: string }> {
+  const existing = input.connection_id ? getConnection(userId, input.connection_id) : null;
+  const providerId = input.provider;
+
+  let apiKey = input.api_key;
+  if (apiKey === undefined && existing && existing.provider === providerId) {
+    apiKey = (await secretsSvc.getSecret(userId, ttsConnectionSecretKey(existing.id))) || undefined;
   }
 
-  const apiKey = await secretsSvc.getSecret(userId, ttsConnectionSecretKey(id));
-  if (!apiKey && provider.capabilities.apiKeyRequired) {
-    return { voices: [], provider: profile.provider, error: "No API key" };
+  const provider = getTtsProvider(providerId);
+  if (!provider) {
+    return { voices: [], provider: providerId, error: `Unknown provider: ${providerId}` };
   }
 
   try {
-    const voices = await provider.listVoices(apiKey || "", profile.api_url || "");
-    return { voices, provider: profile.provider };
+    const voices = await provider.listVoices(apiKey || "", input.api_url ?? existing?.api_url ?? "");
+    return { voices, provider: providerId };
   } catch (err: any) {
-    return { voices: [], provider: profile.provider, error: err.message || "Failed to fetch voices" };
+    return { voices: [], provider: providerId, error: err.message || "Failed to fetch voices" };
   }
 }

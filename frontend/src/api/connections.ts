@@ -2,6 +2,7 @@ import { get, post, put, del } from './client'
 import type {
   ConnectionProfile, CreateConnectionProfileInput, UpdateConnectionProfileInput,
   PaginatedResult, ConnectionTestResult, ConnectionModelsResult, ProviderInfo,
+  ConnectionModelsPreviewInput,
   PollinationsAuthUrlRequest, PollinationsAuthUrlResponse,
 } from '@/types/api'
 
@@ -36,6 +37,10 @@ export const connectionsApi = {
 
   models(id: string) {
     return get<ConnectionModelsResult>(`/connections/${id}/models`)
+  },
+
+  previewModels(input: ConnectionModelsPreviewInput) {
+    return post<ConnectionModelsResult>('/connections/models/preview', input)
   },
 
   pollinationsAuthUrl(input: PollinationsAuthUrlRequest) {

@@ -236,6 +236,14 @@ export interface ConnectionModelsResult {
   error?: string
 }
 
+export interface ConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  metadata?: Record<string, any>;
+  api_key?: string;
+}
+
 export interface PollinationsAuthUrlRequest {
   redirect_url: string;
   models?: string;
@@ -286,6 +294,13 @@ export interface ImageGenConnectionModelsResult {
   models: Array<{ id: string; label: string }>;
   provider: string;
   error?: string;
+}
+
+export interface ImageGenConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
 }
 
 export interface ImageGenParameterSchema {
@@ -370,6 +385,13 @@ export interface TtsConnectionVoicesResult {
   voices: TtsVoice[];
   provider: string;
   error?: string;
+}
+
+export interface TtsConnectionVoicesPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
 }
 
 export interface TtsParameterSchema {

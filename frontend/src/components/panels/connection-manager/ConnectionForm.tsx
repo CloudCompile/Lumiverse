@@ -80,10 +80,25 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   const isPollinations = provider === 'pollinations'
 
   const fetchModels = useCallback(async () => {
-    if (!profile?.id) return
     setModelsLoading(true)
     try {
-      const result = await connectionsApi.models(profile.id)
+      const metadata: Record<string, any> = { ...profile?.metadata }
+      if (showSubscriptionApiToggle) {
+        metadata.use_subscription_api = useSubscriptionApi
+      } else {
+        delete metadata.use_subscription_api
+      }
+      if (isVertexAI) {
+        metadata.vertex_region = vertexRegion
+      }
+
+      const result = await connectionsApi.previewModels({
+        connection_id: profile?.id,
+        provider,
+        api_url: isVertexAI ? undefined : (apiUrl.trim() || undefined),
+        metadata,
+        api_key: apiKey.trim() || undefined,
+      })
       setModels(result.models)
       setModelLabels(result.model_labels || {})
     } catch {
@@ -92,7 +107,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } finally {
       setModelsLoading(false)
     }
-  }, [profile?.id])
+  }, [apiKey, apiUrl, isVertexAI, profile?.id, profile?.metadata, provider, showSubscriptionApiToggle, useSubscriptionApi, vertexRegion])
 
   useEffect(() => {
     if (profile?.id) fetchModels()
@@ -375,7 +390,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           <TextInput value={apiUrl} onChange={setApiUrl} placeholder={urlPlaceholder} />
         </FormField>
       )}
-      <FormField label="Model" hint={!profile?.id ? 'Save connection first to fetch model list' : undefined}>
+      <FormField label="Model" hint="Refresh uses the current form values, even before the connection is saved.">
         <ModelCombobox
           value={model}
           onChange={setModel}
@@ -383,7 +398,6 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           modelLabels={modelLabels}
           loading={modelsLoading}
           onRefresh={fetchModels}
-          disabled={!profile?.id}
           placeholder={isVertexAI ? 'gemini-2.5-flash' : 'gpt-4o'}
         />
       </FormField>

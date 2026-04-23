@@ -16,6 +16,13 @@ export function imageGenConnectionSecretKey(id: string): string {
   return `image_gen_connection_${id}_api_key`;
 }
 
+export interface ImageGenConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
+}
+
 function rowToProfile(row: any): ImageGenConnectionProfile {
   return {
     ...row,
@@ -251,21 +258,37 @@ export async function listConnectionModels(
   const profile = getConnection(userId, id);
   if (!profile) return { models: [], provider: "", error: "Connection not found" };
 
-  const provider = getImageProvider(profile.provider);
-  if (!provider) {
-    return { models: [], provider: profile.provider, error: `Unknown provider: ${profile.provider}` };
+  const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(id));
+  return listConnectionModelsPreview(userId, {
+    connection_id: id,
+    provider: profile.provider,
+    api_url: profile.api_url,
+    api_key: apiKey || undefined,
+  });
+}
+
+export async function listConnectionModelsPreview(
+  userId: string,
+  input: ImageGenConnectionModelsPreviewInput
+): Promise<{ models: Array<{ id: string; label: string }>; provider: string; error?: string }> {
+  const existing = input.connection_id ? getConnection(userId, input.connection_id) : null;
+  const providerId = input.provider;
+
+  let apiKey = input.api_key;
+  if (apiKey === undefined && existing && existing.provider === providerId) {
+    apiKey = (await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(existing.id))) || undefined;
   }
 
-  const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(id));
-  if (!apiKey && provider.capabilities.apiKeyRequired) {
-    return { models: [], provider: profile.provider, error: "No API key" };
+  const provider = getImageProvider(providerId);
+  if (!provider) {
+    return { models: [], provider: providerId, error: `Unknown provider: ${providerId}` };
   }
 
   try {
-    const models = await provider.listModels(apiKey || "", profile.api_url || "");
-    return { models, provider: profile.provider };
+    const models = await provider.listModels(apiKey || "", input.api_url ?? existing?.api_url ?? "");
+    return { models, provider: providerId };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: providerId, error: err.message || "Failed to fetch models" };
   }
 }
 

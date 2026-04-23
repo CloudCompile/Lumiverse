@@ -6,6 +6,7 @@ import type {
   PaginatedResult,
   ImageGenConnectionTestResult,
   ImageGenConnectionModelsResult,
+  ImageGenConnectionModelsPreviewInput,
   ImageGenProviderInfo,
   PollinationsAuthUrlRequest,
   PollinationsAuthUrlResponse,
@@ -42,6 +43,10 @@ export const imageGenConnectionsApi = {
 
   models(id: string) {
     return get<ImageGenConnectionModelsResult>(`/image-gen-connections/${id}/models`)
+  },
+
+  previewModels(input: ImageGenConnectionModelsPreviewInput) {
+    return post<ImageGenConnectionModelsResult>('/image-gen-connections/models/preview', input)
   },
 
   modelsBySubtype(id: string, subtype: string) {
