@@ -79,15 +79,14 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
     userPromptOverride,
   } = opts
 
-  // Fetch chat for existing summary
-  const chat = await chatsApi.get(chatId)
+  const [chat, msgPage] = await Promise.all([
+    chatsApi.get(chatId, { messages: false }),
+    messagesApi.list(chatId, { limit: Math.max(1, messageContext), tail: true }),
+  ])
+
   const existingSummary = (chat.metadata?.[LOOM_SUMMARY_KEY] as string) || ''
-
-  // Fetch recent messages
-  const { data: allMessages } = await messagesApi.list(chatId, { limit: 500, offset: 0 })
-  if (allMessages.length === 0) return null
-
-  const recentMessages = allMessages.slice(-messageContext)
+  const recentMessages = msgPage.data
+  if (msgPage.total === 0 || recentMessages.length === 0) return null
 
   // Fetch default templates up front — needed whenever an override is empty
   const defaults = await loadSummarizationDefaults()
@@ -123,16 +122,13 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
   if (!summaryText) return null
 
   // Store summary in chat metadata
-  const updatedMetadata = {
-    ...(chat.metadata || {}),
+  await chatsApi.patchMetadata(chatId, {
     [LOOM_SUMMARY_KEY]: summaryText,
     [LOOM_LAST_SUMMARIZED_KEY]: {
-      messageCount: allMessages.length,
+      messageCount: msgPage.total,
       timestamp: Date.now(),
     } satisfies LastSummarizedInfo,
-  }
-
-  await chatsApi.update(chatId, { metadata: updatedMetadata })
+  })
 
   return summaryText
 }
@@ -141,27 +137,19 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
  * Save a manually edited summary to chat metadata.
  */
 export async function saveSummary(chatId: string, summaryText: string): Promise<void> {
-  const chat = await chatsApi.get(chatId)
-  const metadata = { ...(chat.metadata || {}) }
-
-  if (summaryText.trim()) {
-    metadata[LOOM_SUMMARY_KEY] = summaryText.trim()
-  } else {
-    delete metadata[LOOM_SUMMARY_KEY]
-  }
-
-  await chatsApi.update(chatId, { metadata })
+  await chatsApi.patchMetadata(chatId, {
+    [LOOM_SUMMARY_KEY]: summaryText.trim() || null,
+  })
 }
 
 /**
  * Clear the summary from chat metadata.
  */
 export async function clearSummary(chatId: string): Promise<void> {
-  const chat = await chatsApi.get(chatId)
-  const metadata = { ...(chat.metadata || {}) }
-  delete metadata[LOOM_SUMMARY_KEY]
-  delete metadata[LOOM_LAST_SUMMARIZED_KEY]
-  await chatsApi.update(chatId, { metadata })
+  await chatsApi.patchMetadata(chatId, {
+    [LOOM_SUMMARY_KEY]: null,
+    [LOOM_LAST_SUMMARIZED_KEY]: null,
+  })
 }
 
 /**

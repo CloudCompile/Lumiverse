@@ -26,7 +26,8 @@ import { generateApi } from '@/api/generate'
  */
 export function useAutoSummarization() {
   const activeChatId = useStore((s) => s.activeChatId)
-  const messageCount = useStore((s) => s.messages.length)
+  // Use the authoritative chat length, not the currently loaded message window.
+  const messageCount = useStore((s) => s.totalChatLength)
   const mode = useStore((s) => s.summarization.mode)
   const autoInterval = useStore((s) => s.summarization.autoInterval)
   const isStreaming = useStore((s) => s.isStreaming)
