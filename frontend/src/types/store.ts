@@ -396,6 +396,7 @@ export interface DrawerSettings {
   panelWidthMode: 'default' | 'stChat' | 'custom'
   customPanelWidth: number
   showTabLabels: boolean
+  hiddenTabIds: string[]
 }
 
 // ---- Loom Registry Entry ----

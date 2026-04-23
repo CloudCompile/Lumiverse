@@ -263,6 +263,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     panelWidthMode: 'default',
     customPanelWidth: 35,
     showTabLabels: false,
+    hiddenTabIds: [],
   },
   oocEnabled: true,
   lumiaOOCStyle: 'social',

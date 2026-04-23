@@ -57,6 +57,27 @@ export interface DrawerTabEntry {
   component: () => ReactNode
 }
 
+export const CORE_DRAWER_TAB_IDS = new Set([
+  'profile',
+  'presets',
+  'loom',
+  'characters',
+  'personas',
+  'branches',
+  'spindle',
+  'theme',
+  'lorebook',
+])
+
+export function isDrawerTabCore(tabId: string): boolean {
+  return CORE_DRAWER_TAB_IDS.has(tabId)
+}
+
+export function sanitizeHiddenDrawerTabIds(hiddenTabIds?: string[] | null): string[] {
+  if (!Array.isArray(hiddenTabIds)) return []
+  return [...new Set(hiddenTabIds.filter((tabId): tabId is string => typeof tabId === 'string' && !isDrawerTabCore(tabId)))]
+}
+
 export const DRAWER_TABS: DrawerTabEntry[] = [
   {
     id: 'profile',

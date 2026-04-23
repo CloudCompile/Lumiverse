@@ -1,5 +1,6 @@
 import { connect, Index, rerankers, type Connection, type Table } from "@lancedb/lancedb";
 import { join } from "path";
+import { pathToFileURL } from "url";
 import { rmSync, existsSync } from "fs";
 import { env } from "../env";
 import { getDb } from "../db/connection";
@@ -22,6 +23,7 @@ import { getFirstUserId } from "../auth/seed";
 const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
 const LANCEDB_PATH = join(env.dataDir, "lancedb");
+const LANCEDB_URI = pathToFileURL(LANCEDB_PATH).href;
 const EMBEDDINGS_TABLE = "embeddings";
 const WORLD_BOOK_VECTOR_VERSION = 2;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
@@ -584,7 +586,7 @@ export function getChatMemoryParams(mode: "conservative" | "balanced" | "aggress
 }
 
 async function getConnection(): Promise<Connection> {
-  if (!connPromise) connPromise = connect(LANCEDB_PATH);
+  if (!connPromise) connPromise = connect(LANCEDB_URI);
   return connPromise;
 }
 

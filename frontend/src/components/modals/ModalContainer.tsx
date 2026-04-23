@@ -23,6 +23,7 @@ import PersonaAddonsModal from './PersonaAddonsModal'
 import GlobalAddonsLibraryModal from './GlobalAddonsLibraryModal'
 import ChatSettingsModal from './GroupSettingsModal'
 import CustomCSSModal from './CustomCSSModal'
+import ConfigureDrawerTabsModal from './ConfigureDrawerTabsModal'
 import { DreamWeaverStudio } from '@/components/dream-weaver/DreamWeaverStudio'
 
 export default function ModalContainer() {
@@ -103,6 +104,7 @@ export default function ModalContainer() {
       {activeModal === 'toolEditor' && <ToolEditorModal />}
       {activeModal === 'regexEditor' && <RegexEditorModal />}
       {activeModal === 'regexImport' && <RegexImportModal />}
+      {activeModal === 'configureTabs' && <ConfigureDrawerTabsModal />}
       {activeModal === 'personaAddons' && <PersonaAddonsModal />}
       {activeModal === 'globalAddonsLibrary' && <GlobalAddonsLibraryModal />}
       {(activeModal === 'chatSettings' || activeModal === 'groupSettings') && <ChatSettingsModal />}
