@@ -103,7 +103,7 @@ Utility macros for text manipulation and flow control.
 | `{{//::...}}` | — | Inline comment shorthand |
 | `{{input}}` | — | The raw text of the last user message |
 | `{{reverse::text}}` | — | Reverses the given text |
-| `{{outlet}}` | — | Placeholder for extension injection points |
+| `{{outlet::name}}` | — | Resolves the content exported by an active world-info entry outlet |
 | `{{banned}}` | — | Placeholder for banned token lists |
 
 ### Conditional Logic

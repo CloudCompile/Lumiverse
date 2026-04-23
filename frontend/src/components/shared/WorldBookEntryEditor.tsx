@@ -62,6 +62,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
   // Local state for text fields to prevent prop-sync from overwriting in-progress edits
   const [content, setContent] = useState(entry.content)
   const [comment, setComment] = useState(entry.comment)
+  const [outletName, setOutletName] = useState(entry.outlet_name || '')
   const [primaryKeys, setPrimaryKeys] = useState(entry.key.join(', '))
   const [secondaryKeys, setSecondaryKeys] = useState(entry.keysecondary.join(', '))
   const lastSyncedId = useRef<string | null>(null)
@@ -72,6 +73,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
     lastSyncedId.current = entry.id
     setContent(entry.content)
     setComment(entry.comment)
+    setOutletName(entry.outlet_name || '')
     setPrimaryKeys(entry.key.join(', '))
     setSecondaryKeys(entry.keysecondary.join(', '))
     setTokenCount(null)
@@ -120,6 +122,15 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
     [entry.id, onUpdate]
   )
 
+  const handleOutletNameChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const nextValue = e.target.value
+      setOutletName(nextValue)
+      onUpdate(entry.id, { outlet_name: nextValue || null })
+    },
+    [entry.id, onUpdate]
+  )
+
   const handlePrimaryKeysChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setPrimaryKeys(e.target.value)
@@ -152,6 +163,16 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
             className={styles.entryInput}
             value={comment}
             onChange={handleCommentChange}
+          />
+        </div>
+        <div className={styles.entryField}>
+          <label className={styles.fieldLabel}>Outlet Name</label>
+          <input
+            type="text"
+            className={styles.entryInput}
+            value={outletName}
+            onChange={handleOutletNameChange}
+            placeholder="Use with {{outlet::name}}"
           />
         </div>
         <div className={styles.entryField}>

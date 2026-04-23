@@ -15,6 +15,7 @@ function makeEnv(opts: {
   messages?: { content: string; name: string; is_user: boolean }[];
   characterTags?: string[];
   chatCreatedAt?: number;
+  worldInfoOutlets?: Record<string, string>;
 } = {}): MacroEnv {
   const env: MacroEnv = {
     commit: true,
@@ -85,6 +86,7 @@ function makeEnv(opts: {
       ],
       chatCreatedAt: opts.chatCreatedAt ?? Math.floor(Date.now() / 1000) - 3600,
       characterTags: opts.characterTags ?? ["fantasy", "warrior", "male"],
+      worldInfoOutlets: opts.worldInfoOutlets ?? {},
     },
   };
   return env;
@@ -147,6 +149,16 @@ describe("Core primitives", () => {
 
   test("input", async () => {
     expect(await ev("{{input}}")).toBe("I draw my sword.");
+  });
+
+  test("outlet resolves world-info outlet content", async () => {
+    const env = makeEnv({ worldInfoOutlets: { dossier: "Known as {{char}}" } });
+    expect(await ev("{{outlet::dossier}}", env)).toBe("Known as Bob");
+  });
+
+  test("outlet lookup is case-insensitive", async () => {
+    const env = makeEnv({ worldInfoOutlets: { dossier: "Hello {{user}}" } });
+    expect(await ev("{{outlet::DOSSIER}}", env)).toBe("Hello Alice");
   });
 });
 

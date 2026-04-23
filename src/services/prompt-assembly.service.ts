@@ -101,6 +101,12 @@ async function yieldAndCheckAbort(signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
 }
 
+function normalizeWorldInfoOutletName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 /**
  * Strip whitespace-only text parts from any multipart message. Strict providers
  * (Anthropic, some OpenAI-compat) reject text content blocks that contain only
@@ -1044,6 +1050,8 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
       }
     }
   }
+
+  await resolveWorldInfoOutlets(mergedWorldInfo.activatedEntries, macroEnv, ctx.signal);
 
   // ---- Resolve macros in world info entries ----
   // WI entry content may contain macros (e.g. {{user}}, {{char}}, {{time}}).
@@ -2074,6 +2082,56 @@ export interface MergedWorldInfoEntriesResult {
   evictedByBudget: number;
   deduplicated: number;
   deduplicationDetails: import("./world-info-dedup.service").DedupRemovalRecord[];
+}
+
+async function resolveWorldInfoOutlets(
+  entries: WorldBookEntryModel[],
+  macroEnv: MacroEnv,
+  signal?: AbortSignal,
+): Promise<Record<string, string>> {
+  const templates = new Map<string, string>();
+
+  for (const entry of entries) {
+    const outletName = normalizeWorldInfoOutletName(entry.outlet_name);
+    if (!outletName) continue;
+    if (typeof entry.content !== "string" || entry.content.trim().length === 0) continue;
+    if (templates.has(outletName)) {
+      console.warn(`[prompt-assembly] Duplicate world-info outlet "${outletName}" detected; later entry overrides earlier entry.`);
+    }
+    templates.set(outletName, entry.content);
+  }
+
+  if (templates.size === 0) {
+    macroEnv.extra.worldInfoOutlets = {};
+    return macroEnv.extra.worldInfoOutlets as Record<string, string>;
+  }
+
+  const resolved = new Map<string, string>(templates);
+  macroEnv.extra.worldInfoOutlets = Object.fromEntries(resolved);
+
+  for (let pass = 0; pass < 5; pass++) {
+    let changed = false;
+    let index = 0;
+
+    for (const [name, template] of templates) {
+      if ((index++ & 15) === 0) {
+        await yieldAndCheckAbort(signal);
+      } else if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+
+      const next = (await evaluate(template, macroEnv, registry)).text;
+      if (resolved.get(name) !== next) {
+        resolved.set(name, next);
+        changed = true;
+      }
+    }
+
+    macroEnv.extra.worldInfoOutlets = Object.fromEntries(resolved);
+    if (!changed) break;
+  }
+
+  return macroEnv.extra.worldInfoOutlets as Record<string, string>;
 }
 
 const WORLD_INFO_VECTOR_STOPWORDS = new Set([

@@ -606,6 +606,7 @@ export interface WorldBookEntry {
   id: string;
   world_book_id: string;
   uid: string;
+  outlet_name: string | null;
   key: string[];
   keysecondary: string[];
   content: string;
@@ -798,6 +799,7 @@ export interface CreateWorldBookInput {
 export type UpdateWorldBookInput = Partial<CreateWorldBookInput>;
 
 export interface CreateWorldBookEntryInput {
+  outlet_name?: string | null;
   key?: string[];
   keysecondary?: string[];
   content?: string;

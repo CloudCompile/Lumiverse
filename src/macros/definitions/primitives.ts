@@ -94,9 +94,16 @@ export function registerCoreMacros(): void {
     builtIn: true,
     name: "outlet",
     category: "Core",
-    description: "Placeholder for extension outlet injection — resolves to empty",
+    description: "Resolve an activated world-info outlet by name",
     returnType: "string",
-    handler: () => "",
+    args: [{ name: "name", description: "Outlet name configured on a world-info entry" }],
+    handler: (ctx) => {
+      const name = (ctx.args[0] || "").trim().toLowerCase();
+      if (!name) return "";
+      const outlets = ctx.env.extra?.worldInfoOutlets as Record<string, unknown> | undefined;
+      const value = outlets?.[name];
+      return typeof value === "string" ? value : "";
+    },
   });
 
   registry.registerMacro({

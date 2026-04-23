@@ -31,8 +31,19 @@ function normalizeWorldBookVectorIndexStatus(row: any): WorldBookVectorIndexStat
 }
 
 function rowToWorldBookEntry(row: any): WorldBookEntry {
+  const extensions = JSON.parse(row.extensions);
+  const outlet_name = typeof extensions?.outlet_name === "string" && extensions.outlet_name.trim().length > 0
+    ? extensions.outlet_name.trim()
+    : typeof extensions?.outletName === "string" && extensions.outletName.trim().length > 0
+      ? extensions.outletName.trim()
+      : null;
+  if (extensions && typeof extensions === "object") {
+    delete extensions.outlet_name;
+    delete extensions.outletName;
+  }
   return {
     ...row,
+    outlet_name,
     key: JSON.parse(row.key),
     keysecondary: JSON.parse(row.keysecondary),
     role: row.role || null,
@@ -53,7 +64,7 @@ function rowToWorldBookEntry(row: any): WorldBookEntry {
     vector_index_error: row.vector_index_error || null,
     scan_depth: row.scan_depth ?? null,
     automation_id: row.automation_id || null,
-    extensions: JSON.parse(row.extensions),
+    extensions,
   };
 }
 

@@ -13,6 +13,43 @@ import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
 import * as vectorizationQueue from "./vectorization-queue.service";
 
+const ENTRY_OUTLET_NAME_KEYS = ["outlet_name", "outletName"] as const;
+
+function normalizeEntryOutletName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function cloneUnknownRecord(value: unknown): Record<string, any> {
+  if (!value || typeof value !== "object") return {};
+  return JSON.parse(JSON.stringify(value));
+}
+
+function splitManagedEntryExtensions(raw: unknown): {
+  extensions: Record<string, any>;
+  outletName: string | null;
+} {
+  const extensions = typeof raw === "string"
+    ? JSON.parse(raw)
+    : cloneUnknownRecord(raw);
+  const next = cloneUnknownRecord(extensions);
+  const outletName = normalizeEntryOutletName(next.outlet_name ?? next.outletName);
+  for (const key of ENTRY_OUTLET_NAME_KEYS) delete next[key];
+  return { extensions: next, outletName };
+}
+
+function buildStoredEntryExtensions(raw: unknown, outletValue: unknown): string {
+  const { extensions, outletName: embeddedOutletName } = splitManagedEntryExtensions(raw);
+  const outletName = outletValue !== undefined
+    ? normalizeEntryOutletName(outletValue)
+    : embeddedOutletName;
+  if (outletName) {
+    extensions.outlet_name = outletName;
+  }
+  return JSON.stringify(extensions);
+}
+
 function rowToBook(row: any): WorldBook {
   return { ...row, metadata: JSON.parse(row.metadata) };
 }
@@ -31,8 +68,10 @@ function normalizeVectorIndexStatus(row: any): WorldBookVectorIndexStatus {
 
 function rowToEntry(row: any): WorldBookEntry {
   const vectorIndexStatus = normalizeVectorIndexStatus(row);
+  const { extensions, outletName } = splitManagedEntryExtensions(row.extensions);
   return {
     ...row,
+    outlet_name: outletName,
     key: JSON.parse(row.key),
     keysecondary: JSON.parse(row.keysecondary),
     role: row.role || null,
@@ -53,7 +92,7 @@ function rowToEntry(row: any): WorldBookEntry {
     vector_index_error: row.vector_index_error || null,
     scan_depth: row.scan_depth ?? null,
     automation_id: row.automation_id || null,
-    extensions: JSON.parse(row.extensions),
+    extensions,
   };
 }
 
@@ -507,6 +546,7 @@ export function createEntry(userId: string, worldBookId: string, input: CreateWo
   const now = Math.floor(Date.now() / 1000);
   const vectorized = !!input.vectorized;
   const vectorIndexState = getPendingVectorIndexState(vectorized);
+  const storedExtensions = buildStoredEntryExtensions(input.extensions, input.outlet_name);
 
   getDb()
     .query(
@@ -556,7 +596,7 @@ export function createEntry(userId: string, worldBookId: string, input: CreateWo
       vectorIndexState.vector_index_status,
       vectorIndexState.vector_indexed_at,
       vectorIndexState.vector_index_error,
-      JSON.stringify(input.extensions || {}),
+      storedExtensions,
       now, now
     );
 
@@ -595,7 +635,13 @@ export function updateEntry(userId: string, id: string, input: UpdateWorldBookEn
     if (input[f] !== undefined) { fields.push(`${f} = ?`); values.push(input[f] ? 1 : 0); }
   }
 
-  if (input.extensions !== undefined) { fields.push("extensions = ?"); values.push(JSON.stringify(input.extensions)); }
+  if (input.extensions !== undefined || input.outlet_name !== undefined) {
+    fields.push("extensions = ?");
+    values.push(buildStoredEntryExtensions(
+      input.extensions ?? existing.extensions,
+      input.outlet_name !== undefined ? input.outlet_name : existing.outlet_name,
+    ));
+  }
 
   if (shouldResetVectorIndex(input)) {
     const nextVectorized = input.vectorized ?? existing.vectorized;
@@ -657,6 +703,7 @@ export function duplicateEntry(userId: string, entryId: string, input?: Duplicat
     : "Copy";
 
   return createEntry(userId, targetBook.id, {
+    outlet_name: existing.outlet_name,
     key: [...existing.key],
     keysecondary: [...existing.keysecondary],
     content: existing.content,
@@ -925,7 +972,7 @@ export function importWorldBook(
       "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
       "delay_until_recursion", "delayUntilRecursion",
       "priority", "sticky", "cooldown", "delay",
-      "id", "entry", "uid", "vectorized", "extensions",
+      "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
     ]);
     const extras: Record<string, any> = {};
     for (const [k, v] of Object.entries(raw)) {
@@ -933,6 +980,7 @@ export function importWorldBook(
     }
 
     createEntry(userId, worldBook.id, {
+      outlet_name: raw.outlet_name ?? raw.outletName,
       key: keys,
       keysecondary: secondaryKeys,
       content: raw.content || "",
@@ -1046,12 +1094,16 @@ export function importWorldBookBulk(
         "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
         "delay_until_recursion", "delayUntilRecursion",
         "priority", "sticky", "cooldown", "delay",
-        "id", "entry", "uid", "vectorized", "extensions",
+        "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
       ]);
       const extras: Record<string, any> = {};
       for (const [k, v] of Object.entries(raw)) {
         if (!bulkKnownFields.has(k)) extras[k] = v;
       }
+      const extensionsJson = buildStoredEntryExtensions(
+        { ...raw.extensions, ...extras },
+        raw.outlet_name ?? raw.outletName,
+      );
 
       insert.run(
         crypto.randomUUID(), worldBook.id, crypto.randomUUID(),
@@ -1088,7 +1140,7 @@ export function importWorldBookBulk(
         "not_enabled",
         null,
         null,
-        JSON.stringify({ ...raw.extensions, ...extras }),
+        extensionsJson,
         now, now
       );
       entryCount++;
@@ -1156,7 +1208,7 @@ export function importCharacterBook(
       "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
       "delay_until_recursion", "delayUntilRecursion",
       "priority", "sticky", "cooldown", "delay",
-      "id", "entry", "uid", "vectorized", "extensions",
+      "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
     ]);
     const extras: Record<string, any> = {};
     for (const [k, v] of Object.entries(raw)) {
@@ -1164,6 +1216,7 @@ export function importCharacterBook(
     }
 
     createEntry(userId, worldBook.id, {
+      outlet_name: raw.outlet_name ?? raw.outletName,
       key: keys,
       keysecondary: secondaryKeys,
       content: raw.content || "",
@@ -1224,6 +1277,7 @@ export function importLumiverseWorldBook(
 
   for (const raw of entries) {
     createEntry(userId, worldBook.id, {
+      outlet_name: raw.outlet_name ?? raw.outletName,
       key: Array.isArray(raw.key) ? raw.key : [],
       keysecondary: Array.isArray(raw.keysecondary) ? raw.keysecondary : [],
       content: raw.content || "",
@@ -1321,6 +1375,7 @@ function entryToCharacterBookSpec(entry: WorldBookEntry, index: number): Record<
     vectorized: entry.vectorized,
     uid: entry.uid,
   };
+  if (entry.outlet_name) extensions.outlet_name = entry.outlet_name;
 
   return {
     id: index,
@@ -1389,6 +1444,7 @@ function exportSillyTavern(book: WorldBook, entries: WorldBookEntry[]): Record<s
           cooldown: entry.cooldown,
           delay: entry.delay,
           vectorized: entry.vectorized,
+          ...(entry.outlet_name ? { outlet_name: entry.outlet_name } : {}),
           ...entry.extensions,
         },
       ])

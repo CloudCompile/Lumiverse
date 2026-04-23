@@ -46,6 +46,7 @@ function makeEntry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
     id: overrides.id ?? crypto.randomUUID(),
     world_book_id: "book-a",
     uid: overrides.uid ?? crypto.randomUUID(),
+    outlet_name: null,
     key: [],
     keysecondary: [],
     content: filler,
