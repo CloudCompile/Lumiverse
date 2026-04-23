@@ -18,7 +18,6 @@ export default function GreetingNav({ message, chatId, variant = 'minimal' }: Gr
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const isGroupChat = useStore((s) => s.isGroupChat)
   const characters = useStore((s) => s.characters)
-  const updateMessage = useStore((s) => s.updateMessage)
   const setHighlightedMessageId = useStore((s) => s.setHighlightedMessageId)
   const [character, setCharacter] = useState<Character | null>(null)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -55,7 +54,6 @@ export default function GreetingNav({ message, chatId, variant = 'minimal' }: Gr
       if (contentChanged) {
         try {
           await messagesApi.update(chatId, message.id, { content: newContent })
-          updateMessage(message.id, { content: newContent })
         } catch (err) {
           console.error('[GreetingNav] Failed to update greeting:', err)
         }
@@ -77,7 +75,7 @@ export default function GreetingNav({ message, chatId, variant = 'minimal' }: Gr
         }, 1700)
       })
     },
-    [character, chatId, message.id, message.content, updateMessage, setHighlightedMessageId]
+    [character, chatId, message.id, message.content, setHighlightedMessageId]
   )
 
   if (!character || !character.alternate_greetings?.length) return null

@@ -46,7 +46,6 @@ export function useMessageCard(message: Message, chatId: string) {
   const [showReasoningEditor, setShowReasoningEditor] = useState(false)
   const hadReasoningRef = useRef(false)
   const wasEditingRef = useRef(false)
-  const updateMessage = useStore((s) => s.updateMessage)
   const removeMessage = useStore((s) => s.removeMessage)
   const openModal = useStore((s) => s.openModal)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -210,19 +209,18 @@ export function useMessageCard(message: Message, chatId: string) {
       const cleanContent = editContent.trim()
 
       if (!message.is_user && hadReasoningRef.current) {
-        // Save clean content (no think tags) and reasoning in extra
+        // Let the WS MESSAGE_EDITED payload reconcile the final stored message so
+        // extension-postprocessed content is not overwritten by a late local merge.
         const extra = { ...(message.extra || {}), reasoning: trimmedReasoning || undefined }
         await messagesApi.update(chatId, message.id, { content: cleanContent, extra })
-        updateMessage(message.id, { content: cleanContent, extra })
       } else {
         await messagesApi.update(chatId, message.id, { content: cleanContent })
-        updateMessage(message.id, { content: cleanContent })
       }
       setEditingMessageId(null)
     } catch (err) {
       console.error('[MessageCard] Failed to save edit:', err)
     }
-  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, updateMessage, setEditingMessageId])
+  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, setEditingMessageId])
 
   const handleCancelEdit = useCallback(() => {
     setEditingMessageId(null)
@@ -243,12 +241,11 @@ export function useMessageCard(message: Message, chatId: string) {
 
   const doDeleteSwipe = useCallback(async () => {
     try {
-      const updated = await messagesApi.deleteSwipe(chatId, message.id, message.swipe_id)
-      updateMessage(message.id, updated)
+      await messagesApi.deleteSwipe(chatId, message.id, message.swipe_id)
     } catch (err) {
       console.error('[MessageCard] Failed to delete swipe:', err)
     }
-  }, [chatId, message.id, message.swipe_id, updateMessage])
+  }, [chatId, message.id, message.swipe_id])
 
   const isHidden = message.extra?.hidden === true
 
@@ -258,11 +255,10 @@ export function useMessageCard(message: Message, chatId: string) {
       const extra = { ...(message.extra || {}), hidden: newHidden || undefined }
       if (!newHidden) delete extra.hidden
       await messagesApi.update(chatId, message.id, { extra })
-      updateMessage(message.id, { extra })
     } catch (err) {
       console.error('[MessageCard] Failed to toggle hidden:', err)
     }
-  }, [chatId, message.id, message.extra, updateMessage])
+  }, [chatId, message.id, message.extra])
 
   const handleFork = useCallback(() => {
     openModal('confirm', {

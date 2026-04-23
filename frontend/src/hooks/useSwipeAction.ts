@@ -19,7 +19,6 @@ export interface SwipeActionResult {
  * Used by SwipeControls (buttons) and gesture/keyboard hooks.
  */
 export default function useSwipeAction(message: Message, chatId: string): SwipeActionResult {
-  const updateMessage = useStore((s) => s.updateMessage)
   const messages = useStore((s) => s.messages)
   const isStreaming = useStore((s) => s.isStreaming)
   const beginStreaming = useStore((s) => s.beginStreaming)
@@ -98,13 +97,12 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
       if (direction === 'right' && atLast) return
 
       try {
-        const updated = await messagesApi.swipe(chatId, message.id, direction)
-        updateMessage(message.id, updated)
+        await messagesApi.swipe(chatId, message.id, direction)
       } catch (err) {
         console.error('[useSwipeAction] Failed to swipe:', err)
       }
     },
-    [chatId, message.id, atFirst, atLast, isLastAssistantMessage, handleRegenerate, updateMessage]
+    [chatId, message.id, atFirst, atLast, isLastAssistantMessage, handleRegenerate]
   )
 
   return { handleSwipe, handleRegenerate, atFirst, atLast, isLastAssistantMessage, disableLeft, disableRight }
@@ -162,8 +160,7 @@ export async function executeSwipe(message: Message, chatId: string, direction: 
   }
 
   try {
-    const updated = await messagesApi.swipe(chatId, message.id, direction)
-    state.updateMessage(message.id, updated)
+    await messagesApi.swipe(chatId, message.id, direction)
   } catch (err) {
     console.error('[executeSwipe] Failed to swipe:', err)
   }

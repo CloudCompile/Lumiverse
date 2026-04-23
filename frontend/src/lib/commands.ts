@@ -249,7 +249,7 @@ export const COMMANDS: Command[] = [
     group: 'Actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, messages, updateMessage, addToast } = useStore.getState()
+      const { activeChatId, messages, addToast } = useStore.getState()
       if (!activeChatId || messages.length === 0) return
       const last = messages[messages.length - 1]
       const newHidden = !last.extra?.hidden
@@ -257,7 +257,6 @@ export const COMMANDS: Command[] = [
         await messagesApi.update(activeChatId, last.id, {
           extra: { ...last.extra, hidden: newHidden },
         })
-        updateMessage(last.id, { extra: { ...last.extra, hidden: newHidden } })
         addToast({ type: 'success', message: newHidden ? 'Message hidden from context' : 'Message visible in context' })
       } catch {
         addToast({ type: 'error', message: 'Failed to update message' })
