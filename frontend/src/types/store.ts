@@ -739,6 +739,7 @@ export interface AuthSlice {
   session: AuthSession | null
   isAuthenticated: boolean
   isAuthLoading: boolean
+  authError: string | null
   login: (username: string, password: string) => Promise<void>
   logout: () => Promise<void>
   checkSession: () => Promise<void>

@@ -57,8 +57,16 @@ import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 import { rateLimit } from "./middleware/rate-limit";
 import { isHostAllowed, isOriginAllowed } from "./services/trusted-hosts.service";
+import { authLockoutService } from "./services/auth-lockout.service";
+import { getClientIp } from "./utils/client-ip";
 
 const app = new Hono();
+const SIGN_IN_AUTH_PATTERN = /^\/api\/auth\/sign-in(?:\/|$)/;
+
+function applyLockoutHeaders(response: Response, retryAfterSeconds: number): Response {
+  response.headers.set("Retry-After", String(retryAfterSeconds));
+  return response;
+}
 
 app.use("*", compress());
 
@@ -76,6 +84,27 @@ const PUBLIC_POST_PREFIXES = [
   "/api/v1/lumihub",
   "/api/v1/openrouter/oauth-landing",
 ];
+app.use("/api/*", async (c, next) => {
+  const clientId = getClientIp(c);
+  const lockout = authLockoutService.getActiveLockout(clientId);
+  if (lockout) {
+    authLockoutService.logBlockedRequest(clientId, lockout, {
+      method: c.req.method,
+      path: c.req.path,
+      origin: c.req.header("origin") || undefined,
+      host: c.req.header("host") || undefined,
+    });
+    return applyLockoutHeaders(
+      c.json(
+        authLockoutService.buildPayload(lockout, "Too many authentication failures from this client. Try again later."),
+        429,
+      ),
+      Math.max(1, Math.ceil(lockout.retryAfterMs / 1000)),
+    );
+  }
+  return next();
+});
+
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
   const isPublic = PUBLIC_POST_PREFIXES.some((p) => path === p || path.startsWith(p));
@@ -101,6 +130,29 @@ app.use("/api/*", async (c, next) => {
 // The allowlist is sourced from trustedHostsService so it can be updated at
 // runtime via the Operator panel without a server restart.
 app.use("/api/*", async (c, next) => {
+  const clientId = getClientIp(c);
+  const origin = c.req.header("origin");
+  if (!env.trustAnyOrigin && origin && !isOriginAllowed(origin)) {
+    const result = authLockoutService.recordFailure(clientId, "origin", {
+      method: c.req.method,
+      path: c.req.path,
+      origin,
+      host: c.req.header("host") || undefined,
+    });
+    if (result.lockout) {
+      return applyLockoutHeaders(
+        c.json(
+          authLockoutService.buildPayload(result.lockout, "Too many invalid-origin requests. Try again later."),
+          429,
+        ),
+        Math.max(1, Math.ceil(result.lockout.retryAfterMs / 1000)),
+      );
+    }
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  authLockoutService.recordSuccess(clientId, "origin");
+
   if (env.trustAnyOrigin) return next();
   const host = c.req.header("host");
   // Reject when Host is missing entirely — a raw HTTP/1.0 request or a crafted
@@ -146,6 +198,40 @@ app.use("/api/auth/*", async (c, next) => {
     return authSensitiveLimiter(c, next);
   }
   return authGeneralLimiter(c, next);
+});
+
+app.use("/api/auth/*", async (c, next) => {
+  await next();
+
+  if (c.req.method !== "POST" || !SIGN_IN_AUTH_PATTERN.test(c.req.path)) {
+    return;
+  }
+
+  const clientId = getClientIp(c);
+  if (c.res.status >= 200 && c.res.status < 300) {
+    authLockoutService.recordSuccess(clientId, ["login", "unauthorized"]);
+    return;
+  }
+
+  if (c.res.status !== 401) {
+    return;
+  }
+
+  const result = authLockoutService.recordFailure(clientId, "login", {
+    method: c.req.method,
+    path: c.req.path,
+    origin: c.req.header("origin") || undefined,
+    host: c.req.header("host") || undefined,
+  });
+  if (!result.lockout) return;
+
+  c.res = applyLockoutHeaders(
+    c.json(
+      authLockoutService.buildPayload(result.lockout, "Too many failed sign-in attempts. Try again later."),
+      429,
+    ),
+    Math.max(1, Math.ceil(result.lockout.retryAfterMs / 1000)),
+  );
 });
 
 // BetterAuth handler — BEFORE auth middleware

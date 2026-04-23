@@ -167,6 +167,28 @@ function addLazyLoadingToImages(html: string): string {
   return html.replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy"')
 }
 
+interface MarkdownFence {
+  marker: '`' | '~'
+  length: number
+}
+
+function getMarkdownFence(line: string): MarkdownFence | null {
+  const match = line.match(/^\s*(`{3,}|~{3,})/)
+  if (!match) return null
+  return {
+    marker: match[1][0] as MarkdownFence['marker'],
+    length: match[1].length,
+  }
+}
+
+function isMarkdownFenceClose(line: string, fence: MarkdownFence): boolean {
+  const trimmed = line.trimStart()
+  const run = trimmed.match(/^(`+|~+)/)?.[0]
+  if (!run) return false
+  if (run[0] !== fence.marker || run.length < fence.length) return false
+  return trimmed.slice(run.length).trim().length === 0
+}
+
 /**
  * Escape ordered-list patterns that don't form intentional multi-item lists.
  * Prevents lines like "25. She felt old" from rendering as <ol start="25">.
@@ -290,6 +312,24 @@ function extractHtmlIslands(
 
   while (i < lines.length) {
     const trimmed = lines[i].trim()
+
+    // Fenced markdown code blocks are literal content and must not be scanned
+    // for extractable HTML islands.
+    const fence = getMarkdownFence(lines[i])
+    if (fence) {
+      output.push(lines[i])
+      i++
+
+      while (i < lines.length) {
+        output.push(lines[i])
+        if (isMarkdownFenceClose(lines[i], fence)) {
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
 
     // Strategy 1: Block-level element that might wrap a <style> block or
     // contain significant inline styling (e.g. phone screens, UI mockups).
