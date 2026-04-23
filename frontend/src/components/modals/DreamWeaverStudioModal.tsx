@@ -231,6 +231,7 @@ function buildSessionPayload(
     dislikes: session.dislikes,
     persona_id: session.persona_id ?? fallbackPersonaId,
     connection_id: session.connection_id ?? fallbackConnectionId,
+    model: session.model,
     draft,
   }
 }

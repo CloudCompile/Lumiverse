@@ -264,6 +264,7 @@ export interface ConnectionModelsPreviewInput {
   api_url?: string;
   metadata?: Record<string, any>;
   api_key?: string;
+  output_modalities?: string;
 }
 
 export interface PollinationsAuthUrlRequest {

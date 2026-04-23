@@ -257,6 +257,7 @@ app.post("/visual/tag-suggestions", async (c) => {
     const result = await suggestVisualTags({
       userId,
       connectionId: session.connection_id,
+      model: session.model,
       draft,
       params: dwParams,
       signal: dwAbort?.signal,

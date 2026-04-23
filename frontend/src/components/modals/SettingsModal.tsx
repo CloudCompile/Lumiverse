@@ -1507,6 +1507,7 @@ function EmbeddingsSettings() {
         provider: getEmbeddingModelPreviewProvider(cfg.provider),
         api_url: normalizeEmbeddingApiUrlForModelListing(cfg.api_url) || undefined,
         api_key: apiKey.trim() || undefined,
+        output_modalities: cfg.provider === 'openrouter' ? 'embeddings' : undefined,
       })
       setModels(result.models || [])
       setModelLabels(result.model_labels || {})

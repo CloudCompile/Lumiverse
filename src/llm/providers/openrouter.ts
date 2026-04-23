@@ -55,7 +55,7 @@ export interface OpenRouterConnectionSettings {
 }
 
 // In-memory caches with TTL
-let _modelCache: { data: OpenRouterModelInfo[]; fetchedAt: number } | null = null;
+const _modelCache = new Map<string, { data: OpenRouterModelInfo[]; fetchedAt: number }>();
 let _providerListCache: { data: OpenRouterProviderEntry[]; fetchedAt: number } | null = null;
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -158,16 +158,27 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
    * Fetch full model metadata from OpenRouter. Cached in-memory with TTL.
    * Used by the credits/models info endpoint.
    */
-  async fetchModelsWithMetadata(apiKey: string, apiUrl: string): Promise<OpenRouterModelInfo[]> {
-    if (_modelCache && Date.now() - _modelCache.fetchedAt < MODEL_CACHE_TTL_MS) {
-      return _modelCache.data;
+  async fetchModelsWithMetadata(
+    apiKey: string,
+    apiUrl: string,
+    opts?: { outputModalities?: string },
+  ): Promise<OpenRouterModelInfo[]> {
+    const cacheKey = opts?.outputModalities?.trim() || "default";
+    const cached = _modelCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < MODEL_CACHE_TTL_MS) {
+      return cached.data;
     }
 
     try {
-      const res = await fetch(`${this.baseUrl(apiUrl)}/models`, {
+      const url = new URL(`${this.baseUrl(apiUrl)}/models`);
+      if (opts?.outputModalities?.trim()) {
+        url.searchParams.set("output_modalities", opts.outputModalities.trim());
+      }
+
+      const res = await fetch(url.toString(), {
         headers: this.headers(apiKey),
       });
-      if (!res.ok) return _modelCache?.data || [];
+      if (!res.ok) return cached?.data || [];
       const data = (await res.json()) as any;
       const models: OpenRouterModelInfo[] = (data.data || []).map((m: any) => ({
         id: m.id,
@@ -178,10 +189,10 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
         architecture: m.architecture,
         supported_parameters: m.supported_parameters,
       }));
-      _modelCache = { data: models, fetchedAt: Date.now() };
+      _modelCache.set(cacheKey, { data: models, fetchedAt: Date.now() });
       return models;
     } catch {
-      return _modelCache?.data || [];
+      return cached?.data || [];
     }
   }
 

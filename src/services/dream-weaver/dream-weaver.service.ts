@@ -59,6 +59,7 @@ const DREAM_WEAVER_REQUIRED_COLUMNS: Array<[name: string, definition: string]> =
   ["dislikes", "TEXT"],
   ["persona_id", "TEXT"],
   ["connection_id", "TEXT"],
+  ["model", "TEXT"],
   ["draft", "TEXT"],
   ["soul_state", "TEXT NOT NULL DEFAULT 'empty'"],
   ["world_state", "TEXT NOT NULL DEFAULT 'empty'"],
@@ -89,6 +90,7 @@ function createDreamWeaverTable(): void {
       dislikes TEXT,
       persona_id TEXT,
       connection_id TEXT,
+      model TEXT,
       draft TEXT,
       status TEXT NOT NULL DEFAULT 'draft',
       soul_state TEXT NOT NULL DEFAULT 'empty',
@@ -186,6 +188,7 @@ function rowToSession(row: any): DreamWeaverSession {
     dislikes: row.dislikes ?? null,
     persona_id: row.persona_id ?? null,
     connection_id: row.connection_id ?? null,
+    model: row.model ?? null,
     draft: row.draft ?? null,
     status: row.status,
     soul_state: row.soul_state ?? "empty",
@@ -355,6 +358,21 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
   return trimmed || null;
 }
 
+function resolveDreamWeaverConnection(userId: string, session: DreamWeaverSession) {
+  const connection = session.connection_id
+    ? connectionsSvc.getConnection(userId, session.connection_id)
+    : connectionsSvc.getDefaultConnection(userId);
+
+  if (!connection) {
+    throw new Error("No connection available");
+  }
+
+  return {
+    connection,
+    model: normalizeOptionalText(session.model) || connection.model,
+  };
+}
+
 function serializeDraft(draft: DW_DRAFT_V1 | null | undefined): string | null {
   if (draft == null) return null;
   if (draft.format !== "DW_DRAFT_V1") {
@@ -413,9 +431,9 @@ export function createSession(userId: string, input: CreateSessionInput): DreamW
   db.prepare(`
     INSERT INTO dream_weaver_sessions (
       id, user_id, created_at, updated_at,
-      dream_text, tone, constraints, dislikes, persona_id, connection_id,
+      dream_text, tone, constraints, dislikes, persona_id, connection_id, model,
       soul_state, world_state, soul_revision, world_source_revision, launch_chat_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     userId,
@@ -427,6 +445,7 @@ export function createSession(userId: string, input: CreateSessionInput): DreamW
     input.dislikes?.trim() || null,
     input.persona_id || null,
     input.connection_id || null,
+    normalizeOptionalText(input.model),
     "empty",
     "empty",
     0,
@@ -508,6 +527,11 @@ export async function updateSession(
     params.push(normalizeOptionalText(input.connection_id));
   }
 
+  if ("model" in input) {
+    updates.push("model = ?");
+    params.push(normalizeOptionalText(input.model));
+  }
+
   if ("draft" in input) {
     const existingDraft = parseStoredDreamWeaverDraft(existing.draft);
     const nextDraft = input.draft
@@ -565,19 +589,13 @@ async function executeDraftGeneration(
   try {
     emitProgress(userId, sessionId, "soul", "reading_dream", 0, 3, "Reading dream");
 
-    const connection = session.connection_id
-      ? connectionsSvc.getConnection(userId, session.connection_id)
-      : connectionsSvc.getDefaultConnection(userId);
-
-    if (!connection) {
-      throw new Error("No connection available");
-    }
+    const { connection, model } = resolveDreamWeaverConnection(userId, session);
 
     emitProgress(userId, sessionId, "soul", "shaping_voice", 1, 3, "Shaping voice");
 
     const result = await rawGenerate(userId, {
       provider: connection.provider,
-      model: connection.model,
+      model,
       messages: [
         { role: "system", content: DREAM_WEAVER_SYSTEM_PROMPT },
         { role: "user", content: buildGenerationPrompt(session) },
@@ -640,13 +658,7 @@ export function generateDraft(
     return session;
   }
 
-  const connection = session.connection_id
-    ? connectionsSvc.getConnection(userId, session.connection_id)
-    : connectionsSvc.getDefaultConnection(userId);
-
-  if (!connection) {
-    throw new Error("No connection available");
-  }
+  resolveDreamWeaverConnection(userId, session);
 
   const now = Math.floor(Date.now() / 1000);
   getDb().prepare(`
@@ -673,13 +685,7 @@ export function generateWorld(
   const currentDraft = parseStoredDreamWeaverDraft(session.draft);
   if (!currentDraft) throw new Error("Generate Soul before World");
 
-  const connection = session.connection_id
-    ? connectionsSvc.getConnection(userId, session.connection_id)
-    : connectionsSvc.getDefaultConnection(userId);
-
-  if (!connection) {
-    throw new Error("No connection available");
-  }
+  resolveDreamWeaverConnection(userId, session);
 
   const now = Math.floor(Date.now() / 1000);
   getDb().prepare(`
@@ -709,19 +715,13 @@ async function executeWorldGeneration(
 
     emitProgress(userId, sessionId, "world", "preparing", 0, 4, "Preparing world");
 
-    const connection = session.connection_id
-      ? connectionsSvc.getConnection(userId, session.connection_id)
-      : connectionsSvc.getDefaultConnection(userId);
-
-    if (!connection) {
-      throw new Error("No connection available");
-    }
+    const { connection, model } = resolveDreamWeaverConnection(userId, session);
 
     emitProgress(userId, sessionId, "world", "generating", 1, 4, "Building world");
 
     const result = await rawGenerate(userId, {
       provider: connection.provider,
-      model: connection.model,
+      model,
       messages: [
         { role: "system", content: WORLD_GENERATION_SYSTEM_PROMPT },
         { role: "user", content: buildWorldGenerationPrompt(session, currentDraft) },
@@ -1541,11 +1541,7 @@ export async function extendDraft(
   const draft = parseStoredDreamWeaverDraft(session.draft);
   if (!draft) throw new Error("No draft to extend. Generate a Soul draft first.");
 
-  const connection = session.connection_id
-    ? connectionsSvc.getConnection(userId, session.connection_id)
-    : connectionsSvc.getDefaultConnection(userId);
-
-  if (!connection) throw new Error("No connection available");
+  const { connection, model } = resolveDreamWeaverConnection(userId, session);
 
   const count = Math.min(Math.max(input.count ?? 2, 1), 5);
   const prompt = buildExtendPrompt(draft, input.target, count, input.instruction, input.bookId);
@@ -1554,7 +1550,7 @@ export async function extendDraft(
   const dwAbort = createDWTimeout(dwParams);
   const result = await rawGenerate(userId, {
     provider: connection.provider,
-    model: connection.model,
+    model,
     messages: [
       { role: "system", content: EXTEND_SYSTEM_PROMPT },
       { role: "user", content: prompt },

@@ -26,6 +26,7 @@ import {
   TextInput,
 } from '@/components/shared/FormComponents'
 import SearchableSelect from '@/components/shared/SearchableSelect'
+import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { getPersonaAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
@@ -68,6 +69,10 @@ export default function DreamWeaverPanel() {
   const [connections, setConnections] = useState<ConnectionProfile[]>([])
   const [selectedPersonaId, setSelectedPersonaId] = useState<string | null>(null)
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null)
+  const [selectedModel, setSelectedModel] = useState('')
+  const [connectionModels, setConnectionModels] = useState<string[]>([])
+  const [connectionModelLabels, setConnectionModelLabels] = useState<Record<string, string>>({})
+  const [connectionModelsLoading, setConnectionModelsLoading] = useState(false)
   const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Partial<Record<ArchiveKey, boolean>>>({})
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isCreating, setIsCreating] = useState(false)
@@ -144,6 +149,30 @@ export default function DreamWeaverPanel() {
     }).catch(() => {})
   }, [])
 
+  const fetchConnectionModels = useCallback(async () => {
+    if (!resolvedConnectionId) {
+      setConnectionModels([])
+      setConnectionModelLabels({})
+      return
+    }
+
+    setConnectionModelsLoading(true)
+    try {
+      const result = await connectionsApi.models(resolvedConnectionId)
+      setConnectionModels(result.models || [])
+      setConnectionModelLabels(result.model_labels || {})
+    } catch {
+      setConnectionModels([])
+      setConnectionModelLabels({})
+    } finally {
+      setConnectionModelsLoading(false)
+    }
+  }, [resolvedConnectionId])
+
+  useEffect(() => {
+    void fetchConnectionModels()
+  }, [fetchConnectionModels])
+
   const updateGenParam = useCallback(<K extends keyof DWGenParams>(key: K, value: DWGenParams[K]) => {
     setGenParams((prev) => {
       const next = { ...prev, [key]: value }
@@ -192,6 +221,7 @@ export default function DreamWeaverPanel() {
         dislikes: dislikes.trim() || undefined,
         persona_id: resolvedPersonaId || undefined,
         connection_id: resolvedConnectionId || undefined,
+        model: selectedModel.trim() || undefined,
       })
       try {
         await dreamWeaverApi.generateDraft(session.id)
@@ -284,21 +314,44 @@ export default function DreamWeaverPanel() {
               emptyMessage="No personas available"
               disabled={personas.length === 0}
               ariaLabel="Persona"
+              portal
             />
           </div>
           <div className={styles.field}>
             <span className={styles.fieldLabel}>Connection</span>
             <SearchableSelect
               value={resolvedConnectionId ?? ''}
-              onChange={(v) => setSelectedConnectionId(v || null)}
+              onChange={(v) => {
+                setSelectedConnectionId(v || null)
+                setSelectedModel('')
+              }}
               options={connectionOptions}
               placeholder="Select a connection…"
               searchPlaceholder="Search connections…"
               emptyMessage="No connections available"
               disabled={connections.length === 0}
               ariaLabel="Connection"
+              portal
             />
           </div>
+        </div>
+
+        <div className={styles.field}>
+          <span className={styles.fieldLabel}>Model</span>
+          <ModelCombobox
+            value={selectedModel}
+            onChange={setSelectedModel}
+            models={connectionModels}
+            modelLabels={connectionModelLabels}
+            loading={connectionModelsLoading}
+            onRefresh={fetchConnectionModels}
+            autoRefreshOnFocus
+            refreshKey={resolvedConnectionId ?? ''}
+            placeholder="Leave empty to use connection default"
+            emptyMessage={resolvedConnectionId ? 'No models returned for this connection. Enter one manually or leave it blank to use the connection default.' : 'No connection available.'}
+            browseHint={resolvedConnectionId ? 'Click into the field to browse models for the selected Dream Weaver connection, or leave it blank to use that profile\'s default model.' : 'Select a connection profile first.'}
+            disabled={!resolvedConnectionId}
+          />
         </div>
 
         {/* Refine — collapsed by default */}

@@ -11,6 +11,7 @@ export interface DreamWeaverSession {
   dislikes: string | null;
   persona_id: string | null;
   connection_id: string | null;
+  model: string | null;
   draft: string | null;
   status: "draft" | "generating" | "complete" | "error";
   soul_state: "empty" | "generating" | "ready" | "error";
@@ -28,6 +29,7 @@ export interface CreateSessionInput {
   dislikes?: string;
   persona_id?: string;
   connection_id?: string;
+  model?: string;
 }
 
 export interface GenerateDraftInput {
@@ -139,5 +141,6 @@ export interface UpdateSessionInput {
   dislikes?: string | null;
   persona_id?: string | null;
   connection_id?: string | null;
+  model?: string | null;
   draft?: DW_DRAFT_V1 | null;
 }

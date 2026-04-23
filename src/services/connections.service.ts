@@ -50,6 +50,7 @@ export interface ConnectionModelsPreviewInput {
   api_url?: string;
   metadata?: Record<string, any>;
   api_key?: string;
+  output_modalities?: string;
 }
 
 function describeConnectionTestError(err: unknown): string {
@@ -441,21 +442,24 @@ export async function listConnectionModelsPreview(
   if (!provider) return { models: [], provider: providerId, error: `Unknown provider: ${providerId}` };
 
   try {
-    const models = await provider.listModels(apiKey || "", apiUrl);
-
-    // For providers that expose human-readable names, build a label map
     let model_labels: Record<string, string> | undefined;
+
     if (providerId === "openrouter") {
       const { OpenRouterProvider } = await import("../llm/providers/openrouter");
       if (provider instanceof OpenRouterProvider) {
-        const richModels = await provider.fetchModelsWithMetadata(apiKey || "", apiUrl);
-        model_labels = {};
+        const richModels = await provider.fetchModelsWithMetadata(apiKey || "", apiUrl, {
+          outputModalities: input.output_modalities,
+        });
+        const models = richModels.map((m) => m.id).sort();
+        const model_labels: Record<string, string> = {};
         for (const m of richModels) {
           if (m.name && m.name !== m.id) model_labels[m.id] = m.name;
         }
+        return { models, model_labels, provider: providerId };
       }
     }
 
+    const models = await provider.listModels(apiKey || "", apiUrl);
     return { models, model_labels, provider: providerId };
   } catch (err: any) {
     return { models: [], provider: providerId, error: err.message || "Failed to fetch models" };
