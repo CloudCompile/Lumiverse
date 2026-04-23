@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react'
 import { Toggle } from '@/components/shared/Toggle'
+import NumericInput from '@/components/shared/NumericInput'
 import { spinClass } from '@/components/shared/Spinner'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { useStore } from '@/store'
@@ -1125,17 +1126,17 @@ export default function OperatorPanel() {
           <div className={styles.tuningGrid}>
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Cache % of host RAM</span>
-              <input
-                type="number"
+              <NumericInput
                 min={0.1}
                 max={50}
                 step={0.1}
                 className={styles.fieldInput}
                 placeholder="Auto"
-                value={dbTuning.cacheMemoryPercent ?? ''}
-                onChange={(e) => setDbTuning((prev) => ({
+                value={dbTuning.cacheMemoryPercent ?? null}
+                allowEmpty
+                onChange={(value) => setDbTuning((prev) => ({
                   ...prev,
-                  cacheMemoryPercent: e.target.value === '' ? null : parseFloat(e.target.value),
+                  cacheMemoryPercent: value,
                 }))}
               />
               <span className={styles.fieldHint}>
@@ -1145,17 +1146,18 @@ export default function OperatorPanel() {
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>mmap size (MiB)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={0}
                 step={16}
                 className={styles.fieldInput}
                 placeholder={mmapSupported ? 'Auto' : 'Disabled on Windows'}
                 disabled={!mmapSupported}
-                value={dbTuning.mmapSizeBytes == null ? '' : Math.round(dbTuning.mmapSizeBytes / (1024 * 1024))}
-                onChange={(e) => setDbTuning((prev) => ({
+                value={dbTuning.mmapSizeBytes == null ? null : Math.round(dbTuning.mmapSizeBytes / (1024 * 1024))}
+                integer
+                allowEmpty
+                onChange={(value) => setDbTuning((prev) => ({
                   ...prev,
-                  mmapSizeBytes: e.target.value === '' ? null : parseInt(e.target.value, 10) * 1024 * 1024,
+                  mmapSizeBytes: value == null ? null : value * 1024 * 1024,
                 }))}
               />
               <span className={styles.fieldHint}>
@@ -1198,109 +1200,112 @@ export default function OperatorPanel() {
           <div className={styles.tuningGrid}>
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Optimize interval (hours)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={1}
                 step={1}
                 className={styles.fieldInput}
                 placeholder="Disabled"
-                value={dbMaintenanceSettings.optimizeIntervalHours ?? ''}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                value={dbMaintenanceSettings.optimizeIntervalHours ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  optimizeIntervalHours: e.target.value === '' ? null : parseInt(e.target.value, 10),
+                  optimizeIntervalHours: value,
                 }))}
               />
             </label>
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Analyze interval (hours)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={1}
                 step={1}
                 className={styles.fieldInput}
                 placeholder="Disabled"
-                value={dbMaintenanceSettings.analyzeIntervalHours ?? ''}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                value={dbMaintenanceSettings.analyzeIntervalHours ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  analyzeIntervalHours: e.target.value === '' ? null : parseInt(e.target.value, 10),
+                  analyzeIntervalHours: value,
                 }))}
               />
             </label>
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Auto vacuum interval (hours)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={1}
                 step={1}
                 className={styles.fieldInput}
                 placeholder="Disabled"
-                value={dbMaintenanceSettings.vacuumIntervalHours ?? ''}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                value={dbMaintenanceSettings.vacuumIntervalHours ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  vacuumIntervalHours: e.target.value === '' ? null : parseInt(e.target.value, 10),
+                  vacuumIntervalHours: value,
                 }))}
               />
             </label>
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Vacuum idle time (minutes)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={1}
                 step={1}
                 className={styles.fieldInput}
                 value={dbMaintenanceSettings.vacuumMinIdleMinutes ?? 15}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                integer
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  vacuumMinIdleMinutes: parseInt(e.target.value, 10),
+                  vacuumMinIdleMinutes: value ?? 15,
                 }))}
               />
             </label>
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Min reclaimable space (MiB)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={0}
                 step={64}
                 className={styles.fieldInput}
-                value={dbMaintenanceSettings.vacuumMinReclaimBytes == null ? '' : Math.round(dbMaintenanceSettings.vacuumMinReclaimBytes / (1024 * 1024))}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                value={dbMaintenanceSettings.vacuumMinReclaimBytes == null ? null : Math.round(dbMaintenanceSettings.vacuumMinReclaimBytes / (1024 * 1024))}
+                integer
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  vacuumMinReclaimBytes: e.target.value === '' ? 0 : parseInt(e.target.value, 10) * 1024 * 1024,
+                  vacuumMinReclaimBytes: (value ?? 0) * 1024 * 1024,
                 }))}
               />
             </label>
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Min reclaim percent</span>
-              <input
-                type="number"
+              <NumericInput
                 min={0}
                 max={100}
                 step={1}
                 className={styles.fieldInput}
                 value={dbMaintenanceSettings.vacuumMinReclaimPercent ?? 15}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                integer
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  vacuumMinReclaimPercent: parseInt(e.target.value, 10),
+                  vacuumMinReclaimPercent: value ?? 15,
                 }))}
               />
             </label>
 
             <label className={styles.fieldGroup}>
               <span className={styles.fieldLabel}>Min DB size (MiB)</span>
-              <input
-                type="number"
+              <NumericInput
                 min={0}
                 step={256}
                 className={styles.fieldInput}
-                value={dbMaintenanceSettings.vacuumMinDbSizeBytes == null ? '' : Math.round(dbMaintenanceSettings.vacuumMinDbSizeBytes / (1024 * 1024))}
-                onChange={(e) => setDbMaintenanceSettings((prev) => ({
+                value={dbMaintenanceSettings.vacuumMinDbSizeBytes == null ? null : Math.round(dbMaintenanceSettings.vacuumMinDbSizeBytes / (1024 * 1024))}
+                integer
+                onChange={(value) => setDbMaintenanceSettings((prev) => ({
                   ...prev,
-                  vacuumMinDbSizeBytes: e.target.value === '' ? 0 : parseInt(e.target.value, 10) * 1024 * 1024,
+                  vacuumMinDbSizeBytes: (value ?? 0) * 1024 * 1024,
                 }))}
               />
             </label>

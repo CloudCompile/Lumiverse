@@ -9,6 +9,7 @@ import WorldBookEntryEditor from '@/components/shared/WorldBookEntryEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ImportWorldBookModal, { type WorldBookImportResult } from '@/components/modals/ImportWorldBookModal'
 import PostImportWorldBookModal from '@/components/shared/PostImportWorldBookModal'
+import NumericInput from '@/components/shared/NumericInput'
 import WorldBookDiagnosticsModal from '@/components/panels/world-book/WorldBookDiagnosticsModal'
 import { formatWorldBookReindexStatus } from '@/lib/worldBookVectorization'
 import { Button } from '@/components/shared/FormComponents'
@@ -926,16 +927,16 @@ function WorldInfoSettingsForm({
           Default scan depth for entries without a per-entry setting. Controls how many recent messages are scanned for keywords.
         </p>
         <div className={styles.wiFieldRow}>
-          <input
-            type="number"
+          <NumericInput
             className={styles.wiFieldInput}
             min={0}
             max={200}
             placeholder="Unlimited"
-            value={settings.globalScanDepth ?? ''}
-            onChange={(e) => {
-              const v = e.target.value.trim()
-              onChange({ globalScanDepth: v === '' ? null : Math.max(0, parseInt(v, 10) || 0) })
+            value={settings.globalScanDepth ?? null}
+            integer
+            allowEmpty
+            onChange={(value) => {
+              onChange({ globalScanDepth: value == null ? null : Math.max(0, value) })
             }}
           />
           {settings.globalScanDepth != null && (
@@ -969,14 +970,14 @@ function WorldInfoSettingsForm({
         <p className={styles.wiFieldHint}>
           Cap the total number of activated entries per generation. 0 = unlimited. Highest-priority entries survive; constants are never evicted.
         </p>
-        <input
-          type="number"
+        <NumericInput
           className={styles.wiFieldInput}
           min={0}
           max={500}
           placeholder="Unlimited"
-          value={settings.maxActivatedEntries || ''}
-          onChange={(e) => onChange({ maxActivatedEntries: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+          value={settings.maxActivatedEntries || null}
+          integer
+          onChange={(value) => onChange({ maxActivatedEntries: Math.max(0, value ?? 0) })}
         />
       </div>
 
@@ -985,15 +986,15 @@ function WorldInfoSettingsForm({
         <p className={styles.wiFieldHint}>
           Approximate max WI content in tokens. 0 = unlimited. Entries included in priority order until budget is met.
         </p>
-        <input
-          type="number"
+        <NumericInput
           className={styles.wiFieldInput}
           min={0}
           max={50000}
           step={100}
           placeholder="Unlimited"
-          value={settings.maxTokenBudget || ''}
-          onChange={(e) => onChange({ maxTokenBudget: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+          value={settings.maxTokenBudget || null}
+          integer
+          onChange={(value) => onChange({ maxTokenBudget: Math.max(0, value ?? 0) })}
         />
       </div>
 

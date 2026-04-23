@@ -5,6 +5,7 @@ import { databankApi } from '@/api/databank'
 import { settingsApi } from '@/api/settings'
 import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
+import NumericInput from '@/components/shared/NumericInput'
 import type { Databank, DatabankDocument } from '@/api/databank'
 import type { DatabankSettings } from '@/types/databank-settings'
 import styles from './DatabankPanel.module.css'
@@ -520,50 +521,50 @@ export default function DatabankPanel() {
         <div className={styles.settingsGrid}>
           <div className={styles.fieldGroup}>
             <label className={styles.fieldLabel}>Chunk Target Tokens</label>
-            <input
+            <NumericInput
               className={styles.fieldInput}
-              type="number"
               min={200}
               max={2000}
               value={databankSettings.chunkTargetTokens}
               disabled={databankSettingsLoading}
-              onChange={(e) => handleDatabankSettingsUpdate({ chunkTargetTokens: Number(e.target.value) || DEFAULT_DATABANK_SETTINGS.chunkTargetTokens })}
+              integer
+              onChange={(value) => handleDatabankSettingsUpdate({ chunkTargetTokens: value ?? DEFAULT_DATABANK_SETTINGS.chunkTargetTokens })}
             />
           </div>
           <div className={styles.fieldGroup}>
             <label className={styles.fieldLabel}>Chunk Max Tokens</label>
-            <input
+            <NumericInput
               className={styles.fieldInput}
-              type="number"
               min={200}
               max={4000}
               value={databankSettings.chunkMaxTokens}
               disabled={databankSettingsLoading}
-              onChange={(e) => handleDatabankSettingsUpdate({ chunkMaxTokens: Number(e.target.value) || DEFAULT_DATABANK_SETTINGS.chunkMaxTokens })}
+              integer
+              onChange={(value) => handleDatabankSettingsUpdate({ chunkMaxTokens: value ?? DEFAULT_DATABANK_SETTINGS.chunkMaxTokens })}
             />
           </div>
           <div className={styles.fieldGroup}>
             <label className={styles.fieldLabel}>Chunk Overlap Tokens</label>
-            <input
+            <NumericInput
               className={styles.fieldInput}
-              type="number"
               min={0}
               max={500}
               value={databankSettings.chunkOverlapTokens}
               disabled={databankSettingsLoading}
-              onChange={(e) => handleDatabankSettingsUpdate({ chunkOverlapTokens: Number(e.target.value) || 0 })}
+              integer
+              onChange={(value) => handleDatabankSettingsUpdate({ chunkOverlapTokens: value ?? 0 })}
             />
           </div>
           <div className={styles.fieldGroup}>
             <label className={styles.fieldLabel}>Retrieved Chunks</label>
-            <input
+            <NumericInput
               className={styles.fieldInput}
-              type="number"
               min={1}
               max={20}
               value={databankSettings.retrievalTopK}
               disabled={databankSettingsLoading}
-              onChange={(e) => handleDatabankSettingsUpdate({ retrievalTopK: Number(e.target.value) || DEFAULT_DATABANK_SETTINGS.retrievalTopK })}
+              integer
+              onChange={(value) => handleDatabankSettingsUpdate({ retrievalTopK: value ?? DEFAULT_DATABANK_SETTINGS.retrievalTopK })}
             />
           </div>
         </div>

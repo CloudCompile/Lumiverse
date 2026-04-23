@@ -4,6 +4,7 @@ import { motion } from 'motion/react'
 import { RefreshCw } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
+import NumericInput from '@/components/shared/NumericInput'
 import { Toggle } from '@/components/shared/Toggle'
 import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
@@ -328,13 +329,13 @@ function DisplaySettings() {
       {drawerSettings.panelWidthMode === 'custom' && (
         <div className={styles.field}>
           <label className={styles.fieldLabel}>CUSTOM WIDTH (vw)</label>
-          <input
+          <NumericInput
             className={styles.numberInput}
-            type="number"
             min={20}
             max={80}
             value={drawerSettings.customPanelWidth}
-            onChange={(e) => updateDrawer({ customPanelWidth: parseInt(e.target.value, 10) || 35 })}
+            integer
+            onChange={(value) => updateDrawer({ customPanelWidth: value ?? 35 })}
           />
         </div>
       )}
@@ -450,13 +451,13 @@ function DisplaySettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>LANDING PAGE CHATS PER BATCH</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={4}
           max={100}
           value={landingPageChatsDisplayed}
-          onChange={(e) => setSetting('landingPageChatsDisplayed', parseInt(e.target.value, 10) || 12)}
+          integer
+          onChange={(value) => setSetting('landingPageChatsDisplayed', value ?? 12)}
         />
       </div>
 
@@ -1669,12 +1670,13 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Dimensions (optional)</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={1}
-          value={cfg.dimensions ?? ''}
-          onChange={(e) => update({ dimensions: e.target.value ? Number(e.target.value) : null })}
+          value={cfg.dimensions ?? null}
+          integer
+          allowEmpty
+          onChange={(value) => update({ dimensions: value })}
         />
       </div>
 
@@ -1687,12 +1689,12 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Vector Recall Size (top-k)</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={1}
           value={cfg.retrieval_top_k}
-          onChange={(e) => update({ retrieval_top_k: Number(e.target.value || 1) })}
+          integer
+          onChange={(value) => update({ retrieval_top_k: value ?? 1 })}
         />
       </div>
 
@@ -1711,25 +1713,25 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Preferred Context Size (messages)</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={1}
           max={64}
           value={cfg.preferred_context_size}
-          onChange={(e) => update({ preferred_context_size: Number(e.target.value || 1) })}
+          integer
+          onChange={(value) => update({ preferred_context_size: value ?? 1 })}
         />
       </div>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Embedding Batch Size</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={1}
           max={200}
           value={cfg.batch_size}
-          onChange={(e) => update({ batch_size: Math.max(1, Math.min(200, Number(e.target.value || 50))) })}
+          integer
+          onChange={(value) => update({ batch_size: Math.max(1, Math.min(200, value ?? 50)) })}
         />
         <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
           Number of entries to embed per API request during reindexing (1-200)
@@ -1738,14 +1740,13 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Similarity Threshold</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={0}
           max={2}
           step={0.05}
           value={cfg.similarity_threshold}
-          onChange={(e) => update({ similarity_threshold: Math.max(0, Math.min(2, Number(e.target.value || 0))) })}
+          onChange={(value) => update({ similarity_threshold: Math.max(0, Math.min(2, value ?? 0)) })}
         />
         <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
           Maximum cosine distance for vector matches (0 = no filtering, lower = stricter). LanceDB cosine distance starts at 0 for identical text and can go above 1.
@@ -1754,14 +1755,13 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>World Book Rerank Cutoff</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={0}
           max={2}
           step={0.01}
           value={cfg.rerank_cutoff}
-          onChange={(e) => update({ rerank_cutoff: Math.max(0, Math.min(2, Number(e.target.value || 0))) })}
+          onChange={(value) => update({ rerank_cutoff: Math.max(0, Math.min(2, value ?? 0)) })}
         />
         <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
           Minimum rerank score required after boosts and penalties are applied to world-book vector hits. 0 = no post-rerank filtering.
@@ -1786,14 +1786,14 @@ function EmbeddingsSettings() {
       )}
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Request Timeout (seconds)</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={0}
           max={300}
           step={5}
           value={cfg.request_timeout ?? 60}
-          onChange={(e) => update({ request_timeout: Math.max(0, Math.min(300, Number(e.target.value || 60))) })}
+          integer
+          onChange={(value) => update({ request_timeout: Math.max(0, Math.min(300, value ?? 60)) })}
         />
         <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
           Max seconds to wait for an embedding API response. Increase for slow providers or large batches. 0 = no timeout.
@@ -2030,26 +2030,26 @@ function WebSearchSettings() {
       <div className={styles.drawerRow}>
         <div className={styles.field}>
           <label className={styles.fieldLabel}>Timeout (ms)</label>
-          <input className={styles.numberInput} type="number" min={5000} max={120000} step={1000} value={cfg.requestTimeoutMs} onChange={(e) => update({ requestTimeoutMs: Math.max(5000, Math.min(120000, Number(e.target.value || 15000))) })} />
+          <NumericInput className={styles.numberInput} min={5000} max={120000} step={1000} value={cfg.requestTimeoutMs} integer onChange={(value) => update({ requestTimeoutMs: Math.max(5000, Math.min(120000, value ?? 15000)) })} />
         </div>
         <div className={styles.field}>
           <label className={styles.fieldLabel}>Default Results</label>
-          <input className={styles.numberInput} type="number" min={1} max={10} value={cfg.defaultResultCount} onChange={(e) => update({ defaultResultCount: Math.max(1, Math.min(10, Number(e.target.value || 3))) })} />
+          <NumericInput className={styles.numberInput} min={1} max={10} value={cfg.defaultResultCount} integer onChange={(value) => update({ defaultResultCount: Math.max(1, Math.min(10, value ?? 3)) })} />
         </div>
         <div className={styles.field}>
           <label className={styles.fieldLabel}>Max Results</label>
-          <input className={styles.numberInput} type="number" min={1} max={20} value={cfg.maxResultCount} onChange={(e) => update({ maxResultCount: Math.max(1, Math.min(20, Number(e.target.value || 5))) })} />
+          <NumericInput className={styles.numberInput} min={1} max={20} value={cfg.maxResultCount} integer onChange={(value) => update({ maxResultCount: Math.max(1, Math.min(20, value ?? 5)) })} />
         </div>
       </div>
 
       <div className={styles.drawerRow}>
         <div className={styles.field}>
           <label className={styles.fieldLabel}>Pages to Scrape</label>
-          <input className={styles.numberInput} type="number" min={1} max={10} value={cfg.maxPagesToScrape} onChange={(e) => update({ maxPagesToScrape: Math.max(1, Math.min(10, Number(e.target.value || 3))) })} />
+          <NumericInput className={styles.numberInput} min={1} max={10} value={cfg.maxPagesToScrape} integer onChange={(value) => update({ maxPagesToScrape: Math.max(1, Math.min(10, value ?? 3)) })} />
         </div>
         <div className={styles.field}>
           <label className={styles.fieldLabel}>Chars per Page</label>
-          <input className={styles.numberInput} type="number" min={500} max={20000} step={250} value={cfg.maxCharsPerPage} onChange={(e) => update({ maxCharsPerPage: Math.max(500, Math.min(20000, Number(e.target.value || 3000))) })} />
+          <NumericInput className={styles.numberInput} min={500} max={20000} step={250} value={cfg.maxCharsPerPage} integer onChange={(value) => update({ maxCharsPerPage: Math.max(500, Math.min(20000, value ?? 3000)) })} />
         </div>
       </div>
 
@@ -2307,56 +2307,56 @@ function AdvancedSettings() {
               <div className={styles.memoryGrid}>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Target Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={200} max={2000}
                     value={cfg.chunkTargetTokens}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ chunkTargetTokens: Number(e.target.value) || 800 })}
+                    integer
+                    onChange={(value) => update({ chunkTargetTokens: value ?? 800 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Max Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={400} max={4000}
                     value={cfg.chunkMaxTokens}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ chunkMaxTokens: Number(e.target.value) || 1600 })}
+                    integer
+                    onChange={(value) => update({ chunkMaxTokens: value ?? 1600 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Overlap Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={500}
                     value={cfg.chunkOverlapTokens}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ chunkOverlapTokens: Number(e.target.value) || 0 })}
+                    integer
+                    onChange={(value) => update({ chunkOverlapTokens: value ?? 0 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Max Messages / Chunk</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={100}
                     value={cfg.maxMessagesPerChunk}
-                    onChange={(e) => update({ maxMessagesPerChunk: Number(e.target.value) || 0 })}
+                    integer
+                    onChange={(value) => update({ maxMessagesPerChunk: value ?? 0 })}
                   />
                   <span className={styles.placeholder} style={{ fontSize: 11 }}>0 = unlimited</span>
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Time Gap Split (min)</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={1440}
                     value={cfg.splitOnTimeGapMinutes}
-                    onChange={(e) => update({ splitOnTimeGapMinutes: Number(e.target.value) || 0 })}
+                    integer
+                    onChange={(value) => update({ splitOnTimeGapMinutes: value ?? 0 })}
                   />
                   <span className={styles.placeholder} style={{ fontSize: 11 }}>0 = disabled</span>
                 </div>
@@ -2374,33 +2374,32 @@ function AdvancedSettings() {
               <div className={styles.memoryGrid}>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Top-K Results</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={1}
                     value={cfg.retrievalTopK}
-                    onChange={(e) => update({ retrievalTopK: Number(e.target.value) || 4 })}
+                    integer
+                    onChange={(value) => update({ retrievalTopK: value ?? 4 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Exclusion Window</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={5} max={100}
                     value={cfg.exclusionWindow}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ exclusionWindow: Number(e.target.value) || 20 })}
+                    integer
+                    onChange={(value) => update({ exclusionWindow: value ?? 20 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Similarity Threshold</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={2} step={0.05}
                     value={cfg.similarityThreshold}
-                    onChange={(e) => update({ similarityThreshold: Math.max(0, Math.min(2, Number(e.target.value) || 0)) })}
+                    onChange={(value) => update({ similarityThreshold: Math.max(0, Math.min(2, value ?? 0)) })}
                   />
                   <span className={styles.placeholder} style={{ fontSize: 11 }}>
                     0 = no filtering. Cosine distance can exceed 1, so useful cutoffs are not limited to 0–1.
@@ -2426,22 +2425,22 @@ function AdvancedSettings() {
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Query Context Size</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={1} max={64}
                     value={cfg.queryContextSize}
-                    onChange={(e) => update({ queryContextSize: Number(e.target.value) || 6 })}
+                    integer
+                    onChange={(value) => update({ queryContextSize: value ?? 6 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Query Max Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={1000} max={32000}
                     value={cfg.queryMaxTokens}
-                    onChange={(e) => update({ queryMaxTokens: Number(e.target.value) || 8000 })}
+                    integer
+                    onChange={(value) => update({ queryMaxTokens: value ?? 8000 })}
                   />
                 </div>
               </div>

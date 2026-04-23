@@ -10,6 +10,7 @@ import {
   TOGGLE_ONLY_PROVIDERS,
 } from '@/lib/reasoning-binding'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
+import NumericInput from '@/components/shared/NumericInput'
 import { Toggle } from '@/components/shared/Toggle'
 import type { ReasoningSettings, ReasoningEffort, ThinkingDisplay } from '@/types/store'
 import styles from './PresetManager.module.css'
@@ -189,15 +190,12 @@ export default function PresetManager() {
         <div className={styles.fieldGroup}>
           <span className={styles.label}>Keep in history</span>
           <div className={styles.historyRow}>
-            <input
-              type="number"
+            <NumericInput
               className={styles.input}
               min={-1}
               value={reasoningSettings.keepInHistory}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10)
-                if (!Number.isNaN(v)) updateReasoning({ keepInHistory: v })
-              }}
+              integer
+              onChange={(value) => updateReasoning({ keepInHistory: value ?? reasoningSettings.keepInHistory })}
             />
             <span className={styles.historyHint}>
               {reasoningSettings.keepInHistory === -1

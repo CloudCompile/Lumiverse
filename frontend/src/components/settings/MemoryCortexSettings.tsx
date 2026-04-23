@@ -18,6 +18,7 @@ import {
   Heart,
 } from "lucide-react";
 import { Toggle } from "@/components/shared/Toggle";
+import NumericInput from "@/components/shared/NumericInput";
 import { useStore } from "@/store";
 import { memoryCortexApi, type CortexConfig, type CortexUsageStats } from "@/api/memory-cortex";
 import { connectionsApi } from "@/api/connections";
@@ -366,11 +367,11 @@ export default function MemoryCortexSettings() {
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Temperature</span>
-                  <input type="number" className={styles.numberInput} value={config.sidecar.temperature} min={0} max={2} step={0.05} onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, temperature: parseFloat(e.target.value) || 0.1 } })} />
+                  <NumericInput className={styles.numberInput} value={config.sidecar.temperature} min={0} max={2} step={0.05} onChange={(value) => updateConfig({ sidecar: { ...config.sidecar, temperature: value ?? 0.1 } })} />
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Top P</span>
-                  <input type="number" className={styles.numberInput} value={config.sidecar.topP} min={0} max={1} step={0.05} onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, topP: parseFloat(e.target.value) || 1.0 } })} />
+                  <NumericInput className={styles.numberInput} value={config.sidecar.topP} min={0} max={1} step={0.05} onChange={(value) => updateConfig({ sidecar: { ...config.sidecar, topP: value ?? 1.0 } })} />
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Entity extraction</span>
@@ -397,19 +398,19 @@ export default function MemoryCortexSettings() {
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Chunks per request</span>
-                  <input type="number" className={styles.numberInput} value={config.sidecar.chunkBatchSize ?? 5} min={1} max={20} step={1} onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, chunkBatchSize: parseInt(e.target.value) || 5 } })} />
+                  <NumericInput className={styles.numberInput} value={config.sidecar.chunkBatchSize ?? 5} min={1} max={20} step={1} integer onChange={(value) => updateConfig({ sidecar: { ...config.sidecar, chunkBatchSize: value ?? 5 } })} />
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Parallel requests</span>
-                  <input type="number" className={styles.numberInput} value={config.sidecar.rebuildConcurrency ?? 3} min={1} max={10} step={1} onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, rebuildConcurrency: parseInt(e.target.value) || 3 } })} />
+                  <NumericInput className={styles.numberInput} value={config.sidecar.rebuildConcurrency ?? 3} min={1} max={10} step={1} integer onChange={(value) => updateConfig({ sidecar: { ...config.sidecar, rebuildConcurrency: value ?? 3 } })} />
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Sidecar timeout (seconds)</span>
-                  <input type="number" className={styles.numberInput} value={Math.round((config.sidecarTimeoutMs ?? 60000) / 1000)} min={0} max={300} step={5} onChange={(e) => updateConfig({ sidecarTimeoutMs: (parseInt(e.target.value) || 60) * 1000 })} />
+                  <NumericInput className={styles.numberInput} value={Math.round((config.sidecarTimeoutMs ?? 60000) / 1000)} min={0} max={300} step={5} integer onChange={(value) => updateConfig({ sidecarTimeoutMs: (value ?? 60) * 1000 })} />
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Retrieval timeout (seconds)</span>
-                  <input type="number" className={styles.numberInput} value={Math.round((config.retrievalTimeoutMs ?? 60000) / 1000)} min={0} max={300} step={5} onChange={(e) => updateConfig({ retrievalTimeoutMs: (parseInt(e.target.value) || 60) * 1000 })} />
+                  <NumericInput className={styles.numberInput} value={Math.round((config.retrievalTimeoutMs ?? 60000) / 1000)} min={0} max={300} step={5} integer onChange={(value) => updateConfig({ retrievalTimeoutMs: (value ?? 60) * 1000 })} />
                 </div>
                 <div className={styles.hintText}>
                   Chunks per request: how many memory chunks to analyze in a single LLM call. Higher = fewer API calls but larger prompts.
@@ -486,7 +487,7 @@ export default function MemoryCortexSettings() {
                     </div>
                     <div className={styles.infoRow}>
                       <span className={styles.infoLabel}>Context token budget</span>
-                      <input type="number" className={styles.numberInput} value={config.contextTokenBudget} min={100} max={2000} step={50} onChange={(e) => updateConfig({ contextTokenBudget: parseInt(e.target.value) || 600 })} />
+                      <NumericInput className={styles.numberInput} value={config.contextTokenBudget} min={100} max={2000} step={50} integer onChange={(value) => updateConfig({ contextTokenBudget: value ?? 600 })} />
                     </div>
                   </div>
 
@@ -498,11 +499,11 @@ export default function MemoryCortexSettings() {
                     </div>
                     <div className={styles.infoRow}>
                       <span className={styles.infoLabel}>Half-life (turns)</span>
-                      <input type="number" className={styles.numberInput} value={config.decay.halfLifeTurns} min={100} max={5000} step={50} onChange={(e) => updateConfig({ decay: { ...config.decay, halfLifeTurns: parseInt(e.target.value) || 500 } })} />
+                      <NumericInput className={styles.numberInput} value={config.decay.halfLifeTurns} min={100} max={5000} step={50} integer onChange={(value) => updateConfig({ decay: { ...config.decay, halfLifeTurns: value ?? 500 } })} />
                     </div>
                     <div className={styles.infoRow}>
                       <span className={styles.infoLabel}>Core memory threshold</span>
-                      <input type="number" className={styles.numberInput} value={config.decay.coreMemoryThreshold} min={0} max={1} step={0.05} onChange={(e) => updateConfig({ decay: { ...config.decay, coreMemoryThreshold: parseFloat(e.target.value) || 0.7 } })} />
+                      <NumericInput className={styles.numberInput} value={config.decay.coreMemoryThreshold} min={0} max={1} step={0.05} onChange={(value) => updateConfig({ decay: { ...config.decay, coreMemoryThreshold: value ?? 0.7 } })} />
                     </div>
                     <div className={styles.hintText}>
                       Memories scoring above the threshold are "core memories" — they resist decay and never fully fade.

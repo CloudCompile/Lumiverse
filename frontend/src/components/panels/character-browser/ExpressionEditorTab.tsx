@@ -7,6 +7,7 @@ import { settingsApi } from '@/api/settings'
 import { useStore } from '@/store'
 import ExpressionSlotCard from './ExpressionSlotCard'
 import ImageLightbox from '@/components/shared/ImageLightbox'
+import NumericInput from '@/components/shared/NumericInput'
 import { Toggle } from '@/components/shared/Toggle'
 import type { ExpressionConfig, ExpressionSlot, ExpressionGroups } from '@/types/expressions'
 import type { CharacterGalleryItem } from '@/types/api'
@@ -628,15 +629,15 @@ export default function ExpressionEditorTab({ characterId }: Props) {
             <>
               <div className={styles.contextRow}>
                 <label htmlFor="expr-context-window">Messages to analyze:</label>
-                <input
+                <NumericInput
                   id="expr-context-window"
-                  type="number"
                   className={styles.contextInput}
                   value={detection.contextWindow}
                   min={1}
                   max={20}
-                  onChange={(e) => {
-                    const val = Math.max(1, Math.min(20, parseInt(e.target.value) || 5))
+                  integer
+                  onChange={(value) => {
+                    const val = Math.max(1, Math.min(20, value ?? 5))
                     saveDetection({ ...detection, contextWindow: val })
                   }}
                 />

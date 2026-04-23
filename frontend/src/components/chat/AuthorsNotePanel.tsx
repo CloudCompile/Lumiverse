@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { CloseButton } from '@/components/shared/CloseButton'
+import NumericInput from '@/components/shared/NumericInput'
 import { chatsApi } from '@/api/chats'
 import styles from './AuthorsNotePanel.module.css'
 
@@ -85,8 +86,8 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
     scheduleSave({ content: val })
   }, [scheduleSave])
 
-  const handleDepthChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = Math.max(0, Math.min(9999, Number(e.target.value) || 0))
+  const handleDepthChange = useCallback((value: number | null) => {
+    const val = Math.max(0, Math.min(9999, value ?? 0))
     setDepth(val)
     scheduleSave({ depth: val })
   }, [scheduleSave])
@@ -132,12 +133,12 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
         <div className={styles.row}>
           <div className={styles.field}>
             <label className={styles.label}>Depth</label>
-            <input
-              type="number"
+            <NumericInput
               className={styles.input}
               min={0}
               max={9999}
               value={depth}
+              integer
               onChange={handleDepthChange}
             />
           </div>
