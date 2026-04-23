@@ -95,3 +95,18 @@
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-dim);
 }
+
+.browseHint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  line-height: 1.4;
+  color: var(--lumiverse-text-dim);
+}
+
+.browseHintIcon {
+  flex-shrink: 0;
+  opacity: 0.8;
+}

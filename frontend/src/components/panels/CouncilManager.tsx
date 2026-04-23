@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu } from 'lucide-react'
 import { useStore } from '@/store'
+import { connectionsApi } from '@/api/connections'
 import { settingsApi } from '@/api/settings'
 import { Toggle } from '@/components/shared/Toggle'
-import { Button, EditorSection, FormField, TextInput } from '@/components/shared/FormComponents'
+import { Button, EditorSection, FormField } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import SearchableSelect from '@/components/shared/SearchableSelect'
+import ModelCombobox from './connection-manager/ModelCombobox'
 import CouncilMemberItem from './council/CouncilMemberItem'
 import AddMemberDropdown from './council/AddMemberDropdown'
 import QuickAddPackDropdown from './council/QuickAddPackDropdown'
@@ -48,6 +50,9 @@ export default function CouncilManager() {
 
   // Shared sidecar settings (independent of council)
   const [sidecarConfig, setSidecarConfig] = useState<SidecarConfig>(SIDECAR_DEFAULTS)
+  const [sidecarModels, setSidecarModels] = useState<string[]>([])
+  const [sidecarModelLabels, setSidecarModelLabels] = useState<Record<string, string>>({})
+  const [sidecarModelsLoading, setSidecarModelsLoading] = useState(false)
 
   useEffect(() => {
     const applyLegacy = (cs: any) => {
@@ -88,6 +93,35 @@ export default function CouncilManager() {
       return updated
     })
   }, [])
+
+  const fetchSidecarModels = useCallback(async () => {
+    if (!sidecarConfig.connectionProfileId) {
+      setSidecarModels([])
+      setSidecarModelLabels({})
+      return
+    }
+
+    setSidecarModelsLoading(true)
+    try {
+      const result = await connectionsApi.models(sidecarConfig.connectionProfileId)
+      setSidecarModels(result.models || [])
+      setSidecarModelLabels(result.model_labels || {})
+    } catch {
+      setSidecarModels([])
+      setSidecarModelLabels({})
+    } finally {
+      setSidecarModelsLoading(false)
+    }
+  }, [sidecarConfig.connectionProfileId])
+
+  useEffect(() => {
+    if (!sidecarConfig.connectionProfileId) {
+      setSidecarModels([])
+      setSidecarModelLabels({})
+      return
+    }
+    fetchSidecarModels()
+  }, [fetchSidecarModels, sidecarConfig.connectionProfileId])
 
   const functionCallingEnabled = useMemo(() => {
     if (!activeLoomPresetId) return true
@@ -167,10 +201,19 @@ export default function CouncilManager() {
         </FormField>
 
         <FormField label="Model">
-          <TextInput
+          <ModelCombobox
             value={sidecarConfig.model}
             onChange={(val) => saveSidecar({ model: val })}
             placeholder="e.g. claude-3-haiku-20240307"
+            models={sidecarModels}
+            modelLabels={sidecarModelLabels}
+            loading={sidecarModelsLoading}
+            onRefresh={fetchSidecarModels}
+            autoRefreshOnFocus
+            refreshKey={sidecarConfig.connectionProfileId}
+            disabled={!sidecarConfig.connectionProfileId}
+            emptyMessage={sidecarConfig.connectionProfileId ? 'No models returned for this connection. Enter one manually.' : 'Select a connection profile to browse models.'}
+            browseHint={sidecarConfig.connectionProfileId ? 'Click into the field to browse models for the selected connection, or type one manually.' : 'Select a connection profile first, then click into the field to browse models.'}
           />
         </FormField>
 

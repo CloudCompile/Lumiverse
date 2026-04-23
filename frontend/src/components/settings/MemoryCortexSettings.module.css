@@ -66,6 +66,10 @@
   gap: 6px;
 }
 
+.modelPicker {
+  width: min(320px, 100%);
+}
+
 /* ── Toggle rows ────────────────────────────────────────────────── */
 
 .toggleRow {

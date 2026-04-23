@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Search } from 'lucide-react'
 import { TextInput } from '@/components/shared/FormComponents'
 import { Spinner } from '@/components/shared/Spinner'
 import styles from './ModelCombobox.module.css'
@@ -14,11 +14,31 @@ interface ModelComboboxProps {
   onRefresh?: () => void
   disabled?: boolean
   placeholder?: string
+  autoRefreshOnFocus?: boolean
+  refreshKey?: string
+  emptyMessage?: string
+  loadingMessage?: string
+  browseHint?: string
 }
 
-export default function ModelCombobox({ value, onChange, models, modelLabels, loading, onRefresh, disabled, placeholder }: ModelComboboxProps) {
+export default function ModelCombobox({
+  value,
+  onChange,
+  models,
+  modelLabels,
+  loading,
+  onRefresh,
+  disabled,
+  placeholder,
+  autoRefreshOnFocus = false,
+  refreshKey,
+  emptyMessage = 'No models found. Enter one manually.',
+  loadingMessage = 'Loading models...',
+  browseHint,
+}: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const autoRefreshedRef = useRef(false)
   const hasLabels = modelLabels && Object.keys(modelLabels).length > 0
 
   const filtered = models.filter((m) => {
@@ -36,10 +56,32 @@ export default function ModelCombobox({ value, onChange, models, modelLabels, lo
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  useEffect(() => {
+    autoRefreshedRef.current = false
+  }, [refreshKey])
+
   const handleSelect = useCallback((model: string) => {
     onChange(model)
     setOpen(false)
   }, [onChange])
+
+  const handleFocus = useCallback(() => {
+    if (disabled) return
+    setOpen(true)
+    if (autoRefreshOnFocus && onRefresh && !autoRefreshedRef.current && models.length === 0) {
+      autoRefreshedRef.current = true
+      onRefresh()
+    }
+  }, [autoRefreshOnFocus, disabled, models.length, onRefresh])
+
+  const handleRefresh = useCallback(() => {
+    if (!onRefresh) return
+    autoRefreshedRef.current = true
+    setOpen(true)
+    onRefresh()
+  }, [onRefresh])
+
+  const shouldShowDropdown = open && (loading || models.length > 0 || (autoRefreshOnFocus && !!onRefresh))
 
   return (
     <div className={styles.combobox} ref={ref}>
@@ -48,15 +90,21 @@ export default function ModelCombobox({ value, onChange, models, modelLabels, lo
           value={value}
           onChange={onChange}
           placeholder={placeholder || 'gpt-4o'}
-          onFocus={() => models.length > 0 && setOpen(true)}
+          onFocus={handleFocus}
+          disabled={disabled}
         />
         {onRefresh && (
-          <button type="button" className={styles.refreshBtn} onClick={onRefresh} disabled={loading || disabled} title="Refresh models">
+          <button type="button" className={styles.refreshBtn} onClick={handleRefresh} disabled={loading || disabled} title="Refresh models">
             {loading ? <Spinner size={14} /> : <RefreshCw size={14} />}
           </button>
         )}
       </div>
-      {open && filtered.length > 0 && (
+      {shouldShowDropdown && loading && (
+        <div className={styles.dropdown}>
+          <div className={styles.dropdownEmpty}>{loadingMessage}</div>
+        </div>
+      )}
+      {shouldShowDropdown && !loading && filtered.length > 0 && (
         <div className={styles.dropdown}>
           {filtered.map((model) => (
             <button key={model} type="button" className={styles.dropdownItem} onClick={() => handleSelect(model)}>
@@ -72,9 +120,20 @@ export default function ModelCombobox({ value, onChange, models, modelLabels, lo
           ))}
         </div>
       )}
-      {open && models.length > 0 && filtered.length === 0 && (
+      {shouldShowDropdown && !loading && models.length > 0 && filtered.length === 0 && (
         <div className={styles.dropdown}>
           <div className={styles.dropdownEmpty}>No matching models</div>
+        </div>
+      )}
+      {shouldShowDropdown && !loading && models.length === 0 && (
+        <div className={styles.dropdown}>
+          <div className={styles.dropdownEmpty}>{emptyMessage}</div>
+        </div>
+      )}
+      {browseHint && (
+        <div className={styles.browseHint}>
+          <Search size={12} className={styles.browseHintIcon} />
+          <span>{browseHint}</span>
         </div>
       )}
     </div>

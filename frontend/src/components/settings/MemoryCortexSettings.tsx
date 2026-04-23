@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Brain,
   Sparkles,
@@ -18,10 +18,10 @@ import {
   Heart,
 } from "lucide-react";
 import { Toggle } from "@/components/shared/Toggle";
-import { Select } from "@/components/shared/FormComponents";
 import { useStore } from "@/store";
 import { memoryCortexApi, type CortexConfig, type CortexUsageStats } from "@/api/memory-cortex";
 import { connectionsApi } from "@/api/connections";
+import ModelCombobox from "@/components/panels/connection-manager/ModelCombobox";
 import { wsClient } from "@/ws/client";
 import { EventType } from "@/ws/events";
 import styles from "./MemoryCortexSettings.module.css";
@@ -68,6 +68,7 @@ export default function MemoryCortexSettings() {
   // Connection profiles for sidecar picker
   const profiles = useStore((s) => s.profiles);
   const [sidecarModels, setSidecarModels] = useState<string[]>([]);
+  const [sidecarModelLabels, setSidecarModelLabels] = useState<Record<string, string>>({});
   const [modelsLoading, setModelsLoading] = useState(false);
 
   // Active chat for stats (if available)
@@ -79,13 +80,19 @@ export default function MemoryCortexSettings() {
 
   // Fetch models when sidecar connection changes
   const fetchModels = useCallback(async (connectionId: string | null) => {
-    if (!connectionId) { setSidecarModels([]); return; }
+    if (!connectionId) {
+      setSidecarModels([]);
+      setSidecarModelLabels({});
+      return;
+    }
     setModelsLoading(true);
     try {
       const result = await connectionsApi.models(connectionId);
       setSidecarModels(result.models || []);
+      setSidecarModelLabels(result.model_labels || {});
     } catch {
       setSidecarModels([]);
+      setSidecarModelLabels({});
     } finally {
       setModelsLoading(false);
     }
@@ -341,29 +348,21 @@ export default function MemoryCortexSettings() {
               <>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Model override</span>
-                  {modelsLoading ? (
-                    <span className={styles.infoValue}>Loading models...</span>
-                  ) : sidecarModels.length > 0 ? (
-                    <select
-                      className={styles.selectInput}
+                  <div className={styles.modelPicker}>
+                    <ModelCombobox
                       value={config.sidecar.model || ""}
-                      onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, model: e.target.value || null } })}
-                    >
-                      <option value="">Use connection default</option>
-                      {sidecarModels.map((m) => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type="text"
-                      className={styles.textInput}
-                      value={config.sidecar.model || ""}
-                      onChange={(e) => updateConfig({ sidecar: { ...config.sidecar, model: e.target.value || null } })}
+                      onChange={(value) => updateConfig({ sidecar: { ...config.sidecar, model: value || null } })}
+                      models={sidecarModels}
+                      modelLabels={sidecarModelLabels}
+                      loading={modelsLoading}
+                      onRefresh={() => fetchModels(config.sidecar.connectionProfileId)}
+                      autoRefreshOnFocus
+                      refreshKey={config.sidecar.connectionProfileId || ""}
                       placeholder="Leave empty to use connection default"
-                      style={{ width: 220 }}
+                      emptyMessage="No models returned for this connection. Enter one manually."
+                      browseHint="Click into the field to browse models for the selected sidecar connection, or leave it blank to use the connection default."
                     />
-                  )}
+                  </div>
                 </div>
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Temperature</span>

@@ -8,6 +8,7 @@ import { Toggle } from '@/components/shared/Toggle'
 import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
+import { connectionsApi } from '@/api/connections'
 import { embeddingsApi } from '@/api/embeddings'
 import { imagesApi } from '@/api/images'
 import { settingsApi } from '@/api/settings'
@@ -25,12 +26,37 @@ import OperatorPanel from '@/components/settings/OperatorPanel'
 import VoiceSettings from '@/components/settings/VoiceSettings'
 import McpServerSettings from '@/components/settings/mcp-servers/McpServerSettings'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
+import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import { getVisibleSettingsTabs } from '@/lib/settings-tab-registry'
 import styles from './SettingsModal.module.css'
 import clsx from 'clsx'
 
 interface SettingsModalProps {
   onClose: () => void
+}
+
+function getEmbeddingModelPreviewProvider(provider: string): string {
+  return provider === 'openai-compatible' ? 'custom' : provider
+}
+
+function normalizeEmbeddingApiUrlForModelListing(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, '')
+  if (!trimmed) return ''
+
+  try {
+    const parsed = new URL(trimmed)
+    let path = parsed.pathname.replace(/\/+$/, '')
+    if (/\/(embeddings|embed)$/.test(path)) {
+      path = path.replace(/\/(embeddings|embed)$/, '')
+    }
+    parsed.pathname = path || '/v1'
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString().replace(/\/+$/, '')
+  } catch {
+    const stripped = trimmed.replace(/\/(embeddings|embed)$/, '')
+    return stripped || trimmed
+  }
 }
 
 export default function SettingsModal({ onClose }: SettingsModalProps) {
@@ -1377,6 +1403,9 @@ function EmbeddingsSettings() {
   const [success, setSuccess] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [cfg, setCfg] = useState<EmbeddingConfig | null>(null)
+  const [models, setModels] = useState<string[]>([])
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
+  const [modelsLoading, setModelsLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -1394,6 +1423,11 @@ function EmbeddingsSettings() {
   useEffect(() => {
     load()
   }, [])
+
+  useEffect(() => {
+    setModels([])
+    setModelLabels({})
+  }, [cfg?.provider, cfg?.api_url])
 
   const PROVIDER_DEFAULTS: Record<string, { api_url: string; model: string }> = {
     'openai-compatible': { api_url: 'https://api.openai.com/v1/embeddings', model: 'text-embedding-3-small' },
@@ -1462,6 +1496,25 @@ function EmbeddingsSettings() {
       setError(err?.body?.error || err?.message || 'Embedding test failed')
     } finally {
       setTesting(false)
+    }
+  }
+
+  const fetchModels = async () => {
+    if (!cfg) return
+    setModelsLoading(true)
+    try {
+      const result = await connectionsApi.previewModels({
+        provider: getEmbeddingModelPreviewProvider(cfg.provider),
+        api_url: normalizeEmbeddingApiUrlForModelListing(cfg.api_url) || undefined,
+        api_key: apiKey.trim() || undefined,
+      })
+      setModels(result.models || [])
+      setModelLabels(result.model_labels || {})
+    } catch {
+      setModels([])
+      setModelLabels({})
+    } finally {
+      setModelsLoading(false)
     }
   }
 
@@ -1578,7 +1631,7 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Provider</label>
-        <select className={styles.select} value={cfg.provider} onChange={(e) => update({ provider: e.target.value as EmbeddingConfig['provider'] })}>
+        <select className={styles.select} value={cfg.provider} onChange={(e) => update({ provider: e.target.value as EmbeddingConfig['provider'] })} disabled={inherited}>
           <option value="openai-compatible">OpenAI Compatible</option>
           <option value="openai">OpenAI</option>
           <option value="openrouter">OpenRouter</option>
@@ -1589,7 +1642,7 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>API URL</label>
-        <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} />
+        <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} disabled={inherited} />
         <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
           Auto-appends /v1/embeddings to base domains and /embeddings to partial paths (e.g. /v1). Full paths ending in /embeddings are used as-is.
         </span>
@@ -1597,7 +1650,20 @@ function EmbeddingsSettings() {
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>Embedding Model</label>
-        <input className={styles.select} value={cfg.model} onChange={(e) => update({ model: e.target.value })} />
+        <ModelCombobox
+          value={cfg.model}
+          onChange={(value) => update({ model: value })}
+          models={models}
+          modelLabels={modelLabels}
+          loading={modelsLoading}
+          onRefresh={fetchModels}
+          autoRefreshOnFocus
+          refreshKey={`${cfg.provider}:${cfg.api_url}`}
+          placeholder="text-embedding-3-small"
+          emptyMessage="No models returned for this provider. Enter one manually."
+          browseHint="Click into the field to browse embedding-capable models for this provider, or type one manually."
+          disabled={inherited}
+        />
       </div>
 
       <div className={styles.field}>
