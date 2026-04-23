@@ -766,7 +766,7 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
       </div>
       <div
         ref={trackRef}
-        className={s.sliderTrack}
+        className={s.sliderTrackArea}
         onPointerDown={isIncluded ? handlePointerDown : undefined}
         onPointerMove={isIncluded ? handlePointerMove : undefined}
         onPointerUp={isIncluded ? handlePointerUp : undefined}
@@ -774,8 +774,10 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
         title="Double-click to reset"
         style={{ opacity: !isIncluded ? 0.2 : isSet ? 1 : 0.4 }}
       >
-        <div className={s.sliderFill} style={{ width: `${pct}%` }} />
-        <div className={s.sliderThumb} style={{ left: `${pct}%` }} />
+        <div className={s.sliderTrack}>
+          <div className={s.sliderFill} style={{ width: `${pct}%` }} />
+          <div className={s.sliderThumb} style={{ left: `${pct}%` }} />
+        </div>
       </div>
     </div>
   )
