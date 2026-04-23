@@ -3,6 +3,7 @@ import { marked } from 'marked'
 import { highlightCode } from '@/lib/codeHighlight'
 import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
+import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
 import { resolveDisplayMacros } from '@/lib/resolveDisplayMacros'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import {
@@ -244,6 +245,7 @@ marked.setOptions({
   gfm: true,
   silent: true,
   renderer,
+  tokenizer: createStrictTildeTokenizer(),
 })
 
 // ── HTML Island Isolation ──

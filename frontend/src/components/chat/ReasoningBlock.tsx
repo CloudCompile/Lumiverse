@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { Marked } from 'marked'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
+import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
 import { ChevronRight, Brain } from 'lucide-react'
 import styles from './ReasoningBlock.module.css'
 import clsx from 'clsx'
@@ -19,6 +20,7 @@ const md = new Marked({
   gfm: true,
   breaks: true,
   renderer: createEmphasisAwareRenderer(),
+  tokenizer: createStrictTildeTokenizer(),
   silent: true,
 })
 
