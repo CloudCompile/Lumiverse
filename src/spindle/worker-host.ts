@@ -98,6 +98,7 @@ type TokenCountResult = {
 
 type RuntimeWorkerToHost =
   | WorkerToHost
+  | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | {
       type: "user_storage_write_binary";
@@ -1132,7 +1133,13 @@ export class WorkerHost {
         break;
       // ─── Toast (free tier) ────────────────────────────────────────────
       case "toast_show":
-        this.handleToastShow(msg.toastType, msg.message, msg.title, msg.duration);
+        this.handleToastShow(
+          msg.toastType,
+          msg.message,
+          msg.title,
+          msg.duration,
+          "userId" in msg ? msg.userId : undefined,
+        );
         break;
       case "log":
         this.handleLog(msg.level, msg.message);
@@ -4971,6 +4978,7 @@ export class WorkerHost {
     message: string,
     title?: string,
     duration?: number,
+    userId?: string,
   ): void {
     const validTypes = ["success", "warning", "error", "info"];
     if (!validTypes.includes(toastType)) {
@@ -5004,7 +5012,18 @@ export class WorkerHost {
       sanitizedDuration = Math.max(1000, Math.min(30_000, sanitizedDuration));
     }
 
-    // Broadcast — scoped to extension owner for user-scoped extensions
+    let targetUserId: string | undefined;
+    if (this.installScope === "user") {
+      targetUserId = this.installedByUserId ?? undefined;
+    } else if (typeof userId === "string" && userId.trim()) {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (resolvedUserId) {
+        this.enforceScopedUser(resolvedUserId);
+        targetUserId = resolvedUserId;
+      }
+    }
+
+    // Broadcast only when an operator-scoped extension omits userId.
     eventBus.emit(
       EventType.SPINDLE_TOAST,
       {
@@ -5015,7 +5034,7 @@ export class WorkerHost {
         title: sanitizedTitle,
         duration: sanitizedDuration,
       },
-      this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+      targetUserId,
     );
   }
 

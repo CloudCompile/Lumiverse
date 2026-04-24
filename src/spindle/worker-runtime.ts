@@ -49,6 +49,7 @@ type MacroInvocationState = {
 
 type RuntimeWorkerToHost =
   | WorkerToHost
+  | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | {
       type: "user_storage_write_binary";
@@ -1624,17 +1625,17 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   toast: {
-    success(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "success", message, title: options?.title, duration: options?.duration });
+    success(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "success", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
-    warning(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "warning", message, title: options?.title, duration: options?.duration });
+    warning(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "warning", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
-    error(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "error", message, title: options?.title, duration: options?.duration });
+    error(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "error", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
-    info(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "info", message, title: options?.title, duration: options?.duration });
+    info(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "info", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
   },
 
