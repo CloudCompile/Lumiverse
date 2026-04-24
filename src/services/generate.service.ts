@@ -35,7 +35,7 @@ import { detectExpression, detectMultiCharacterExpression, getExpressionDetectio
 import { hasExpressions, getExpressionConfig, getExpressionGroups } from "./expressions.service";
 import { getSidecarSettings } from "./sidecar-settings.service";
 import { abortChatBackground, abortUserBackgrounds, abortAllBackgrounds } from "./chat-background.service";
-import { createCooperativeYielder } from "../llm/stream-utils";
+import { createCooperativeYielder, yieldToEventLoop } from "../llm/stream-utils";
 import { getMcpClientManager } from "./mcp-client-manager";
 import { parseMcpToolName } from "./council/mcp-tools";
 import {
@@ -1924,91 +1924,18 @@ async function runGeneration(
         reasoningDurationMs = Date.now() - reasoningStartedAt;
       }
 
-      // ── Generation metrics (tokenCount, TTFT, TPS) ─────────────────────
-      const finalPoolEntry = pool.getPoolEntry(generationId);
-      // Total output token count via model's tokenizer (content + reasoning)
-      let resolvedTokenCount: number | undefined;
-      const fullOutput = (fullReasoning ? fullReasoning + fullContent : fullContent);
-      if (fullOutput.length > 0) {
-        try {
-          resolvedTokenCount = (await tokenizerSvc.countForModel(model, fullOutput)) ?? undefined;
-        } catch { /* non-fatal */ }
-      }
-
-      let generationMetrics: {
-        ttft?: number;
-        tps?: number;
-        durationMs: number;
-        wasStreaming: boolean;
-        model?: string;
-        provider?: string;
-      } | undefined;
-      if (finalPoolEntry) {
-        const wasStreaming = finalPoolEntry.wasStreaming ?? true;
-        const streamStart = finalPoolEntry.streamingStartedAt;
-        const now = Date.now();
-        const durationMs = streamStart ? now - streamStart : 0;
-        let ttft: number | undefined;
-        let tps: number | undefined;
-
-        if (wasStreaming && streamStart) {
-          // TTFT: time from LLM request to first token (content or reasoning)
-          if (finalPoolEntry.firstTokenAt) {
-            ttft = finalPoolEntry.firstTokenAt - streamStart;
-          }
-          // TPS: total output tokens over total streaming duration (first token → completion)
-          if (finalPoolEntry.firstTokenAt && resolvedTokenCount && resolvedTokenCount > 1) {
-            const streamDurationSec = (now - finalPoolEntry.firstTokenAt) / 1000;
-            if (streamDurationSec > 0) {
-              tps = Math.round((resolvedTokenCount / streamDurationSec) * 10) / 10;
-            }
-          }
-        }
-
-        generationMetrics = {
-          durationMs,
-          wasStreaming,
-          ...(ttft != null ? { ttft } : {}),
-          ...(tps != null ? { tps } : {}),
-          ...(lifecycle.model ? { model: lifecycle.model } : {}),
-          ...(lifecycle.providerName ? { provider: lifecycle.providerName } : {}),
-        };
-      }
-
-      // Persist all generation metadata (reasoning, usage, metrics) in a single
-      // patchMessageExtra call to avoid triggering redundant chunk rebuilds,
-      // cache invalidation, and MESSAGE_EDITED events for each field.
+      // Persist lightweight metadata needed for immediate message reconciliation
+      // before we emit GENERATION_ENDED. Expensive bookkeeping (token counts,
+      // breakdown tokenization) is deferred so the frontend can clear its stop
+      // button as soon as the message itself is safely stored.
       {
-        const metaExtra: Record<string, any> = {};
-        if (fullReasoning) metaExtra.reasoning = fullReasoning;
-        if (streamUsage) metaExtra.usage = streamUsage;
-        if (reasoningDurationMs > 0) metaExtra.reasoningDuration = reasoningDurationMs;
-        if (resolvedTokenCount) metaExtra.tokenCount = resolvedTokenCount;
-        if (generationMetrics) metaExtra.generationMetrics = generationMetrics;
-
-        if (Object.keys(metaExtra).length > 0) {
+        const immediateExtra: Record<string, any> = {};
+        if (fullReasoning) immediateExtra.reasoning = fullReasoning;
+        if (streamUsage) immediateExtra.usage = streamUsage;
+        if (reasoningDurationMs > 0) immediateExtra.reasoningDuration = reasoningDurationMs;
+        if (Object.keys(immediateExtra).length > 0) {
           const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
-          chatsSvc.patchMessageExtra(userId, messageId, { ...existing, ...metaExtra });
-        }
-      }
-
-      // Compute and store breakdown for the generated message
-      let breakdownPayload: any;
-      if (lifecycle.breakdown && lifecycle.breakdown.length > 0 && lifecycle.model) {
-        try {
-          const tokenResult = await tokenizerSvc.countBreakdown(lifecycle.model, lifecycle.breakdown, lifecycle.chatHistoryMessages);
-          breakdownPayload = {
-            entries: tokenResult.breakdown,
-            totalTokens: tokenResult.total_tokens,
-            maxContext: lifecycle.maxContext || 0,
-            model: lifecycle.model,
-            provider: lifecycle.providerName || "",
-            presetName: lifecycle.presetName,
-            tokenizer_name: tokenResult.tokenizer_name,
-          };
-          breakdownSvc.storeBreakdown(userId, messageId, chatId, breakdownPayload);
-        } catch {
-          // non-fatal
+          chatsSvc.patchMessageExtra(userId, messageId, { ...existing, ...immediateExtra });
         }
       }
 
@@ -2018,11 +1945,98 @@ async function runGeneration(
         chatId,
         messageId,
         content: fullContent,
-        breakdown: breakdownPayload,
         usage: streamUsage,
-        tokenCount: resolvedTokenCount,
-        generationMetrics,
       }, userId);
+
+      // Non-critical post-processing can be expensive on low-power/mobile
+      // hosts (tokenizer startup, full breakdown counting). Run it after the
+      // terminal WS event so the UI doesn't sit in a fake "still generating"
+      // state after the final token already rendered.
+      void (async () => {
+        await yieldToEventLoop();
+
+        // ── Generation metrics (tokenCount, TTFT, TPS) ───────────────────
+        const finalPoolEntry = pool.getPoolEntry(generationId);
+        let resolvedTokenCount: number | undefined;
+        const fullOutput = (fullReasoning ? fullReasoning + fullContent : fullContent);
+        if (fullOutput.length > 0) {
+          try {
+            resolvedTokenCount = (await tokenizerSvc.countForModel(model, fullOutput)) ?? undefined;
+          } catch {
+            resolvedTokenCount = undefined;
+          }
+        }
+
+        let generationMetrics: {
+          ttft?: number;
+          tps?: number;
+          durationMs: number;
+          wasStreaming: boolean;
+          model?: string;
+          provider?: string;
+        } | undefined;
+        if (finalPoolEntry) {
+          const wasStreaming = finalPoolEntry.wasStreaming ?? true;
+          const streamStart = finalPoolEntry.streamingStartedAt;
+          const now = Date.now();
+          const durationMs = streamStart ? now - streamStart : 0;
+          let ttft: number | undefined;
+          let tps: number | undefined;
+
+          if (wasStreaming && streamStart) {
+            if (finalPoolEntry.firstTokenAt) {
+              ttft = finalPoolEntry.firstTokenAt - streamStart;
+            }
+            if (finalPoolEntry.firstTokenAt && resolvedTokenCount && resolvedTokenCount > 1) {
+              const streamDurationSec = (now - finalPoolEntry.firstTokenAt) / 1000;
+              if (streamDurationSec > 0) {
+                tps = Math.round((resolvedTokenCount / streamDurationSec) * 10) / 10;
+              }
+            }
+          }
+
+          generationMetrics = {
+            durationMs,
+            wasStreaming,
+            ...(ttft != null ? { ttft } : {}),
+            ...(tps != null ? { tps } : {}),
+            ...(lifecycle.model ? { model: lifecycle.model } : {}),
+            ...(lifecycle.providerName ? { provider: lifecycle.providerName } : {}),
+          };
+        }
+
+        if (resolvedTokenCount || generationMetrics) {
+          const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
+          const metricsExtra: Record<string, any> = { ...existing };
+          if (resolvedTokenCount) metricsExtra.tokenCount = resolvedTokenCount;
+          if (generationMetrics) metricsExtra.generationMetrics = generationMetrics;
+          chatsSvc.patchMessageExtra(userId, messageId, metricsExtra);
+        }
+
+        if (lifecycle.breakdown && lifecycle.breakdown.length > 0 && lifecycle.model) {
+          try {
+            const tokenResult = await tokenizerSvc.countBreakdown(
+              lifecycle.model,
+              lifecycle.breakdown,
+              lifecycle.chatHistoryMessages,
+            );
+            const breakdownPayload = {
+              entries: tokenResult.breakdown,
+              totalTokens: tokenResult.total_tokens,
+              maxContext: lifecycle.maxContext || 0,
+              model: lifecycle.model,
+              provider: lifecycle.providerName || "",
+              presetName: lifecycle.presetName,
+              tokenizer_name: tokenResult.tokenizer_name,
+            };
+            breakdownSvc.storeBreakdown(userId, messageId, chatId, breakdownPayload);
+          } catch {
+            // non-fatal
+          }
+        }
+      })().catch((err) => {
+        console.warn("[generate] Deferred post-processing failed:", err);
+      });
 
       // Fire-and-forget expression detection after successful generation
       fireExpressionDetection(userId, chatId, lifecycle).catch(() => {});

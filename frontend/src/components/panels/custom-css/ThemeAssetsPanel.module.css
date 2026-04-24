@@ -1,11 +1,12 @@
 .panel {
   display: flex;
   flex-direction: column;
-  min-height: 220px;
-  max-height: 360px;
+  flex: 0 0 clamp(260px, 34vh, 420px);
+  min-height: 260px;
+  max-height: clamp(260px, 34vh, 420px);
   border-top: 1px solid var(--lumiverse-border);
   background: var(--lumiverse-bg);
-  min-height: 0;
+  overflow: hidden;
   padding-top: 8px;
 }
 
@@ -14,6 +15,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   padding: 12px 16px;
   border-bottom: 1px solid var(--lumiverse-border);
   background: var(--lumiverse-bg);
@@ -42,6 +44,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .panelBtn,
@@ -86,9 +90,11 @@
   gap: 10px;
   padding: 12px 16px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .assetCard {
+  flex: 0 0 auto;
   border: 1px solid var(--lumiverse-border);
   border-radius: var(--lumiverse-radius-md);
   background: var(--lumiverse-bg-deep);

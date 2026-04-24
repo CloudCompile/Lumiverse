@@ -885,8 +885,20 @@ export function useWebSocket() {
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
 
+    // Mobile browsers occasionally deliver the full token stream but miss or
+    // delay the terminal WS event. While a chat is streaming, poll the pooled
+    // status endpoint at a low frequency so a dropped GENERATION_ENDED/STOPPED
+    // cannot leave the stop button stuck indefinitely.
+    const recoveryWatchdog = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      const state = store.getState()
+      if (!state.isStreaming || !state.activeChatId) return
+      recoverPooledGeneration(state.activeChatId).catch(() => { /* best-effort */ })
+    }, 4000)
+
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange)
+      clearInterval(recoveryWatchdog)
       unsubs.forEach(unsub => unsub())
       wsClient.disconnect()
     }

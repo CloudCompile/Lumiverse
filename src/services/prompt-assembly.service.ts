@@ -4519,7 +4519,7 @@ export function injectReasoningParams(
       params.thinking = { type: "enabled" };
     }
   } else {
-    // Generic OpenAI-compatible providers (OpenAI, DeepSeek, xAI, etc.)
+    // Generic OpenAI-compatible providers (OpenAI, xAI, etc.)
     // reasoning: { effort } is the standard format for reasoning-capable models.
     if (!params.reasoning) {
       params.reasoning = { effort };

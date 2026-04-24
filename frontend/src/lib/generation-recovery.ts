@@ -8,7 +8,8 @@ import { useStore } from '@/store'
  * so `replaceStreamContent` + `setLastPooledSeq` snap the local buffer to the
  * true server-side state and the watermark drops WS tokens already included.
  *
- * Triggered on: initial chat load, tab becoming visible, WS reconnect.
+ * Triggered on: initial chat load, tab becoming visible, WS reconnect, and a
+ * lightweight watchdog poll while a generation is active.
  */
 export async function recoverPooledGeneration(chatId: string): Promise<void> {
   if (!chatId) return
@@ -65,10 +66,20 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
     return
   }
 
-  if (!genStatus.active && genStatus.completedMessageId) {
-    if (latest.isStreaming && latest.activeGenerationId === genStatus.generationId) {
-      latest.endStreaming()
+  if (!genStatus.active) {
+    const sameGeneration = !latest.activeGenerationId || latest.activeGenerationId === genStatus.generationId
+    if (latest.isStreaming && sameGeneration) {
+      if (genStatus.error) {
+        latest.setStreamingError(genStatus.error)
+      } else if (genStatus.completedMessageId) {
+        latest.endStreaming()
+      } else {
+        latest.stopStreaming()
+      }
     }
+
+    if (!genStatus.completedMessageId) return
+
     const pageSize = latest.messagesPerPage || 50
     try {
       const fresh = await messagesApi.list(chatId, { limit: pageSize, tail: true })
