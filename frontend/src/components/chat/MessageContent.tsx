@@ -4,6 +4,7 @@ import { highlightCode } from '@/lib/codeHighlight'
 import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
+import { healFormattingArtifacts } from '@/lib/formatHealing'
 import { resolveDisplayMacros } from '@/lib/resolveDisplayMacros'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import {
@@ -252,7 +253,8 @@ function escapeIsolatedOrderedListItems(text: string): string {
 
 function formatContent(raw: string): string {
   if (!raw) return ''
-  const normalized = normalizeQuotes(raw)
+  const healed = healFormattingArtifacts(raw)
+  const normalized = normalizeQuotes(healed)
   const listSafe = escapeIsolatedOrderedListItems(normalized)
   let html = marked.parse(listSafe, { async: false }) as string
   html = normalizeQuotesInHTML(html)

@@ -29,6 +29,7 @@ import {
   sanitizeForVectorization,
   type SanitizeOptions,
 } from "../utils/content-sanitizer";
+import { healFormattingArtifacts } from "../utils/format-healing";
 import { getReasoningStripOptions, hasReasoningDelimiters, resolveReasoningDelimiters } from "../utils/reasoning-strip";
 import * as charactersSvc from "./characters.service";
 import * as personasSvc from "./personas.service";
@@ -1204,7 +1205,7 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
           throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
         }
         const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
-        const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
+        const resolvedContent = healFormattingArtifacts((await evaluate(msg.content, macroEnv, registry)).text);
         historyParts.push(resolvedContent);
         const attachments = Array.isArray(msg.extra?.attachments) ? msg.extra.attachments : [];
         if (attachments.length > 0) {
@@ -4621,7 +4622,7 @@ async function onelinerImpersonation(
       throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
     const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
-    const resolvedContent = (await evaluate(msg.content, macroEnv, registry)).text;
+    const resolvedContent = healFormattingArtifacts((await evaluate(msg.content, macroEnv, registry)).text);
     result.push({ role, content: resolvedContent });
     historyParts.push(resolvedContent);
     messageCount++;
@@ -4808,7 +4809,7 @@ async function legacyAssembly(
     } else if (signal?.aborted) {
       throw signal.reason ?? new DOMException("Aborted", "AbortError");
     }
-    const resolved = await resolveMacros(m.content);
+    const resolved = healFormattingArtifacts(await resolveMacros(m.content));
     legacyHistoryParts.push(resolved);
     const attachments = Array.isArray(m.extra?.attachments) ? m.extra.attachments : [];
     if (attachments.length > 0) {

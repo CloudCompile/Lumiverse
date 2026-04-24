@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { Marked } from 'marked'
+import { healFormattingArtifacts } from '@/lib/formatHealing'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
 import { ChevronRight, Brain } from 'lucide-react'
@@ -90,7 +91,7 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
   // the rendered HTML isn't visible so parsing is pure waste. Parse once
   // the user expands or when streaming ends (final content).
   const html = useMemo(
-    () => (isStreaming && !isOpen) ? '' : md.parse(reasoning) as string,
+    () => (isStreaming && !isOpen) ? '' : md.parse(healFormattingArtifacts(reasoning)) as string,
     [reasoning, isStreaming, isOpen]
   )
 
