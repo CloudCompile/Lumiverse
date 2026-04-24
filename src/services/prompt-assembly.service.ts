@@ -83,6 +83,24 @@ export function isChatHistoryMessage(msg: LlmMessage): boolean {
   return (msg as any)[CHAT_HISTORY_KEY] === true;
 }
 
+export function resolveChatHistoryInsertionIndex(messages: LlmMessage[], depth: number): number {
+  const clampedDepth = Math.max(0, depth);
+  const historyIndices: number[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    if (isChatHistoryMessage(messages[i])) historyIndices.push(i);
+  }
+
+  if (historyIndices.length === 0) return messages.length;
+
+  const offsetFromStart = Math.max(0, historyIndices.length - clampedDepth);
+  if (offsetFromStart >= historyIndices.length) {
+    return historyIndices[historyIndices.length - 1] + 1;
+  }
+
+  return historyIndices[offsetFromStart];
+}
+
 // ---------------------------------------------------------------------------
 // Cooperative cancellation helper
 // ---------------------------------------------------------------------------
@@ -1455,10 +1473,12 @@ export async function assemblePrompt(ctx: AssemblyContext): Promise<AssemblyResu
   }
 
   // ---- Depth-based block injection ----
-  // Blocks with position "in_history" and depth > 0 are inserted N messages
-  // from the end, matching the same semantics as WI depth and Author's Note.
+  // Blocks with position "in_history" and depth > 0 are inserted relative to
+  // the actual tagged chat-history messages, not the tail of the full prompt.
+  // This keeps them inside chat history even when post-history/system utility
+  // blocks have already been appended around it.
   for (const depthBlock of pendingDepthBlocks) {
-    const insertAt = Math.max(0, result.length - depthBlock.depth);
+    const insertAt = resolveChatHistoryInsertionIndex(result, depthBlock.depth);
     result.splice(insertAt, 0, { role: depthBlock.role, content: depthBlock.content });
     breakdown.push({
       type: "block", name: depthBlock.blockName, role: depthBlock.role,
