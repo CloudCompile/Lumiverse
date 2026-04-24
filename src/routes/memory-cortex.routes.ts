@@ -17,6 +17,7 @@ import * as chatsSvc from "../services/chats.service";
 import * as connectionsSvc from "../services/connections.service";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as memoryCortex from "../services/memory-cortex";
+import { ChatLinkError } from "../services/memory-cortex/vault";
 import { getCharacter } from "../services/characters.service";
 import { getChat } from "../services/chats.service";
 import { eventBus } from "../ws/bus";
@@ -37,6 +38,20 @@ function ensureChatOwnership(c: Context, chatId: string):
   const chat = getChat(userId, chatId);
   if (!chat) return { ok: false, response: c.json({ error: "Chat not found" }, 404) };
   return { ok: true, userId };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function optionalTrimmedString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 // ─── Configuration ─────────────────────────────────────────────
@@ -1111,10 +1126,39 @@ app.post("/chats/:chatId/links", async (c) => {
   const chat = getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  const { linkType, vaultId, targetChatId, label, bidirectional } = await c.req.json();
-  if (!linkType || !["vault", "interlink"].includes(linkType)) {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!isRecord(body)) {
+    return c.json({ error: "Request body must be a JSON object" }, 400);
+  }
+
+  const linkTypeRaw = body.linkType ?? body.link_type;
+  const linkTypeValue = typeof linkTypeRaw === "string" ? linkTypeRaw.trim() : "";
+  if (!linkTypeValue || !["vault", "interlink"].includes(linkTypeValue)) {
     return c.json({ error: "linkType must be 'vault' or 'interlink'" }, 400);
   }
+  const linkType = linkTypeValue as "vault" | "interlink";
+
+  const vaultId = optionalTrimmedString(body.vaultId ?? body.vault_id);
+  const targetChatId = optionalTrimmedString(body.targetChatId ?? body.target_chat_id);
+  const label = optionalTrimmedString(body.label);
+  const bidirectionalRaw = body.bidirectional ?? body.bidirectional_link;
+  if (
+    body.label !== undefined && typeof body.label !== "string"
+  ) {
+    return c.json({ error: "label must be a string when provided" }, 400);
+  }
+  if (
+    bidirectionalRaw !== undefined && optionalBoolean(bidirectionalRaw) === undefined
+  ) {
+    return c.json({ error: "bidirectional must be a boolean when provided" }, 400);
+  }
+  const bidirectional = optionalBoolean(bidirectionalRaw);
 
   try {
     const links = memoryCortex.attachLink(userId, chatId, linkType, {
@@ -1127,7 +1171,11 @@ app.post("/chats/:chatId/links", async (c) => {
     }
     return c.json({ data: links }, 201);
   } catch (err: any) {
-    return c.json({ error: err.message }, 400);
+    if (err instanceof ChatLinkError) {
+      return c.json({ error: err.message }, { status: err.status as 400 | 404 | 409 });
+    }
+    console.error("[memory-cortex] failed to attach chat link:", err);
+    return c.json({ error: "Failed to attach chat link" }, 500);
   }
 });
 

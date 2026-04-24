@@ -159,6 +159,16 @@ export interface ChatLink {
   createdAt: number;
 }
 
+export class ChatLinkError extends Error {
+  status: number;
+
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "ChatLinkError";
+    this.status = status;
+  }
+}
+
 // ─── JSON Helpers ─────────────────────────────────────────────
 
 function safeJsonArray(raw: string | null | undefined): string[] {
@@ -644,32 +654,32 @@ export function attachLink(
 
   // Validate
   if (linkType === "vault") {
-    if (!opts.vaultId) throw new Error("vaultId is required for vault links");
+    if (!opts.vaultId) throw new ChatLinkError("vaultId is required for vault links");
     // Scope by user_id so a user can't attach someone else's vault by guessing UUIDs.
     const vault = db.query(
       `SELECT id FROM cortex_vaults WHERE id = ? AND user_id = ?`,
     ).get(opts.vaultId, userId);
-    if (!vault) throw new Error("Vault not found");
+    if (!vault) throw new ChatLinkError("Vault not found", 404);
 
     // Check for duplicate
     const existing = db.query(
       `SELECT id FROM cortex_chat_links WHERE chat_id = ? AND link_type = 'vault' AND vault_id = ?`,
     ).get(chatId, opts.vaultId);
-    if (existing) throw new Error("This vault is already linked to this chat");
+    if (existing) throw new ChatLinkError("This vault is already linked to this chat", 409);
   } else {
-    if (!opts.targetChatId) throw new Error("targetChatId is required for interlinks");
-    if (opts.targetChatId === chatId) throw new Error("Cannot interlink a chat with itself");
+    if (!opts.targetChatId) throw new ChatLinkError("targetChatId is required for interlinks");
+    if (opts.targetChatId === chatId) throw new ChatLinkError("Cannot interlink a chat with itself");
     // Target chat must also belong to the caller; cross-user interlinks are not supported.
     const chat = db.query(
       `SELECT id FROM chats WHERE id = ? AND user_id = ?`,
     ).get(opts.targetChatId, userId);
-    if (!chat) throw new Error("Target chat not found");
+    if (!chat) throw new ChatLinkError("Target chat not found", 404);
 
     // Check for duplicate
     const existing = db.query(
       `SELECT id FROM cortex_chat_links WHERE chat_id = ? AND link_type = 'interlink' AND target_chat_id = ?`,
     ).get(chatId, opts.targetChatId);
-    if (existing) throw new Error("This chat is already interlinked with the target");
+    if (existing) throw new ChatLinkError("This chat is already interlinked with the target", 409);
   }
 
   const links: ChatLink[] = [];
