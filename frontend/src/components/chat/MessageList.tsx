@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo, type ReactNode } from 'react'
+import { useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactNode, type TouchEvent, type WheelEvent } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useChunkedMessages } from '@/hooks/useChunkedMessages'
 import { useStore } from '@/store'
@@ -23,6 +23,12 @@ interface MessageListProps {
 
 const TOP_LOAD_THRESHOLD = 96
 const CHAT_SCROLL_TO_BOTTOM_EVENT = 'lumiverse:chat-scroll-bottom'
+const MIN_MEASURED_ROW_HEIGHT = 32
+const MAX_ESTIMATED_ROW_HEIGHT = 900
+
+function clampEstimate(value: number) {
+  return Math.max(MIN_MEASURED_ROW_HEIGHT, Math.min(MAX_ESTIMATED_ROW_HEIGHT, value))
+}
 
 export default function MessageList({ messages, chatId, isStreaming }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -31,18 +37,17 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const isProgrammaticScrollRef = useRef(false)
   const topLoadArmedRef = useRef(true)
   const rafRef = useRef<number>(0)
+  const touchYRef = useRef<number | null>(null)
   const { visibleMessages, hasMore, loadMore, loadingOlder, justPrependedRef } = useChunkedMessages(messages, chatId)
   const lastScrollHeightRef = useRef(0)
+  const measuredRowHeightsRef = useRef<Map<string, number>>(new Map())
+  const averageMeasuredHeightRef = useRef<number | null>(null)
 
-  // Per-row reveal gate: rows fade in once their first measurement lands, so
-  // the estimate→measured reposition happens invisibly. Keys already in the
-  // Set mount revealed (covers scroll-back into previously measured rows).
-  const measuredKeysRef = useRef<Set<string | number | bigint>>(new Set())
-
-  // Clear the per-row reveal cache and re-arm top-pagination on chat switch.
+  // Re-arm top-pagination on chat switch.
   useEffect(() => {
-    measuredKeysRef.current = new Set()
     topLoadArmedRef.current = true
+    measuredRowHeightsRef.current = new Map()
+    averageMeasuredHeightRef.current = null
   }, [chatId])
   const streamingContent = useStore((s) => s.streamingContent)
   const streamingReasoning = useStore((s) => s.streamingReasoning)
@@ -95,10 +100,43 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const getImgUrl = isBubble ? imagesApi.largeUrl : imagesApi.smallUrl
   const estimateSize = isBubble ? 260 : 180
 
+  useEffect(() => {
+    measuredRowHeightsRef.current = new Map()
+    averageMeasuredHeightRef.current = null
+  }, [displayMode])
+
+  const estimateMessageSize = useCallback((message: Message) => {
+    const measured = measuredRowHeightsRef.current.get(message.id)
+    if (measured) return measured
+
+    const el = scrollRef.current
+    const width = Math.max(320, el?.clientWidth ?? 720)
+    const bubbleWidth = isBubble ? width - 48 : width * 0.82
+    const charsPerLine = Math.max(24, Math.floor(bubbleWidth / 7.2))
+    const content = message.swipes?.[message.swipe_id] ?? message.content ?? ''
+    const explicitLines = content.split('\n').length
+    const wrappedLines = Math.ceil(content.length / charsPerLine)
+    const lineCount = Math.max(1, explicitLines, wrappedLines)
+    const codeBlockCount = (content.match(/```/g)?.length ?? 0) / 2
+    const imageCount = message.extra?.attachments?.filter((a) => a.type === 'image').length ?? 0
+    const audioCount = message.extra?.attachments?.filter((a) => a.type === 'audio').length ?? 0
+    const base = isBubble ? 104 : 76
+    const lineHeight = 23
+    const mediaHeight = imageCount > 0 ? 250 : 0
+    const audioHeight = audioCount * 58
+    const codeHeight = codeBlockCount * 44
+    const contentEstimate = base + lineCount * lineHeight + mediaHeight + audioHeight + codeHeight
+    const average = averageMeasuredHeightRef.current
+
+    // Blend content heuristics with the measured chat average so unknown rows
+    // near the loaded tail don't all start from the same poor fixed estimate.
+    return clampEstimate(average ? (contentEstimate * 0.7 + average * 0.3) : contentEstimate)
+  }, [isBubble])
+
   const getItemKey = useCallback(
     (index: number) => {
       const message = visibleMessages[index]
-      return message ? `${message.id}:${message.index_in_chat}` : index
+      return message ? message.id : index
     },
     [visibleMessages]
   )
@@ -106,13 +144,39 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const rowVirtualizer = useVirtualizer({
     count: visibleMessages.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => estimateSize,
-    overscan: 6,
+    estimateSize: (index) => {
+      const message = visibleMessages[index]
+      return message ? estimateMessageSize(message) : estimateSize
+    },
+    overscan: 12,
     getItemKey,
+    useAnimationFrameWithResizeObserver: true,
+    measureElement: (element, entry) => {
+      const size = entry?.borderBoxSize?.[0]?.blockSize
+      const measured = size ?? element.getBoundingClientRect().height
+      const messageId = element.getAttribute('data-message-id')
+      if (messageId && measured >= MIN_MEASURED_ROW_HEIGHT) {
+        measuredRowHeightsRef.current.set(messageId, measured)
+        const values = Array.from(measuredRowHeightsRef.current.values())
+        const sample = values.slice(-80)
+        averageMeasuredHeightRef.current = sample.reduce((sum, value) => sum + value, 0) / sample.length
+      }
+      return measured
+    },
   })
 
+  useLayoutEffect(() => {
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item) => {
+      const scrollOffset = rowVirtualizer.scrollOffset ?? scrollRef.current?.scrollTop ?? 0
+      return item.end < scrollOffset
+    }
+
+    return () => {
+      rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined
+    }
+  }, [rowVirtualizer])
+
   const virtualItems = rowVirtualizer.getVirtualItems()
-  const rangeKey = `${virtualItems[0]?.index ?? -1}:${virtualItems[virtualItems.length - 1]?.index ?? -1}`
 
   // While streaming, the `streamingContent`-deps RAF pin (below) is the sole
   // authority on scroll position. The virtualTotalSize layout-effect and the
@@ -152,14 +216,14 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     const el = scrollRef.current
     if (!el) return
 
+    const threshold = 30
+    isNearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+
     if (isProgrammaticScrollRef.current) {
       isProgrammaticScrollRef.current = false
       return
     }
-
-    const threshold = 30
-    isNearBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold
 
     if (el.scrollTop > TOP_LOAD_THRESHOLD) {
       topLoadArmedRef.current = true
@@ -170,6 +234,25 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       loadMore()
     }
   }, [hasMore, loadingOlder, loadMore])
+
+  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) {
+      isNearBottomRef.current = false
+    }
+  }, [])
+
+  const handleTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null
+  }, [])
+
+  const handleTouchMove = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    const previousY = touchYRef.current
+    const nextY = event.touches[0]?.clientY ?? null
+    if (previousY != null && nextY != null && nextY > previousY) {
+      isNearBottomRef.current = false
+    }
+    touchYRef.current = nextY
+  }, [])
 
   // Scroll anchoring: when older messages are prepended, adjust scrollTop so
   // the user's viewport stays on the same content instead of jumping to the top.
@@ -316,44 +399,17 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     return () => window.removeEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollToBottom)
   }, [scrollToHistoryBottom])
 
-  // Viewport observer — gate expensive effects (box-shadow, backdrop-filter) to visible cards.
-  // When glass is disabled, skip the observer entirely — the backdrop-filter rules won't apply
-  // via CSS (gated behind [data-glass]), and the box-shadow alone isn't expensive enough to
-  // warrant the constant attribute toggling that causes layout thrash during scroll.
-  const glassEnabled = useStore((s) => s.theme?.enableGlass ?? true)
-
-  useEffect(() => {
-    const container = scrollRef.current
-    if (!container) return
-
-    // When glass is off, mark all cards as in-viewport statically (for box-shadow)
-    // and skip the observer to avoid scroll-time DOM mutations.
-    const cards = container.querySelectorAll('[data-message-id]')
-    if (!glassEnabled) {
-      cards.forEach((card) => card.setAttribute('data-in-viewport', ''))
-      return
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            entry.target.setAttribute('data-in-viewport', '')
-          } else {
-            entry.target.removeAttribute('data-in-viewport')
-          }
-        }
-      },
-      { root: container, rootMargin: '200px' }
-    )
-
-    cards.forEach((card) => observer.observe(card))
-
-    return () => observer.disconnect()
-  }, [glassEnabled, rangeKey])
-
   return (
-    <div data-component="MessageList" className={styles.list} ref={scrollRef} onScroll={handleScroll} data-chat-scroll="true">
+    <div
+      data-component="MessageList"
+      className={styles.list}
+      ref={scrollRef}
+      onScroll={handleScroll}
+      onWheel={handleWheel}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      data-chat-scroll="true"
+    >
       {isGroupChat && <GroupChatMemberBar chatId={chatId} />}
       {loadingOlder && (
         <div className={styles.loadingOlder}>Loading older messages...</div>
@@ -369,11 +425,10 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
           return (
             <VirtualRow
               key={virtualRow.key}
-              itemKey={virtualRow.key}
               index={virtualRow.index}
+              messageId={message.id}
               start={virtualRow.start}
               measureElement={rowVirtualizer.measureElement}
-              measuredKeys={measuredKeysRef.current}
             >
               <MessageCard
                 message={message}
@@ -394,7 +449,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
         const bubbleStyleClass = isImpersonateStream ? bubbleStyles.user : bubbleStyles.character
         const nameStyleClass = isImpersonateStream ? bubbleStyles.nameUser : bubbleStyles.nameChar
         return (
-          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${impersonateUserLeft ? bubbleStyles.userLeft : ''} ${bubbleStyles.streaming}`} data-in-viewport>
+          <div className={`${bubbleStyles.card} ${bubbleStyleClass} ${impersonateUserLeft ? bubbleStyles.userLeft : ''} ${bubbleStyles.streaming}`}>
             <div className={bubbleStyles.bubble}>
               <div className={bubbleStyles.header}>
                 <div className={bubbleStyles.headerLeft}>
@@ -464,43 +519,19 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
 }
 
 interface VirtualRowProps {
-  itemKey: string | number | bigint
   index: number
+  messageId: string
   start: number
   measureElement: (el: Element | null) => void
-  measuredKeys: Set<string | number | bigint>
   children: ReactNode
 }
 
-// Gates each virtualized row's opacity on its first measurement. The row
-// mounts invisible, then fades in after two rAFs — enough for the
-// ResizeObserver-driven reposition to commit before we reveal. Previously
-// measured keys (e.g. on scroll-back) mount already revealed so the reveal
-// isn't replayed every time a row re-enters the window.
-function VirtualRow({ itemKey, index, start, measureElement, measuredKeys, children }: VirtualRowProps) {
-  const alreadyMeasured = measuredKeys.has(itemKey)
-  const [measured, setMeasured] = useState(alreadyMeasured)
-
-  useEffect(() => {
-    if (alreadyMeasured) return
-    let r2 = 0
-    const r1 = requestAnimationFrame(() => {
-      r2 = requestAnimationFrame(() => {
-        measuredKeys.add(itemKey)
-        setMeasured(true)
-      })
-    })
-    return () => {
-      cancelAnimationFrame(r1)
-      cancelAnimationFrame(r2)
-    }
-  }, [alreadyMeasured, measuredKeys, itemKey])
-
+function VirtualRow({ index, messageId, start, measureElement, children }: VirtualRowProps) {
   return (
     <div
       ref={measureElement}
       data-index={index}
-      data-measured={measured ? 'true' : 'false'}
+      data-message-id={messageId}
       className={styles.virtualRow}
       style={{ transform: `translateY(${start}px)` }}
     >

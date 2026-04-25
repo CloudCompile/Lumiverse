@@ -61,8 +61,10 @@
   flex-direction: row;
 }
 
-/* Viewport-gated expensive effects — only rendered for visible cards */
-.card[data-in-viewport] {
+/* Virtualized rows only mount near the viewport, so avoid scroll-time DOM
+   attribute toggles here. Toggling a public attribute let custom CSS change
+   row size during measurement, which could feed back into virtualization. */
+.card {
   box-shadow:
     0 0 0 0.5px var(--lcs-glass-border),
     0 2px 6px rgba(0, 0, 0, 0.2),
@@ -71,11 +73,11 @@
 
 /* Only apply backdrop-filter when glass is enabled AND there's a non-solid
    background (image/video/scene). Blurring a solid color is pure GPU waste. */
-:global([data-glass][data-chat-bg]) .card[data-in-viewport] {
+:global([data-glass][data-chat-bg]) .card {
   backdrop-filter: blur(var(--lcs-glass-strong-blur, 12px)) saturate(1.2);
 }
 
-.card[data-in-viewport]:hover {
+.card:hover {
   box-shadow:
     0 0 0 0.5px var(--lcs-glass-border-hover, rgba(255, 255, 255, 0.1)),
     0 1px 2px rgba(0, 0, 0, 0.28),
@@ -87,7 +89,7 @@
     var(--lcs-glass-bg-hover, rgba(24, 22, 36, 0.65));
 }
 
-:global([data-theme-mode='light']) .card[data-in-viewport]:hover {
+:global([data-theme-mode='light']) .card:hover {
   box-shadow:
     0 0 0 0.5px rgba(0, 0, 0, 0.06),
     0 1px 2px rgba(0, 0, 0, 0.04),
@@ -104,7 +106,7 @@
 }
 
 /* Disable bubble hover effects when user opts out */
-:global([data-no-bubble-hover]) .card[data-in-viewport]:hover {
+:global([data-no-bubble-hover]) .card:hover {
   box-shadow:
     0 0 0 0.5px var(--lcs-glass-border),
     0 1px 2px rgba(0, 0, 0, 0.2),

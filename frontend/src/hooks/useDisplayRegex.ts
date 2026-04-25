@@ -19,6 +19,16 @@ interface DisplayRegexContentCacheEntry {
   promise?: Promise<string>
 }
 
+interface ResolvedTemplatesState {
+  key: string
+  value: ResolvedDisplayRegexTemplates
+}
+
+interface ResolvedContentState {
+  key: string
+  value: string
+}
+
 const displayRegexResolutionCache = new Map<string, DisplayRegexCacheEntry>()
 const displayRegexContentCache = new Map<string, DisplayRegexContentCacheEntry>()
 const displayRegexCacheListeners = new Set<() => void>()
@@ -35,6 +45,8 @@ function createEmptyResolvedTemplates(): ResolvedDisplayRegexTemplates {
     resolvedReplacements: new Map(),
   }
 }
+
+const EMPTY_RESOLVED_TEMPLATES = createEmptyResolvedTemplates()
 
 function subscribeDisplayRegexCache(listener: () => void): () => void {
   displayRegexCacheListeners.add(listener)
@@ -112,16 +124,49 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
 
   // Pre-resolve find patterns and non-raw replacement strings via the backend macro engine.
   // Raw replacements stay per-match so capture groups remain available before macro evaluation.
-  const [resolvedTemplates, setResolvedTemplates] = useState<ResolvedDisplayRegexTemplates>(createEmptyResolvedTemplates)
-  const [resolvedContent, setResolvedContent] = useState<string | null>(null)
+  const templateCacheKey = useMemo(() => {
+    const templates: Record<string, string> = {}
+    for (const s of scriptsNeedingResolution) {
+      if (hasMacroSyntax(s.find_regex)) {
+        templates[`find:${s.id}`] = s.find_regex
+      }
+      if (s.substitute_macros !== 'raw' && hasMacroSyntax(s.replace_string)) {
+        templates[`replace:${s.id}`] = s.replace_string
+      }
+    }
+
+    const templateEntries = Object.entries(templates)
+    if (templateEntries.length === 0) return null
+
+    return JSON.stringify({
+      cacheVersion,
+      activeChatId,
+      activeCharacterId,
+      activePersonaId,
+      scripts: scriptsNeedingResolution.map((s) => [
+        s.id,
+        s.updated_at,
+        s.find_regex,
+        s.replace_string,
+        s.substitute_macros,
+      ]),
+    })
+  }, [scriptsNeedingResolution, activeChatId, activeCharacterId, activePersonaId, cacheVersion])
+
+  const cachedTemplates = templateCacheKey ? displayRegexResolutionCache.get(templateCacheKey)?.value : undefined
+  const [resolvedTemplatesState, setResolvedTemplatesState] = useState<ResolvedTemplatesState | null>(() => (
+    templateCacheKey && cachedTemplates ? { key: templateCacheKey, value: cachedTemplates } : null
+  ))
+
+  const resolvedTemplates = cachedTemplates
+    ?? (resolvedTemplatesState?.key === templateCacheKey ? resolvedTemplatesState.value : undefined)
+    ?? EMPTY_RESOLVED_TEMPLATES
+
+  const [resolvedContentState, setResolvedContentState] = useState<ResolvedContentState | null>(null)
 
   useEffect(() => {
-    if (scriptsNeedingResolution.length === 0) {
-      setResolvedTemplates((current) =>
-        current.resolvedFindPatterns.size === 0 && current.resolvedReplacements.size === 0
-          ? current
-          : createEmptyResolvedTemplates(),
-      )
+    if (!templateCacheKey) {
+      setResolvedTemplatesState((current) => current === null ? current : null)
       return
     }
 
@@ -137,35 +182,17 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
 
     const templateEntries = Object.entries(templates)
     if (templateEntries.length === 0) {
-      setResolvedTemplates((current) =>
-        current.resolvedFindPatterns.size === 0 && current.resolvedReplacements.size === 0
-          ? current
-          : createEmptyResolvedTemplates(),
-      )
+      setResolvedTemplatesState((current) => current === null ? current : null)
       return
     }
-
-    const cacheKey = JSON.stringify({
-      cacheVersion,
-      activeChatId,
-      activeCharacterId,
-      activePersonaId,
-      scripts: scriptsNeedingResolution.map((s) => [
-        s.id,
-        s.updated_at,
-        s.find_regex,
-        s.replace_string,
-        s.substitute_macros,
-      ]),
-    })
 
     let cancelled = false
 
     const applyResolvedTemplates = (next: ResolvedDisplayRegexTemplates) => {
-      if (!cancelled) setResolvedTemplates(next)
+      if (!cancelled) setResolvedTemplatesState({ key: templateCacheKey, value: next })
     }
 
-    const cached = displayRegexResolutionCache.get(cacheKey)
+    const cached = displayRegexResolutionCache.get(templateCacheKey)
     if (cached?.value) {
       applyResolvedTemplates(cached.value)
       return () => { cancelled = true }
@@ -187,21 +214,21 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
               next.resolvedReplacements.set(key.slice(8), value)
             }
           }
-          displayRegexResolutionCache.set(cacheKey, { value: next })
+          displayRegexResolutionCache.set(templateCacheKey, { value: next })
           return next
         })
         .catch(() => {
-          displayRegexResolutionCache.delete(cacheKey)
+          displayRegexResolutionCache.delete(templateCacheKey)
           return createEmptyResolvedTemplates()
         })
 
-      displayRegexResolutionCache.set(cacheKey, { promise })
+      displayRegexResolutionCache.set(templateCacheKey, { promise })
     }
 
-    displayRegexResolutionCache.get(cacheKey)?.promise?.then(applyResolvedTemplates)
+    displayRegexResolutionCache.get(templateCacheKey)?.promise?.then(applyResolvedTemplates)
 
     return () => { cancelled = true }
-  }, [scriptsNeedingResolution, activeChatId, activeCharacterId, activePersonaId, cacheVersion])
+  }, [scriptsNeedingResolution, templateCacheKey, activeChatId, activeCharacterId, activePersonaId])
 
   const fallbackContent = useMemo(
     () => {
@@ -230,13 +257,10 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
     [resolvedTemplates],
   )
 
-  useEffect(() => {
-    if (displayScripts.length === 0 || !hasRawMacroScripts) {
-      setResolvedContent((current) => current === null ? current : null)
-      return
-    }
+  const contentCacheKey = useMemo(() => {
+    if (displayScripts.length === 0 || !hasRawMacroScripts) return null
 
-    const cacheKey = JSON.stringify({
+    return JSON.stringify({
       cacheVersion,
       activeChatId,
       activeCharacterId,
@@ -260,13 +284,34 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
         s.substitute_macros,
       ]),
     })
+  }, [
+    displayScripts,
+    hasRawMacroScripts,
+    cacheVersion,
+    activeChatId,
+    activeCharacterId,
+    activePersonaId,
+    isUser,
+    depth,
+    macroCtx,
+    content,
+    resolvedTemplateKey,
+  ])
+
+  const cachedResolvedContent = contentCacheKey ? displayRegexContentCache.get(contentCacheKey)?.value : undefined
+
+  useEffect(() => {
+    if (!contentCacheKey) {
+      setResolvedContentState((current) => current === null ? current : null)
+      return
+    }
 
     let cancelled = false
     const applyResolvedContent = (next: string) => {
-      if (!cancelled) setResolvedContent(next)
+      if (!cancelled) setResolvedContentState({ key: contentCacheKey, value: next })
     }
 
-    const cached = displayRegexContentCache.get(cacheKey)
+    const cached = displayRegexContentCache.get(contentCacheKey)
     if (cached?.value !== undefined) {
       applyResolvedContent(cached.value)
       return () => { cancelled = true }
@@ -290,18 +335,18 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
         }),
       )
         .then((next) => {
-          displayRegexContentCache.set(cacheKey, { value: next })
+          displayRegexContentCache.set(contentCacheKey, { value: next })
           return next
         })
         .catch(() => {
-          displayRegexContentCache.delete(cacheKey)
+          displayRegexContentCache.delete(contentCacheKey)
           return fallbackContent
         })
 
-      displayRegexContentCache.set(cacheKey, { promise })
+      displayRegexContentCache.set(contentCacheKey, { promise })
     }
 
-    displayRegexContentCache.get(cacheKey)?.promise?.then(applyResolvedContent)
+    displayRegexContentCache.get(contentCacheKey)?.promise?.then(applyResolvedContent)
 
     return () => { cancelled = true }
   }, [
@@ -317,8 +362,10 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
     activeChatId,
     activeCharacterId,
     activePersonaId,
-    cacheVersion,
+    contentCacheKey,
   ])
 
-  return resolvedContent ?? fallbackContent
+  return cachedResolvedContent
+    ?? (resolvedContentState?.key === contentCacheKey ? resolvedContentState.value : undefined)
+    ?? fallbackContent
 }

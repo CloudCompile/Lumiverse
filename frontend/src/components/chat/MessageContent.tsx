@@ -168,6 +168,17 @@ function addLazyLoadingToImages(html: string): string {
   return html.replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy"')
 }
 
+function normalizeLegacyFontTags(html: string): string {
+  return html
+    .replace(/<font\b([^>]*)>/gi, (_match, attrs: string) => {
+      const color = attrs.match(/\bcolor\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i)?.slice(1).find(Boolean)
+      const safeColor = color && /^[#\w\s(),.%+-]+$/.test(color) ? color : null
+
+      return safeColor ? `<span style="color:${escapeHtml(safeColor)}">` : '<span>'
+    })
+    .replace(/<\/font\s*>/gi, '</span>')
+}
+
 interface MarkdownFence {
   marker: '`' | '~'
   length: number
@@ -258,6 +269,7 @@ function formatContent(raw: string): string {
   const listSafe = escapeIsolatedOrderedListItems(normalized)
   let html = marked.parse(listSafe, { async: false }) as string
   html = normalizeQuotesInHTML(html)
+  html = normalizeLegacyFontTags(html)
   html = colorizeDialogue(html)
   html = addLazyLoadingToImages(html)
   return html
@@ -464,7 +476,7 @@ function processMarkdownInIsland(html: string): string {
     result = result.replace(`<!--ISLAND_STYLE_${i}-->`, styleBlocks[i])
   }
 
-  return result
+  return normalizeLegacyFontTags(result)
 }
 
 interface ContentPiece {

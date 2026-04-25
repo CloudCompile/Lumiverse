@@ -15,8 +15,10 @@
     box-shadow var(--lcs-transition-fast);
 }
 
-/* Only apply backdrop-filter when glass is enabled AND there's a non-solid background */
-:global([data-glass][data-chat-bg]) .card[data-in-viewport] {
+/* Only apply backdrop-filter when glass is enabled AND there's a non-solid background.
+   Message rows are virtualized, so mounted cards are already near the viewport;
+   keeping this static avoids style/measurement feedback loops while scrolling. */
+:global([data-glass][data-chat-bg]) .card {
   backdrop-filter: blur(var(--lcs-glass-blur));
 }
 

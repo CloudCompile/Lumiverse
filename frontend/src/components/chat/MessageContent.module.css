@@ -52,7 +52,13 @@
   color: var(--lumiverse-prose-dialogue);
 }
 
-/* Inside <font> tags, dialogue/italic/bold defer to the font's color */
+/* Inside explicit color spans, dialogue/italic/bold defer to the authored color. */
+.prose :global(span[style*="color"]) .proseDialogue,
+.prose :global(span[style*="color"]) em,
+.prose :global(span[style*="color"]) .proseItalic,
+.prose :global(span[style*="color"]) strong,
+.prose :global(span[style*="color"]) .proseBold,
+.prose :global(span[style*="color"]) .proseInlineEmphasis,
 .prose :global(font) .proseDialogue,
 .prose :global(font) em,
 .prose :global(font) .proseItalic,

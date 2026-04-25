@@ -48,6 +48,7 @@
   position: relative;
   width: 100%;
   flex-shrink: 0;
+  overflow-anchor: none;
 }
 
 .virtualRow {
@@ -56,12 +57,8 @@
   left: 0;
   right: 0;
   padding-bottom: 8px;
-  opacity: 0;
-  transition: opacity 120ms ease-out;
-}
-
-.virtualRow[data-measured="true"] {
-  opacity: 1;
+  contain: layout style;
+  will-change: transform;
 }
 
 .errorBubble {
