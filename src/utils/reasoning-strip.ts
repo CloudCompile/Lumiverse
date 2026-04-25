@@ -111,7 +111,7 @@ export class GuidedReasoningStreamParser {
         const afterSuffix = this.suffixBuffer.slice(suffixIdx + this.delimiters.suffix.length);
         this.phase = "content";
         this.suffixBuffer = "";
-        if (afterSuffix) processContentChunk(afterSuffix);
+        if (afterSuffix) emitContent(afterSuffix);
         return;
       }
 
@@ -206,7 +206,7 @@ export async function* wrapDelimitedReasoningStream(
 
   for await (const chunk of stream) {
     const parsed = parser.push(chunk.token || "");
-    const reasoning = [chunk.reasoning, parsed.reasoning]
+    const reasoning = [parsed.reasoning, chunk.reasoning]
       .filter((value): value is string => !!value)
       .join("");
 

@@ -328,6 +328,7 @@ export function convertRisuRegexScripts(
       scope: "character",
       scope_id: characterId,
       target,
+      character_id: characterId,
       disabled: r.ableFlag === false,
       sort_order: i,
       description: `Imported from RisuAI module`,

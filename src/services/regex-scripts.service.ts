@@ -43,6 +43,7 @@ export function rowToRegexScript(row: any): RegexScript {
     folder: row.folder || "",
     pack_id: row.pack_id || null,
     preset_id: row.preset_id || null,
+    character_id: row.character_id || null,
     metadata: JSON.parse(row.metadata),
     run_on_edit: !!row.run_on_edit,
     disabled: !!row.disabled,
@@ -195,8 +196,8 @@ export function createRegexScript(userId: string, input: CreateRegexScriptInput)
 
   getDb()
     .query(
-      `INSERT INTO regex_scripts (id, user_id, name, script_id, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, pack_id, preset_id, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO regex_scripts (id, user_id, name, script_id, find_regex, replace_string, flags, placement, scope, scope_id, target, min_depth, max_depth, trim_strings, run_on_edit, substitute_macros, disabled, sort_order, description, folder, pack_id, preset_id, character_id, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -221,6 +222,7 @@ export function createRegexScript(userId: string, input: CreateRegexScriptInput)
       input.folder ?? "",
       input.pack_id ?? null,
       input.preset_id ?? null,
+      input.character_id ?? null,
       JSON.stringify(input.metadata ?? {}),
       now,
       now
@@ -725,7 +727,7 @@ export function exportRegexScripts(userId: string, ids?: string[]): RegexScriptE
   }
 
   const scripts = rows.map(rowToRegexScript).map((s) => {
-    const { id, user_id, created_at, updated_at, pack_id, preset_id, ...rest } = s;
+    const { id, user_id, created_at, updated_at, pack_id, preset_id, character_id, ...rest } = s;
     return rest;
   });
 
@@ -751,6 +753,13 @@ export function getRegexScriptsByPresetId(userId: string, presetId: string): Reg
   return rows.map(rowToRegexScript);
 }
 
+export function getRegexScriptsByCharacterId(userId: string, characterId: string): RegexScript[] {
+  const rows = getDb()
+    .query("SELECT * FROM regex_scripts WHERE user_id = ? AND character_id = ? ORDER BY sort_order ASC, created_at ASC")
+    .all(userId, characterId) as any[];
+  return rows.map(rowToRegexScript);
+}
+
 /**
  * Delete every regex script owned by a preset. Emits REGEX_SCRIPT_DELETED per
  * removed script so subscribed clients update their lists.
@@ -765,6 +774,29 @@ export function deleteRegexScriptsByPresetId(userId: string, presetId: string): 
   const result = db
     .query("DELETE FROM regex_scripts WHERE user_id = ? AND preset_id = ?")
     .run(userId, presetId);
+  const changes = Number(result.changes ?? 0);
+
+  for (const { id } of rows) {
+    eventBus.emit(EventType.REGEX_SCRIPT_DELETED, { id }, userId);
+  }
+
+  return changes;
+}
+
+/**
+ * Delete every regex script owned by a character import/generation flow. Emits
+ * REGEX_SCRIPT_DELETED per removed script so subscribed clients update their lists.
+ */
+export function deleteRegexScriptsByCharacterId(userId: string, characterId: string): number {
+  const db = getDb();
+  const rows = db
+    .query("SELECT id FROM regex_scripts WHERE user_id = ? AND character_id = ?")
+    .all(userId, characterId) as Array<{ id: string }>;
+  if (rows.length === 0) return 0;
+
+  const result = db
+    .query("DELETE FROM regex_scripts WHERE user_id = ? AND character_id = ?")
+    .run(userId, characterId);
   const changes = Number(result.changes ?? 0);
 
   for (const { id } of rows) {
@@ -844,6 +876,12 @@ export function importRegexScripts(
       ? payload.preset_id.trim()
       : undefined;
 
+  // Extract top-level character_id ownership link so character deletion can cascade
+  const characterIdOverride: string | undefined =
+    typeof payload?.character_id === "string" && payload.character_id.trim()
+      ? payload.character_id.trim()
+      : undefined;
+
   // Normalize input: accept array, { scripts: [] }, or single object
   let scripts: any[];
   if (Array.isArray(payload)) {
@@ -915,6 +953,11 @@ export function importRegexScripts(
     // Stamp preset ownership if provided
     if (presetIdOverride && !item.preset_id) {
       item.preset_id = presetIdOverride;
+    }
+
+    // Stamp character ownership if provided
+    if (characterIdOverride && !item.character_id) {
+      item.character_id = characterIdOverride;
     }
 
     const result = createRegexScript(userId, item);

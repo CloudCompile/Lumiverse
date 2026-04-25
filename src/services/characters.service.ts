@@ -6,6 +6,7 @@ import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import * as filesSvc from "./files.service";
 import * as imagesSvc from "./images.service";
+import { deleteRegexScriptsByCharacterId } from "./regex-scripts.service";
 
 // ─── Summary queries (lightweight, for character browser) ─────────────────
 
@@ -587,6 +588,7 @@ export function setCharacterSourceFilename(userId: string, id: string, sourceFil
 export function deleteCharacter(userId: string, id: string): boolean {
   const result = getDb().query("DELETE FROM characters WHERE id = ? AND user_id = ?").run(id, userId);
   if (result.changes > 0) {
+    deleteRegexScriptsByCharacterId(userId, id);
     eventBus.emit(EventType.CHARACTER_DELETED, { id }, userId);
   }
   return result.changes > 0;

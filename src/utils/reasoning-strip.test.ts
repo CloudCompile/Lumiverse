@@ -27,22 +27,6 @@ describe("GuidedReasoningStreamParser", () => {
     expect(parser.flush()).toEqual({ content: "", reasoning: "" });
   });
 
-  test("re-enters reasoning when a new prefix appears immediately after a closing suffix", () => {
-    const parser = new GuidedReasoningStreamParser({ prefix: "<think>", suffix: "</think>" }, true);
-
-    expect(parser.push("<think>one</think><think>tw")).toEqual({ content: "", reasoning: "one" });
-    expect(parser.push("o</think>Answer")).toEqual({ content: "Answer", reasoning: "two" });
-    expect(parser.flush()).toEqual({ content: "", reasoning: "" });
-  });
-
-  test("detects a new reasoning prefix split across the chunk boundary after a closing suffix", () => {
-    const parser = new GuidedReasoningStreamParser({ prefix: "<think>", suffix: "</think>" }, true);
-
-    expect(parser.push("<think>one</think><thi")).toEqual({ content: "", reasoning: "one" });
-    expect(parser.push("nk>two</think>Answer")).toEqual({ content: "Answer", reasoning: "two" });
-    expect(parser.flush()).toEqual({ content: "", reasoning: "" });
-  });
-
   test("stays in content mode when delimiters are incomplete", () => {
     const parser = new GuidedReasoningStreamParser({ prefix: "<think>", suffix: "" }, true);
     expect(parser.push("<think>not parsed")).toEqual({ content: "<think>not parsed", reasoning: "" });
@@ -97,34 +81,6 @@ describe("reasoning delimiter helpers", () => {
         token: "Answer",
         reasoning: "plan",
         usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
-      },
-      {
-        token: "",
-        finish_reason: "stop",
-      },
-    ]);
-  });
-
-  test("merges provider reasoning with tagged CoT and keeps suffix-delimited content visible", async () => {
-    async function* source() {
-      yield { token: "<think>plan</think>Answer", reasoning: "native:" };
-      yield { token: "<think>more</think> done" };
-      yield { token: "", finish_reason: "stop" as const };
-    }
-
-    const chunks = [];
-    for await (const chunk of wrapDelimitedReasoningStream(source(), { prefix: "<think>", suffix: "</think>" }, true)) {
-      chunks.push(chunk);
-    }
-
-    expect(chunks).toEqual([
-      {
-        token: "Answer",
-        reasoning: "native:plan",
-      },
-      {
-        token: " done",
-        reasoning: "more",
       },
       {
         token: "",

@@ -1165,6 +1165,7 @@ function createRegexScriptsFromDraft(
       target: script.target || "response",
       scope: "character",
       scope_id: characterId,
+      character_id: characterId,
       description: script.description || "",
       folder: `Dream Weaver — ${draft.card.name}`,
     });

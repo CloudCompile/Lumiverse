@@ -342,6 +342,7 @@ async function installFromUrl(
               ...(bundled as import("../types/regex-script").CreateRegexScriptInput),
               scope: "character",
               scope_id: character.id,
+              character_id: character.id,
               metadata: { ...bundled.metadata, source: "charx_bundle" },
             });
           } catch { /* skip individual failures */ }
