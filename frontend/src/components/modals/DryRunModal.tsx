@@ -192,13 +192,10 @@ export default function DryRunModal() {
 
   // Memoise derived values so toggling a sibling section doesn't re-serialise
   // potentially large payloads on every render.
-  const tokensByName = useMemo(() => {
-    const map = new Map<string, number>()
-    if (tokenCount?.breakdown) {
-      for (const entry of tokenCount.breakdown) map.set(entry.name, entry.tokens)
-    }
-    return map
-  }, [tokenCount])
+  const tokenBreakdown = useMemo(
+    () => tokenCount?.breakdown || [],
+    [tokenCount],
+  )
 
   const parametersJson = useMemo(
     () => JSON.stringify(parameters, null, 2),
@@ -291,15 +288,18 @@ export default function DryRunModal() {
                         )}
                       </div>
                     )}
-                    <div className={styles.breakdownList}>
-                      {breakdown.map((entry, i) => {
-                        const tokens = tokensByName.get(entry.name)
-                        return (
-                          <div key={i} className={styles.breakdownEntry}>
-                            <span className={styles.breakdownLabel}>{entry.name}</span>
-                            <span className={styles.breakdownSource}>{entry.type}</span>
-                            {entry.role && (
-                              <span className={styles.breakdownRole}>{entry.role}</span>
+                      <div className={styles.breakdownList}>
+                        {breakdown.map((entry, i) => {
+                          const tokens = tokenBreakdown[i]?.tokens
+                          return (
+                            <div key={i} className={styles.breakdownEntry}>
+                              <span className={styles.breakdownLabel}>{entry.name}</span>
+                              {entry.extensionName && (
+                                <span className={styles.breakdownRole}>{entry.extensionName}</span>
+                              )}
+                              <span className={styles.breakdownSource}>{entry.type}</span>
+                              {entry.role && (
+                                <span className={styles.breakdownRole}>{entry.role}</span>
                             )}
                             {tokens != null && (
                               <span className={styles.breakdownTokens}>

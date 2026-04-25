@@ -301,6 +301,9 @@ function GroupAccordion({ group, total, open, onToggle }: {
                       <div className={styles.tokenName}>
                         <div className={styles.tokenColor} style={{ background: getBlockDisplayColor(i) }} />
                         <span>{entry.name}</span>
+                        {entry.extensionName && (
+                          <span className={styles.tokenRole}>{entry.extensionName}</span>
+                        )}
                         {entry.role && (
                           <span className={clsx(styles.tokenRole, ROLE_CLASS[entry.role])}>
                             {entry.role}

@@ -3,6 +3,7 @@ import type {
   WorkerToHost,
   HostToWorker,
   LlmMessageDTO,
+  InterceptorBreakdownEntryDTO,
   ToolRegistration,
   ExtensionInfo,
   ConnectionProfileDTO,
@@ -732,7 +733,16 @@ export class WorkerHost {
             interceptParams = undefined;
           }
         }
-        this.resolveRequest(msg.requestId, { messages: msg.messages, parameters: interceptParams });
+        const interceptBreakdown = Array.isArray(msg.breakdown)
+          ? msg.breakdown
+              .map((entry) => this.normalizeInterceptorBreakdownEntry(entry, msg.messages))
+              .filter((entry): entry is NonNullable<typeof entry> => !!entry)
+          : undefined;
+        this.resolveRequest(msg.requestId, {
+          messages: msg.messages,
+          parameters: interceptParams,
+          ...(interceptBreakdown && interceptBreakdown.length > 0 ? { breakdown: interceptBreakdown } : {}),
+        });
         break;
       }
       case "register_tool":
@@ -1539,6 +1549,29 @@ export class WorkerHost {
         });
       },
     });
+  }
+
+  private normalizeInterceptorBreakdownEntry(
+    entry: InterceptorBreakdownEntryDTO,
+    messages: LlmMessageDTO[],
+  ): NonNullable<InterceptorResult["breakdown"]>[number] | null {
+    const messageIndex = Number(entry?.messageIndex);
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex >= messages.length) {
+      return null;
+    }
+    const message = messages[messageIndex];
+    const extensionName = String(this.manifest.name || this.manifest.identifier || this.extensionId).trim();
+    const label = typeof entry?.name === "string" && entry.name.trim()
+      ? entry.name.trim()
+      : extensionName;
+    return {
+      messageIndex,
+      name: label,
+      role: message.role,
+      content: message.content,
+      extensionId: this.manifest.identifier,
+      extensionName,
+    };
   }
 
   // ─── Tool registration ───────────────────────────────────────────────
@@ -4896,6 +4929,8 @@ export class WorkerHost {
           firstMessageIndex: b.firstMessageIndex,
           preCountedTokens: b.preCountedTokens,
           excludeFromTotal: b.excludeFromTotal,
+          extensionId: b.extensionId,
+          extensionName: b.extensionName,
         })),
         parameters: dryRunResult.parameters,
         model: dryRunResult.model,

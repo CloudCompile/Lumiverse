@@ -360,6 +360,8 @@ export async function countBreakdown(
       tokens,
       role: entry.role,
       blockId: entry.blockId,
+      extensionId: entry.extensionId,
+      extensionName: entry.extensionName,
     });
   }
 

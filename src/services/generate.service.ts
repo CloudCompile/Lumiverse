@@ -20,7 +20,7 @@ import {
 import * as charactersSvc from "./characters.service";
 import { getEffectiveCharacterName } from "../types/character";
 import { getTextContent, type LlmMessage, type GenerationParameters, type GenerationRequest, type GenerationResponse, type StreamChunk, type GenerationType, type ImpersonateMode, type AssemblyBreakdownEntry, type ActivatedWorldInfoEntry, type ToolDefinition, type ToolCallResult } from "../llm/types";
-import { interceptorPipeline } from "../spindle/interceptor-pipeline";
+import { interceptorPipeline, type InterceptorBreakdownEntry } from "../spindle/interceptor-pipeline";
 import { contextHandlerChain } from "../spindle/context-handler";
 import { executeCouncil, collectWorldInfoForCouncil, formatDeliberation, type CouncilEnrichment } from "./council/council-execution.service";
 import { activateWorldInfo } from "./world-info-activation.service";
@@ -160,7 +160,14 @@ export interface DryRunResult {
   provider: string;
   tokenCount?: {
     total_tokens: number;
-    breakdown: { name: string; type: string; tokens: number; role?: string }[];
+    breakdown: {
+      name: string;
+      type: string;
+      tokens: number;
+      role?: string;
+      extensionId?: string;
+      extensionName?: string;
+    }[];
     tokenizer_id: string | null;
     tokenizer_name: string | null;
   };
@@ -273,6 +280,25 @@ function getReasoningParseConfig(userId: string): { enabled: boolean; delimiters
     enabled: reasoningSetting?.value?.autoParse === true,
     delimiters: resolveReasoningDelimiters(reasoningSetting?.value),
   };
+}
+
+function appendInterceptorBreakdownEntries(
+  breakdown: AssemblyBreakdownEntry[] | undefined,
+  interceptorBreakdown: InterceptorBreakdownEntry[] | undefined,
+): AssemblyBreakdownEntry[] | undefined {
+  if (!breakdown || !interceptorBreakdown || interceptorBreakdown.length === 0) return breakdown;
+  const injected = interceptorBreakdown
+    .slice()
+    .sort((a, b) => a.messageIndex - b.messageIndex)
+    .map((entry) => ({
+      type: "extension" as const,
+      name: entry.name,
+      role: entry.role,
+      content: entry.content,
+      extensionId: entry.extensionId,
+      extensionName: entry.extensionName,
+    }));
+  return [...breakdown, ...injected];
 }
 
 function applyDelimitedReasoningParsing(userId: string, response: GenerationResponse): GenerationResponse {
@@ -593,6 +619,7 @@ async function runPromptPipeline(opts: {
   let messages: LlmMessage[];
   let assembledParams: GenerationParameters = {};
   let breakdown: AssemblyBreakdownEntry[] | undefined;
+  let interceptorBreakdown: InterceptorBreakdownEntry[] | undefined;
   let assistantPrefill: string | undefined;
   let activatedWorldInfo: ActivatedWorldInfoEntry[] | undefined;
   let worldInfoStats: DryRunResult["worldInfoStats"] | undefined;
@@ -691,6 +718,7 @@ async function runPromptPipeline(opts: {
     );
     messages = interceptorResult.messages as unknown as LlmMessage[];
     interceptorParameters = interceptorResult.parameters;
+    interceptorBreakdown = interceptorResult.breakdown;
   }
 
   // Apply promptPostProcessing
@@ -751,8 +779,19 @@ async function runPromptPipeline(opts: {
           messages[i] = { ...msg, content: resolvedParts };
         }
       }
+
+      if (interceptorBreakdown && interceptorBreakdown.length > 0) {
+        for (const entry of interceptorBreakdown) {
+          const placement = entry.role === "user" ? "user_input" as const
+            : entry.role === "assistant" ? "ai_output" as const
+            : "world_info" as const;
+          entry.content = await regexScriptsSvc.applyRegexScripts(entry.content, promptScripts, placement, undefined, macroEnv);
+        }
+      }
     }
   }
+
+  breakdown = appendInterceptorBreakdownEntries(breakdown, interceptorBreakdown);
 
   // Merge parameters: assembled (from preset) < interceptor overrides < request overrides
   const parameters: GenerationParameters = { ...assembledParams, ...interceptorParameters, ...opts.inputParameters };

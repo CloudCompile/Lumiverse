@@ -885,7 +885,15 @@ export interface SpindlePlacementSlice {
 
 // ---- Prompt Breakdown Slice ----
 export interface BreakdownCacheEntry {
-  entries: { name: string; type: string; tokens: number; role?: string; blockId?: string }[]
+  entries: {
+    name: string
+    type: string
+    tokens: number
+    role?: string
+    blockId?: string
+    extensionId?: string
+    extensionName?: string
+  }[]
   totalTokens: number
   maxContext: number
   model: string

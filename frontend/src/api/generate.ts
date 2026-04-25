@@ -79,6 +79,8 @@ export interface AssemblyBreakdownEntry {
   role?: string
   content?: string
   blockId?: string
+  extensionId?: string
+  extensionName?: string
 }
 
 export interface DryRunResponse {
@@ -90,7 +92,14 @@ export interface DryRunResponse {
   provider: string
   tokenCount?: {
     total_tokens: number
-    breakdown: { name: string; type: string; tokens: number; role?: string }[]
+    breakdown: {
+      name: string
+      type: string
+      tokens: number
+      role?: string
+      extensionId?: string
+      extensionName?: string
+    }[]
     tokenizer_id: string | null
     tokenizer_name: string | null
   }
@@ -148,7 +157,15 @@ export interface DryRunResponse {
 }
 
 export interface BreakdownResponse {
-  entries: { name: string; type: string; tokens: number; role?: string; blockId?: string }[]
+  entries: {
+    name: string
+    type: string
+    tokens: number
+    role?: string
+    blockId?: string
+    extensionId?: string
+    extensionName?: string
+  }[]
   totalTokens: number
   maxContext: number
   model: string

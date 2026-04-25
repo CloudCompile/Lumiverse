@@ -1869,6 +1869,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
             requestId: msg.requestId,
             messages: normalized.messages,
             ...(normalized.parameters ? { parameters: normalized.parameters } : {}),
+            ...(normalized.breakdown ? { breakdown: normalized.breakdown } : {}),
           });
         } catch (err: any) {
           post({

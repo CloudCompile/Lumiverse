@@ -320,7 +320,7 @@ export interface AssemblyResult {
 }
 
 export interface AssemblyBreakdownEntry {
-  type: 'block' | 'chat_history' | 'separator' | 'utility' | 'world_info' | 'authors_note' | 'append' | 'long_term_memory' | 'sidecar' | 'databank' | 'databank_mention';
+  type: 'block' | 'chat_history' | 'separator' | 'utility' | 'world_info' | 'authors_note' | 'append' | 'long_term_memory' | 'sidecar' | 'databank' | 'databank_mention' | 'extension';
   name: string;
   role?: string;
   content?: string;
@@ -333,4 +333,8 @@ export interface AssemblyBreakdownEntry {
   preCountedTokens?: number;
   /** If true, tokens are displayed but NOT added to the total (e.g. sidecar tokens spent on a separate LLM). */
   excludeFromTotal?: boolean;
+  /** Present for prompt blocks injected by Spindle interceptors. */
+  extensionId?: string;
+  /** Human-readable extension attribution for injected prompt blocks. */
+  extensionName?: string;
 }

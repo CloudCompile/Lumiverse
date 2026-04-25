@@ -1,9 +1,19 @@
 import type { LlmMessageDTO } from "lumiverse-spindle-types";
 import { DEFAULT_INTERCEPTOR_TIMEOUT_MS } from "../services/spindle-settings.service";
 
+export interface InterceptorBreakdownEntry {
+  messageIndex: number;
+  name: string;
+  role: LlmMessageDTO["role"];
+  content: string;
+  extensionId: string;
+  extensionName: string;
+}
+
 export interface InterceptorResult {
   messages: LlmMessageDTO[];
   parameters?: Record<string, unknown>;
+  breakdown?: InterceptorBreakdownEntry[];
 }
 
 export interface Interceptor {
@@ -50,6 +60,7 @@ class InterceptorPipeline {
   ): Promise<InterceptorResult> {
     let result = messages;
     let mergedParameters: Record<string, unknown> | undefined;
+    const mergedBreakdown: InterceptorBreakdownEntry[] = [];
 
     for (const interceptor of this.interceptors) {
       if (interceptor.userId && interceptor.userId !== userId) {
@@ -86,6 +97,9 @@ class InterceptorPipeline {
         if (output.parameters && Object.keys(output.parameters).length > 0) {
           mergedParameters = { ...mergedParameters, ...output.parameters };
         }
+        if (output.breakdown && output.breakdown.length > 0) {
+          mergedBreakdown.push(...output.breakdown);
+        }
       } catch (err) {
         console.error(
           `[Spindle] Interceptor error from ${interceptor.extensionId}:`,
@@ -95,7 +109,11 @@ class InterceptorPipeline {
       }
     }
 
-    return { messages: result, parameters: mergedParameters };
+    return {
+      messages: result,
+      parameters: mergedParameters,
+      ...(mergedBreakdown.length > 0 ? { breakdown: mergedBreakdown } : {}),
+    };
   }
 
   get count(): number {

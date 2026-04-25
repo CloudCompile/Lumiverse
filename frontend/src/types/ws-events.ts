@@ -213,6 +213,15 @@ export interface GenerationStartedPayload {
   characterId?: string
   characterName?: string
   contextClipStats?: ContextClipStats
+  breakdown?: Array<{
+    name: string
+    type: string
+    role?: string
+    content?: string
+    blockId?: string
+    extensionId?: string
+    extensionName?: string
+  }>
 }
 
 export interface GenerationMetrics {
