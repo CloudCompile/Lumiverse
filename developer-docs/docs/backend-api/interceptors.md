@@ -2,7 +2,7 @@
 
 !!! warning "Permission required: `interceptor`"
 
-Interceptors run after prompt assembly but before the messages reach the LLM provider. They can modify, add, or remove messages — and optionally inject generation parameters.
+Interceptors run after prompt assembly but before the messages reach the LLM provider. They can modify, add, or remove messages, optionally inject generation parameters, and mark injected messages as first-class Prompt Breakdown entries.
 
 ```ts
 spindle.registerInterceptor(async (messages, context) => {
@@ -49,6 +49,12 @@ Return an `InterceptorResultDTO` to modify both messages and generation paramete
 interface InterceptorResultDTO {
   messages: LlmMessageDTO[]
   parameters?: Record<string, unknown>
+  breakdown?: InterceptorBreakdownEntryDTO[]
+}
+
+interface InterceptorBreakdownEntryDTO {
+  messageIndex: number
+  name?: string
 }
 ```
 
@@ -70,6 +76,39 @@ spindle.registerInterceptor(async (messages, context) => {
 ```
 
 Without the `generation_parameters` permission, returned parameters are silently stripped. The extension still works as a message-only interceptor — just the parameters are ignored.
+
+### Prompt Breakdown entries
+
+If your interceptor injects one or more messages that users should be able to inspect in Prompt Breakdown, return them in `breakdown`.
+
+`messageIndex` points at the message inside the interceptor's returned `messages` array. The host resolves the message role/content from that index and automatically stamps the entry with the extension's manifest-based attribution (`extensionId`, `extensionName`).
+
+```ts
+spindle.registerInterceptor(async (messages) => {
+  const injected = {
+    role: 'system' as const,
+    content: '[Lore Recall] Relevant memory snippets...'
+  }
+
+  return {
+    messages: [injected, ...messages],
+    breakdown: [
+      {
+        messageIndex: 0,
+        name: 'Retrieved Lore',
+      },
+    ],
+  }
+})
+```
+
+Use `breakdown` when you want the injected content to appear in:
+
+- `spindle.generate.dryRun()` results
+- the live generation breakdown payload sent at generation start
+- saved `/generate/breakdown/:messageId` snapshots after the message is stored
+
+If you omit `breakdown`, the injected message still reaches the model normally — it just will not be represented as its own breakdown block.
 
 ### Parameter merge order
 

@@ -258,11 +258,15 @@ Each entry represents one block in the assembled prompt:
 
 | Field | Type | Description |
 |---|---|---|
-| `type` | `string` | Block type: `"block"`, `"chat_history"`, `"world_info"`, `"authors_note"`, `"utility"`, `"long_term_memory"`, `"separator"`, `"append"`, `"sidecar"`. |
+| `type` | `string` | Block type: `"block"`, `"chat_history"`, `"world_info"`, `"authors_note"`, `"utility"`, `"long_term_memory"`, `"separator"`, `"append"`, `"sidecar"`, `"extension"`. |
 | `name` | `string` | Human-readable block name. |
 | `role` | `string` | Message role (`"system"`, `"user"`, `"assistant"`). |
 | `content` | `string` | The resolved text content. |
 | `blockId` | `string` | Preset block ID (if from a preset block). |
+| `extensionId` | `string` | Present for interceptor-injected breakdown blocks. Resolved from the installed extension manifest. |
+| `extensionName` | `string` | Human-readable extension attribution for interceptor-injected breakdown blocks. |
+
+When an interceptor returns `breakdown: [{ messageIndex, name? }]`, the host turns those referenced messages into `type: "extension"` breakdown entries. This means retrieval or prompt-engineering extensions can expose their injected context in both dry-run results and persisted prompt breakdown snapshots without having to parse or diff the final prompt themselves.
 
 ### ActivationStatsDTO
 
