@@ -261,6 +261,27 @@ function rowToChatLink(row: ChatLinkRow): ChatLink {
   };
 }
 
+function getChatLinksByIds(linkIds: string[]): ChatLink[] {
+  if (linkIds.length === 0) return [];
+
+  const placeholders = linkIds.map(() => "?").join(", ");
+  const rows = getDb().query(
+    `SELECT
+       l.*,
+       v.name AS vault_name,
+       v.entity_count AS vault_entity_count,
+       v.relation_count AS vault_relation_count,
+       tc.name AS target_chat_name
+     FROM cortex_chat_links l
+     LEFT JOIN cortex_vaults v ON v.id = l.vault_id
+     LEFT JOIN chats tc ON tc.id = l.target_chat_id
+     WHERE l.id IN (${placeholders})`,
+  ).all(...linkIds) as ChatLinkRow[];
+
+  const linkById = new Map(rows.map((row) => [row.id, rowToChatLink(row)]));
+  return linkIds.map((id) => linkById.get(id)).filter((link): link is ChatLink => Boolean(link));
+}
+
 // ─── Vault CRUD ───────────────────────────────────────────────
 
 /**
@@ -651,6 +672,7 @@ export function attachLink(
 ): ChatLink[] {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
+  const createdLinkIds: string[] = [];
 
   // Validate
   if (linkType === "vault") {
@@ -682,8 +704,6 @@ export function attachLink(
     if (existing) throw new ChatLinkError("This chat is already interlinked with the target", 409);
   }
 
-  const links: ChatLink[] = [];
-
   db.transaction(() => {
     // Primary link
     const id = crypto.randomUUID();
@@ -691,24 +711,7 @@ export function attachLink(
       `INSERT INTO cortex_chat_links (id, user_id, chat_id, link_type, vault_id, target_chat_id, label, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, userId, chatId, linkType, opts.vaultId ?? null, opts.targetChatId ?? null, opts.label ?? "", now);
-
-    links.push({
-      id,
-      userId,
-      chatId,
-      linkType,
-      vaultId: opts.vaultId ?? null,
-      vaultName: null,
-      vaultEntityCount: null,
-      vaultRelationCount: null,
-      targetChatId: opts.targetChatId ?? null,
-      targetChatName: null,
-      targetChatExists: true,
-      label: opts.label ?? "",
-      enabled: true,
-      priority: 0,
-      createdAt: now,
-    });
+    createdLinkIds.push(id);
 
     // Bidirectional reverse link (interlinks only)
     if (linkType === "interlink" && opts.bidirectional && opts.targetChatId) {
@@ -722,29 +725,12 @@ export function attachLink(
           `INSERT INTO cortex_chat_links (id, user_id, chat_id, link_type, vault_id, target_chat_id, label, created_at)
            VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
         ).run(reverseId, userId, opts.targetChatId, "interlink", chatId, opts.label ?? "", now);
-
-        links.push({
-          id: reverseId,
-          userId,
-          chatId: opts.targetChatId,
-          linkType: "interlink",
-          vaultId: null,
-          vaultName: null,
-          vaultEntityCount: null,
-          vaultRelationCount: null,
-          targetChatId: chatId,
-          targetChatName: null,
-          targetChatExists: true,
-          label: opts.label ?? "",
-          enabled: true,
-          priority: 0,
-          createdAt: now,
-        });
+        createdLinkIds.push(reverseId);
       }
     }
   })();
 
-  return links;
+  return getChatLinksByIds(createdLinkIds);
 }
 
 /**
@@ -772,20 +758,20 @@ export function getChatLinks(chatId: string): ChatLink[] {
 /**
  * Remove a link. Verifies ownership.
  */
-export function removeLink(userId: string, linkId: string): boolean {
+export function removeLink(userId: string, chatId: string, linkId: string): boolean {
   const result = getDb().query(
-    `DELETE FROM cortex_chat_links WHERE id = ? AND user_id = ?`,
-  ).run(linkId, userId);
+    `DELETE FROM cortex_chat_links WHERE id = ? AND chat_id = ? AND user_id = ?`,
+  ).run(linkId, chatId, userId);
   return (result as any).changes > 0;
 }
 
 /**
  * Toggle a link's enabled state.
  */
-export function toggleLink(userId: string, linkId: string, enabled: boolean): boolean {
+export function toggleLink(userId: string, chatId: string, linkId: string, enabled: boolean): boolean {
   const result = getDb().query(
-    `UPDATE cortex_chat_links SET enabled = ? WHERE id = ? AND user_id = ?`,
-  ).run(enabled ? 1 : 0, linkId, userId);
+    `UPDATE cortex_chat_links SET enabled = ? WHERE id = ? AND chat_id = ? AND user_id = ?`,
+  ).run(enabled ? 1 : 0, linkId, chatId, userId);
   return (result as any).changes > 0;
 }
 

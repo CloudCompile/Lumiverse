@@ -7,6 +7,7 @@ import { ApiError } from "@/api/client";
 import { useStore } from "@/store";
 import { memoryCortexApi, type CortexVault, type CortexChatLink } from "@/api/memory-cortex";
 import { chatsApi } from "@/api/chats";
+import type { RecentChat } from "@/types/api";
 import styles from "./MemoryCortexPanel.module.css";
 import clsx from "clsx";
 
@@ -166,12 +167,12 @@ export default function CortexLinksTab({ activeChatId, activeChatName }: CortexL
       const res = await chatsApi.listRecent({ limit: 50 });
       setAvailableChats(
         res.data
-          .filter((c: any) => c.chatId !== activeChatId)
-          .map((c: any) => ({
-            id: c.chatId,
-            name: c.chatName || c.characterName || "Unnamed chat",
-            characterName: c.characterName,
-            updatedAt: c.lastMessageAt,
+          .filter((chat: RecentChat) => chat.id !== activeChatId)
+          .map((chat: RecentChat) => ({
+            id: chat.id,
+            name: chat.name || chat.character_name || "Unnamed chat",
+            characterName: chat.character_name || undefined,
+            updatedAt: chat.updated_at,
           })),
       );
     } catch {

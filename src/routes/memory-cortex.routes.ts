@@ -1164,6 +1164,10 @@ app.post("/chats/:chatId/links", async (c) => {
     const links = memoryCortex.attachLink(userId, chatId, linkType, {
       vaultId, targetChatId, label, bidirectional,
     });
+    memoryCortex.invalidateLinkedCortexCache(chatId);
+    for (const link of links) {
+      memoryCortex.invalidateLinkedCortexCache(link.chatId);
+    }
     for (const link of links) {
       eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
         chatId: link.chatId, linkId: link.id, action: "attached",
@@ -1189,14 +1193,16 @@ app.get("/chats/:chatId/links", (c) => {
 
 /** PATCH /chats/:chatId/links/:linkId — Toggle link enabled state */
 app.patch("/chats/:chatId/links/:linkId", async (c) => {
-  const userId = c.get("userId");
-  const linkId = c.req.param("linkId");
   const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const userId = owned.userId;
+  const linkId = c.req.param("linkId");
   const { enabled } = await c.req.json();
   if (typeof enabled !== "boolean") {
     return c.json({ error: "enabled (boolean) is required" }, 400);
   }
-  const ok = memoryCortex.toggleLink(userId, linkId, enabled);
+  const ok = memoryCortex.toggleLink(userId, chatId, linkId, enabled);
   if (!ok) return c.json({ error: "Link not found or not owned" }, 404);
   memoryCortex.invalidateLinkedCortexCache(chatId);
   eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
@@ -1207,10 +1213,12 @@ app.patch("/chats/:chatId/links/:linkId", async (c) => {
 
 /** DELETE /chats/:chatId/links/:linkId — Remove a link */
 app.delete("/chats/:chatId/links/:linkId", (c) => {
-  const userId = c.get("userId");
-  const linkId = c.req.param("linkId");
   const chatId = c.req.param("chatId");
-  const ok = memoryCortex.removeLink(userId, linkId);
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const userId = owned.userId;
+  const linkId = c.req.param("linkId");
+  const ok = memoryCortex.removeLink(userId, chatId, linkId);
   if (!ok) return c.json({ error: "Link not found or not owned" }, 404);
   memoryCortex.invalidateLinkedCortexCache(chatId);
   eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
