@@ -978,6 +978,24 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
     }
   }
 
+  // Stage an empty assistant message early for normal sends so the frontend
+  // has a real message ID to attach to the streaming bubble via data-message-id.
+  // This eliminates the duplicate ephemeral bubble and renders tokens in-place
+  // on the message card, matching the regenerate/swipe UX.
+  if (genType === "normal") {
+    const extra: Record<string, any> = {};
+    if (input.target_character_id) extra.character_id = input.target_character_id;
+    const stagedMsg = chatsSvc.createMessage(input.chat_id, {
+      is_user: false,
+      name: characterName,
+      content: "",
+      extra: Object.keys(extra).length > 0 ? extra : undefined,
+    }, input.userId);
+    stagedMessageId = stagedMsg.id;
+    lifecycle.targetMessageId = stagedMsg.id;
+    excludeMessageId = stagedMsg.id;
+  }
+
   // Register pool entry for recovery — at this point we have all the metadata
   pool.createPoolEntry({
     generationId,
@@ -1111,7 +1129,9 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
         // so the frontend has a real message bubble to stream tokens into. Without
         // this, the HTTP response (and thus startStreaming) arrives after council
         // completes, racing with WS events that may have already finished.
-        if (genType === "normal" || genType === "swipe") {
+        // Guard: normal sends are already staged above; only stage here for swipe
+        // or for sidecar council paths that bypassed the early staging.
+        if (!stagedMessageId && (genType === "normal" || genType === "swipe")) {
           const extra: Record<string, any> = {};
           if (input.target_character_id) extra.character_id = input.target_character_id;
           const stagedMsg = chatsSvc.createMessage(input.chat_id, {
@@ -1510,6 +1530,9 @@ export async function startGeneration(input: GenerateInput): Promise<{ generatio
   } catch (err: any) {
     // Early setup failure (before the async continuation) — connection
     // resolution, character lookup, swipe creation, etc.
+    if (stagedMessageId) {
+      try { chatsSvc.deleteMessage(input.userId, stagedMessageId); } catch { /* best-effort cleanup */ }
+    }
     activeGenerations.delete(generationId);
     activeChatGenerations.delete(chatKey);
     pool.errorPool(generationId, errorMessage(err));

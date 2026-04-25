@@ -33,15 +33,16 @@ function clampEstimate(value: number) {
 export default function MessageList({ messages, chatId, isStreaming }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const isNearBottomRef = useRef(true)
+  const isPinnedRef = useRef(true)
   const isProgrammaticScrollRef = useRef(false)
   const topLoadArmedRef = useRef(true)
-  const rafRef = useRef<number>(0)
   const touchYRef = useRef<number | null>(null)
   const { visibleMessages, hasMore, loadMore, loadingOlder, justPrependedRef } = useChunkedMessages(messages, chatId)
   const lastScrollHeightRef = useRef(0)
   const measuredRowHeightsRef = useRef<Map<string, number>>(new Map())
   const averageMeasuredHeightRef = useRef<number | null>(null)
+  const isPrependingRef = useRef(false)
+  const suppressNextPinUpdateRef = useRef(false)
 
   // Re-arm top-pagination on chat switch.
   useEffect(() => {
@@ -178,11 +179,8 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
 
   const virtualItems = rowVirtualizer.getVirtualItems()
 
-  // While streaming, the `streamingContent`-deps RAF pin (below) is the sole
-  // authority on scroll position. The virtualTotalSize layout-effect and the
-  // MutationObserver/visualViewport triple-pin get routed through this ref so
-  // they no-op during generation — their overlapping scrollTop writes on top
-  // of the RAF pin are what produced the "jumping" stream on iOS PWA.
+  // Gate that keeps the keyboard/safe-zone repin from fighting the unified
+  // scroll guard while streaming is active.
   const isStreamingRef = useRef(isStreaming)
   useEffect(() => {
     isStreamingRef.current = isStreaming
@@ -192,7 +190,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     const el = scrollRef.current
     if (!el || visibleMessages.length === 0) return
 
-    isNearBottomRef.current = true
+    isPinnedRef.current = true
     isProgrammaticScrollRef.current = true
     rowVirtualizer.scrollToIndex(visibleMessages.length - 1, { align: 'end', behavior })
 
@@ -200,7 +198,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       const latest = scrollRef.current
       if (!latest) return
       isProgrammaticScrollRef.current = true
-      latest.scrollTop = latest.scrollHeight
+      latest.scrollTop = latest.scrollHeight - latest.clientHeight
     })
   }, [rowVirtualizer, visibleMessages.length])
 
@@ -210,20 +208,37 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       ? getImgUrl(activeChatAvatarId)
       : getCharAvatar(streamCharacterId, streamCharacter?.image_id ?? null)
 
+  const PIN_THRESHOLD = 80
+  const UNPIN_THRESHOLD = 120
+
+  const updatePinState = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
+    const distance = scrollHeight - scrollTop - clientHeight
+    if (isPinnedRef.current) {
+      if (distance > UNPIN_THRESHOLD) {
+        isPinnedRef.current = false
+      }
+    } else {
+      if (distance < PIN_THRESHOLD) {
+        isPinnedRef.current = true
+      }
+    }
+  }
+
   // Track if user is near bottom — only update pin state for user-initiated
   // scrolls so that programmatic auto-scrolls don't fight user intent.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
 
-    const threshold = 30
-    isNearBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold
-
     if (isProgrammaticScrollRef.current) {
       isProgrammaticScrollRef.current = false
       return
     }
+
+    if (!suppressNextPinUpdateRef.current) {
+      updatePinState(el.scrollTop, el.scrollHeight, el.clientHeight)
+    }
+    suppressNextPinUpdateRef.current = false
 
     if (el.scrollTop > TOP_LOAD_THRESHOLD) {
       topLoadArmedRef.current = true
@@ -236,8 +251,9 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   }, [hasMore, loadingOlder, loadMore])
 
   const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
-    if (event.deltaY < 0) {
-      isNearBottomRef.current = false
+    if (event.deltaY < -30) {
+      isPinnedRef.current = false
+      suppressNextPinUpdateRef.current = true
     }
   }, [])
 
@@ -248,8 +264,9 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const handleTouchMove = useCallback((event: TouchEvent<HTMLDivElement>) => {
     const previousY = touchYRef.current
     const nextY = event.touches[0]?.clientY ?? null
-    if (previousY != null && nextY != null && nextY > previousY) {
-      isNearBottomRef.current = false
+    if (previousY != null && nextY != null && nextY > previousY + 10) {
+      isPinnedRef.current = false
+      suppressNextPinUpdateRef.current = true
     }
     touchYRef.current = nextY
   }, [])
@@ -261,12 +278,14 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     if (!el) return
 
     if (justPrependedRef.current) {
+      isPrependingRef.current = true
       justPrependedRef.current = false
       const heightDiff = el.scrollHeight - lastScrollHeightRef.current
       if (heightDiff > 0 && lastScrollHeightRef.current > 0) {
         isProgrammaticScrollRef.current = true
         el.scrollTop += heightDiff
       }
+      isPrependingRef.current = false
     }
 
     lastScrollHeightRef.current = el.scrollHeight
@@ -285,46 +304,66 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     }
   }, [virtualItems, justPrependedRef, hasMore, loadingOlder, loadMore])
 
-  // RAF-batched auto-scroll during streaming — skipped when user scrolls up
+  // Unified scroll guard: watches scrollHeight changes caused by streaming
+  // tokens, extension mounts, lazy image loads, or virtual row resizing.
+  // When pinned we follow the bottom; when floating we compensate so the
+  // viewport stays locked to the same reading position.
   useEffect(() => {
-    if (!isNearBottomRef.current) return
-
-    cancelAnimationFrame(rafRef.current)
-    rafRef.current = requestAnimationFrame(() => {
-      const el = scrollRef.current
-      if (el) {
-        isProgrammaticScrollRef.current = true
-        el.scrollTop = el.scrollHeight
-      }
-    })
-
-    return () => cancelAnimationFrame(rafRef.current)
-  }, [messages.length, streamingContent])
-
-  // The virtualizer renders each row at estimateSize first and measures its
-  // real height asynchronously via ResizeObserver. When the measured height
-  // exceeds the estimate (common for long messages), totalSize grows after
-  // the pin-to-bottom effect above already ran — leaving the tail of the
-  // last message behind the input bar. Re-pin whenever the virtual total
-  // size changes while the user is anchored to the bottom. Skipped during
-  // active streaming — the streamingContent RAF pin already handles that
-  // cadence, and lazy markdown/image measures mid-stream would otherwise
-  // double-pin on top of the RAF writes.
-  const virtualTotalSize = rowVirtualizer.getTotalSize()
-  useLayoutEffect(() => {
-    if (isStreamingRef.current) return
-    if (!isNearBottomRef.current) return
     const el = scrollRef.current
     if (!el) return
-    isProgrammaticScrollRef.current = true
-    el.scrollTop = el.scrollHeight - el.clientHeight
-  }, [virtualTotalSize])
+
+    let pendingRaf = 0
+    let lastSH = el.scrollHeight
+    let lastST = el.scrollTop
+
+    const apply = () => {
+      pendingRaf = 0
+      const latest = scrollRef.current
+      if (!latest) return
+      if (justPrependedRef.current || isPrependingRef.current) return
+
+      const newSH = latest.scrollHeight
+      const newST = latest.scrollTop
+      const heightDelta = newSH - lastSH
+      const scrollTopDelta = newST - lastST
+
+      lastSH = newSH
+      lastST = newST
+
+      if (heightDelta === 0) return
+
+      // If scrollTop already moved by roughly the height change, something
+      // else (e.g. the virtualizer's shouldAdjustScrollPositionOnItemSizeChange)
+      // handled it — don't double-compensate.
+      if (Math.abs(scrollTopDelta - heightDelta) < 2) return
+
+      if (isPinnedRef.current) {
+        isProgrammaticScrollRef.current = true
+        latest.scrollTop = latest.scrollHeight - latest.clientHeight
+      } else if (heightDelta > 0) {
+        // Only compensate for growth. Shrinkage is either handled by the
+        // virtualizer or is minor enough to ignore.
+        isProgrammaticScrollRef.current = true
+        latest.scrollTop += heightDelta
+      }
+    }
+
+    const mo = new MutationObserver(() => {
+      if (pendingRaf) return
+      pendingRaf = requestAnimationFrame(apply)
+    })
+
+    mo.observe(el, { childList: true, subtree: true, characterData: true })
+
+    return () => {
+      mo.disconnect()
+      if (pendingRaf) cancelAnimationFrame(pendingRaf)
+    }
+  }, [])
 
   // Re-pin to bottom when the input safe-zone changes — keyboard opening on
-  // mobile/iOS PWA grows --lcs-input-safe-zone (set as inline style on the
-  // parent chatColumnInner by InputArea's ResizeObserver). Without this, the
-  // last message would stay behind the newly-raised input bar. Also covers
-  // textarea auto-grow and any other input-driven safe-zone changes.
+  // mobile/iOS PWA grows --lcs-input-safe-zone. Without this, the last
+  // message would stay behind the newly-raised input bar.
   useEffect(() => {
     const el = scrollRef.current
     const parent = el?.parentElement
@@ -338,7 +377,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     }
 
     const pinToBottom = () => {
-      if (!isNearBottomRef.current) return
+      if (!isPinnedRef.current) return
       const latest = scrollRef.current
       if (!latest) return
       isProgrammaticScrollRef.current = true
@@ -349,30 +388,21 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     // resize events. A single rAF-pin can land mid-animation, so we pin
     // immediately AND schedule settling retries to catch the final layout
     // once the keyboard and safe-zone have settled. Skipped while streaming
-    // — the 32ms streamingContent RAF pin already holds the viewport at the
-    // bottom, and stacking the 180/420ms timer pins on top of rapid content
-    // growth produced the visible stepping on iOS PWA.
+    // — the unified scroll guard already handles content growth.
     const repinIfAnchored = () => {
       if (isStreamingRef.current) return
-      if (!isNearBottomRef.current) return
+      if (!isPinnedRef.current) return
       requestAnimationFrame(pinToBottom)
       clearSettleTimers()
       settleTimers.push(window.setTimeout(pinToBottom, 180))
       settleTimers.push(window.setTimeout(pinToBottom, 420))
     }
 
-    // Inline-style mutations on chatColumnInner carry --lcs-input-safe-zone
-    // updates (set by InputArea's ResizeObserver + visualViewport listener).
     const mo = new MutationObserver(repinIfAnchored)
     mo.observe(parent, { attributes: true, attributeFilter: ['style'] })
 
-    // visualViewport resize catches the keyboard directly, in case the
-    // safe-zone lands at the same computed value (e.g., the keyboard's
-    // inset already equals the default fallback).
     const vv = window.visualViewport
     vv?.addEventListener('resize', repinIfAnchored)
-    // visualViewport scroll fires on iOS when the page offsets itself to
-    // keep the focused input in view — another moment worth re-pinning.
     vv?.addEventListener('scroll', repinIfAnchored)
 
     return () => {
@@ -387,9 +417,9 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   useEffect(() => {
     const el = scrollRef.current
     if (el) {
-      isNearBottomRef.current = true
+      isPinnedRef.current = true
       isProgrammaticScrollRef.current = true
-      el.scrollTop = el.scrollHeight
+      el.scrollTop = el.scrollHeight - el.clientHeight
     }
   }, [chatId])
 
