@@ -271,6 +271,7 @@ export function createInputBarActionHandle(
     extensionId,
     extensionName,
     label: options.label,
+    subtitle: options.subtitle,
     iconSvg: options.iconSvg,
     iconUrl: options.iconUrl,
     enabled: options.enabled !== false,
@@ -281,6 +282,9 @@ export function createInputBarActionHandle(
     actionId,
     setLabel(label: string) {
       getStore().updateInputBarAction(actionId, { label })
+    },
+    setSubtitle(subtitle?: string) {
+      getStore().updateInputBarAction(actionId, { subtitle })
     },
     setEnabled(enabled: boolean) {
       getStore().updateInputBarAction(actionId, { enabled })

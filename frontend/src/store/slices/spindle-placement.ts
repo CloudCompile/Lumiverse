@@ -74,6 +74,7 @@ export interface InputBarActionState {
   extensionId: string
   extensionName: string
   label: string
+  subtitle?: string
   iconSvg?: string
   iconUrl?: string
   enabled: boolean
@@ -255,7 +256,7 @@ export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = 
     }))
   },
 
-  updateInputBarAction: (actionId: string, updates: Partial<Pick<InputBarActionState, 'label' | 'enabled'>>) => {
+  updateInputBarAction: (actionId: string, updates: Partial<Pick<InputBarActionState, 'label' | 'subtitle' | 'enabled'>>) => {
     set((state) => ({
       inputBarActions: state.inputBarActions.map((a) =>
         a.id === actionId ? { ...a, ...updates } : a

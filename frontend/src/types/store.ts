@@ -871,7 +871,7 @@ export interface SpindlePlacementSlice {
 
   registerInputBarAction: (action: InputBarActionState) => void
   unregisterInputBarAction: (actionId: string) => void
-  updateInputBarAction: (actionId: string, updates: Partial<Pick<InputBarActionState, 'label' | 'enabled'>>) => void
+  updateInputBarAction: (actionId: string, updates: Partial<Pick<InputBarActionState, 'label' | 'subtitle' | 'enabled'>>) => void
 
   setExtensionCommands: (entry: ExtensionCommandState) => void
   clearExtensionCommands: (extensionId: string) => void
