@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link2, Trash2, Edit3, Zap, Check, Star, BrainCircuit, Copy, LogIn, RefreshCw, MoreVertical } from 'lucide-react'
 import { connectionsApi } from '@/api/connections'
-import { openrouterApi, type OpenRouterCreditsInfo } from '@/api/openrouter'
+import { buildOpenRouterOAuthCallbackUrl, openrouterApi, type OpenRouterCreditsInfo } from '@/api/openrouter'
 import {
   getReasoningBindingSummary,
   getReasoningBindingTitle,
@@ -146,9 +146,7 @@ export default function ConnectionItem({ profile, isActive, providers, onSelect,
   const handleOAuthLogin = useCallback(async () => {
     setOauthLoading(true)
     try {
-      const baseUrl = import.meta.env.VITE_API_BASE || '/api/v1'
-      const apiOrigin = baseUrl.startsWith('http') ? new URL(baseUrl).origin : window.location.origin
-      const callbackUrl = `${apiOrigin}/api/v1/openrouter/oauth-landing`
+      const callbackUrl = buildOpenRouterOAuthCallbackUrl()
       const { auth_url, session_token } = await openrouterApi.initiateAuth(callbackUrl, { connectionId: profile.id })
 
       const popup = window.open(auth_url, 'openrouter_auth', 'width=600,height=700,scrollbars=yes')

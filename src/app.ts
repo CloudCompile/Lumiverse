@@ -259,15 +259,30 @@ app.route("/api/v1/lumihub", lumihubCallbackRoute);
 // to the opener window via postMessage so it can call our exchange endpoint.
 app.get("/api/v1/openrouter/oauth-landing", async (c) => {
   const rawCode = c.req.query("code") || "";
+  const rawOpenerOrigin = c.req.query("opener_origin") || "";
   // Whitelist the OAuth code character set. OpenRouter codes are URL-safe
   // base64-style strings; rejecting anything outside that set blocks the
   // </script> XSS payload entirely. JSON.stringify alone does NOT HTML-encode
   // < or >, so a value like </script><script>alert(1)</script> would otherwise
   // break out of the inline script context.
   const code = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawCode) ? rawCode : "";
+  let openerOrigin = "";
+  try {
+    const parsed = new URL(rawOpenerOrigin);
+    if (parsed.origin === rawOpenerOrigin && isOriginAllowed(parsed.origin)) {
+      openerOrigin = parsed.origin;
+    }
+  } catch {
+    openerOrigin = "";
+  }
   // Pass the code to the inline script via a data attribute. dataset reads it
   // from the DOM as a plain string with no HTML/JS interpretation.
   const codeAttr = code
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const openerOriginAttr = openerOrigin
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
@@ -276,13 +291,14 @@ app.get("/api/v1/openrouter/oauth-landing", async (c) => {
 <html><head><title>OpenRouter Authorization</title>
 <style>body{background:#1c1826;color:rgba(255,255,255,.8);font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:14px}</style></head>
 <body>
-<div id="s" data-code="${codeAttr}">Completing authorization...</div>
+<div id="s" data-code="${codeAttr}" data-opener-origin="${openerOriginAttr}">Completing authorization...</div>
 <script>
 var el = document.getElementById('s');
 var code = el.dataset.code || '';
+var targetOrigin = el.dataset.openerOrigin || window.location.origin;
 if (code && window.opener) {
-  // Restrict postMessage to this origin so only the Lumiverse opener receives the code
-  window.opener.postMessage({ type: 'openrouter_oauth_code', code: code }, window.location.origin);
+  // Restrict postMessage to the known Lumiverse opener origin.
+  window.opener.postMessage({ type: 'openrouter_oauth_code', code: code }, targetOrigin);
   el.textContent = 'Authorized! Closing...';
   setTimeout(function(){ window.close(); }, 500);
 } else if (!code) {
