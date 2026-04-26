@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useStore } from '@/store'
 import { applyDisplayRegex, applyDisplayRegexAsync } from '@/lib/regex/compiler'
 import { resolveMacrosBatch } from '@/api/macros'
@@ -33,6 +33,8 @@ const displayRegexResolutionCache = new Map<string, DisplayRegexCacheEntry>()
 const displayRegexContentCache = new Map<string, DisplayRegexContentCacheEntry>()
 const displayRegexCacheListeners = new Set<() => void>()
 let displayRegexCacheVersion = 0
+
+const RAW_MACRO_RE = /\{\{(?!\s*(?:user|char|bot|notChar|not_char|charName)\s*\}\})/
 
 /** Quick check for macro syntax in a string. */
 function hasMacroSyntax(s: string): boolean {
@@ -365,7 +367,19 @@ export function useDisplayRegex(content: string, isUser: boolean, depth: number,
     contentCacheKey,
   ])
 
-  return cachedResolvedContent
+  // Carry the previous resolved value forward across cv-bumps and per-chunk
+  // content churn so the sync fallback's raw {{...}} doesn't flash through
+  // during the async re-resolve window.
+  const lastResolvedRef = useRef<{ content: string; value: string } | null>(null)
+  const liveResolved = cachedResolvedContent
     ?? (resolvedContentState?.key === contentCacheKey ? resolvedContentState.value : undefined)
-    ?? fallbackContent
+  if (liveResolved !== undefined) {
+    lastResolvedRef.current = { content, value: liveResolved }
+  }
+  const stale = lastResolvedRef.current
+  const staleResolved = stale && (stale.content === content || RAW_MACRO_RE.test(fallbackContent))
+    ? stale.value
+    : undefined
+
+  return liveResolved ?? staleResolved ?? fallbackContent
 }
