@@ -5,6 +5,43 @@ import * as charactersSvc from "../services/characters.service";
 import { parsePagination } from "../services/pagination";
 import { RECENT_CHATS_DEFAULT_LIMIT } from "../types/pagination";
 import { parseStChatJsonl, parseStGroupChatJsonl } from "../migration/st-reader";
+import {
+  messageContentProcessorChain,
+  type MessageContentProcessorCtx,
+} from "../spindle/message-content-processor";
+
+async function runMessageContentProcessors(
+  ctx: MessageContentProcessorCtx,
+  userId: string
+): Promise<MessageContentProcessorCtx> {
+  if (messageContentProcessorChain.count === 0) return ctx;
+  return messageContentProcessorChain.run(ctx, userId);
+}
+
+// Auto-greetings are inserted by service-layer createMessage calls that
+// bypass the per-route processor hook; run the chain explicitly so the
+// DB holds resolved content before MESSAGE_SENT broadcasts.
+async function processChatGreeting(userId: string, chat: { id: string }) {
+  if (messageContentProcessorChain.count === 0) return;
+  const msgs = svc.listMessagesTail(userId, chat.id, 1);
+  const greeting = msgs.data[0];
+  if (!greeting || greeting.is_user || greeting.extra?.greeting !== true) return;
+  const ctx: MessageContentProcessorCtx = {
+    chatId: chat.id,
+    messageId: greeting.id,
+    content: greeting.content,
+    extra: greeting.extra,
+    origin: "create",
+    userId,
+  };
+  const processed = await messageContentProcessorChain.run(ctx, userId);
+  const update: { content?: string; extra?: Record<string, unknown> } = {};
+  if (processed.content !== greeting.content) update.content = processed.content;
+  if (processed.extra && processed.extra !== greeting.extra) update.extra = processed.extra;
+  if (update.content !== undefined || update.extra !== undefined) {
+    svc.updateMessage(userId, greeting.id, update);
+  }
+}
 
 const app = new Hono();
 
@@ -49,6 +86,7 @@ app.post("/", async (c) => {
   const body = await c.req.json();
   if (!body.character_id) return c.json({ error: "character_id is required" }, 400);
   const chat = svc.createChat(userId, body);
+  await processChatGreeting(userId, chat);
   return c.json(chat, 201);
 });
 
@@ -59,6 +97,7 @@ app.post("/group", async (c) => {
     return c.json({ error: "character_ids must be an array with at least 2 entries" }, 400);
   }
   const chat = svc.createGroupChat(userId, body);
+  await processChatGreeting(userId, chat);
   return c.json(chat, 201);
 });
 
@@ -86,6 +125,7 @@ app.post("/:id/members/:characterId", async (c) => {
     greeting_index: body.greeting_index,
   });
   if (!updated) return c.json({ error: "Not found, not a group chat, character not found, or already a member" }, 400);
+  if (!body.skip_greeting) await processChatGreeting(userId, updated);
   return c.json(updated);
 });
 
@@ -434,14 +474,40 @@ app.post("/:chatId/messages", async (c) => {
     return c.json({ error: "name and content are required" }, 400);
   }
 
+  const processed = await runMessageContentProcessors(
+    { chatId, content: body.content, extra: body.extra, origin: "create", userId },
+    userId
+  );
+  body.content = processed.content;
+  if (processed.extra !== undefined) body.extra = processed.extra;
+
   const msg = svc.createMessage(chatId, body, userId);
   return c.json(msg, 201);
 });
 
 app.put("/:chatId/messages/:id", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
-  const msg = svc.updateMessage(userId, c.req.param("id"), body);
+
+  if (body.content !== undefined) {
+    const processed = await runMessageContentProcessors(
+      {
+        chatId,
+        messageId,
+        content: body.content,
+        extra: body.extra,
+        origin: "update",
+        userId,
+      },
+      userId
+    );
+    body.content = processed.content;
+    if (processed.extra !== undefined) body.extra = processed.extra;
+  }
+
+  const msg = svc.updateMessage(userId, messageId, body);
   if (!msg) return c.json({ error: "Not found" }, 404);
   return c.json(msg);
 });
@@ -455,13 +521,25 @@ app.delete("/:chatId/messages/:id", (c) => {
 
 app.post("/:chatId/messages/:id/swipe", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
   let msg = null;
 
   if (body.direction === "left" || body.direction === "right") {
-    msg = svc.cycleSwipe(userId, c.req.param("id"), body.direction);
+    msg = svc.cycleSwipe(userId, messageId, body.direction);
   } else if (body.content !== undefined) {
-    msg = svc.addSwipe(userId, c.req.param("id"), body.content);
+    const processed = await runMessageContentProcessors(
+      {
+        chatId,
+        messageId,
+        content: body.content,
+        origin: "swipe_add",
+        userId,
+      },
+      userId
+    );
+    msg = svc.addSwipe(userId, messageId, processed.content);
   } else {
     return c.json({ error: "direction or content is required" }, 400);
   }
@@ -472,10 +550,25 @@ app.post("/:chatId/messages/:id/swipe", async (c) => {
 
 app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
   if (body.content === undefined) return c.json({ error: "content is required" }, 400);
   const idx = parseInt(c.req.param("idx"), 10);
-  const msg = svc.updateSwipe(userId, c.req.param("id"), idx, body.content);
+
+  const processed = await runMessageContentProcessors(
+    {
+      chatId,
+      messageId,
+      content: body.content,
+      origin: "swipe_update",
+      swipeIndex: idx,
+      userId,
+    },
+    userId
+  );
+
+  const msg = svc.updateSwipe(userId, messageId, idx, processed.content);
   if (!msg) return c.json({ error: "Not found or invalid swipe index" }, 404);
   return c.json(msg);
 });

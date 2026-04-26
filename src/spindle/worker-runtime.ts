@@ -83,9 +83,34 @@ type RuntimeWorkerToHost =
       model?: string;
       modelSource?: TokenModelSource;
       userId?: string;
+    }
+  | { type: "register_message_content_processor"; priority?: number }
+  | {
+      type: "message_content_processor_result";
+      requestId: string;
+      result: unknown;
+    };
+
+type RuntimeHostToWorker =
+  | HostToWorker
+  | {
+      type: "message_content_processor_request";
+      requestId: string;
+      ctx: unknown;
     };
 
 type RuntimeSpindleAPI = SpindleAPI & {
+  registerMessageContentProcessor(
+    handler: (ctx: {
+      chatId: string;
+      messageId?: string;
+      content: string;
+      extra?: Record<string, unknown>;
+      origin: "create" | "update" | "swipe_add" | "swipe_update";
+      swipeIndex?: number;
+    }) => Promise<{ content?: string; extra?: Record<string, unknown> } | void>,
+    priority?: number
+  ): void;
   tokens: {
     countText(text: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
     countMessages(
@@ -129,6 +154,9 @@ let interceptHandler:
     ) => Promise<LlmMessageDTO[] | InterceptorResultDTO>)
   | null = null;
 let contextHandlerFn: ((context: unknown) => Promise<unknown>) | null = null;
+let messageContentProcessorFn:
+  | ((ctx: unknown) => Promise<unknown>)
+  | null = null;
 let oauthCallbackHandler:
   | ((params: Record<string, string>) => Promise<{ html?: string } | void>)
   | null = null;
@@ -1601,6 +1629,12 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "register_context_handler", priority });
   },
 
+  registerMessageContentProcessor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerMessageContentProcessor()");
+    messageContentProcessorFn = handler as (ctx: unknown) => Promise<unknown>;
+    post({ type: "register_message_content_processor", priority });
+  },
+
   sendToFrontend(payload: unknown, userId?: string): void {
     post({ type: "frontend_message", payload, userId });
   },
@@ -1761,7 +1795,7 @@ const spindleApi: RuntimeSpindleAPI = {
 
 // ─── Message handler (host → worker) ─────────────────────────────────────
 
-self.onmessage = async (event: MessageEvent<HostToWorker>) => {
+self.onmessage = async (event: MessageEvent<RuntimeHostToWorker>) => {
   const msg = event.data;
 
   switch (msg.type) {
@@ -1948,6 +1982,31 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
             type: "context_handler_result",
             requestId: msg.requestId,
             context: msg.context,
+          });
+        }
+      }
+      break;
+    }
+
+    case "message_content_processor_request": {
+      if (messageContentProcessorFn) {
+        try {
+          const result = await messageContentProcessorFn(msg.ctx);
+          post({
+            type: "message_content_processor_result",
+            requestId: msg.requestId,
+            result,
+          });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Message content processor error: ${err.message}`,
+          });
+          post({
+            type: "message_content_processor_result",
+            requestId: msg.requestId,
+            result: undefined,
           });
         }
       }
