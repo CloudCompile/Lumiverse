@@ -303,6 +303,17 @@ export function deleteChat(userId: string, id: string): boolean {
   if (result.changes > 0) {
     invalidateChatMemoryCache(id);
     removePoolEntriesForChat(userId, id);
+
+    // Clean up long-term chat memory (LanceDB vectors)
+    embeddingsSvc.deleteChatChunkEmbeddings(userId, id).catch(err => {
+      console.warn(`[chats] Failed to delete LanceDB chat_chunk vectors for chat ${id}:`, err);
+    });
+
+    try {
+      memoryCortex.invalidateCortexCache(id);
+      memoryCortex.invalidateLinkedCortexCache(id);
+    } catch { /* ignore if not loaded */ }
+
     // Drop any debounced vectorization timers tied to this chat — without
     // this the gc.dirtyChunks Map would hold timers for a chat that no longer
     // exists until they fire and quietly fail.
@@ -789,6 +800,11 @@ export function updateMessage(userId: string, id: string, input: UpdateMessageIn
     patchedContent ||
     (swipeShapeTouched && newSwipes[newSwipeId] !== existing.swipes[existing.swipe_id]);
   if (activeContentChanged) {
+    try {
+      memoryCortex.invalidateCortexCache(updated.chat_id);
+      memoryCortex.invalidateLinkedCortexCache(updated.chat_id);
+    } catch { /* ignore if not loaded */ }
+
     rebuildChatChunks(userId, updated.chat_id).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message edit:", err);
     });
@@ -836,6 +852,11 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
 
   invalidateChatMemoryCache(chatId);
 
+  try {
+    memoryCortex.invalidateCortexCache(chatId);
+    memoryCortex.invalidateLinkedCortexCache(chatId);
+  } catch { /* ignore if not loaded */ }
+
   // Rebuild chunks once after all updates
   rebuildChatChunks(userId, chatId).catch(err => {
     console.warn("[chats] Failed to rebuild chunks after bulk hide:", err);
@@ -877,6 +898,11 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
   if (deleted > 0) {
     invalidateChatMemoryCache(chatId);
 
+    try {
+      memoryCortex.invalidateCortexCache(chatId);
+      memoryCortex.invalidateLinkedCortexCache(chatId);
+    } catch { /* ignore if not loaded */ }
+
     rebuildChatChunks(userId, chatId).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after bulk delete:", err);
     });
@@ -892,6 +918,11 @@ export function deleteMessage(userId: string, id: string): boolean {
   if (result.changes > 0) {
     eventBus.emit(EventType.MESSAGE_DELETED, { chatId: msg.chat_id, messageId: id }, userId);
     invalidateChatMemoryCache(msg.chat_id);
+
+    try {
+      memoryCortex.invalidateCortexCache(msg.chat_id);
+      memoryCortex.invalidateLinkedCortexCache(msg.chat_id);
+    } catch { /* ignore if not loaded */ }
 
     rebuildChatChunks(userId, msg.chat_id).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message delete:", err);
@@ -1759,11 +1790,25 @@ export async function rebuildChatChunks(userId: string, chatId: string): Promise
 async function _rebuildChatChunksImpl(userId: string, chatId: string): Promise<void> {
   invalidateChatMemoryCache(chatId);
 
+  // Clean up old vectors from LanceDB before wiping chat_chunks so they don't leak
+  // and aren't retrieved by future LanceDB searches.
+  try {
+    await embeddingsSvc.deleteChatChunkEmbeddings(userId, chatId);
+  } catch (err) {
+    console.warn(`[chats] Failed to delete LanceDB chat_chunk vectors for chat ${chatId}:`, err);
+  }
+
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
-  if (!cfg.enabled || !cfg.vectorize_chat_messages) return;
+  if (!cfg.enabled || !cfg.vectorize_chat_messages) {
+    getDb().query("DELETE FROM chat_chunks WHERE chat_id = ?").run(chatId);
+    return;
+  }
 
   const messages = getMessages(userId, chatId).filter(m => m.extra?.hidden !== true);
-  if (messages.length === 0) return;
+  if (messages.length === 0) {
+    getDb().query("DELETE FROM chat_chunks WHERE chat_id = ?").run(chatId);
+    return;
+  }
 
   getDb().query("DELETE FROM chat_chunks WHERE chat_id = ?").run(chatId);
 

@@ -52,6 +52,9 @@ import {
 import * as worldBooksSvc from "../services/world-books.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
+import * as councilSettingsSvc from "../services/council/council-settings.service";
+import * as packsSvc from "../services/packs.service";
+import { buildCouncilMemberContext } from "../services/council/tool-runtime";
 import { resolveInterceptorTimeout } from "../services/spindle-settings.service";
 import { getSidecarSettings } from "../services/sidecar-settings.service";
 import * as colorExtractionSvc from "../services/color-extraction.service";
@@ -1198,6 +1201,16 @@ export class WorkerHost {
         break;
       case "personas_get_world_book":
         this.handlePersonasGetWorldBook(msg.requestId, msg.personaId, msg.userId);
+        break;
+      // ─── Council (free tier, read-only) ─────────────────────────────
+      case "council_get_settings":
+        this.handleCouncilGetSettings(msg.requestId, msg.userId);
+        break;
+      case "council_get_members":
+        this.handleCouncilGetMembers(msg.requestId, msg.userId);
+        break;
+      case "council_get_available_lumia_items":
+        this.handleCouncilGetAvailableLumiaItems(msg.requestId, msg.userId);
         break;
       // ─── Toast (free tier) ────────────────────────────────────────────
       case "toast_show":
@@ -6346,6 +6359,48 @@ export class WorkerHost {
         },
         this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
       );
+    }
+  }
+
+  // ─── Council (free tier, read-only) ────────────────────────────────
+
+  private handleCouncilGetSettings(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      const settings = councilSettingsSvc.getCouncilSettings(resolvedUserId);
+      this.resolveRequest(requestId, settings);
+    } catch (err) {
+      this.rejectRequest(requestId, String(err));
+    }
+  }
+
+  private handleCouncilGetMembers(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      const settings = councilSettingsSvc.getCouncilSettings(resolvedUserId);
+      
+      // We need to fetch the LumiaItems to build the full context
+      const allLumiaItems = packsSvc.getAllLumiaItems(resolvedUserId);
+      const itemsById = new Map(allLumiaItems.map((item) => [item.id, item]));
+
+      const membersCtx = settings.members.map((member) => {
+        const item = itemsById.get(member.itemId) || null;
+        return buildCouncilMemberContext(member, item);
+      });
+
+      this.resolveRequest(requestId, membersCtx);
+    } catch (err) {
+      this.rejectRequest(requestId, String(err));
+    }
+  }
+
+  private handleCouncilGetAvailableLumiaItems(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      const items = packsSvc.getAllLumiaItems(resolvedUserId);
+      this.resolveRequest(requestId, items);
+    } catch (err) {
+      this.rejectRequest(requestId, String(err));
     }
   }
 

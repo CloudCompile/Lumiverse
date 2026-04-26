@@ -30,6 +30,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [Chats](chats.md) | `chats` | CRUD on chat sessions + active chat |
 | [World Books](world-books.md) | `world_books` | CRUD on world books and entries |
 | [Personas](personas.md) | `personas` | CRUD on personas + active switching + attached world books |
+| [Council](council.md) | Free | Read the active council members and configuration |
 | [Chat Mutation](chat-mutation.md) | `chat_mutation` | Read and modify chat messages |
 | [Event Tracking](event-tracking.md) | `event_tracking` | Structured telemetry and analytics |
 | [Secure Enclave](secure-enclave.md) | Free | Encrypted secret storage |

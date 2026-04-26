@@ -68,8 +68,10 @@
 }
 
 .name {
+  margin: 0;
   font-size: calc(22px * var(--lumiverse-font-scale, 1));
   font-weight: 700;
+  text-align: center;
   color: color-mix(in srgb, var(--hero-contrast-shifted) 88%, var(--lumiverse-text) 12%);
   text-shadow:
     0 0 6px var(--hero-text-glow),
@@ -80,6 +82,7 @@
 
 .creator {
   font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  text-align: center;
   color: color-mix(in srgb, var(--hero-contrast-muted-shifted) 88%, var(--lumiverse-text-muted) 12%);
   text-shadow:
     0 0 4px var(--hero-text-glow),

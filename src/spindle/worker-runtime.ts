@@ -29,6 +29,9 @@ import type {
   PersonaDTO,
   PersonaCreateDTO,
   PersonaUpdateDTO,
+  CouncilSettings,
+  CouncilMemberContext,
+  LumiaItemDTO,
   StreamChunkDTO,
 } from "lumiverse-spindle-types";
 
@@ -1512,6 +1515,24 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_get_world_book", requestId, personaId, userId });
       return result as WorldBookDTO | null;
+    },
+  },
+
+  council: {
+    async getSettings(options?: { userId?: string }): Promise<CouncilSettings> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "council_get_settings", requestId, userId: options?.userId });
+      return result as CouncilSettings;
+    },
+    async getMembers(options?: { userId?: string }): Promise<CouncilMemberContext[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "council_get_members", requestId, userId: options?.userId });
+      return result as CouncilMemberContext[];
+    },
+    async getAvailableLumiaItems(options?: { userId?: string }): Promise<LumiaItemDTO[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "council_get_available_lumia_items", requestId, userId: options?.userId });
+      return result as LumiaItemDTO[];
     },
   },
 
