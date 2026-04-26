@@ -1,6 +1,7 @@
 import type { ThemeConfig } from '@/types/theme'
 import type { ComponentOverride } from '@/lib/componentOverrides'
 import type { CustomCSSSettings } from '@/types/store'
+import { generateUUID } from '@/lib/uuid'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 
 /** Portable theme pack — bundles all three override layers. */
@@ -165,7 +166,7 @@ function normalizeArchiveManifest(data: any): ThemePackArchiveManifest | null {
     author: sanitizeString(data.author, '', 200),
     description: sanitizeString(data.description, '', 5000),
     createdAt: data.createdAt,
-    bundleId: sanitizeString(data.bundleId, crypto.randomUUID(), 128) || crypto.randomUUID(),
+    bundleId: sanitizeString(data.bundleId, generateUUID(), 128) || generateUUID(),
     theme: data.theme ?? null,
     globalCSS: sanitizeString(data.globalCSS, '', 2_000_000),
     components: data.components,
@@ -283,7 +284,7 @@ function fromArchiveBytes(bytes: Uint8Array): ThemePackImportResult {
       author: manifest.author,
       description: manifest.description,
       createdAt: manifest.createdAt,
-      bundleId: manifest.bundleId || crypto.randomUUID(),
+      bundleId: manifest.bundleId || generateUUID(),
       theme: manifest.theme,
       globalCSS: manifest.globalCSS,
       components: manifest.components,
@@ -318,7 +319,7 @@ export function createThemePack(
     author: meta.author || '',
     description: meta.description || '',
     createdAt: Math.floor(Date.now() / 1000),
-    bundleId: customCSS.bundleId || crypto.randomUUID(),
+    bundleId: customCSS.bundleId || generateUUID(),
     theme,
     globalCSS: customCSS.css || '',
     components,
@@ -346,7 +347,7 @@ function normalizeThemePack(data: any): ThemePack | null {
       author: sanitizeString(data.author, '', 200),
       description: sanitizeString(data.description, '', 5000),
       createdAt: data.createdAt,
-      bundleId: sanitizeString(data.bundleId, crypto.randomUUID(), 128) || crypto.randomUUID(),
+      bundleId: sanitizeString(data.bundleId, generateUUID(), 128) || generateUUID(),
       theme: data.theme ?? null,
       globalCSS: sanitizeString(data.globalCSS, '', 2_000_000),
       components: data.components,
@@ -372,7 +373,7 @@ function normalizeThemePack(data: any): ThemePack | null {
       author: sanitizeString(legacy.author, '', 200),
       description: sanitizeString(legacy.description, '', 5000),
       createdAt: legacy.createdAt,
-      bundleId: crypto.randomUUID(),
+      bundleId: generateUUID(),
       theme: legacy.theme,
       globalCSS: sanitizeString(legacy.globalCSS, '', 2_000_000),
       components: legacy.components,

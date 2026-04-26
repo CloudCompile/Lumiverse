@@ -9,6 +9,7 @@ import { CSS_MODULE_REGISTRY, generateSelector, type CSSModuleEntry } from '@/li
 import { getComponentTemplate } from '@/lib/componentTemplates'
 import { createThemePack, exportThemePack, importThemePack, packSummary, type ThemePackAsset } from '@/lib/themePack'
 import { toast } from '@/lib/toast'
+import { generateUUID } from '@/lib/uuid'
 import { css } from '@codemirror/lang-css'
 import { javascript } from '@codemirror/lang-javascript'
 import CodeEditor, { type CodeEditorHandle } from '@/components/panels/custom-css/CSSEditor'
@@ -207,7 +208,7 @@ export default function CustomCSSModal() {
       return
     }
     const pack = result.pack
-    const localBundleId = crypto.randomUUID()
+    const localBundleId = generateUUID()
     const localizedPack = { ...pack, bundleId: localBundleId }
     try {
       for (const asset of localizedPack.assets) {

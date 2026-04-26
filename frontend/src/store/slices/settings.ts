@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand'
 import type { SettingsSlice, ThemeConfig, ReasoningSettings } from '@/types/store'
 import { settingsApi } from '@/api/settings'
 import { BASE_URL } from '@/api/client'
+import { generateUUID } from '@/lib/uuid'
 
 /** Default reasoning settings — used as initial state and for restore-on-unbind. */
 export const REASONING_DEFAULTS: ReasoningSettings = {
@@ -378,7 +379,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   ensureThemeBundleId: () => {
     const current = get().customCSS.bundleId
     if (current) return current
-    const bundleId = crypto.randomUUID()
+    const bundleId = generateUUID()
     const customCSS = { ...get().customCSS, bundleId }
     set({ customCSS })
     persistKey('customCSS', customCSS)
@@ -448,7 +449,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       css: pack.globalCSS || '',
       enabled: !!pack.globalCSS.trim(),
       revision: Date.now(),
-      bundleId: pack.bundleId || crypto.randomUUID(),
+      bundleId: pack.bundleId || generateUUID(),
     }
     patch.customCSS = customCSS
     persistKey('customCSS', customCSS)
