@@ -16,16 +16,13 @@ import {
 } from "../spindle/macro-interceptor";
 
 const MAX_NESTING_DEPTH = 20;
-const LEGACY_MACRO_MAP: Record<string, string> = {
-  "<USER>": "{{user}}",
-  "<BOT>": "{{char}}",
-  "<CHAR>": "{{char}}",
-};
 
 export interface EvaluateOptions {
   phase?: MacroInterceptorPhase;
   sourceHint?: string;
 }
+
+const HAS_MACRO_RE = /\{\{|<(?:user|char|bot)>/i;
 
 /**
  * Evaluate a macro template string, resolving all macros using the provided
@@ -41,7 +38,7 @@ export async function evaluate(
 
   // Fast-path: skip the entire lex/parse/evaluate pipeline when there are
   // no macro markers in the input (the vast majority of stored chat messages).
-  if (!input.includes("{{") && !input.includes("<USER>") && !input.includes("<BOT>") && !input.includes("<CHAR>")) {
+  if (!HAS_MACRO_RE.test(input)) {
     return { text: input, diagnostics: [] };
   }
 
@@ -90,17 +87,8 @@ export async function evaluate(
 }
 
 function preprocessLegacy(input: string): string {
-  let result = input;
-
-  // Replace <USER>, <BOT>, <CHAR> legacy tokens
-  for (const [legacy, replacement] of Object.entries(LEGACY_MACRO_MAP)) {
-    result = result.replaceAll(legacy, replacement);
-  }
-
   // Convert {{time_UTC+2}} → {{time::UTC+2}} pattern
-  result = result.replace(/\{\{time_([^}]+)\}\}/g, "{{time::$1}}");
-
-  return result;
+  return input.replace(/\{\{time_([^}]+)\}\}/g, "{{time::$1}}");
 }
 
 function postprocess(text: string): string {

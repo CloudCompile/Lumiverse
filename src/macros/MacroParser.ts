@@ -355,8 +355,46 @@ function findClosingMacro(nodes: AstNode[], startIdx: number, name: string): num
   return -1;
 }
 
-/** Push a text value, merging with the previous node if it's also text. */
+const LEGACY_MACRO_REGEX = /<(user|char|bot)>/gi;
+
+/** Push a text value, breaking out legacy <user>/<char> tokens into macros. */
 function pushTextNode(nodes: AstNode[], value: string): void {
+  if (value.indexOf('<') === -1) {
+    pushRawText(nodes, value);
+    return;
+  }
+
+  let lastIndex = 0;
+  LEGACY_MACRO_REGEX.lastIndex = 0;
+  let match;
+
+  while ((match = LEGACY_MACRO_REGEX.exec(value)) !== null) {
+    if (match.index > lastIndex) {
+      pushRawText(nodes, value.substring(lastIndex, match.index));
+    }
+
+    let name = match[1].toLowerCase();
+    if (name === "bot") name = "char"; // Normalize <bot> to char
+
+    nodes.push({
+      type: "macro",
+      name,
+      args: [],
+      flags: { ...DEFAULT_FLAGS },
+      raw: match[0],
+      offset: -1,
+    } as MacroNode);
+
+    lastIndex = LEGACY_MACRO_REGEX.lastIndex;
+  }
+
+  if (lastIndex < value.length) {
+    pushRawText(nodes, value.substring(lastIndex));
+  }
+}
+
+/** Push a text value, merging with the previous node if it's also text. */
+function pushRawText(nodes: AstNode[], value: string): void {
   if (nodes.length > 0) {
     const prev = nodes[nodes.length - 1];
     if (prev.type === "text") {
