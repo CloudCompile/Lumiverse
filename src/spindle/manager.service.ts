@@ -794,7 +794,7 @@ export function grantPermission(
   identifier: string,
   permission: string
 ): void {
-  if (!isValidPermission(permission) && !PRIVILEGED_PERMISSIONS.has(permission)) {
+  if (!isValidPermission(permission)) {
     throw new Error(`Invalid permission: ${permission}`);
   }
 
