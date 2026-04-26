@@ -18,9 +18,69 @@ export interface UpdateState {
   latestMessage: string;
 }
 
+const FRONTEND_BUILD_IGNORED_PATHS = [
+  "frontend/dist/",
+];
+
+const FRONTEND_BUILD_IGNORED_FILES = new Set([
+  "frontend/tsconfig.tsbuildinfo",
+]);
+
 function log(text: string): void {
   const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
   console.log(`[${ts}] [runner] ${text}`);
+}
+
+function getHeadRef(): string {
+  const head = runGit("rev-parse", "HEAD");
+  if (!head.ok || !head.out) {
+    throw new Error("Unable to resolve current git HEAD");
+  }
+  return head.out;
+}
+
+function getChangedFilesBetween(fromRef: string, toRef: string): string[] {
+  if (fromRef === toRef) return [];
+  const diff = runGit("diff", "--name-only", `${fromRef}..${toRef}`);
+  if (!diff.ok || !diff.out) return [];
+  return diff.out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function isFrontendBuildInput(filePath: string): boolean {
+  if (!filePath.startsWith("frontend/")) return false;
+  if (FRONTEND_BUILD_IGNORED_FILES.has(filePath)) return false;
+  return !FRONTEND_BUILD_IGNORED_PATHS.some((prefix) => filePath.startsWith(prefix));
+}
+
+function shouldRebuildFrontend(changedFiles: string[]): boolean {
+  return changedFiles.some(isFrontendBuildInput);
+}
+
+function summarizeFrontendChanges(changedFiles: string[]): string {
+  const relevant = changedFiles.filter(isFrontendBuildInput);
+  if (relevant.length === 0) return "";
+  const preview = relevant.slice(0, 5).join(", ");
+  return relevant.length > 5 ? `${preview}, ...` : preview;
+}
+
+async function runCommandOrThrow(
+  cmd: string[],
+  opts: { cwd: string; timeoutMs: number; label: string }
+): Promise<void> {
+  const result = await spawnAsync(cmd, {
+    cwd: opts.cwd,
+    timeoutMs: opts.timeoutMs,
+  });
+
+  if (result.exitCode === 0) return;
+
+  const reason = result.timedOut
+    ? `${opts.label} timed out after ${opts.timeoutMs / 1000}s`
+    : result.stderr.trim() || result.stdout.trim() || `${opts.label} failed`;
+  throw new Error(reason);
 }
 
 /**
@@ -64,13 +124,15 @@ export async function checkForUpdates(): Promise<UpdateState> {
 }
 
 /**
- * Apply update: stash → clear cache → delete dist → pull → install → build → restart
+ * Apply update: stash → clear cache → delete dist → pull → install deps →
+ * conditional frontend build → restart
  */
 export async function applyUpdate(
   stopServer: () => Promise<void>,
   startServer: () => Promise<void>
 ): Promise<void> {
   log("Preparing update...");
+  const previousHead = getHeadRef();
 
   // Stash local changes
   const status = runGit("status", "--porcelain");
@@ -114,15 +176,26 @@ export async function applyUpdate(
     if (line.trim()) log(`  ${line.trim()}`);
   }
 
-  // Install dependencies and rebuild
-  await installAndBuild(frontendDir);
+  const currentHead = getHeadRef();
+  const changedFiles = getChangedFilesBetween(previousHead, currentHead);
+
+  // Install dependencies and rebuild only if pulled files touched frontend inputs.
+  await ensureDependencies(frontendDir);
+  if (shouldRebuildFrontend(changedFiles)) {
+    const summary = summarizeFrontendChanges(changedFiles);
+    log(`Frontend changes detected in update; waiting for Vite build (${summary}).`);
+    await rebuildFrontend(frontendDir);
+  } else {
+    log("No frontend source/config changes detected in pulled files; skipping local Vite rebuild.");
+  }
 
   log("Update complete. Restarting server...");
   await startServer();
 }
 
 /**
- * Switch branch: stash → stop → clear cache → delete dist → checkout → pull → install → build → restart
+ * Switch branch: stash → stop → clear cache → delete dist → checkout → pull
+ * → install deps → conditional frontend build → restart
  */
 export async function switchBranch(
   target: string,
@@ -135,6 +208,7 @@ export async function switchBranch(
 
   const currentBranch = getCurrentBranch();
   log(`Switching from '${currentBranch}' to '${target}'...`);
+  const previousHead = getHeadRef();
 
   // Stash local changes
   const status = runGit("status", "--porcelain");
@@ -193,55 +267,48 @@ export async function switchBranch(
     }
   }
 
-  // Install and rebuild
-  await installAndBuild(frontendDir);
+  const currentHead = getHeadRef();
+  const changedFiles = getChangedFilesBetween(previousHead, currentHead);
+
+  await ensureDependencies(frontendDir);
+  if (shouldRebuildFrontend(changedFiles)) {
+    const summary = summarizeFrontendChanges(changedFiles);
+    log(`Frontend changes detected after branch switch; waiting for Vite build (${summary}).`);
+    await rebuildFrontend(frontendDir);
+  } else {
+    log("No frontend source/config changes detected after branch switch; skipping local Vite rebuild.");
+  }
 
   log(`Branch switch complete. Now on '${target}'. Restarting server...`);
   await startServer();
 }
 
-async function installAndBuild(frontendDir: string): Promise<void> {
+export async function ensureDependencies(frontendDir: string): Promise<void> {
   log("Installing backend dependencies...");
-  const backend = await spawnAsync(["bun", "install"], {
+  await runCommandOrThrow(["bun", "install"], {
     cwd: PROJECT_ROOT,
     timeoutMs: TIMEOUT_BUN_INSTALL_MS,
+    label: "backend install",
   });
-  if (backend.exitCode !== 0) {
-    const reason = backend.timedOut
-      ? `timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
-      : backend.stderr.trim() || backend.stdout.trim() || "unknown error";
-    log(`Backend install failed: ${reason}`);
-  } else {
-    log("Backend dependencies updated.");
-  }
+  log("Backend dependencies updated.");
 
   log("Installing frontend dependencies...");
-  const frontend = await spawnAsync(["bun", "install"], {
+  await runCommandOrThrow(["bun", "install"], {
     cwd: frontendDir,
     timeoutMs: TIMEOUT_BUN_INSTALL_MS,
+    label: "frontend install",
   });
-  if (frontend.exitCode !== 0) {
-    const reason = frontend.timedOut
-      ? `timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
-      : frontend.stderr.trim() || frontend.stdout.trim() || "unknown error";
-    log(`Frontend install failed: ${reason}`);
-  } else {
-    log("Frontend dependencies updated.");
-  }
+  log("Frontend dependencies updated.");
+}
 
+export async function rebuildFrontend(frontendDir: string): Promise<void> {
   log("Rebuilding frontend...");
-  const build = await spawnAsync(["bun", "run", "build"], {
+  await runCommandOrThrow(["bun", "run", "build"], {
     cwd: frontendDir,
     timeoutMs: TIMEOUT_BUN_BUILD_MS,
+    label: "frontend build",
   });
-  if (build.exitCode !== 0) {
-    const reason = build.timedOut
-      ? `timed out after ${TIMEOUT_BUN_BUILD_MS / 1000}s`
-      : build.stderr.trim() || build.stdout.trim() || "unknown error";
-    log(`Frontend build failed: ${reason}`);
-  } else {
-    log("Frontend rebuilt successfully.");
-  }
+  log("Frontend rebuilt successfully.");
 }
 
 /** Rebuild frontend (best-effort) and restart the server after a git failure. */

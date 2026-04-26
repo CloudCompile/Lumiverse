@@ -1,14 +1,18 @@
 import { join } from "path";
-import { existsSync, rmSync } from "fs";
 import { sendToServer, stopServer, startServer, restartServer } from "./server-manager.js";
-import { checkForUpdates, applyUpdate, switchBranch } from "./git-ops.js";
-import { readEnvConfig, writeTrustAnyOrigin } from "./env-config.js";
+import {
+  checkForUpdates,
+  applyUpdate,
+  switchBranch,
+  ensureDependencies,
+  rebuildFrontend,
+} from "./git-ops.js";
+import { writeTrustAnyOrigin } from "./env-config.js";
 import {
   PROJECT_ROOT,
   AVAILABLE_BRANCHES,
   TIMEOUT_BUN_CACHE_MS,
   TIMEOUT_BUN_INSTALL_MS,
-  TIMEOUT_BUN_BUILD_MS,
 } from "./lib/constants.js";
 import { spawnAsync } from "./lib/spawn-async.js";
 
@@ -85,7 +89,7 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         );
         lastUpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
       } catch (err) {
-        // Server should be back up after error recovery in applyUpdate
+        console.error("[runner] Update failed:", err);
       } finally {
         operationInProgress = null;
       }
@@ -119,7 +123,7 @@ export async function handleIPCMessage(msg: any): Promise<void> {
           () => { startServer(isDev); return Promise.resolve(); }
         );
       } catch (err) {
-        // Server should be back up after error recovery
+        console.error("[runner] Branch switch failed:", err);
       } finally {
         operationInProgress = null;
       }
@@ -247,31 +251,20 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       respond(id, true, { message: "Rebuilding frontend..." });
       try {
         const frontendDir = join(PROJECT_ROOT, "frontend");
-        const distDir = join(frontendDir, "dist");
 
-        progress(id, "rebuild", "Rebuilding frontend...");
+        progress(id, "rebuild", "Stopping server for dependency checks and frontend rebuild...");
         await stopServer();
 
-        if (existsSync(distDir)) {
-          rmSync(distDir, { recursive: true, force: true });
-        }
+        progress(id, "rebuild", "Installing backend and frontend dependencies...");
+        await ensureDependencies(frontendDir);
 
-        const build = await spawnAsync(["bun", "run", "build"], {
-          cwd: frontendDir,
-          timeoutMs: TIMEOUT_BUN_BUILD_MS,
-        });
-
-        if (build.exitCode !== 0) {
-          const reason = build.timedOut
-            ? `timed out after ${TIMEOUT_BUN_BUILD_MS / 1000}s`
-            : build.stderr.trim() || build.stdout.trim() || "unknown error";
-          console.error(`Frontend build failed: ${reason}`);
-        }
+        progress(id, "rebuild", "Waiting for Vite build to finish...");
+        await rebuildFrontend(frontendDir);
 
         startServer(isDev);
       } catch (err) {
-        // Try to restart anyway so the server doesn't stay down.
-        try { startServer(isDev); } catch {}
+        console.error("[runner] Frontend rebuild failed:", err);
+        console.error("[runner] Server remains stopped because the rebuild did not complete successfully.");
       } finally {
         operationInProgress = null;
       }
