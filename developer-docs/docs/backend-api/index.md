@@ -16,6 +16,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [Macros](macros.md) | Free | Register custom `{{macros}}` for prompts |
 | [Interceptors](interceptors.md) | `interceptor` | Modify the prompt before it reaches the LLM |
 | [Context Handlers](context-handlers.md) | `context_handler` | Enrich the generation context before assembly |
+| [Macro Interceptor](macro-interceptor.md) | `macro_interceptor` | Transform raw templates before macro parsing/dispatch |
 | [Message Content Processor](message-content-processor.md) | `chat_mutation` | Transform message content before it is written to the database |
 | [LLM Tools](llm-tools.md) | `tools` | Register function-calling tools + Council-eligible tools |
 | [Generation](generation.md) | `generation` | Fire LLM generations + inspect connections |

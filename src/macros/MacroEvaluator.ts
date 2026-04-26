@@ -10,6 +10,10 @@ import type {
 } from "./types";
 import { parse, ESCAPED_OPEN, ESCAPED_CLOSE } from "./MacroParser";
 import { MacroRegistry } from "./MacroRegistry";
+import {
+  macroInterceptorChain,
+  type MacroInterceptorPhase,
+} from "../spindle/macro-interceptor";
 
 const MAX_NESTING_DEPTH = 20;
 const LEGACY_MACRO_MAP: Record<string, string> = {
@@ -17,6 +21,11 @@ const LEGACY_MACRO_MAP: Record<string, string> = {
   "<BOT>": "{{char}}",
   "<CHAR>": "{{char}}",
 };
+
+export interface EvaluateOptions {
+  phase?: MacroInterceptorPhase;
+  sourceHint?: string;
+}
 
 /**
  * Evaluate a macro template string, resolving all macros using the provided
@@ -26,6 +35,7 @@ export async function evaluate(
   input: string,
   env: MacroEnv,
   registry: MacroRegistry,
+  options?: EvaluateOptions,
 ): Promise<EvaluateResult> {
   if (!input) return { text: "", diagnostics: [] };
 
@@ -41,6 +51,11 @@ export async function evaluate(
   const diagnostics: MacroDiagnostic[] = [];
   let text = processed;
 
+  const userId = typeof env.extra?.userId === "string" ? env.extra.userId : undefined;
+  const runInterceptors = macroInterceptorChain.count > 0;
+  const phase = options?.phase ?? "other";
+  const sourceHint = options?.sourceHint;
+
   // Iterative evaluation: most macros are now recursively expanded inline
   // (see evaluateMacroNode). The outer loop acts as a safety net for the
   // rare case where a macro result depends on state mutated by a later macro
@@ -48,6 +63,19 @@ export async function evaluate(
   const MAX_ITERATIONS = 2;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (env.signal?.aborted) throw env.signal.reason ?? new DOMException("Aborted", "AbortError");
+
+    if (runInterceptors) {
+      text = await macroInterceptorChain.run({
+        template: text,
+        env: snapshotEnvForInterceptor(env),
+        commit: env.commit !== false,
+        phase,
+        ...(sourceHint ? { sourceHint } : {}),
+        ...(userId !== undefined ? { userId } : {}),
+      });
+      if (!text.includes("{{")) break;
+    }
+
     const ast = parse(text);
     const result = await evaluateNodes(ast, env, registry, 0, 0, diagnostics);
     if (result === text) break; // No change — converged
@@ -325,6 +353,34 @@ function buildExecContext(
     warn: (message: string) => {
       diagnostics.push({ level: "warn", message, macroName: node.name, offset: node.offset });
     },
+  };
+}
+
+function snapshotEnvForInterceptor(env: MacroEnv): {
+  commit: boolean;
+  names: MacroEnv["names"];
+  character: MacroEnv["character"];
+  chat: MacroEnv["chat"];
+  system: MacroEnv["system"];
+  variables: {
+    local: Record<string, string>;
+    global: Record<string, string>;
+    chat: Record<string, string>;
+  };
+  extra: Record<string, unknown>;
+} {
+  return {
+    commit: env.commit !== false,
+    names: { ...env.names },
+    character: { ...env.character },
+    chat: { ...env.chat },
+    system: { ...env.system },
+    variables: {
+      local: Object.fromEntries(env.variables.local),
+      global: Object.fromEntries(env.variables.global),
+      chat: Object.fromEntries(env.variables.chat),
+    },
+    extra: { ...env.extra },
   };
 }
 

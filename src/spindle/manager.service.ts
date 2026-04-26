@@ -208,6 +208,7 @@ export const PRIVILEGED_PERMISSIONS = new Set([
   "generation",
   "interceptor",
   "context_handler",
+  "macro_interceptor",
   "characters",
   "chats",
   "world_books",
@@ -793,7 +794,7 @@ export function grantPermission(
   identifier: string,
   permission: string
 ): void {
-  if (!isValidPermission(permission)) {
+  if (!isValidPermission(permission) && !PRIVILEGED_PERMISSIONS.has(permission)) {
     throw new Error(`Invalid permission: ${permission}`);
   }
 

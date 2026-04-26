@@ -34,6 +34,11 @@ import {
   type MessageContentProcessorCtx,
   type MessageContentProcessorResult,
 } from "./message-content-processor";
+import {
+  macroInterceptorChain,
+  type MacroInterceptorCtx,
+  type MacroInterceptorResult,
+} from "./macro-interceptor";
 import { toolRegistry } from "./tool-registry";
 import * as managerSvc from "./manager.service";
 import * as generateSvc from "../services/generate.service";
@@ -144,6 +149,12 @@ type RuntimeWorkerToHost =
       type: "message_content_processor_result";
       requestId: string;
       result: unknown;
+    }
+  | { type: "register_macro_interceptor"; priority?: number }
+  | {
+      type: "macro_interceptor_result";
+      requestId: string;
+      result: unknown;
     };
 
 type RuntimeHostToWorker =
@@ -152,6 +163,11 @@ type RuntimeHostToWorker =
       type: "message_content_processor_request";
       requestId: string;
       ctx: MessageContentProcessorCtx;
+    }
+  | {
+      type: "macro_interceptor_request";
+      requestId: string;
+      ctx: MacroInterceptorCtx;
     };
 
 let cachedBackendVersion: string | null = null;
@@ -365,6 +381,7 @@ export class WorkerHost {
   private interceptorUnregister: (() => void) | null = null;
   private contextHandlerUnregister: (() => void) | null = null;
   private messageContentProcessorUnregister: (() => void) | null = null;
+  private macroInterceptorUnregister: (() => void) | null = null;
   private registeredMacroNames = new Set<string>();
   private macroValueCache = new Map<string, string>();
   private toastTimestamps: number[] = [];
@@ -549,6 +566,9 @@ export class WorkerHost {
     this.messageContentProcessorUnregister?.();
     this.messageContentProcessorUnregister = null;
 
+    this.macroInterceptorUnregister?.();
+    this.macroInterceptorUnregister = null;
+
     // Unregister all tools for this extension
     toolRegistry.unregisterByExtension(this.extensionId);
 
@@ -573,6 +593,7 @@ export class WorkerHost {
     interceptorPipeline.unregisterByExtension(this.extensionId);
     contextHandlerChain.unregisterByExtension(this.extensionId);
     messageContentProcessorChain.unregisterByExtension(this.extensionId);
+    macroInterceptorChain.unregisterByExtension(this.extensionId);
 
     // Reject pending requests
     for (const [, pending] of this.pendingRequests) {
@@ -929,6 +950,12 @@ export class WorkerHost {
         this.handleRegisterMessageContentProcessor(msg.priority);
         break;
       case "message_content_processor_result":
+        this.resolveRequest(msg.requestId, msg.result);
+        break;
+      case "register_macro_interceptor":
+        this.handleRegisterMacroInterceptor(msg.priority);
+        break;
+      case "macro_interceptor_result":
         this.resolveRequest(msg.requestId, msg.result);
         break;
       case "tool_invocation_result":
@@ -3907,6 +3934,58 @@ export class WorkerHost {
             resolve: (val) => {
               clearTimeout(timeout);
               resolve(val as MessageContentProcessorResult | undefined);
+            },
+            reject: (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            },
+          });
+        });
+      },
+    });
+  }
+
+  private handleRegisterMacroInterceptor(priority?: number): void {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "macro_interceptor")) {
+      console.warn(
+        `[Spindle:${this.manifest.identifier}] macro_interceptor permission not granted for registerMacroInterceptor`
+      );
+      this.postToWorker({
+        type: "permission_denied",
+        permission: "macro_interceptor",
+        operation: "registerMacroInterceptor",
+      });
+      return;
+    }
+
+    this.macroInterceptorUnregister?.();
+    this.macroInterceptorUnregister = macroInterceptorChain.register({
+      extensionId: this.extensionId,
+      userId: this.getScopedUserId(),
+      priority: priority ?? 100,
+      handler: async (ctx: MacroInterceptorCtx) => {
+        const requestId = crypto.randomUUID();
+
+        this.postToWorker({
+          type: "macro_interceptor_request",
+          requestId,
+          ctx,
+        });
+
+        return new Promise<MacroInterceptorResult | void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            this.pendingRequests.delete(requestId);
+            reject(
+              new Error(
+                `Macro interceptor timeout from ${this.manifest.identifier}`
+              )
+            );
+          }, 10_000);
+
+          this.pendingRequests.set(requestId, {
+            resolve: (val) => {
+              clearTimeout(timeout);
+              resolve(val as MacroInterceptorResult | undefined);
             },
             reject: (err) => {
               clearTimeout(timeout);
