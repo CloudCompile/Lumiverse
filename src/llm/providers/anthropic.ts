@@ -1,8 +1,20 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
 import { createCooperativeYielder, readWithAbort } from "../stream-utils";
-import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
-import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
+import {
+  getTextContent,
+  type GenerationRequest,
+  type GenerationResponse,
+  type StreamChunk,
+  type ToolCallResult,
+  type LlmMessage,
+  type LlmMessagePart,
+} from "../types";
+import {
+  fetchProviderJson,
+  ProviderRequestError,
+  throwProviderResponseError,
+} from "../../utils/provider-errors";
 
 const API_VERSION = "2023-06-01";
 
@@ -51,19 +63,40 @@ export class AnthropicProvider implements LlmProvider {
 
   private shouldSuppressThinking(request: GenerationRequest): boolean {
     const thinking = request.parameters?.thinking;
-    return !!thinking && typeof thinking === "object" && (thinking as any).type === "disabled";
+    return (
+      !!thinking &&
+      typeof thinking === "object" &&
+      (thinking as any).type === "disabled"
+    );
   }
 
-  private normalizeOutputConfig(outputConfig: unknown, thinking: unknown): Record<string, unknown> | undefined {
-    if (!outputConfig || typeof outputConfig !== "object" || Array.isArray(outputConfig)) return undefined;
+  private normalizeOutputConfig(
+    outputConfig: unknown,
+    thinking: unknown,
+  ): Record<string, unknown> | undefined {
+    if (
+      !outputConfig ||
+      typeof outputConfig !== "object" ||
+      Array.isArray(outputConfig)
+    )
+      return undefined;
     const next = { ...(outputConfig as Record<string, unknown>) };
-    if (!thinking || typeof thinking !== "object" || Array.isArray(thinking) || (thinking as any).type === "disabled") {
+    if (
+      !thinking ||
+      typeof thinking !== "object" ||
+      Array.isArray(thinking) ||
+      (thinking as any).type === "disabled"
+    ) {
       delete next.effort;
     }
     return Object.keys(next).length > 0 ? next : undefined;
   }
 
-  async generate(apiKey: string, apiUrl: string, request: GenerationRequest): Promise<GenerationResponse> {
+  async generate(
+    apiKey: string,
+    apiUrl: string,
+    request: GenerationRequest,
+  ): Promise<GenerationResponse> {
     const url = `${this.baseUrl(apiUrl)}/v1/messages`;
     const body = this.buildBody(request, false);
     const suppressThinking = this.shouldSuppressThinking(request);
@@ -81,7 +114,7 @@ export class AnthropicProvider implements LlmProvider {
       throw new Error(`Anthropic API error ${res.status}: ${err}`);
     }
 
-    const data = await res.json() as any;
+    const data = (await res.json()) as any;
     const blocks = data.content || [];
     let textContent = "";
     let thinkingContent = "";
@@ -98,14 +131,19 @@ export class AnthropicProvider implements LlmProvider {
     }
 
     const toolUseBlocks = blocks.filter((c: any) => c.type === "tool_use");
-    const toolCalls: ToolCallResult[] | undefined = toolUseBlocks.length > 0
-      ? toolUseBlocks.map((c: any) => ({ name: c.name, args: c.input ?? {}, call_id: c.id }))
-      : undefined;
+    const toolCalls: ToolCallResult[] | undefined =
+      toolUseBlocks.length > 0
+        ? toolUseBlocks.map((c: any) => ({
+            name: c.name,
+            args: c.input ?? {},
+            call_id: c.id,
+          }))
+        : undefined;
 
     return {
       content: textContent,
       reasoning: thinkingContent || undefined,
-      finish_reason: toolCalls ? "tool_calls" : (data.stop_reason || "end_turn"),
+      finish_reason: toolCalls ? "tool_calls" : data.stop_reason || "end_turn",
       tool_calls: toolCalls,
       usage: data.usage
         ? {
@@ -120,7 +158,7 @@ export class AnthropicProvider implements LlmProvider {
   async *generateStream(
     apiKey: string,
     apiUrl: string,
-    request: GenerationRequest
+    request: GenerationRequest,
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const url = `${this.baseUrl(apiUrl)}/v1/messages`;
     const body = this.buildBody(request, true);
@@ -147,79 +185,94 @@ export class AnthropicProvider implements LlmProvider {
     const maybeYield = createCooperativeYielder(64, request.signal);
 
     // Tool call accumulation — Anthropic streams tool_use as content blocks
-    const pendingToolCalls: { id: string; name: string; inputJson: string }[] = [];
+    const pendingToolCalls: { id: string; name: string; inputJson: string }[] =
+      [];
     let currentToolIdx = -1;
 
     try {
-    while (true) {
-      const { done, value } = await readWithAbort(reader, request.signal);
-      if (done) break;
+      while (true) {
+        const { done, value } = await readWithAbort(reader, request.signal);
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        await maybeYield();
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        for (const line of lines) {
+          await maybeYield();
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
 
-        try {
-          const data = JSON.parse(trimmed.slice(6));
+          try {
+            const data = JSON.parse(trimmed.slice(6));
 
-          if (data.type === "message_start" && data.message?.usage) {
-            // Capture input token count from message_start (output tokens arrive in message_delta)
-            streamInputTokens = data.message.usage.input_tokens || 0;
-          } else if (data.type === "content_block_start") {
-            if (data.content_block?.type === "tool_use") {
-              pendingToolCalls.push({ id: data.content_block.id, name: data.content_block.name, inputJson: "" });
-              currentToolIdx = pendingToolCalls.length - 1;
-            }
-          } else if (data.type === "content_block_delta") {
-            if (data.delta?.type === "thinking_delta") {
-              if (suppressThinking) {
-                yield { token: data.delta.thinking };
-              } else {
-                yield { token: "", reasoning: data.delta.thinking };
+            if (data.type === "message_start" && data.message?.usage) {
+              // Capture input token count from message_start (output tokens arrive in message_delta)
+              streamInputTokens = data.message.usage.input_tokens || 0;
+            } else if (data.type === "content_block_start") {
+              if (data.content_block?.type === "tool_use") {
+                pendingToolCalls.push({
+                  id: data.content_block.id,
+                  name: data.content_block.name,
+                  inputJson: "",
+                });
+                currentToolIdx = pendingToolCalls.length - 1;
               }
-            } else if (data.delta?.type === "text_delta") {
-              yield { token: data.delta.text };
-            } else if (data.delta?.type === "input_json_delta" && currentToolIdx >= 0) {
-              pendingToolCalls[currentToolIdx].inputJson += data.delta.partial_json;
-            }
-          } else if (data.type === "message_delta") {
-            const outputTokens = data.usage?.output_tokens || 0;
-            const usage = (streamInputTokens || outputTokens)
-              ? {
-                  prompt_tokens: streamInputTokens,
-                  completion_tokens: outputTokens,
-                  total_tokens: streamInputTokens + outputTokens,
+            } else if (data.type === "content_block_delta") {
+              if (data.delta?.type === "thinking_delta") {
+                if (suppressThinking) {
+                  yield { token: data.delta.thinking };
+                } else {
+                  yield { token: "", reasoning: data.delta.thinking };
                 }
-              : undefined;
+              } else if (data.delta?.type === "text_delta") {
+                yield { token: data.delta.text };
+              } else if (
+                data.delta?.type === "input_json_delta" &&
+                currentToolIdx >= 0
+              ) {
+                pendingToolCalls[currentToolIdx].inputJson +=
+                  data.delta.partial_json;
+              }
+            } else if (data.type === "message_delta") {
+              const outputTokens = data.usage?.output_tokens || 0;
+              const usage =
+                streamInputTokens || outputTokens
+                  ? {
+                      prompt_tokens: streamInputTokens,
+                      completion_tokens: outputTokens,
+                      total_tokens: streamInputTokens + outputTokens,
+                    }
+                  : undefined;
 
-            const stopReason = data.delta?.stop_reason;
-            if (stopReason) {
-              // Emit accumulated tool calls when Anthropic signals tool_use stop
-              const toolCalls: ToolCallResult[] | undefined = pendingToolCalls.length > 0
-                ? pendingToolCalls.map(tc => ({ name: tc.name, args: JSON.parse(tc.inputJson || "{}"), call_id: tc.id }))
-                : undefined;
-              yield {
-                token: "",
-                finish_reason: toolCalls ? "tool_calls" : stopReason,
-                tool_calls: toolCalls,
-                usage,
-              };
-            } else if (usage) {
-              yield { token: "", usage };
+              const stopReason = data.delta?.stop_reason;
+              if (stopReason) {
+                // Emit accumulated tool calls when Anthropic signals tool_use stop
+                const toolCalls: ToolCallResult[] | undefined =
+                  pendingToolCalls.length > 0
+                    ? pendingToolCalls.map((tc) => ({
+                        name: tc.name,
+                        args: JSON.parse(tc.inputJson || "{}"),
+                        call_id: tc.id,
+                      }))
+                    : undefined;
+                yield {
+                  token: "",
+                  finish_reason: toolCalls ? "tool_calls" : stopReason,
+                  tool_calls: toolCalls,
+                  usage,
+                };
+              } else if (usage) {
+                yield { token: "", usage };
+              }
+            } else if (data.type === "message_stop") {
+              return;
             }
-          } else if (data.type === "message_stop") {
-            return;
+          } catch {
+            // Skip malformed SSE lines
           }
-        } catch {
-          // Skip malformed SSE lines
         }
       }
-    }
     } finally {
       reader.cancel().catch(() => {});
     }
@@ -239,7 +292,11 @@ export class AnthropicProvider implements LlmProvider {
       });
       // 200 or 400 (bad request but valid auth) both indicate valid key
       if (res.status === 401 || res.status === 403) {
-        await throwProviderResponseError(this.displayName, "authentication", res);
+        await throwProviderResponseError(
+          this.displayName,
+          "authentication",
+          res,
+        );
       }
       return res.status !== 401 && res.status !== 403;
     } catch (err) {
@@ -254,9 +311,14 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<string[]> {
-    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${this.baseUrl(apiUrl)}/v1/models`, {
-      headers: this.headers(apiKey),
-    });
+    const data = await fetchProviderJson<any>(
+      this.displayName,
+      "model listing",
+      `${this.baseUrl(apiUrl)}/v1/models`,
+      {
+        headers: this.headers(apiKey),
+      },
+    );
     return (data.data || []).map((m: any) => m.id).sort();
   }
 
@@ -268,10 +330,20 @@ export class AnthropicProvider implements LlmProvider {
         case "text":
           return { type: "text", text: part.text };
         case "image":
-          return { type: "image", source: { type: "base64", media_type: part.mime_type, data: part.data } };
+          return {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: part.mime_type,
+              data: part.data,
+            },
+          };
         case "audio":
           // Anthropic doesn't support native audio content blocks — include as text note
-          return { type: "text", text: `[Audio attachment: ${part.mime_type}]` };
+          return {
+            type: "text",
+            text: `[Audio attachment: ${part.mime_type}]`,
+          };
         default:
           return { type: "text", text: "" };
       }
@@ -349,18 +421,32 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   /** Keys that are internal to Lumiverse and should never be sent to any provider API. */
-  private static readonly INTERNAL_PARAMS = new Set(["max_context_length", "_include_usage", "_streaming"]);
+  private static readonly INTERNAL_PARAMS = new Set([
+    "max_context_length",
+    "_include_usage",
+    "_streaming",
+  ]);
 
   /** Keys explicitly handled by Anthropic's buildBody — excluded from passthrough. */
   private static readonly HANDLED_PARAMS = new Set([
-    "temperature", "max_tokens", "top_p", "top_k", "stop", "thinking", "output_config", "system",
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "top_k",
+    "stop",
+    "thinking",
+    "output_config",
+    "system",
   ]);
 
   private buildBody(request: GenerationRequest, stream: boolean): any {
     const params = request.parameters || {};
     const omitSampling = this.isOpus47Model(request.model);
     const systemBlocks: Array<{ type: "text"; text: string }> = [];
-    const normalizedMessages: Array<{ role: "user" | "assistant"; content: string | any[] }> = [];
+    const normalizedMessages: Array<{
+      role: "user" | "assistant";
+      content: string | any[];
+    }> = [];
     let sawNonSystem = false;
 
     for (const message of request.messages) {
@@ -377,9 +463,38 @@ export class AnthropicProvider implements LlmProvider {
       });
     }
 
+    const mergedMessages: typeof normalizedMessages = [];
+    for (const msg of normalizedMessages) {
+      if (
+        mergedMessages.length > 0 &&
+        mergedMessages[mergedMessages.length - 1].role === msg.role
+      ) {
+        const prev = mergedMessages[mergedMessages.length - 1];
+        if (
+          typeof prev.content === "string" &&
+          typeof msg.content === "string"
+        ) {
+          prev.content += "\n\n" + msg.content;
+        } else {
+          // If either is multipart, combine them into an array
+          const prevParts =
+            typeof prev.content === "string"
+              ? [{ type: "text", text: prev.content }]
+              : [...prev.content];
+          const newParts =
+            typeof msg.content === "string"
+              ? [{ type: "text", text: "\n\n" + msg.content }]
+              : msg.content;
+          prev.content = prevParts.concat(newParts) as any;
+        }
+      } else {
+        mergedMessages.push(msg);
+      }
+    }
+
     const body: any = {
       model: request.model,
-      messages: normalizedMessages,
+      messages: mergedMessages,
       max_tokens: params.max_tokens || 4096,
       stream,
     };
@@ -393,10 +508,13 @@ export class AnthropicProvider implements LlmProvider {
     }
 
     if (body.messages.length === 0) {
-      body.messages = [{ role: "user", content: AnthropicProvider.PROMPT_PLACEHOLDER }];
+      body.messages = [
+        { role: "user", content: AnthropicProvider.PROMPT_PLACEHOLDER },
+      ];
     }
 
-    if (!omitSampling && params.temperature !== undefined) body.temperature = params.temperature;
+    if (!omitSampling && params.temperature !== undefined)
+      body.temperature = params.temperature;
     if (!omitSampling && params.top_p !== undefined) body.top_p = params.top_p;
     if (!omitSampling && params.top_k !== undefined) body.top_k = params.top_k;
     if (params.stop) body.stop_sequences = params.stop;
@@ -408,7 +526,10 @@ export class AnthropicProvider implements LlmProvider {
     // Anthropic uses `output_config` for both structured output (`format`) and
     // reasoning effort. Preserve non-reasoning keys even when thinking is off,
     // but never leak `effort` alongside `thinking: disabled`.
-    const normalizedOutputConfig = this.normalizeOutputConfig(params.output_config, body.thinking);
+    const normalizedOutputConfig = this.normalizeOutputConfig(
+      params.output_config,
+      body.thinking,
+    );
     if (normalizedOutputConfig) {
       body.output_config = normalizedOutputConfig;
     }
@@ -419,7 +540,11 @@ export class AnthropicProvider implements LlmProvider {
       if (body[key] !== undefined) continue;
       if (AnthropicProvider.HANDLED_PARAMS.has(key)) continue;
       if (AnthropicProvider.INTERNAL_PARAMS.has(key)) continue;
-      if (omitSampling && (key === "temperature" || key === "top_p" || key === "top_k")) continue;
+      if (
+        omitSampling &&
+        (key === "temperature" || key === "top_p" || key === "top_k")
+      )
+        continue;
       body[key] = params[key];
     }
 
