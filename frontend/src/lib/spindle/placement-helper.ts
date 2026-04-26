@@ -121,6 +121,7 @@ export function createFloatWidgetHandle(
     snapToEdge: options?.snapToEdge ?? true,
     tooltip: options?.tooltip,
     chromeless: options?.chromeless,
+    fullscreen: options?.fullscreen ?? false,
   })
 
   return {
@@ -139,6 +140,38 @@ export function createFloatWidgetHandle(
     isVisible() {
       const w = getStore().floatWidgets.find((w) => w.id === widgetId)
       return w?.visible ?? true
+    },
+    setFullscreen(fullscreen: boolean) {
+      const store = getStore()
+      const w = store.floatWidgets.find((w) => w.id === widgetId)
+      if (!w) return
+      if (fullscreen) {
+        // Save current state before entering fullscreen
+        const preFullscreen = { x: w.x, y: w.y, width: w.width, height: w.height }
+        store.updateFloatWidget(widgetId, {
+          fullscreen: true,
+          preFullscreen,
+          x: 0,
+          y: 0,
+          width: window.innerWidth,
+          height: window.innerHeight,
+        })
+      } else {
+        // Restore pre-fullscreen state
+        const pre = w.preFullscreen
+        store.updateFloatWidget(widgetId, {
+          fullscreen: false,
+          x: pre?.x ?? w.x,
+          y: pre?.y ?? w.y,
+          width: pre?.width ?? w.width,
+          height: pre?.height ?? w.height,
+          preFullscreen: undefined,
+        })
+      }
+    },
+    isFullscreen() {
+      const w = getStore().floatWidgets.find((w) => w.id === widgetId)
+      return w?.fullscreen ?? false
     },
     destroy() {
       window.removeEventListener('spindle:float-drag-end', handleDragEndEvent)

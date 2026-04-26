@@ -44,6 +44,9 @@ export interface FloatWidgetState {
   snapToEdge: boolean
   tooltip?: string
   chromeless?: boolean
+  fullscreen?: boolean
+  /** Saved x/y/w/h from before entering fullscreen. */
+  preFullscreen?: { x: number; y: number; width: number; height: number }
 }
 
 export interface DockPanelState {
@@ -169,7 +172,7 @@ export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = 
     }))
   },
 
-  updateFloatWidget: (widgetId: string, updates: Partial<Pick<FloatWidgetState, 'x' | 'y' | 'visible'>>) => {
+  updateFloatWidget: (widgetId: string, updates: Partial<Pick<FloatWidgetState, 'x' | 'y' | 'visible' | 'fullscreen' | 'preFullscreen'>>) => {
     set((state) => ({
       floatWidgets: state.floatWidgets.map((w) =>
         w.id === widgetId ? { ...w, ...updates } : w
