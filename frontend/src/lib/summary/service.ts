@@ -87,7 +87,9 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
 
   const existingSummary = (chat.metadata?.[LOOM_SUMMARY_KEY] as string) || ''
   const recentMessages = msgPage.data
-  if (msgPage.total === 0 || recentMessages.length === 0) return null
+  if (msgPage.total === 0 || recentMessages.length === 0) {
+    throw new Error('No messages to summarize')
+  }
 
   // Fetch default templates up front — needed whenever an override is empty
   const defaults = await loadSummarizationDefaults()
@@ -105,7 +107,9 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
     systemTemplate: defaults.systemPrompt,
     userTemplate: defaults.userPrompt,
   })
-  if (!prompt) return null
+  if (!prompt) {
+    throw new Error('Failed to build summarization prompt')
+  }
 
   // Send to backend via summarize endpoint (sidecar-aware, not localhost-restricted).
   // Passing chat_id lets the server register this job in its summarize-pool so
@@ -120,7 +124,12 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
   })
 
   const summaryText = result.content?.trim()
-  if (!summaryText) return null
+  if (!summaryText) {
+    if (result.reasoning) {
+      throw new Error('Model returned only reasoning with no summary content')
+    }
+    throw new Error(\`No summary generated (finish reason: \${result.finish_reason || 'unknown'})\`)
+  }
 
   // Store summary in chat metadata
   await chatsApi.patchMetadata(chatId, {

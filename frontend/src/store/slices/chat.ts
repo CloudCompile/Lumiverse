@@ -123,7 +123,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         }
 
         const messages = sortMessagesByPosition([...state.messages, message])
-        return { messages, totalChatLength: messages.length }
+        return { messages, totalChatLength: state.totalChatLength + 1 }
       }),
 
     updateMessage: (id, updates) =>
@@ -152,7 +152,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         }
         if (idx === -1) return { messages: state.messages }
         const messages = state.messages.filter((_m, i) => i !== idx)
-        return { messages, totalChatLength: messages.length }
+        return { messages, totalChatLength: Math.max(0, state.totalChatLength - 1) }
       }),
 
     beginStreaming: (regeneratingMessageId, generationType) => {
