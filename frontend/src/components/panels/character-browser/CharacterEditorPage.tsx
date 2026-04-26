@@ -202,13 +202,15 @@ export default function CharacterEditorPage() {
 
   const handleGalleryUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (!file || !editingCharacterId) return
+      const files = Array.from(e.target.files ?? [])
+      if (files.length === 0 || !editingCharacterId) return
       e.target.value = ''
       setGalleryUploading(true)
       try {
-        const item = await characterGalleryApi.upload(editingCharacterId, file)
-        setGalleryItems((prev) => [...prev, item])
+        const items = files.length === 1
+          ? [await characterGalleryApi.upload(editingCharacterId, files[0])]
+          : await characterGalleryApi.uploadMany(editingCharacterId, files)
+        if (items.length > 0) setGalleryItems((prev) => [...prev, ...items])
       } catch {
         // upload failed
       } finally {
@@ -1100,7 +1102,7 @@ export default function CharacterEditorPage() {
                           disabled={galleryUploading}
                         >
                           <ImagePlus size={20} />
-                          <span>{galleryUploading ? 'Uploading...' : 'Add Image'}</span>
+                          <span>{galleryUploading ? 'Uploading...' : 'Add Images'}</span>
                         </button>
                       </div>
 
@@ -1108,6 +1110,7 @@ export default function CharacterEditorPage() {
                         ref={galleryFileRef}
                         type="file"
                         accept="image/*"
+                        multiple
                         className={styles.hiddenInput}
                         onChange={handleGalleryUpload}
                       />
