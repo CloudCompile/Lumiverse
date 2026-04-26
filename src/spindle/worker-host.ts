@@ -4240,6 +4240,7 @@ export class WorkerHost {
       creator: c.creator || "",
       image_id: c.image_id || null,
       world_book_ids: getCharacterWorldBookIds(c.extensions),
+      extensions: c.extensions || {},
       created_at: c.created_at,
       updated_at: c.updated_at,
     };
@@ -4335,9 +4336,14 @@ export class WorkerHost {
         alternate_greetings: input.alternate_greetings,
         creator: input.creator,
       };
-      if (input.world_book_ids !== undefined) {
+      if (input.world_book_ids !== undefined || input.extensions !== undefined) {
         const ids = this.sanitizeWorldBookIds(input.world_book_ids);
-        createInput.extensions = setCharacterWorldBookIds({}, ids);
+        createInput.extensions = setCharacterWorldBookIds(
+          input.extensions && typeof input.extensions === "object" && !Array.isArray(input.extensions)
+            ? input.extensions
+            : {},
+          ids,
+        );
       }
       const c = charactersSvc.createCharacter(resolvedUserId, createInput);
       this.postToWorker({ type: "response", requestId, result: this.toCharacterDTO(c) });
@@ -4393,9 +4399,6 @@ export class WorkerHost {
       if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
       this.enforceScopedUser(resolvedUserId);
 
-      // Whitelist allowed update fields. The raw `extensions` blob is never
-      // accepted from extensions — only structured fields like `world_book_ids`
-      // are allowed to mutate it, and only via the dedicated helper.
       const update: any = {};
       const passthroughFields = [
         "name", "description", "personality", "scenario", "first_mes",
@@ -4406,11 +4409,22 @@ export class WorkerHost {
         if (input?.[field] !== undefined) update[field] = input[field];
       }
 
+      const existing = charactersSvc.getCharacter(resolvedUserId, characterId);
+      if (!existing) throw new Error("Character not found");
+
+      let mergedExtensions: Record<string, any> | undefined;
+      if (input?.extensions !== undefined) {
+        if (typeof input.extensions !== "object" || Array.isArray(input.extensions)) {
+          throw new Error("extensions must be a plain object");
+        }
+        mergedExtensions = { ...existing.extensions, ...input.extensions };
+      }
+
       if (input?.world_book_ids !== undefined) {
-        const existing = charactersSvc.getCharacter(resolvedUserId, characterId);
-        if (!existing) throw new Error("Character not found");
         const ids = this.sanitizeWorldBookIds(input.world_book_ids);
-        update.extensions = setCharacterWorldBookIds(existing.extensions || {}, ids);
+        update.extensions = setCharacterWorldBookIds(mergedExtensions || existing.extensions || {}, ids);
+      } else if (mergedExtensions !== undefined) {
+        update.extensions = mergedExtensions;
       }
 
       const c = charactersSvc.updateCharacter(resolvedUserId, characterId, update);
