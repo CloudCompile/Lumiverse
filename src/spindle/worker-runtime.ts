@@ -83,9 +83,68 @@ type RuntimeWorkerToHost =
       model?: string;
       modelSource?: TokenModelSource;
       userId?: string;
+    }
+  | { type: "register_message_content_processor"; priority?: number }
+  | {
+      type: "message_content_processor_result";
+      requestId: string;
+      result: unknown;
+    }
+  | { type: "register_macro_interceptor"; priority?: number }
+  | {
+      type: "macro_interceptor_result";
+      requestId: string;
+      result: unknown;
+    };
+
+type RuntimeHostToWorker =
+  | HostToWorker
+  | {
+      type: "message_content_processor_request";
+      requestId: string;
+      ctx: unknown;
+    }
+  | {
+      type: "macro_interceptor_request";
+      requestId: string;
+      ctx: unknown;
     };
 
 type RuntimeSpindleAPI = SpindleAPI & {
+  registerMessageContentProcessor(
+    handler: (ctx: {
+      chatId: string;
+      messageId?: string;
+      content: string;
+      extra?: Record<string, unknown>;
+      origin: "create" | "update" | "swipe_add" | "swipe_update";
+      swipeIndex?: number;
+    }) => Promise<{ content?: string; extra?: Record<string, unknown> } | void>,
+    priority?: number
+  ): void;
+  registerMacroInterceptor(
+    handler: (ctx: {
+      template: string;
+      env: {
+        commit: boolean;
+        names: Record<string, string>;
+        character: Record<string, unknown>;
+        chat: Record<string, unknown>;
+        system: Record<string, unknown>;
+        variables: {
+          local: Record<string, string>;
+          global: Record<string, string>;
+          chat: Record<string, string>;
+        };
+        extra: Record<string, unknown>;
+      };
+      commit: boolean;
+      phase: "prompt" | "display" | "response" | "other";
+      sourceHint?: string;
+      userId?: string;
+    }) => Promise<string | void>,
+    priority?: number
+  ): void;
   tokens: {
     countText(text: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
     countMessages(
@@ -129,6 +188,12 @@ let interceptHandler:
     ) => Promise<LlmMessageDTO[] | InterceptorResultDTO>)
   | null = null;
 let contextHandlerFn: ((context: unknown) => Promise<unknown>) | null = null;
+let messageContentProcessorFn:
+  | ((ctx: unknown) => Promise<unknown>)
+  | null = null;
+let macroInterceptorFn:
+  | ((ctx: unknown) => Promise<unknown>)
+  | null = null;
 let oauthCallbackHandler:
   | ((params: Record<string, string>) => Promise<{ html?: string } | void>)
   | null = null;
@@ -1601,6 +1666,18 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "register_context_handler", priority });
   },
 
+  registerMessageContentProcessor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerMessageContentProcessor()");
+    messageContentProcessorFn = handler as (ctx: unknown) => Promise<unknown>;
+    post({ type: "register_message_content_processor", priority });
+  },
+
+  registerMacroInterceptor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerMacroInterceptor()");
+    macroInterceptorFn = handler as (ctx: unknown) => Promise<unknown>;
+    post({ type: "register_macro_interceptor", priority });
+  },
+
   sendToFrontend(payload: unknown, userId?: string): void {
     post({ type: "frontend_message", payload, userId });
   },
@@ -1761,7 +1838,7 @@ const spindleApi: RuntimeSpindleAPI = {
 
 // ─── Message handler (host → worker) ─────────────────────────────────────
 
-self.onmessage = async (event: MessageEvent<HostToWorker>) => {
+self.onmessage = async (event: MessageEvent<RuntimeHostToWorker>) => {
   const msg = event.data;
 
   switch (msg.type) {
@@ -1948,6 +2025,56 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
             type: "context_handler_result",
             requestId: msg.requestId,
             context: msg.context,
+          });
+        }
+      }
+      break;
+    }
+
+    case "message_content_processor_request": {
+      if (messageContentProcessorFn) {
+        try {
+          const result = await messageContentProcessorFn(msg.ctx);
+          post({
+            type: "message_content_processor_result",
+            requestId: msg.requestId,
+            result,
+          });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Message content processor error: ${err.message}`,
+          });
+          post({
+            type: "message_content_processor_result",
+            requestId: msg.requestId,
+            result: undefined,
+          });
+        }
+      }
+      break;
+    }
+
+    case "macro_interceptor_request": {
+      if (macroInterceptorFn) {
+        try {
+          const result = await macroInterceptorFn(msg.ctx);
+          post({
+            type: "macro_interceptor_result",
+            requestId: msg.requestId,
+            result,
+          });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Macro interceptor error: ${err.message}`,
+          });
+          post({
+            type: "macro_interceptor_result",
+            requestId: msg.requestId,
+            result: undefined,
           });
         }
       }
