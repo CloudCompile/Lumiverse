@@ -123,6 +123,28 @@ export function collapseExcessiveNewlines(content: string): string {
 // Composed sanitization for vectorization
 // ---------------------------------------------------------------------------
 
+/** 
+ * Remove ANY HTML-like tags and their inner contents.
+ * Iteratively removes <tag>...</tag> blocks and then drops self-closing/unclosed tags.
+ */
+export function stripAllHtmlTagsAndContent(content: string): string {
+  let result = content;
+  let prev: string;
+  let iter = 0;
+  
+  do {
+    if (++iter > MAX_FILTER_ITERATIONS) break;
+    prev = result;
+    // Strip <tag...> ... </tag>
+    result = result.replace(/<([a-zA-Z][\w-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/gi, "");
+  } while (result !== prev);
+  
+  // Also strip any remaining self-closing or unclosed tags
+  result = result.replace(/<[a-zA-Z][\w-]*(?:\s[^>]*)?\/?>/gi, "");
+  
+  return result;
+}
+
 export interface SanitizeOptions {
   /** User-configured reasoning prefix (e.g. from `reasoningSettings.prefix`). */
   reasoningPrefix?: string;
@@ -172,14 +194,13 @@ function stripCustomReasoningBlocks(content: string, prefix: string, suffix: str
 /**
  * Apply full content sanitization for embedding/vectorization.
  *
- * Strips reasoning tags, details blocks, loom structural tags, and HTML
- * formatting tags. Font tags are intentionally KEPT — they carry semantic
- * styling intent rather than structural noise.
+ * Strips reasoning tags, custom reasoning blocks, and ALL HTML-like
+ * structural tags along with their inner contents. This prevents the
+ * vector embeddings from being polluted with meta-content, system tags,
+ * or UI formatting wrappers.
  *
  * Pass `options.reasoningPrefix` / `options.reasoningSuffix` to also strip
- * blocks wrapped in the user's custom reasoning delimiters — critical for
- * keeping reasoning out of chat chunks and retrieval queries when a user has
- * configured non-default CoT tags.
+ * blocks wrapped in the user's custom reasoning delimiters.
  */
 export function sanitizeForVectorization(content: string, options?: SanitizeOptions): string {
   // Strip custom reasoning blocks first so default-tag regexes don't leave
@@ -198,10 +219,10 @@ export function sanitizeForVectorization(content: string, options?: SanitizeOpti
     /\s*<(think|thinking|reasoning)>[\s\S]*$/gi,
     "",
   );
-  result = stripDetailsBlocks(result);
-  result = stripLoomTags(result);
-  result = stripHtmlFormattingTags(result);
-  // NOTE: Font tags are intentionally KEPT — they carry semantic styling intent
+
+  // Strip ALL HTML-like tags and their inner contents
+  result = stripAllHtmlTagsAndContent(result);
+
   result = collapseExcessiveNewlines(result);
   return result.trim();
 }

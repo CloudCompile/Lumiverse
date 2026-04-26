@@ -9,7 +9,7 @@ import type {
   WorldBookEntry,
   WorldBookReindexProgress,
   WorldBookReindexResult,
-  WorldBookVectorIndexStatus,
+  WorldBookVectorIndexStatus
 } from "../types/world-book";
 import { embeddingCache, computeCacheKey, type ModelFingerprint } from "./embedding-cache";
 import {
@@ -18,6 +18,7 @@ import {
   vertexHostForLocation,
 } from "../llm/providers/google-vertex";
 import { getFirstUserId } from "../auth/seed";
+import { sanitizeForVectorization } from "../utils/content-sanitizer";
 
 const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
@@ -778,7 +779,7 @@ export function buildWorldBookEntrySearchText(entry: WorldBookEntry): string {
   const primaryKeys = uniqueNonEmpty(entry.key || []);
   const secondaryKeys = uniqueNonEmpty(entry.keysecondary || []);
   const comment = (entry.comment || "").trim();
-  const content = (entry.content || "").trim();
+  const content = sanitizeForVectorization(entry.content || "");
   const sections: string[] = [];
 
   if (comment) sections.push(`Entry title: ${comment}`);
