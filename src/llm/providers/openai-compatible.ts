@@ -2,6 +2,7 @@ import type { LlmProvider } from "../provider";
 import type { ProviderCapabilities } from "../param-schema";
 import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import type { GenerationRequest, GenerationResponse, StreamChunk, ToolCallResult, LlmMessage, LlmMessagePart } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 /**
  * Abstract base class for providers that use the OpenAI-compatible
@@ -208,23 +209,24 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       const res = await fetch(`${this.baseUrl(apiUrl)}/models`, {
         headers: this.headers(apiKey),
       });
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({
+        provider: this.displayName,
+        operation: "authentication",
+        detail: err instanceof Error ? err.message : "network request failed",
+        retryable: true,
+      });
     }
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<string[]> {
-    try {
-      const res = await fetch(`${this.baseUrl(apiUrl)}/models`, {
-        headers: this.headers(apiKey),
-      });
-      if (!res.ok) return [];
-      const data = (await res.json()) as any;
-      return this.filterModels(data);
-    } catch {
-      return [];
-    }
+    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${this.baseUrl(apiUrl)}/models`, {
+      headers: this.headers(apiKey),
+    });
+    return this.filterModels(data);
   }
 
   /** Override to customise model list extraction / filtering. */

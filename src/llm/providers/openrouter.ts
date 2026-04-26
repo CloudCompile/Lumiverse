@@ -1,6 +1,7 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
 import type { GenerationRequest } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 /** Cached model metadata from OpenRouter's /models endpoint. */
 export interface OpenRouterModelInfo {
@@ -138,10 +139,19 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
         headers: this.headers(apiKey),
       });
       if (res.ok) return true;
+      if (res.status === 401 || res.status === 403) {
+        await throwProviderResponseError(this.displayName, "authentication", res);
+      }
       // Fall back to models endpoint
       return super.validateKey(apiKey, apiUrl);
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({
+        provider: this.displayName,
+        operation: "authentication",
+        detail: err instanceof Error ? err.message : "network request failed",
+        retryable: true,
+      });
     }
   }
 
@@ -169,17 +179,15 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
       return cached.data;
     }
 
-    try {
-      const url = new URL(`${this.baseUrl(apiUrl)}/models`);
-      if (opts?.outputModalities?.trim()) {
-        url.searchParams.set("output_modalities", opts.outputModalities.trim());
-      }
+    const url = new URL(`${this.baseUrl(apiUrl)}/models`);
+    if (opts?.outputModalities?.trim()) {
+      url.searchParams.set("output_modalities", opts.outputModalities.trim());
+    }
 
-      const res = await fetch(url.toString(), {
+    try {
+      const data = await fetchProviderJson<any>(this.displayName, "model listing", url.toString(), {
         headers: this.headers(apiKey),
       });
-      if (!res.ok) return cached?.data || [];
-      const data = (await res.json()) as any;
       const models: OpenRouterModelInfo[] = (data.data || []).map((m: any) => ({
         id: m.id,
         name: m.name,
@@ -191,8 +199,9 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
       }));
       _modelCache.set(cacheKey, { data: models, fetchedAt: Date.now() });
       return models;
-    } catch {
-      return cached?.data || [];
+    } catch (err) {
+      if (cached?.data) return cached.data;
+      throw err;
     }
   }
 

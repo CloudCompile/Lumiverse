@@ -2,6 +2,7 @@ import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
 import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
+import { fetchProviderJson, throwProviderResponseError } from "../../utils/provider-errors";
 
 // ── Service account JWT → OAuth2 access token ──────────────────────────────
 
@@ -123,8 +124,7 @@ export async function getAccessToken(sa: ServiceAccountCredentials): Promise<str
   });
 
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Vertex AI token exchange failed (${res.status}): ${err}`);
+    await throwProviderResponseError("Vertex AI", "authentication", res);
   }
 
   const data = (await res.json()) as { access_token: string; expires_in: number };
@@ -187,14 +187,9 @@ export async function listVertexLocations(apiKey: string): Promise<string[]> {
     const params = new URLSearchParams();
     if (pageToken) params.set("pageToken", pageToken);
     const url = `https://aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations${params.toString() ? `?${params}` : ""}`;
-    const res = await fetch(url, {
+    const data = await fetchProviderJson<any>("Vertex AI", "region listing", url, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Failed to list Vertex AI locations (${res.status}): ${err}`);
-    }
-    const data = (await res.json()) as any;
     const locations: any[] = data.locations || [];
     for (const loc of locations) {
       const id: string = loc.locationId || loc.name?.split("/").pop() || "";
@@ -412,73 +407,53 @@ export class GoogleVertexProvider implements LlmProvider {
   }
 
   async validateKey(apiKey: string, apiUrl: string): Promise<boolean> {
-    try {
-      const { sa, location } = this.resolveProjectConfig(apiKey, apiUrl);
-      const accessToken = await getAccessToken(sa);
-      const host = vertexHostForLocation(location);
-      // See listModels() for URL rationale. The publisher-list endpoint is
-      // un-prefixed (no project/location in the path) and lives at v1beta1.
-      const url = `${host}/v1beta1/publishers/google/models?pageSize=1`;
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (!res.ok) {
-        const err = await res.text();
-        console.error(`[Vertex AI] validateKey failed (${res.status}): ${err}`);
-      }
-      return res.ok;
-    } catch (e) {
-      console.error("[Vertex AI] validateKey error:", e);
-      return false;
-    }
+    const { sa, location } = this.resolveProjectConfig(apiKey, apiUrl);
+    const accessToken = await getAccessToken(sa);
+    const host = vertexHostForLocation(location);
+    // See listModels() for URL rationale. The publisher-list endpoint is
+    // un-prefixed (no project/location in the path) and lives at v1beta1.
+    const url = `${host}/v1beta1/publishers/google/models?pageSize=1`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return res.ok;
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<string[]> {
-    try {
-      const { sa, location } = this.resolveProjectConfig(apiKey, apiUrl);
-      const accessToken = await getAccessToken(sa);
-      const host = vertexHostForLocation(location);
-      const allModels: string[] = [];
-      let pageToken: string | undefined;
+    const { sa, location } = this.resolveProjectConfig(apiKey, apiUrl);
+    const accessToken = await getAccessToken(sa);
+    const host = vertexHostForLocation(location);
+    const allModels: string[] = [];
+    let pageToken: string | undefined;
 
-      do {
-        const params = new URLSearchParams();
-        if (pageToken) params.set("pageToken", pageToken);
-        // List base (publisher) models. Per Google's @google/genai SDK
-        // (`_api_client.ts` → `shouldPrependVertexProjectPath`):
-        //   "For base models Vertex does not accept a project/location
-        //    prefix (for tuned models the prefix is required)."
-        // So the URL is un-prefixed and sits at v1beta1 (the SDK's default
-        // version for Vertex; the v1 surface does not expose this list).
-        //   →  {host}/v1beta1/publishers/google/models
-        const url = `${host}/v1beta1/publishers/google/models${params.toString() ? `?${params}` : ""}`;
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          console.error(`[Vertex AI] listModels failed (${res.status}): ${err}`);
-          break;
-        }
-        const data = (await res.json()) as any;
-        // Response may use `publisherModels`, `models`, or `tunedModels`
-        // depending on the surface — mirrors tExtractModels() in the SDK.
-        const models: any[] = data.publisherModels || data.models || data.tunedModels || [];
-        for (const m of models) {
-          // Names are "publishers/google/models/{id}".
-          const name: string = m.name || "";
-          const shortName = name.replace(/^publishers\/google\/models\//, "");
-          const id = shortName || name;
-          if (id) allModels.push(id);
-        }
-        pageToken = data.nextPageToken;
-      } while (pageToken);
+    do {
+      const params = new URLSearchParams();
+      if (pageToken) params.set("pageToken", pageToken);
+      // List base (publisher) models. Per Google's @google/genai SDK
+      // (`_api_client.ts` → `shouldPrependVertexProjectPath`):
+      //   "For base models Vertex does not accept a project/location
+      //    prefix (for tuned models the prefix is required)."
+      // So the URL is un-prefixed and sits at v1beta1 (the SDK's default
+      // version for Vertex; the v1 surface does not expose this list).
+      //   →  {host}/v1beta1/publishers/google/models
+      const url = `${host}/v1beta1/publishers/google/models${params.toString() ? `?${params}` : ""}`;
+      const data = await fetchProviderJson<any>(this.displayName, "model listing", url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      // Response may use `publisherModels`, `models`, or `tunedModels`
+      // depending on the surface — mirrors tExtractModels() in the SDK.
+      const models: any[] = data.publisherModels || data.models || data.tunedModels || [];
+      for (const m of models) {
+        // Names are "publishers/google/models/{id}".
+        const name: string = m.name || "";
+        const shortName = name.replace(/^publishers\/google\/models\//, "");
+        const id = shortName || name;
+        if (id) allModels.push(id);
+      }
+      pageToken = data.nextPageToken;
+    } while (pageToken);
 
-      return allModels.sort();
-    } catch (e) {
-      console.error("[Vertex AI] listModels error:", e);
-      return [];
-    }
+    return allModels.sort();
   }
 
   // ── Body building (mirrors GoogleProvider.buildBody) ──────────────────

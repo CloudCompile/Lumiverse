@@ -11,6 +11,7 @@ import type {
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import type { TtsVoice } from "../tts/types";
+import { describeProviderError } from "../utils/provider-errors";
 
 /** Secret key for a TTS connection's API key. */
 export function ttsConnectionSecretKey(id: string): string {
@@ -250,7 +251,7 @@ export async function testConnection(
       provider: profile.provider,
     };
   } catch (err: any) {
-    return { success: false, message: err.message || "Connection test failed", provider: profile.provider };
+    return { success: false, message: describeProviderError(err, "Connection test failed"), provider: profile.provider };
   }
 }
 
@@ -275,7 +276,7 @@ export async function listConnectionModels(
     const models = await provider.listModels(apiKey || "", profile.api_url || "");
     return { models, provider: profile.provider };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: profile.provider, error: describeProviderError(err, "Failed to fetch models") };
   }
 }
 
@@ -316,6 +317,6 @@ export async function listConnectionVoicesPreview(
     const voices = await provider.listVoices(apiKey || "", input.api_url ?? existing?.api_url ?? "");
     return { voices, provider: providerId };
   } catch (err: any) {
-    return { voices: [], provider: providerId, error: err.message || "Failed to fetch voices" };
+    return { voices: [], provider: providerId, error: describeProviderError(err, "Failed to fetch voices") };
   }
 }

@@ -10,6 +10,7 @@ import type {
 } from "../types/connection-profile";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
+import { describeProviderError } from "../utils/provider-errors";
 
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 15_000;
 
@@ -54,9 +55,7 @@ export interface ConnectionModelsPreviewInput {
 }
 
 function describeConnectionTestError(err: unknown): string {
-  if (err instanceof Error && err.message.trim()) return err.message;
-  if (typeof err === "string" && err.trim()) return err;
-  return "Connection test failed";
+  return describeProviderError(err, "Connection test failed");
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -462,7 +461,7 @@ export async function listConnectionModelsPreview(
     const models = await provider.listModels(apiKey || "", apiUrl);
     return { models, model_labels, provider: providerId };
   } catch (err: any) {
-    return { models: [], provider: providerId, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: providerId, error: describeProviderError(err, "Failed to fetch models") };
   }
 }
 
@@ -528,6 +527,6 @@ export async function listConnectionRegions(userId: string, id: string): Promise
     const regions = await listVertexLocations(apiKey);
     return { regions };
   } catch (err: any) {
-    return { regions: [], error: err.message || "Failed to list regions" };
+    return { regions: [], error: describeProviderError(err, "Failed to list regions") };
   }
 }

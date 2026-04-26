@@ -2,6 +2,7 @@ import type { ImageProvider } from "../provider"
 import type { ImageProviderCapabilities, ImageParameterSchemaMap } from "../param-schema"
 import type { ImageGenRequest, ImageGenResponse } from "../types"
 import { applyRawOverride } from "../types"
+import { ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors"
 
 const PARAMETERS: ImageParameterSchemaMap = {
   width: {
@@ -162,7 +163,7 @@ export class SwarmUIImageProvider implements ImageProvider {
     })
 
     if (!res.ok) {
-      throw new Error(`SwarmUI session request failed: ${res.status} ${await res.text().catch(() => "")}`)
+      await throwProviderResponseError("SwarmUI", "session request", res)
     }
 
     const data = (await res.json()) as Record<string, any>
@@ -381,8 +382,9 @@ export class SwarmUIImageProvider implements ImageProvider {
       const base = this.baseUrl(apiUrl)
       await this.getSession(base, apiKey || undefined)
       return true
-    } catch {
-      return false
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err
+      throw new ProviderRequestError({ provider: this.displayName, operation: "connection check", detail: err instanceof Error ? err.message : "network request failed", retryable: true })
     }
   }
 
@@ -411,42 +413,38 @@ export class SwarmUIImageProvider implements ImageProvider {
     apiUrl: string,
     query: { path: string; depth: number; subtype: string },
   ): Promise<Array<{ id: string; label: string }>> {
-    try {
-      const base = this.baseUrl(apiUrl)
-      const token = apiKey || undefined
-      const sessionId = await this.getSession(base, token)
+    const base = this.baseUrl(apiUrl)
+    const token = apiKey || undefined
+    const sessionId = await this.getSession(base, token)
 
-      const body: Record<string, any> = {
-        session_id: sessionId,
-        path: query.path,
-        depth: query.depth,
-      }
-      if (query.subtype) body.subtype = query.subtype
-
-      const res = await fetch(`${base}/API/ListModels`, {
-        method: "POST",
-        headers: this.buildHeaders(token),
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15_000),
-      })
-
-      if (!res.ok) return []
-
-      const data = (await res.json()) as Record<string, any>
-
-      // Response: { folders: [...], files: [{ name, title, ... }] }
-      const models: Array<{ id: string; label: string }> = []
-      const files: any[] = Array.isArray(data.files) ? data.files : []
-
-      for (const f of files) {
-        const id = typeof f === "string" ? f : String(f?.name ?? "")
-        if (id) models.push({ id, label: modelLabel(id) })
-      }
-
-      return models
-    } catch {
-      return []
+    const body: Record<string, any> = {
+      session_id: sessionId,
+      path: query.path,
+      depth: query.depth,
     }
+    if (query.subtype) body.subtype = query.subtype
+
+    const res = await fetch(`${base}/API/ListModels`, {
+      method: "POST",
+      headers: this.buildHeaders(token),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+
+    if (!res.ok) await throwProviderResponseError(this.displayName, "model listing", res)
+
+    const data = (await res.json()) as Record<string, any>
+
+    // Response: { folders: [...], files: [{ name, title, ... }] }
+    const models: Array<{ id: string; label: string }> = []
+    const files: any[] = Array.isArray(data.files) ? data.files : []
+
+    for (const f of files) {
+      const id = typeof f === "string" ? f : String(f?.name ?? "")
+      if (id) models.push({ id, label: modelLabel(id) })
+    }
+
+    return models
   }
 
   // ── WebSocket event stream ────────────────────────────────────────────

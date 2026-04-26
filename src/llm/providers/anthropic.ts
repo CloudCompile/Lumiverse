@@ -2,6 +2,7 @@ import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
 import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 const API_VERSION = "2023-06-01";
 
@@ -237,23 +238,26 @@ export class AnthropicProvider implements LlmProvider {
         }),
       });
       // 200 or 400 (bad request but valid auth) both indicate valid key
+      if (res.status === 401 || res.status === 403) {
+        await throwProviderResponseError(this.displayName, "authentication", res);
+      }
       return res.status !== 401 && res.status !== 403;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({
+        provider: this.displayName,
+        operation: "authentication",
+        detail: err instanceof Error ? err.message : "network request failed",
+        retryable: true,
+      });
     }
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<string[]> {
-    try {
-      const res = await fetch(`${this.baseUrl(apiUrl)}/v1/models`, {
-        headers: this.headers(apiKey),
-      });
-      if (!res.ok) return [];
-      const data = await res.json() as any;
-      return (data.data || []).map((m: any) => m.id).sort();
-    } catch {
-      return [];
-    }
+    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${this.baseUrl(apiUrl)}/v1/models`, {
+      headers: this.headers(apiKey),
+    });
+    return (data.data || []).map((m: any) => m.id).sort();
   }
 
   /** Format message content for the Anthropic API, handling multipart (vision) content. */

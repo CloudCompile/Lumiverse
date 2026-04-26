@@ -1,6 +1,7 @@
 import type { ImageProvider } from "../provider"
 import type { ImageProviderCapabilities, ImageParameterSchemaMap } from "../param-schema"
 import type { ImageGenRequest, ImageGenResponse } from "../types"
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors"
 
 const PARAMETERS: ImageParameterSchemaMap = {}
 
@@ -248,32 +249,27 @@ export class ComfyUIImageProvider implements ImageProvider {
       const res = await fetch(`${baseUrl}/system_stats`, {
         signal: AbortSignal.timeout(5000),
       })
+      if (!res.ok) await throwProviderResponseError(this.displayName, "connection check", res)
       return res.ok
-    } catch {
-      return false
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err
+      throw new ProviderRequestError({ provider: this.displayName, operation: "connection check", detail: err instanceof Error ? err.message : "network request failed", retryable: true })
     }
   }
 
   async listModels(_apiKey: string, apiUrl: string): Promise<Array<{ id: string; label: string }>> {
-    try {
-      const baseUrl = apiUrl || this.capabilities.defaultUrl
-      assertSafeComfyUrl(baseUrl!)
-      const res = await fetch(`${baseUrl}/object_info/CheckpointLoaderSimple`, {
-        signal: AbortSignal.timeout(10000),
-      })
-      if (!res.ok) return []
+    const baseUrl = apiUrl || this.capabilities.defaultUrl
+    assertSafeComfyUrl(baseUrl!)
+    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${baseUrl}/object_info/CheckpointLoaderSimple`, {
+      signal: AbortSignal.timeout(10000),
+    })
+    const checkpoints: string[] =
+      data?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || []
 
-      const data = (await res.json()) as any
-      const checkpoints: string[] =
-        data?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || []
-
-      return checkpoints.map((name) => ({
-        id: name,
-        label: name.replace(/\.[^.]+$/, ""), // Strip file extension for display
-      }))
-    } catch {
-      return []
-    }
+    return checkpoints.map((name) => ({
+      id: name,
+      label: name.replace(/\.[^.]+$/, ""), // Strip file extension for display
+    }))
   }
 
   private async *wsEventsWithNodes(

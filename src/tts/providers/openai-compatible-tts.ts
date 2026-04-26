@@ -1,6 +1,7 @@
 import type { TtsProvider } from "../provider";
 import type { TtsProviderCapabilities } from "../param-schema";
 import type { TtsRequest, TtsResponse, TtsStreamChunk, TtsVoice } from "../types";
+import { ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 /**
  * Abstract base class for providers that use the OpenAI-compatible
@@ -119,9 +120,11 @@ export abstract class OpenAICompatibleTtsProvider implements TtsProvider {
       const res = await fetch(`${this.baseUrl(apiUrl)}/models`, {
         headers: this.headers(apiKey),
       });
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({ provider: this.displayName, operation: "authentication", detail: err instanceof Error ? err.message : "network request failed", retryable: true });
     }
   }
 

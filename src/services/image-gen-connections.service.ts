@@ -10,6 +10,7 @@ import type {
 } from "../types/image-gen-connection";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
+import { describeProviderError } from "../utils/provider-errors";
 
 /** Secret key for an image gen connection's API key. */
 export function imageGenConnectionSecretKey(id: string): string {
@@ -284,7 +285,7 @@ export async function testConnection(
       provider: profile.provider,
     };
   } catch (err: any) {
-    return { success: false, message: err.message || "Connection test failed", provider: profile.provider };
+    return { success: false, message: describeProviderError(err, "Connection test failed"), provider: profile.provider };
   }
 }
 
@@ -325,7 +326,7 @@ export async function listConnectionModelsPreview(
     const models = await provider.listModels(apiKey || "", input.api_url ?? existing?.api_url ?? "");
     return { models, provider: providerId };
   } catch (err: any) {
-    return { models: [], provider: providerId, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: providerId, error: describeProviderError(err, "Failed to fetch models") };
   }
 }
 
@@ -355,7 +356,7 @@ export async function listConnectionModelsBySubtype(
     const models = await provider.listModelsBySubtype(apiKey || "", profile.api_url || "", subtype);
     return { models, provider: profile.provider };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: profile.provider, error: describeProviderError(err, "Failed to fetch models") };
   }
 }
 
