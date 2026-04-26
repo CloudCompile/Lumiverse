@@ -1,20 +1,23 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
-import { Download, Upload, X, Paintbrush, Code2, ChevronDown, ChevronUp, ShieldAlert, Globe, RotateCcw, Package, Trash2 } from 'lucide-react'
+import { Download, Upload, X, Paintbrush, Code2, ChevronDown, ChevronUp, ShieldAlert, Globe, RotateCcw, Package, Trash2, PanelRightOpen, PanelRightClose, Image as ImageIcon } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { themeAssetsApi } from '@/api/theme-assets'
 import { useStore } from '@/store'
 import { validateCSS, sanitizeCSS } from '@/lib/cssValidator'
 import { validateTSX } from '@/lib/componentTranspiler'
 import { CSS_MODULE_REGISTRY, generateSelector, type CSSModuleEntry } from '@/lib/cssModuleRegistry'
-import { getComponentTemplate } from '@/lib/componentTemplates'
+import { getComponentTemplate, type PropDoc } from '@/lib/componentTemplates'
 import { createThemePack, exportThemePack, importThemePack, packSummary, type ThemePackAsset } from '@/lib/themePack'
 import { toast } from '@/lib/toast'
 import { generateUUID } from '@/lib/uuid'
-import { css } from '@codemirror/lang-css'
-import { javascript } from '@codemirror/lang-javascript'
+import { css, cssLanguage } from '@codemirror/lang-css'
+import { javascript, javascriptLanguage } from '@codemirror/lang-javascript'
+import { type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
 import CodeEditor, { type CodeEditorHandle } from '@/components/panels/custom-css/CSSEditor'
 import ThemeAssetsPanel from '@/components/panels/custom-css/ThemeAssetsPanel'
 import PropsReference from './PropsReference'
+import CssVariablesReference from './CssVariablesReference'
+import ComponentCssReference from './ComponentCssReference'
 import styles from './CustomCSSModal.module.css'
 import clsx from 'clsx'
 
@@ -23,6 +26,113 @@ type EditorTab = 'css' | 'tsx'
 const GLOBAL_KEY = '__global__'
 const cssLang = css()
 const tsxLang = javascript({ jsx: true, typescript: true })
+
+function createPropsCompletionSource(props: PropDoc[]) {
+  return (context: CompletionContext): CompletionResult | null => {
+    // Match any sequence of word characters and dots
+    const matchPrefix = context.matchBefore(/[\w.]+/)
+    if (!matchPrefix && !context.explicit) return null
+
+    const text = matchPrefix ? matchPrefix.text : ''
+    
+    // Find the word we are currently completing (after the last dot)
+    const lastDotIndex = text.lastIndexOf('.')
+    const currentWord = lastDotIndex !== -1 ? text.slice(lastDotIndex + 1) : text
+    const from = context.pos - currentWord.length
+
+    // Determine the path of properties to traverse
+    // E.g., if text is "props.message.isU", path is "props.message"
+    // If text is "message.isU", path is "message"
+    const pathText = lastDotIndex !== -1 ? text.slice(0, lastDotIndex) : ''
+    const parts = pathText.split('.').filter(Boolean)
+
+    // Optional: strip leading 'props' so 'props.message' and 'message' act the same
+    if (parts[0] === 'props') {
+      parts.shift()
+    }
+
+    let targetProps = props
+    for (const part of parts) {
+      const found = targetProps.find(p => p.name === part)
+      if (found && found.children) {
+        targetProps = found.children
+      } else {
+        targetProps = []
+        break
+      }
+    }
+
+    const options = targetProps.map((p) => {
+      return {
+        label: p.name,
+        type: 'property',
+        info: p.description,
+        detail: p.type,
+      }
+    })
+
+    return {
+      from,
+      options,
+    }
+  }
+}
+
+function createCssPropsCompletionSource(props: PropDoc[]) {
+  return (context: CompletionContext): CompletionResult | null => {
+    const word = context.matchBefore(/--[\w-]*|data-[\w-]*/)
+    if (!word) return null
+    if (word.from === word.to && !context.explicit) return null
+
+    const text = word.text
+    const isVar = text.startsWith('--')
+    const isData = text.startsWith('data-')
+    
+    if (!isVar && !isData) return null
+
+    const options = props.flatMap((p) => {
+      const opts = []
+      if (isData) {
+        opts.push({ label: `data-${p.name}`, type: 'property', info: p.description })
+      }
+      if (p.children) {
+        for (const c of p.children) {
+          if (isData) {
+            opts.push({ label: `data-${p.name}-${c.name}`, type: 'property', info: c.description })
+          }
+        }
+      }
+      return opts
+    })
+
+    return {
+      from: word.from,
+      options,
+    }
+  }
+}
+
+import GENERATED_VARS from '@/lib/generatedCssVariables'
+import GENERATED_COMPONENT_CSS from '@/lib/generatedComponentCss'
+
+function createCssThemeVarsCompletionSource() {
+  return (context: CompletionContext): CompletionResult | null => {
+    const word = context.matchBefore(/--lumiverse-[\w-]*/)
+    if (!word) return null
+    if (word.from === word.to && !context.explicit) return null
+
+    const options = Object.entries(GENERATED_VARS).map(([name, value]) => ({
+      label: name,
+      type: 'variable',
+      info: value,
+    }))
+
+    return {
+      from: word.from,
+      options,
+    }
+  }
+}
 
 async function blobToBase64(blob: Blob): Promise<string> {
   const buffer = await blob.arrayBuffer()
@@ -57,6 +167,8 @@ export default function CustomCSSModal() {
   const [selected, setSelected] = useState<string>(GLOBAL_KEY)
   const [activeTab, setActiveTab] = useState<EditorTab>('css')
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [showReference, setShowReference] = useState(false)
+  const [showAssets, setShowAssets] = useState(false)
   const cssEditorRef = useRef<CodeEditorHandle | null>(null)
 
   const isGlobal = selected === GLOBAL_KEY
@@ -272,6 +384,23 @@ export default function CustomCSSModal() {
     cssEditorRef.current?.replaceSelection(text)
   }, [])
 
+  const editorExtensions = useMemo(() => {
+    const extensions = []
+    
+    if (activeTab === 'css') {
+      extensions.push(cssLanguage.data.of({ autocomplete: createCssThemeVarsCompletionSource() }))
+    }
+
+    if (!isGlobal && componentTemplate?.props) {
+      if (activeTab === 'tsx') {
+        extensions.push(javascriptLanguage.data.of({ autocomplete: createPropsCompletionSource(componentTemplate.props) }))
+      } else if (activeTab === 'css') {
+        extensions.push(cssLanguage.data.of({ autocomplete: createCssPropsCompletionSource(componentTemplate.props) }))
+      }
+    }
+    return extensions
+  }, [activeTab, isGlobal, componentTemplate])
+
   return (
     <ModalShell
       isOpen
@@ -404,24 +533,45 @@ export default function CustomCSSModal() {
           {/* ── Main: tabs + editor ──────────────────────────── */}
           <div className={styles.main}>
             <div className={styles.tabBar}>
-              <button
-                type="button"
-                className={clsx(styles.tab, activeTab === 'css' && styles.tabActive)}
-                onClick={() => setActiveTab('css')}
-              >
-                <Paintbrush size={13} className={styles.tabIcon} />
-                CSS
-              </button>
-              {!isGlobal && (
+              <div className={styles.tabsLeft}>
                 <button
                   type="button"
-                  className={clsx(styles.tab, activeTab === 'tsx' && styles.tabActive)}
-                  onClick={() => setActiveTab('tsx')}
+                  className={clsx(styles.tab, activeTab === 'css' && styles.tabActive)}
+                  onClick={() => setActiveTab('css')}
                 >
-                  <Code2 size={13} className={styles.tabIcon} />
-                  Component
+                  <Paintbrush size={13} className={styles.tabIcon} />
+                  CSS
                 </button>
-              )}
+                {!isGlobal && (
+                  <button
+                    type="button"
+                    className={clsx(styles.tab, activeTab === 'tsx' && styles.tabActive)}
+                    onClick={() => setActiveTab('tsx')}
+                  >
+                    <Code2 size={13} className={styles.tabIcon} />
+                    Component
+                  </button>
+                )}
+              </div>
+              <div className={styles.tabsRight}>
+                {activeTab === 'css' && assetBundleId && (
+                  <button 
+                    type="button" 
+                    className={clsx(styles.panelToggleBtn, showAssets && styles.panelToggleBtnActive)}
+                    onClick={() => setShowAssets(!showAssets)}
+                  >
+                    <ImageIcon size={13} /> Assets
+                  </button>
+                )}
+                <button 
+                  type="button" 
+                  className={clsx(styles.panelToggleBtn, showReference && styles.panelToggleBtnActive)}
+                  onClick={() => setShowReference(!showReference)}
+                >
+                  {showReference ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
+                  Reference
+                </button>
+              </div>
             </div>
 
             {/* TSX sandbox notice */}
@@ -434,22 +584,33 @@ export default function CustomCSSModal() {
               </div>
             )}
 
-            <div className={styles.editorContainer}>
-              {activeTab === 'css' ? (
-                <CodeEditor ref={cssEditorRef} key={`css:${selected}`} value={currentCSS} onChange={handleCSSChange} language={cssLang} />
-              ) : !isGlobal ? (
-                <CodeEditor key={`tsx:${selected}`} value={effectiveTSX} onChange={handleTSXChange} language={tsxLang} />
-              ) : null}
+            <div className={styles.editorContentRow}>
+              <div className={styles.editorMain}>
+                <div className={styles.editorContainer}>
+                  {activeTab === 'css' ? (
+                    <CodeEditor ref={cssEditorRef} key={`css:${selected}`} value={currentCSS} onChange={handleCSSChange} language={cssLang} extensions={editorExtensions} />
+                  ) : !isGlobal ? (
+                    <CodeEditor key={`tsx:${selected}`} value={effectiveTSX} onChange={handleTSXChange} language={tsxLang} extensions={editorExtensions} />
+                  ) : null}
+                </div>
+
+                {showAssets && activeTab === 'css' && assetBundleId && (
+                  <ThemeAssetsPanel bundleId={assetBundleId} onInsertReference={handleInsertAssetReference} />
+                )}
+              </div>
+
+              {/* Reference panel — shown based on tab and selection */}
+              {showReference && isGlobal && activeTab === 'css' && (
+                <div className={styles.editorSidebar}>
+                  <CssVariablesReference />
+                </div>
+              )}
+              {showReference && !isGlobal && componentTemplate && (
+                <div className={styles.editorSidebar}>
+                  {activeTab === 'css' ? <ComponentCssReference componentName={selected} cssContent={GENERATED_COMPONENT_CSS[selected] || ''} /> : <PropsReference props={componentTemplate.props} componentName={selected} />}
+                </div>
+              )}
             </div>
-
-            {activeTab === 'css' && assetBundleId && (
-              <ThemeAssetsPanel bundleId={assetBundleId} onInsertReference={handleInsertAssetReference} />
-            )}
-
-            {/* Props reference panel — shown on TSX tab for documented components */}
-            {activeTab === 'tsx' && !isGlobal && componentTemplate && (
-              <PropsReference props={componentTemplate.props} componentName={selected} />
-            )}
 
             <div className={styles.statusBar}>
               <span>

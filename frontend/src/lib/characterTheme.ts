@@ -7,7 +7,33 @@
  */
 
 import type { ImagePalette, RGB } from './colorExtraction'
-import { rgbToHsl, shiftTowards } from './colorExtraction'
+import {
+  rgbToHsl,
+  shiftTowards,
+  ensureContrast,
+  hslToRgb,
+  constrainLuminance,
+} from './colorExtraction'
+
+/** Reference dark theme background (approximate) for contrast checks. */
+const REF_DARK_BG: RGB = { r: 10, g: 10, b: 15 }
+/** Reference light theme background (approximate) for contrast checks. */
+const REF_LIGHT_BG: RGB = { r: 250, g: 250, b: 252 }
+/** WCAG AA minimum for large text / UI elements. */
+const MIN_UI_CONTRAST = 3.0
+/** WCAG AA minimum for normal text. */
+const MIN_TEXT_CONTRAST = 4.5
+
+/**
+ * Dark-mode eye-comfort ceiling: colours should never exceed this perceptual
+ * luminance (0–255) so they do not glare on a dark background.
+ */
+const DARK_MODE_MAX_LUM = 215
+/**
+ * Light-mode eye-comfort floor: colours should stay above this perceptual
+ * luminance (0–255) so they do not feel like harsh smudges on a light background.
+ */
+const LIGHT_MODE_MIN_LUM = 50
 
 export interface CharacterThemeOverlay {
   accent: { h: number; s: number; l: number }
@@ -45,24 +71,46 @@ export function deriveCharacterOverlay(palette: ImagePalette): CharacterThemeOve
   const accentS = clamp(domHsl.s, 35, 70)
   const accentL = clamp(domHsl.l, 48, 65)
 
+  let primaryRgb = hslToRgb(domHsl.h, accentS, accentL)
+  // Primary is used for buttons / interactive elements — ensure 3:1 on both modes.
+  primaryRgb = ensureContrast(primaryRgb, REF_DARK_BG, MIN_UI_CONTRAST)
+  primaryRgb = ensureContrast(primaryRgb, REF_LIGHT_BG, MIN_UI_CONTRAST)
+  // Dark mode: cap brightness so the accent never glares.
+  primaryRgb = constrainLuminance(primaryRgb, undefined, DARK_MODE_MAX_LUM)
+  const primaryHsl = rgbToHsl(primaryRgb.r, primaryRgb.g, primaryRgb.b)
+
   // Secondary: derived from the center region (the character's "core")
   const centerHsl = rgbToHsl(regions.center.r, regions.center.g, regions.center.b)
   const secondaryS = clamp(centerHsl.s, 20, 60)
   const secondaryL = clamp(centerHsl.l, 35, 55)
 
-  // Light mode: lower lightness so colors contrast against bright backgrounds
-  const accentLLight = clamp(domHsl.l, 30, 45)
-  const secondaryLLight = clamp(centerHsl.l, 25, 40)
+  let secondaryRgb = hslToRgb(centerHsl.h, secondaryS, secondaryL)
+  // Secondary is often used for labels / sub-text — enforce 4.5:1 on both modes.
+  secondaryRgb = ensureContrast(secondaryRgb, REF_DARK_BG, MIN_TEXT_CONTRAST)
+  secondaryRgb = ensureContrast(secondaryRgb, REF_LIGHT_BG, MIN_TEXT_CONTRAST)
+  // Dark mode: cap brightness so labels never glare.
+  secondaryRgb = constrainLuminance(secondaryRgb, undefined, DARK_MODE_MAX_LUM)
+  const secondaryHsl = rgbToHsl(secondaryRgb.r, secondaryRgb.g, secondaryRgb.b)
+
+  // Light mode: lower lightness so colors contrast against bright backgrounds,
+  // but enforce a luminance floor so they do not feel like harsh smudges.
+  let primaryLightRgb = hslToRgb(primaryHsl.h, primaryHsl.s, clamp(primaryHsl.l, 30, 45))
+  primaryLightRgb = constrainLuminance(primaryLightRgb, LIGHT_MODE_MIN_LUM, undefined)
+  const primaryLightHsl = rgbToHsl(primaryLightRgb.r, primaryLightRgb.g, primaryLightRgb.b)
+
+  let secondaryLightRgb = hslToRgb(secondaryHsl.h, secondaryHsl.s, clamp(secondaryHsl.l, 25, 40))
+  secondaryLightRgb = constrainLuminance(secondaryLightRgb, LIGHT_MODE_MIN_LUM, undefined)
+  const secondaryLightHsl = rgbToHsl(secondaryLightRgb.r, secondaryLightRgb.g, secondaryLightRgb.b)
 
   return {
-    accent: { h: domHsl.h, s: accentS, l: accentL },
+    accent: { h: primaryHsl.h, s: primaryHsl.s, l: primaryHsl.l },
     baseColors: {
-      primary: `hsl(${domHsl.h}, ${accentS}%, ${accentL}%)`,
-      secondary: `hsl(${centerHsl.h}, ${secondaryS}%, ${secondaryL}%)`,
+      primary: `hsl(${primaryHsl.h}, ${primaryHsl.s}%, ${primaryHsl.l}%)`,
+      secondary: `hsl(${secondaryHsl.h}, ${secondaryHsl.s}%, ${secondaryHsl.l}%)`,
     },
     baseColorsLight: {
-      primary: `hsl(${domHsl.h}, ${accentS}%, ${accentLLight}%)`,
-      secondary: `hsl(${centerHsl.h}, ${secondaryS}%, ${secondaryLLight}%)`,
+      primary: `hsl(${primaryLightHsl.h}, ${primaryLightHsl.s}%, ${primaryLightHsl.l}%)`,
+      secondary: `hsl(${secondaryLightHsl.h}, ${secondaryLightHsl.s}%, ${secondaryLightHsl.l}%)`,
     },
   }
 }
@@ -82,7 +130,8 @@ export function deriveCharacterOverlay(palette: ImagePalette): CharacterThemeOve
  * so the text feels connected to the image rather than flat white/black.
  */
 export function deriveHeroTextVars(
-  palette: ImagePalette
+  palette: ImagePalette,
+  surfaceColor?: RGB
 ): Record<string, string> {
   const { dominant, regions } = palette
 
@@ -94,12 +143,35 @@ export function deriveHeroTextVars(
   }
 
   // Dark mode: bright text — 92% toward white, 8% image tint
-  const contrastDark = shiftTowards(textZone, { r: 250, g: 251, b: 255 }, 0.92)
-  const mutedDark = shiftTowards(contrastDark, { r: 214, g: 220, b: 236 }, 0.22)
+  let contrastDark = shiftTowards(textZone, { r: 250, g: 251, b: 255 }, 0.92)
+  let mutedDark = shiftTowards(contrastDark, { r: 214, g: 220, b: 236 }, 0.22)
 
   // Light mode: dark text — 92% toward black, 8% image tint
-  const contrastLight = shiftTowards(textZone, { r: 16, g: 18, b: 24 }, 0.92)
-  const mutedLight = shiftTowards(contrastLight, { r: 32, g: 36, b: 46 }, 0.22)
+  let contrastLight = shiftTowards(textZone, { r: 16, g: 18, b: 24 }, 0.92)
+  let mutedLight = shiftTowards(contrastLight, { r: 32, g: 36, b: 46 }, 0.22)
+
+  // Determine the effective backing surface for contrast checks.
+  // When the caller provides a `surfaceColor` (e.g. the computed page
+  // background of the profile tab) we use that — the text is sitting on
+  // the page surface, not directly on the image.  Otherwise we fall back
+  // to the image's textZone for traditional hero-banner overlays.
+  const contrastBg = surfaceColor ?? textZone
+
+  // Ensure all hero text colors have sufficient contrast against the actual
+  // backing surface (4.5:1 for normal text readability).
+  // This prevents deep-black images from producing invisible black text labels
+  // when the real background is a dark theme surface.
+  contrastDark = ensureContrast(contrastDark, contrastBg, MIN_TEXT_CONTRAST)
+  mutedDark = ensureContrast(mutedDark, contrastBg, MIN_TEXT_CONTRAST)
+  contrastLight = ensureContrast(contrastLight, contrastBg, MIN_TEXT_CONTRAST)
+  mutedLight = ensureContrast(mutedLight, contrastBg, MIN_TEXT_CONTRAST)
+
+  // Eye-comfort clamping: dark-mode text should never be blindingly bright,
+  // and light-mode text should never be a harsh smudge.
+  contrastDark = constrainLuminance(contrastDark, undefined, DARK_MODE_MAX_LUM)
+  mutedDark = constrainLuminance(mutedDark, undefined, DARK_MODE_MAX_LUM)
+  contrastLight = constrainLuminance(contrastLight, LIGHT_MODE_MIN_LUM, undefined)
+  mutedLight = constrainLuminance(mutedLight, LIGHT_MODE_MIN_LUM, undefined)
 
   return {
     '--hero-dominant': `rgb(${dominant.r} ${dominant.g} ${dominant.b})`,
@@ -140,11 +212,23 @@ export function deriveCharacterNameVars(
 
   // Dark mode: bright pastel — boosted saturation, high lightness
   const darkS = clamp(hsl.s + 10, 45, 80)
-  const darkL = clamp(hsl.l, 72, 85)
+  let darkL = clamp(hsl.l, 72, 85)
 
   // Light mode: deep rich — boosted saturation, low lightness
   const lightS = clamp(hsl.s + 15, 50, 85)
-  const lightL = clamp(hsl.l, 25, 38)
+  let lightL = clamp(hsl.l, 25, 38)
+
+  // Guard against low-contrast edge cases (e.g. near-black palettes where
+  // saturation clamping might still leave the color too dim).
+  let darkRgb = ensureContrast(hslToRgb(hsl.h, darkS, darkL), REF_DARK_BG, MIN_TEXT_CONTRAST)
+  // Dark mode: cap brightness so the name never glares on a dark background.
+  darkRgb = constrainLuminance(darkRgb, undefined, DARK_MODE_MAX_LUM)
+  darkL = rgbToHsl(darkRgb.r, darkRgb.g, darkRgb.b).l
+
+  let lightRgb = ensureContrast(hslToRgb(hsl.h, lightS, lightL), REF_LIGHT_BG, MIN_TEXT_CONTRAST)
+  // Light mode: floor brightness so the name never feels like a harsh smudge.
+  lightRgb = constrainLuminance(lightRgb, LIGHT_MODE_MIN_LUM, undefined)
+  lightL = rgbToHsl(lightRgb.r, lightRgb.g, lightRgb.b).l
 
   return {
     '--char-name-dark': `hsl(${hsl.h}, ${darkS}%, ${darkL}%)`,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, type CSSProperties } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react'
 import { useParams } from 'react-router'
 import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
@@ -10,7 +10,7 @@ import {
   User, Users, BookOpen, MessageSquare, Sparkles, FileText, Eye, Mic,
   Pencil, Settings2, ChevronRight,
 } from 'lucide-react'
-import { extractPalette } from '@/lib/colorExtraction'
+import { extractPalette, getSurfaceColor } from '@/lib/colorExtraction'
 import { deriveHeroTextVars } from '@/lib/characterTheme'
 import type { Character } from '@/types/api'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
@@ -79,6 +79,7 @@ function SingleCharacterProfile({
   const [character, setCharacter] = useState<Character | null>(storedCharacter)
   const [loading, setLoading] = useState(false)
   const [heroTextVars, setHeroTextVars] = useState<CSSProperties | undefined>(undefined)
+  const heroMetaRef = useRef<HTMLDivElement>(null)
 
   const handleEditCharacter = useCallback(() => {
     if (!charId) return
@@ -122,7 +123,17 @@ function SingleCharacterProfile({
       try {
         const palette = await extractPalette(avatarUrl)
         if (cancelled) return
-        setHeroTextVars(deriveHeroTextVars(palette) as CSSProperties)
+
+        // Wait one frame so the heroMeta element is guaranteed to exist in the
+        // DOM, then read its effective backing surface colour.
+        requestAnimationFrame(() => {
+          if (cancelled) return
+          const surface = heroMetaRef.current
+            ? getSurfaceColor(heroMetaRef.current)
+            : null
+          const vars = deriveHeroTextVars(palette, surface ?? undefined)
+          setHeroTextVars(vars as CSSProperties)
+        })
       } catch {
         if (!cancelled) setHeroTextVars(undefined)
       }
@@ -161,7 +172,7 @@ function SingleCharacterProfile({
             }
           />
         </div>
-        <div className={styles.heroMeta} style={heroTextVars}>
+        <div className={styles.heroMeta} style={heroTextVars} ref={heroMetaRef}>
           <h2 className={styles.name}>{character.name}</h2>
           <button type="button" className={styles.editBtn} onClick={handleEditCharacter}>
             <Pencil size={12} />

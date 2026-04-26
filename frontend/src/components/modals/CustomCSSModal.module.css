@@ -298,11 +298,23 @@
 
 .tabBar {
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  justify-content: space-between;
   border-bottom: 1px solid var(--lumiverse-border);
   background: var(--lumiverse-bg);
   padding: 0 12px;
   gap: 0;
+}
+
+.tabsLeft {
+  display: flex;
+  align-items: stretch;
+}
+
+.tabsRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tab {
@@ -339,7 +351,57 @@
   opacity: 1;
 }
 
+.panelToggleBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--lumiverse-text-dim);
+  padding: 4px 8px;
+  border-radius: var(--lumiverse-radius-sm);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.panelToggleBtn:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+}
+
+.panelToggleBtnActive {
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-border);
+}
+
 /* ── Editor ──────────────────────────────────────────────────────────── */
+
+.editorContentRow {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editorMain {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.editorSidebar {
+  width: 280px;
+  min-width: 280px;
+  border-left: 1px solid var(--lumiverse-border);
+  display: flex;
+  flex-direction: column;
+  background: var(--lumiverse-bg);
+}
 
 .editorContainer {
   flex: 1;

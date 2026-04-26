@@ -5,7 +5,7 @@ import { css } from '@codemirror/lang-css'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, foldKeymap } from '@codemirror/language'
-import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
+import { closeBrackets, closeBracketsKeymap, autocompletion } from '@codemirror/autocomplete'
 import { lintGutter } from '@codemirror/lint'
 import styles from './CSSEditor.module.css'
 
@@ -14,6 +14,8 @@ interface CodeEditorProps {
   onChange: (value: string) => void
   /** Language extension — defaults to CSS. Pass a different extension for TSX etc. */
   language?: Extension
+  /** Optional extra extensions */
+  extensions?: Extension[]
 }
 
 export interface CodeEditorHandle {
@@ -21,7 +23,7 @@ export interface CodeEditorHandle {
   replaceSelection: (text: string) => void
 }
 
-const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor({ value, onChange, language }, ref) {
+const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor({ value, onChange, language, extensions = [] }, ref) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const onChangeRef = useRef(onChange)
@@ -51,6 +53,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
         foldGutter(),
         bracketMatching(),
         closeBrackets(),
+        autocompletion(),
         lang,
         oneDark,
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
@@ -61,6 +64,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
           ...foldKeymap,
           ...closeBracketsKeymap,
         ]),
+        ...extensions,
         updateListener,
         EditorView.lineWrapping,
       ],

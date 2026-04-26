@@ -50,6 +50,116 @@ function rgbToHsl(r: number, g: number, b: number): HSL {
   return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
 }
 
+export function hslToRgb(h: number, s: number, l: number): RGB {
+  s /= 100;
+  l /= 100;
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) =>
+    l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return {
+    r: Math.round(f(0) * 255),
+    g: Math.round(f(8) * 255),
+    b: Math.round(f(4) * 255),
+  };
+}
+
+/** WCAG 2.1 relative luminance (gamma-corrected). */
+export function relativeLuminance(r: number, g: number, b: number): number {
+  const [rs, gs, bs] = [r, g, b].map((c) => {
+    c = c / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+}
+
+/** WCAG 2.1 contrast ratio between two RGB colors. */
+export function contrastRatio(rgb1: RGB, rgb2: RGB): number {
+  const l1 = relativeLuminance(rgb1.r, rgb1.g, rgb1.b);
+  const l2 = relativeLuminance(rgb2.r, rgb2.g, rgb2.b);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * Adjust a foreground color until it meets a minimum contrast ratio against
+ * the given background. Modifies lightness in HSL space while preserving hue
+ * and saturation.
+ */
+export function ensureContrast(
+  foreground: RGB,
+  background: RGB,
+  minRatio: number
+): RGB {
+  const current = contrastRatio(foreground, background);
+  if (current >= minRatio) return foreground;
+
+  const bgHsl = rgbToHsl(background.r, background.g, background.b);
+  const fgHsl = rgbToHsl(foreground.r, foreground.g, foreground.b);
+
+  const step = bgHsl.l < 50 ? 1 : -1;
+  let bestCandidate = foreground;
+  let bestRatio = current;
+
+  for (let l = fgHsl.l; l >= 0 && l <= 100; l += step) {
+    const candidate = hslToRgb(fgHsl.h, fgHsl.s, l);
+    const ratio = contrastRatio(candidate, background);
+    if (ratio >= minRatio) return candidate;
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
+}
+
+/**
+ * Adjust a color until its perceptual luminance stays within the requested
+ * [minLum, maxLum] bounds (0–255 scale).  This is useful for eye-comfort
+ * clamping: dark-mode colors can be capped so they are never blinding, and
+ * light-mode colors can be floored so they are never too harsh.
+ */
+export function constrainLuminance(
+  color: RGB,
+  minLum?: number,
+  maxLum?: number
+): RGB {
+  const lum = luminance(color.r, color.g, color.b);
+
+  if (
+    (minLum === undefined || lum >= minLum) &&
+    (maxLum === undefined || lum <= maxLum)
+  ) {
+    return color;
+  }
+
+  const hsl = rgbToHsl(color.r, color.g, color.b);
+
+  if (minLum !== undefined && lum < minLum) {
+    for (let l = hsl.l + 1; l <= 100; l++) {
+      const candidate = hslToRgb(hsl.h, hsl.s, l);
+      if (luminance(candidate.r, candidate.g, candidate.b) >= minLum) {
+        return candidate;
+      }
+    }
+    return { r: 255, g: 255, b: 255 };
+  }
+
+  if (maxLum !== undefined && lum > maxLum) {
+    for (let l = hsl.l - 1; l >= 0; l--) {
+      const candidate = hslToRgb(hsl.h, hsl.s, l);
+      if (luminance(candidate.r, candidate.g, candidate.b) <= maxLum) {
+        return candidate;
+      }
+    }
+    return { r: 0, g: 0, b: 0 };
+  }
+
+  return color;
+}
+
 function luminance(r: number, g: number, b: number): number {
   return r * 0.2126 + g * 0.7152 + b * 0.0722;
 }

@@ -177,12 +177,25 @@ const TEMPLATES: Record<string, ComponentTemplate> = {
   ChatView: genericTemplate('ChatView', '  //   (no props — uses useParams and store)'),
 }
 
+import GENERATED_PROPS from './generatedComponentProps'
+
 /** Get the starter template for a component, or a fallback generic one. */
 export function getComponentTemplate(componentName: string): ComponentTemplate {
-  return TEMPLATES[componentName] ?? {
+  if (TEMPLATES[componentName]) {
+    return TEMPLATES[componentName]
+  }
+
+  // Fallback to generated props if available
+  const generatedProps = (GENERATED_PROPS as Record<string, PropDoc[]>)[componentName]
+  let propsNote = '  // No documented props contract for this component yet.\n  // Use console.log(props) to inspect available data.'
+  
+  if (generatedProps && generatedProps.length > 0) {
+    propsNote = '  // Available props:\n' + generatedProps.map(p => `  //   ${p.name}: ${p.type.replace(/\n/g, ' ')}`).join('\n')
+  }
+
+  return {
     template: `export default function ${componentName}(props) {
-  // No documented props contract for this component yet.
-  // Use console.log(props) to inspect available data.
+${propsNote}
 
   return (
     <div>
@@ -192,6 +205,6 @@ export function getComponentTemplate(componentName: string): ComponentTemplate {
     </div>
   )
 }`,
-    props: [],
+    props: generatedProps || [],
   }
 }

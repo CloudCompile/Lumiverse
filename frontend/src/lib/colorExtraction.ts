@@ -62,6 +62,178 @@ export function rgbToHsl(r: number, g: number, b: number): { h: number; s: numbe
   return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) }
 }
 
+export function hslToRgb(h: number, s: number, l: number): RGB {
+  s /= 100
+  l /= 100
+  const k = (n: number) => (n + h / 30) % 12
+  const a = s * Math.min(l, 1 - l)
+  const f = (n: number) =>
+    l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))
+  return {
+    r: Math.round(f(0) * 255),
+    g: Math.round(f(8) * 255),
+    b: Math.round(f(4) * 255),
+  }
+}
+
+/** WCAG 2.1 relative luminance (gamma-corrected). */
+export function relativeLuminance(r: number, g: number, b: number): number {
+  const [rs, gs, bs] = [r, g, b].map((c) => {
+    c = c / 255
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+  })
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs
+}
+
+/** WCAG 2.1 contrast ratio between two RGB colors. */
+export function contrastRatio(rgb1: RGB, rgb2: RGB): number {
+  const l1 = relativeLuminance(rgb1.r, rgb1.g, rgb1.b)
+  const l2 = relativeLuminance(rgb2.r, rgb2.g, rgb2.b)
+  const lighter = Math.max(l1, l2)
+  const darker = Math.min(l1, l2)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+/**
+ * Adjust a foreground color until it meets a minimum contrast ratio against
+ * the given background. Modifies lightness in HSL space while preserving hue
+ * and saturation, which keeps the color's character intact.
+ */
+export function ensureContrast(
+  foreground: RGB,
+  background: RGB,
+  minRatio: number
+): RGB {
+  const current = contrastRatio(foreground, background)
+  if (current >= minRatio) return foreground
+
+  const bgHsl = rgbToHsl(background.r, background.g, background.b)
+  const fgHsl = rgbToHsl(foreground.r, foreground.g, foreground.b)
+
+  // Lighten if bg is dark, darken if bg is light
+  const step = bgHsl.l < 50 ? 1 : -1
+  let bestCandidate = foreground
+  let bestRatio = current
+
+  for (let l = fgHsl.l; l >= 0 && l <= 100; l += step) {
+    const candidate = hslToRgb(fgHsl.h, fgHsl.s, l)
+    const ratio = contrastRatio(candidate, background)
+    if (ratio >= minRatio) return candidate
+    if (ratio > bestRatio) {
+      bestRatio = ratio
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+/**
+ * Adjust a color until its perceptual luminance stays within the requested
+ * [minLum, maxLum] bounds (0–255 scale).  This is useful for eye-comfort
+ * clamping: dark-mode colors can be capped so they are never blinding, and
+ * light-mode colors can be floored so they are never too harsh.
+ *
+ * The algorithm walks lightness in HSL space (preserving hue/saturation) until
+ * the luminance constraint is satisfied.
+ */
+export function constrainLuminance(
+  color: RGB,
+  minLum?: number,
+  maxLum?: number
+): RGB {
+  const lum = luminance(color.r, color.g, color.b)
+
+  if (
+    (minLum === undefined || lum >= minLum) &&
+    (maxLum === undefined || lum <= maxLum)
+  ) {
+    return color
+  }
+
+  const hsl = rgbToHsl(color.r, color.g, color.b)
+
+  // Too dark — lighten
+  if (minLum !== undefined && lum < minLum) {
+    for (let l = hsl.l + 1; l <= 100; l++) {
+      const candidate = hslToRgb(hsl.h, hsl.s, l)
+      if (luminance(candidate.r, candidate.g, candidate.b) >= minLum) {
+        return candidate
+      }
+    }
+    return { r: 255, g: 255, b: 255 }
+  }
+
+  // Too bright — darken
+  if (maxLum !== undefined && lum > maxLum) {
+    for (let l = hsl.l - 1; l >= 0; l--) {
+      const candidate = hslToRgb(hsl.h, hsl.s, l)
+      if (luminance(candidate.r, candidate.g, candidate.b) <= maxLum) {
+        return candidate
+      }
+    }
+    return { r: 0, g: 0, b: 0 }
+  }
+
+  return color
+}
+
+/**
+ * Parse a CSS colour value into an RGB object.
+ * Supports `rgb(r, g, b)`, `rgba(r, g, b, a)`, `#rrggbb`, and `#rgb`.
+ * Returns `null` for unrecognised values.
+ */
+export function parseCssColor(value: string): RGB | null {
+  if (!value) return null
+
+  const rgbMatch = value.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+  if (rgbMatch) {
+    return {
+      r: parseInt(rgbMatch[1], 10),
+      g: parseInt(rgbMatch[2], 10),
+      b: parseInt(rgbMatch[3], 10),
+    }
+  }
+
+  const hexMatch = value.match(/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/)
+  if (hexMatch) {
+    const hex = hexMatch[1]
+    if (hex.length === 3) {
+      return {
+        r: parseInt(hex[0] + hex[0], 16),
+        g: parseInt(hex[1] + hex[1], 16),
+        b: parseInt(hex[2] + hex[2], 16),
+      }
+    }
+    return {
+      r: parseInt(hex.slice(0, 2), 16),
+      g: parseInt(hex.slice(2, 4), 16),
+      b: parseInt(hex.slice(4, 6), 16),
+    }
+  }
+
+  return null
+}
+
+/**
+ * Read the effective opaque backing-surface colour of an element by walking
+ * up the DOM tree until a non-transparent `background-color` is found.
+ * Returns `null` if no opaque surface is found (e.g. everything is transparent).
+ */
+export function getSurfaceColor(element: Element): RGB | null {
+  let el: Element | null = element
+  while (el) {
+    const style = window.getComputedStyle(el as HTMLElement)
+    const bg = style.backgroundColor
+    if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+      const parsed = parseCssColor(bg)
+      if (parsed) return parsed
+    }
+    el = el.parentElement
+  }
+  return null
+}
+
 // ── Image loading ──
 
 function loadImage(src: string): Promise<HTMLImageElement> {
