@@ -74,7 +74,10 @@ const chatIndex = new Map<string, string>();
 const TERMINAL_STATUSES: Set<PoolStatus> = new Set(["completed", "stopped", "error"]);
 
 /** Safety cap: terminal entries are swept after this to prevent memory leaks */
-const UNACKNOWLEDGED_MAX_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const UNACKNOWLEDGED_MAX_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+/** Additional cap so terminal chat-head state cannot grow without bound. */
+const MAX_TERMINAL_ENTRIES = 200;
 
 /** Sweep interval */
 const SWEEP_INTERVAL_MS = 60 * 1000; // 60 seconds
@@ -157,6 +160,7 @@ export function completePool(generationId: string, messageId: string): void {
   entry.status = "completed";
   entry.completedMessageId = messageId;
   entry.completedAt = Date.now();
+  trimTerminalEntries();
 }
 
 export function stopPool(generationId: string): void {
@@ -164,6 +168,7 @@ export function stopPool(generationId: string): void {
   if (!entry) return;
   entry.status = "stopped";
   entry.completedAt = Date.now();
+  trimTerminalEntries();
 }
 
 export function errorPool(generationId: string, message: string): void {
@@ -172,6 +177,7 @@ export function errorPool(generationId: string, message: string): void {
   entry.status = "error";
   entry.error = message;
   entry.completedAt = Date.now();
+  trimTerminalEntries();
 }
 
 // ── Lookups ──────────────────────────────────────────────────────────────────
@@ -289,6 +295,19 @@ function sweep(): void {
     if (age > ttl) {
       removePoolEntry(id);
     }
+  }
+
+  trimTerminalEntries();
+}
+
+function trimTerminalEntries(): void {
+  const terminalEntries = [...pool.entries()]
+    .filter(([, entry]) => TERMINAL_STATUSES.has(entry.status) && entry.completedAt)
+    .sort((a, b) => (a[1].completedAt ?? 0) - (b[1].completedAt ?? 0));
+
+  while (terminalEntries.length > MAX_TERMINAL_ENTRIES) {
+    const [generationId] = terminalEntries.shift()!;
+    removePoolEntry(generationId);
   }
 }
 

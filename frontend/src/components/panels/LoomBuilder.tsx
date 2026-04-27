@@ -54,7 +54,7 @@ import {
   Unlink,
 } from 'lucide-react'
 import clsx from 'clsx'
-import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
+import ExpandedTextEditor, { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { resolveMacros as resolveMacrosApi } from '@/api/macros'
 import { useLoomBuilder } from '@/hooks/useLoomBuilder'
@@ -935,11 +935,14 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
             </button>
           )}
         </div>
-        {multiline ? (
-          <textarea className={s.settingsTextarea} value={value} onChange={e => handleChange(fieldKey, e.target.value)} spellCheck={false} />
-        ) : (
-          <input className={s.settingsInput} value={value} onChange={e => handleChange(fieldKey, e.target.value)} />
-        )}
+        <ExpandableTextarea
+          className={s.settingsTextarea}
+          value={value}
+          onChange={next => handleChange(fieldKey, next)}
+          title={`${label} — Prompt Behavior`}
+          rows={multiline ? 4 : 2}
+          spellCheck={false}
+        />
         {hint && <span className={s.settingsHint}>{hint}</span>}
       </div>
     )
@@ -956,11 +959,12 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
       {isExpanded && (
         <div className={s.accordionBody}>
           <Field fieldKey="continueNudge" label="Continue Nudge" hint="Injected when continuing a response" multiline />
+          <Field fieldKey="emptySendNudge" label="Empty Send Nudge" hint="Injected when nudging for a fresh reply from an assistant-ending chat" multiline />
           <Field fieldKey="impersonationPrompt" label="Impersonation Prompt" hint="Injected when impersonating the user" multiline />
           <Field fieldKey="groupNudge" label="Group Nudge" hint="Injected in group chats" multiline />
           <Field fieldKey="newChatPrompt" label="New Chat Separator" hint="Inserted at conversation start" />
           <Field fieldKey="newGroupChatPrompt" label="New Group Chat Separator" hint="Inserted at group conversation start" />
-          <Field fieldKey="sendIfEmpty" label="Send If Empty" hint="Sent as user message when input is empty" />
+          <Field fieldKey="sendIfEmpty" label="Send If Empty" hint="Sent as a user message when the final assistant content is blank" />
         </div>
       )}
     </div>

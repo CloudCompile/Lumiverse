@@ -1,4 +1,4 @@
-import sharp from "sharp";
+import sharp from "../utils/sharp-config";
 import { mkdirSync, existsSync, unlinkSync } from "fs";
 import { extname, join, resolve, sep } from "path";
 import { env } from "../env";

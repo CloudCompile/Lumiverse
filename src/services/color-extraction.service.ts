@@ -4,7 +4,7 @@
  * sharp's raw pixel data instead of Canvas.
  */
 
-import sharp from "sharp";
+import sharp from "../utils/sharp-config";
 import { join } from "path";
 import { env } from "../env";
 import { getDb } from "../db/connection";

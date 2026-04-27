@@ -8,6 +8,11 @@ import {
   InvalidTrustedHostError,
   setTrustedHosts,
 } from "../services/trusted-hosts.service";
+import {
+  getSharpSettingsStatus,
+  putSharpSettings,
+} from "../services/sharp-settings.service";
+import { InvalidSettingError } from "../services/settings.service";
 
 const app = new Hono();
 const CHECKPOINT_MODES = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
@@ -25,6 +30,23 @@ app.get("/status", async (c) => {
 app.get("/database", async (c) => {
   const userId = c.get("userId");
   return c.json(await operatorService.getDatabaseStatus(userId));
+});
+
+app.get("/sharp", (c) => {
+  return c.json(getSharpSettingsStatus());
+});
+
+app.put("/sharp", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => null);
+  try {
+    return c.json(putSharpSettings(userId, body ?? {}));
+  } catch (err) {
+    if (err instanceof InvalidSettingError) {
+      return c.json({ error: err.message }, 400);
+    }
+    return c.json({ error: err instanceof Error ? err.message : "Unknown error" }, 500);
+  }
 });
 
 app.post("/database/maintenance", async (c) => {
@@ -62,7 +84,8 @@ app.post("/database/maintenance", async (c) => {
 
 app.get("/trusted-hosts", async (c) => {
   const snapshot = getTrustedHostsSnapshot();
-  const suggestions = await detectHostnameSuggestions();
+  const fresh = c.req.query("fresh") === "1";
+  const suggestions = await detectHostnameSuggestions({ forceRefresh: fresh, baseline: snapshot.baseline });
   return c.json({ ...snapshot, ...suggestions });
 });
 

@@ -27,6 +27,27 @@ export interface DatabaseTuningSettings {
   mmapSizeBytes?: number | null
 }
 
+export interface SharpSettings {
+  concurrency?: number | null
+  cacheMemoryMb?: number | null
+  cacheFiles?: number | null
+  cacheItems?: number | null
+}
+
+export interface ResolvedSharpSettings {
+  concurrency: number
+  cacheMemoryMb: number
+  cacheFiles: number
+  cacheItems: number
+}
+
+export interface OperatorSharpStatus {
+  settingsKey: string
+  configuredSettings: SharpSettings
+  effectiveSettings: ResolvedSharpSettings
+  defaults: ResolvedSharpSettings
+}
+
 export interface DatabaseMaintenanceSettings {
   optimizeIntervalHours?: number | null
   analyzeIntervalHours?: number | null
@@ -158,9 +179,11 @@ export interface TrustedHostsUpdateResponse {
 
 export const operatorApi = {
   getStatus: () => get<OperatorStatus>('/operator/status'),
-  getTrustedHosts: () => get<TrustedHostsResponse>('/operator/trusted-hosts'),
+  getTrustedHosts: (fresh = false) => get<TrustedHostsResponse>('/operator/trusted-hosts', fresh ? { fresh: 1 } : undefined),
   putTrustedHosts: (hosts: string[]) => put<TrustedHostsUpdateResponse>('/operator/trusted-hosts', { hosts }),
   getDatabase: () => get<OperatorDatabaseStatus>('/operator/database'),
+  getSharp: () => get<OperatorSharpStatus>('/operator/sharp'),
+  putSharp: (settings: SharpSettings) => put<OperatorSharpStatus>('/operator/sharp', settings),
   getLogs: (limit = 150) => get<OperatorLogsResponse>('/operator/logs', { limit }),
   subscribeLogs: () => post<{ subscribed: boolean }>('/operator/logs/subscribe'),
   unsubscribeLogs: () => del<{ subscribed: boolean }>('/operator/logs/subscribe'),

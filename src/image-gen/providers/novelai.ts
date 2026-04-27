@@ -1,5 +1,5 @@
 import { decodeMulti } from "@msgpack/msgpack";
-import sharp from "sharp";
+import sharp from "../../utils/sharp-config";
 import type { ImageProvider } from "../provider";
 import type { ImageProviderCapabilities } from "../param-schema";
 import type { ImageGenRequest, ImageGenResponse } from "../types";

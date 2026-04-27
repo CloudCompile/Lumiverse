@@ -82,9 +82,13 @@ export default function useHorizontalScroll<T extends HTMLElement>(): [
     let scrollStart = 0
 
     const onPointerDown = (e: PointerEvent) => {
-      // Only left-click, and ignore buttons inside the bar (clicks on
-      // member cards are handled by their own handlers).
-      if (e.button !== 0) return
+      // Desktop mouse only. Touch keeps native scrolling, and interactive
+      // descendants (member buttons, add button, etc.) keep their own clicks.
+      if (e.pointerType !== 'mouse' || e.button !== 0) return
+      const target = e.target instanceof Element ? e.target : null
+      if (target?.closest('button, a, input, textarea, select, [role="button"], [data-no-drag-scroll]')) {
+        return
+      }
       isDragging = true
       startX = e.clientX
       scrollStart = el.scrollLeft

@@ -27,8 +27,13 @@ export interface TrustedHostsSuggestions {
 // wildcards, no paths, no schemes. Port is added by normalization below.
 const HOSTNAME_PATTERN = /^(?:\[[0-9a-f:%.]+\]|[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)$/i;
 const MAX_CONFIGURED_HOSTS = 32;
+const REVERSE_LOOKUP_TIMEOUT_MS = 1500;
+const TAILSCALE_TIMEOUT_MS = 2000;
+const SUGGESTIONS_CACHE_TTL_MS = 60_000;
 
 let networkInterfacesWarned = false;
+let suggestionsCache: { value: TrustedHostsSuggestions; expiresAt: number } | null = null;
+let suggestionsInFlight: Promise<TrustedHostsSuggestions> | null = null;
 
 // Termux/Android sandboxes deny getifaddrs() (EACCES). Treat enumeration as
 // best-effort so a missing LAN-IP list doesn't crash the server at startup.
@@ -307,7 +312,7 @@ async function tailscaleSuggestion(timeoutMs: number): Promise<string | null> {
   }
 }
 
-export async function detectHostnameSuggestions(): Promise<TrustedHostsSuggestions> {
+async function buildHostnameSuggestions(baseline?: TrustedHostEntry[]): Promise<TrustedHostsSuggestions> {
   const shortHostname = osHostname().toLowerCase();
   const seen = new Set<string>();
   const suggestions: TrustedHostEntry[] = [];
@@ -329,27 +334,73 @@ export async function detectHostnameSuggestions(): Promise<TrustedHostsSuggestio
 
   // Collect non-internal IPs once, then reverse-resolve in parallel.
   const ips: string[] = [];
+  const seenIps = new Set<string>();
   for (const iface of Object.values(safeNetworkInterfaces())) {
     if (!iface) continue;
     for (const addr of iface) {
       if (addr.internal) continue;
-      if (addr.family === "IPv4") ips.push(addr.address);
-      else if (addr.family === "IPv6") ips.push(`[${addr.address.split("%")[0]}]`);
+      if (addr.family === "IPv4") {
+        if (!seenIps.has(addr.address)) {
+          seenIps.add(addr.address);
+          ips.push(addr.address);
+        }
+      } else if (addr.family === "IPv6") {
+        const ip = `[${addr.address.split("%")[0]}]`;
+        if (!seenIps.has(ip)) {
+          seenIps.add(ip);
+          ips.push(ip);
+        }
+      }
     }
   }
-  const reverseResults = await Promise.all(ips.map((ip) => reverseLookup(ip, 1500)));
+  const [reverseResults, tailscaleName] = await Promise.all([
+    Promise.all(ips.map((ip) => reverseLookup(ip, REVERSE_LOOKUP_TIMEOUT_MS))),
+    tailscaleSuggestion(TAILSCALE_TIMEOUT_MS),
+  ]);
   for (const names of reverseResults) {
     for (const name of names) add(name, "reverse-dns");
   }
 
-  const tailscaleName = await tailscaleSuggestion(2000);
   if (tailscaleName) add(tailscaleName, "tailscale");
 
   // Drop anything that is already in the baseline — no need to suggest those.
-  const baseline = new Set(baselineEntries().map((e) => e.host));
-  const filtered = suggestions.filter((s) => !baseline.has(s.host));
+  const baselineHosts = new Set((baseline ?? baselineEntries()).map((e) => e.host));
+  const filtered = suggestions.filter((s) => !baselineHosts.has(s.host));
 
   return { hostname: shortHostname, suggestions: filtered };
+}
+
+export async function detectHostnameSuggestions(options?: {
+  forceRefresh?: boolean;
+  baseline?: TrustedHostEntry[];
+}): Promise<TrustedHostsSuggestions> {
+  const forceRefresh = options?.forceRefresh === true;
+  const now = Date.now();
+
+  if (!forceRefresh && suggestionsCache && suggestionsCache.expiresAt > now) {
+    return suggestionsCache.value;
+  }
+
+  if (suggestionsInFlight) {
+    return suggestionsInFlight;
+  }
+
+  const promise = buildHostnameSuggestions(options?.baseline)
+    .then((value) => {
+      suggestionsCache = {
+        value,
+        expiresAt: Date.now() + SUGGESTIONS_CACHE_TTL_MS,
+      };
+      return value;
+    })
+    .finally(() => {
+      if (suggestionsInFlight === promise) {
+        suggestionsInFlight = null;
+      }
+    });
+
+  suggestionsInFlight = promise;
+  return promise;
 }
 
 // ─── Test support ───────────────────────────────────────────────────────────
@@ -360,5 +411,6 @@ export function _resetForTests(): void {
   allowedHosts = new Set();
   allowedOrigins = new Set();
   loaded = false;
+  suggestionsCache = null;
+  suggestionsInFlight = null;
 }
-

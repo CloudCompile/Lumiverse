@@ -247,6 +247,8 @@ function isDecorativeNewChatSeparator(text: string): boolean {
   return /^\[Start a new group chat(?:\. Group members:.*)?\]$/i.test(trimmed);
 }
 
+const DEFAULT_EMPTY_SEND_NUDGE = "[Write the next reply only as {{char}}.]";
+
 // ---------------------------------------------------------------------------
 // Attachment resolution — read image/audio files from disk into base64
 // ---------------------------------------------------------------------------
@@ -2192,6 +2194,35 @@ export async function assemblePrompt(
         breakdown.push({
           type: "utility",
           name: "Send If Empty",
+          role: "user",
+          content: resolved,
+        });
+      }
+    }
+  }
+
+  // Empty-send nudge: normal generations that start from an assistant-ending
+  // chat need a fresh user turn so providers produce a new reply instead of
+  // relying on continue semantics. Group/member-targeted nudges use groupNudge.
+  const lastVisibleChatMessage = [...messages]
+    .reverse()
+    .find((msg) => msg.extra?.hidden !== true);
+  if (
+    ctx.generationType === "normal" &&
+    !ctx.targetCharacterId &&
+    lastVisibleChatMessage &&
+    !lastVisibleChatMessage.is_user &&
+    result.length > 0 &&
+    result[result.length - 1].role !== "user"
+  ) {
+    const nudge = promptBehavior.emptySendNudge ?? DEFAULT_EMPTY_SEND_NUDGE;
+    if (nudge) {
+      const resolved = (await evaluate(nudge, macroEnv, registry)).text;
+      if (resolved) {
+        result.push({ role: "user", content: resolved });
+        breakdown.push({
+          type: "utility",
+          name: "Empty Send Nudge",
           role: "user",
           content: resolved,
         });
@@ -4244,6 +4275,7 @@ function isVectorEligibleWorldInfoEntry(
 // ─── Vector WI retrieval cache (short-TTL for rapid dry-run optimization) ───
 
 const VECTOR_WI_CACHE_TTL_MS = 30_000;
+const VECTOR_WI_CACHE_MAX_ENTRIES = 128;
 
 interface CachedVectorWiResult {
   result: VectorWorldInfoRetrievalResult;
@@ -4251,6 +4283,20 @@ interface CachedVectorWiResult {
 }
 
 const vectorWiCache = new Map<string, CachedVectorWiResult>();
+
+function pruneVectorWiCache(now = Date.now()): void {
+  for (const [key, cached] of vectorWiCache) {
+    if (now - cached.cachedAt > VECTOR_WI_CACHE_TTL_MS) {
+      vectorWiCache.delete(key);
+    }
+  }
+
+  while (vectorWiCache.size >= VECTOR_WI_CACHE_MAX_ENTRIES) {
+    const oldest = vectorWiCache.keys().next();
+    if (oldest.done) break;
+    vectorWiCache.delete(oldest.value);
+  }
+}
 
 function getCachedVectorWiResult(
   cacheKey: string,
@@ -4268,6 +4314,7 @@ function setCachedVectorWiResult(
   cacheKey: string,
   result: VectorWorldInfoRetrievalResult,
 ): void {
+  pruneVectorWiCache();
   vectorWiCache.set(cacheKey, { result, cachedAt: Date.now() });
 }
 

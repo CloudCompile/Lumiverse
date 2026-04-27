@@ -89,6 +89,7 @@ export interface PromptBlock {
 
 export interface PromptBehavior {
   continueNudge: string;
+  emptySendNudge: string;
   impersonationPrompt: string;
   groupNudge: string;
   newChatPrompt: string;

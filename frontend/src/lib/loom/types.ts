@@ -82,6 +82,7 @@ export interface CustomBody {
 
 export interface PromptBehavior {
   continueNudge: string
+  emptySendNudge: string
   impersonationPrompt: string
   groupNudge: string
   newChatPrompt: string

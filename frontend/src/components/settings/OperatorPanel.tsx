@@ -26,7 +26,9 @@ import {
   operatorApi,
   type DatabaseTuningSettings,
   type OperatorDatabaseStatus,
+  type OperatorSharpStatus,
   type OperatorStatus,
+  type SharpSettings,
   type TrustedHostEntry,
   type TrustedHostsResponse,
 } from '@/api/operator'
@@ -127,6 +129,20 @@ function normalizeDatabaseMaintenance(input: DatabaseMaintenanceSettings): Datab
       ? 1024 * 1024 * 1024
       : Math.max(0, Math.floor(input.vacuumMinDbSizeBytes)),
     vacuumCheckpointMode: input.vacuumCheckpointMode ?? 'TRUNCATE',
+  }
+}
+
+function normalizeSharpSettings(input: SharpSettings): SharpSettings {
+  const normalizeInt = (value: number | null | undefined, min: number, max: number) => {
+    if (value == null || !Number.isFinite(value)) return null
+    return Math.max(min, Math.min(max, Math.floor(value)))
+  }
+
+  return {
+    concurrency: normalizeInt(input.concurrency, 1, 16),
+    cacheMemoryMb: normalizeInt(input.cacheMemoryMb, 8, 512),
+    cacheFiles: normalizeInt(input.cacheFiles, 0, 2048),
+    cacheItems: normalizeInt(input.cacheItems, 1, 4096),
   }
 }
 
@@ -235,6 +251,8 @@ export default function OperatorPanel() {
   const [dbStatus, setDbStatus] = useState<OperatorDatabaseStatus | null>(null)
   const [dbTuning, setDbTuning] = useState<DatabaseTuningSettings>({ cacheMemoryPercent: null, mmapSizeBytes: null })
   const [dbMaintenanceSettings, setDbMaintenanceSettings] = useState<DatabaseMaintenanceSettings>({})
+  const [sharpStatus, setSharpStatus] = useState<OperatorSharpStatus | null>(null)
+  const [sharpSettings, setSharpSettings] = useState<SharpSettings>({})
   const [uptime, setUptime] = useState(0)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
@@ -244,6 +262,8 @@ export default function OperatorPanel() {
   const [vectorHealth, setVectorHealth] = useState<VectorStoreHealth | null>(null)
   const [vectorBusy, setVectorBusy] = useState<string | null>(null)
   const [trustedHosts, setTrustedHosts] = useState<TrustedHostsResponse | null>(null)
+  const [trustedHostsLoading, setTrustedHostsLoading] = useState(true)
+  const [trustedHostsError, setTrustedHostsError] = useState<string | null>(null)
   const [hostDraft, setHostDraft] = useState('')
   const storeBusy = useStore((s) => s.operatorBusy)
   const addToast = useStore((s) => s.addToast)
@@ -251,6 +271,7 @@ export default function OperatorPanel() {
   // Track the operation that triggered a server restart so we can
   // show "Reconnecting..." once the WS drops and recover on reconnect.
   const pendingRestartOp = useRef<string | null>(null)
+  const trustedHostsRequestId = useRef(0)
 
   const effectiveBusy = reconnecting ? 'reconnecting' : (storeBusy || busy)
   const ipcAvailable = status?.ipcAvailable ?? false
@@ -286,19 +307,47 @@ export default function OperatorPanel() {
     }
   }, [])
 
-  const refreshTrustedHosts = useCallback(async () => {
+  const refreshTrustedHosts = useCallback(async (showLoader = false, forceRefresh = false) => {
+    const requestId = ++trustedHostsRequestId.current
+    if (showLoader) setTrustedHostsLoading(true)
     try {
-      const res = await operatorApi.getTrustedHosts()
+      const res = await operatorApi.getTrustedHosts(forceRefresh)
+      if (requestId !== trustedHostsRequestId.current) return
       setTrustedHosts(res)
+      setTrustedHostsError(null)
+    } catch (err) {
+      if (requestId !== trustedHostsRequestId.current) return
+      setTrustedHostsError(err instanceof Error ? err.message : 'Failed to load trusted hostnames.')
+    } finally {
+      if (requestId === trustedHostsRequestId.current) {
+        setTrustedHostsLoading(false)
+      }
+    }
+  }, [])
+
+  const refreshSharpSettings = useCallback(async () => {
+    try {
+      const next = await operatorApi.getSharp()
+      setSharpStatus(next)
+      setSharpSettings({
+        concurrency: next.configuredSettings.concurrency ?? null,
+        cacheMemoryMb: next.configuredSettings.cacheMemoryMb ?? null,
+        cacheFiles: next.configuredSettings.cacheFiles ?? null,
+        cacheItems: next.configuredSettings.cacheItems ?? null,
+      })
+      return next
     } catch {
-      /* leave previous state */
+      return null
     }
   }, [])
 
   const saveTrustedHosts = useCallback(async (nextConfigured: string[]) => {
     try {
+      trustedHostsRequestId.current += 1
       const res = await operatorApi.putTrustedHosts(nextConfigured)
+      trustedHostsRequestId.current += 1
       setTrustedHosts((prev) => prev ? { ...prev, configured: res.configured, baseline: res.baseline } : prev)
+      setTrustedHostsError(null)
       addToast({ type: 'success', message: 'Trusted hosts updated.' })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to update trusted hosts.'
@@ -363,14 +412,27 @@ export default function OperatorPanel() {
   useEffect(() => {
     let mounted = true
     const fetchStatus = async () => {
-      const [s] = await Promise.all([refreshStatus(), refreshDatabase(), refreshVectorHealth(), refreshTrustedHosts()])
+      const [s] = await Promise.all([refreshStatus(), refreshDatabase(), refreshVectorHealth(), refreshSharpSettings()])
       if (mounted && s) setLoading(false)
       else if (mounted) setLoading(false)
     }
     fetchStatus()
     const interval = setInterval(fetchStatus, 30_000)
     return () => { mounted = false; clearInterval(interval) }
-  }, [refreshDatabase, refreshStatus, refreshVectorHealth, refreshTrustedHosts])
+  }, [refreshDatabase, refreshSharpSettings, refreshStatus, refreshVectorHealth])
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      refreshTrustedHosts()
+    }, 0)
+    const interval = window.setInterval(() => {
+      refreshTrustedHosts()
+    }, 30_000)
+    return () => {
+      window.clearTimeout(timeout)
+      window.clearInterval(interval)
+    }
+  }, [refreshTrustedHosts])
 
   // Tick uptime every second (paused while reconnecting or shut down)
   useEffect(() => {
@@ -404,6 +466,8 @@ export default function OperatorPanel() {
       // Re-fetch status (new PID, uptime reset, possibly new branch/version)
       refreshStatus()
       refreshDatabase()
+      refreshSharpSettings()
+      refreshTrustedHosts()
 
       // Re-subscribe to log streaming
       operatorApi.subscribeLogs().catch(() => {})
@@ -413,7 +477,7 @@ export default function OperatorPanel() {
       clearInterval(disconnectPoll)
       unsub()
     }
-  }, [reconnecting, refreshDatabase, refreshStatus])
+  }, [reconnecting, refreshDatabase, refreshSharpSettings, refreshStatus, refreshTrustedHosts])
 
   // ── Actions ─────────────────────────────────────────────────────────────
 
@@ -616,6 +680,43 @@ export default function OperatorPanel() {
     setBusy(null)
   }, [dbMaintenanceSettings, refreshDatabase])
 
+  const handleSaveSharpSettings = useCallback(async () => {
+    setBusy('saving sharp settings')
+    try {
+      const normalized = normalizeSharpSettings(sharpSettings)
+      const next = await operatorApi.putSharp(normalized)
+      setSharpStatus(next)
+      setSharpSettings({
+        concurrency: next.configuredSettings.concurrency ?? null,
+        cacheMemoryMb: next.configuredSettings.cacheMemoryMb ?? null,
+        cacheFiles: next.configuredSettings.cacheFiles ?? null,
+        cacheItems: next.configuredSettings.cacheItems ?? null,
+      })
+      addToast({ type: 'success', message: 'Sharp runtime settings applied.' })
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to apply Sharp settings.' })
+    }
+    setBusy(null)
+  }, [addToast, sharpSettings])
+
+  const handleResetSharpSettings = useCallback(async () => {
+    setBusy('saving sharp settings')
+    try {
+      const next = await operatorApi.putSharp({})
+      setSharpStatus(next)
+      setSharpSettings({
+        concurrency: null,
+        cacheMemoryMb: null,
+        cacheFiles: null,
+        cacheItems: null,
+      })
+      addToast({ type: 'success', message: 'Sharp runtime settings reset to defaults.' })
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to reset Sharp settings.' })
+    }
+    setBusy(null)
+  }, [addToast])
+
   const handleRunVacuumNow = useCallback(() => {
     const normalizedTuning = normalizeDatabaseTuning(dbTuning)
     const normalizedMaintenance = normalizeDatabaseMaintenance(dbMaintenanceSettings)
@@ -719,6 +820,7 @@ export default function OperatorPanel() {
   const autoMaintenance = dbStatus?.automaticMaintenance
   const maintenanceState = dbStatus?.maintenanceState
   const vacuumDiskWarning = dbStats?.vacuumHasEnoughFreeBytes === false
+  const trustedHostsReady = !!trustedHosts
 
   return (
     <div className={styles.container}>
@@ -788,7 +890,8 @@ export default function OperatorPanel() {
            effectiveBusy === 'clearing cache' ? 'Clearing package cache...' :
            effectiveBusy === 'installing dependencies' ? 'Installing dependencies...' :
            effectiveBusy === 'saving database tuning' ? 'Saving database tuning...' :
-           effectiveBusy === 'saving database maintenance' ? 'Saving database maintenance...' :
+            effectiveBusy === 'saving sharp settings' ? 'Applying Sharp runtime settings...' :
+            effectiveBusy === 'saving database maintenance' ? 'Saving database maintenance...' :
            effectiveBusy === 'refreshing database stats' ? 'Refreshing database stats...' :
             effectiveBusy === 'database maintenance' ? 'Running database maintenance...' :
            effectiveBusy === 'database vacuum' ? 'Running SQLite VACUUM...' :
@@ -943,63 +1046,88 @@ export default function OperatorPanel() {
             to reach this device. Wildcards are not allowed — this guards against DNS-rebinding attacks.
           </span>
 
-          <div className={styles.dbInfoBlock}>
-            <span className={styles.fieldLabel}>Always trusted</span>
-            <div className={styles.hostChipGroup}>
-              {(trustedHosts?.baseline ?? []).map((entry) => (
-                <span key={entry.host} className={styles.hostChipBaseline} title={`source: ${TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}`}>
-                  {entry.host}
-                  <span className={styles.hostChipSource}>{TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}</span>
-                </span>
-              ))}
+          {trustedHostsLoading && !trustedHosts && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--lumiverse-text-dim)', fontSize: 12 }}>
+              <Loader2 size={14} className={spinClass} /> Detecting trusted hostnames...
             </div>
-          </div>
+          )}
 
-          <div className={styles.dbInfoBlock}>
-            <span className={styles.fieldLabel}>Configured</span>
-            {trustedHosts && trustedHosts.configured.length > 0 ? (
-              <div className={styles.hostChipGroup}>
-                {trustedHosts.configured.map((host) => (
-                  <span key={host} className={styles.hostChip}>
-                    {host}
-                    <button
-                      type="button"
-                      className={styles.hostChipRemove}
-                      onClick={() => handleRemoveHost(host)}
-                      aria-label={`Remove ${host}`}
-                    >
-                      <X size={12} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <span className={styles.hostEmpty}>No custom hostnames added yet.</span>
-            )}
-          </div>
+          {trustedHostsError && (
+            <div className={styles.disabledHint}>
+              {trustedHosts
+                ? `Trusted hostname refresh failed: ${trustedHostsError}. Showing the last successful snapshot.`
+                : `Trusted hostname detection is still unavailable: ${trustedHostsError}`}
+            </div>
+          )}
 
-          {trustedHosts && trustedHosts.suggestions.length > 0 && (
-            <div className={styles.dbInfoBlock}>
-              <span className={styles.fieldLabel}>Detected on this device</span>
-              <div className={styles.hostChipGroup}>
-                {trustedHosts.suggestions.map((entry) => {
-                  const alreadyConfigured = trustedHosts.configured.includes(entry.host)
-                  return (
-                    <button
-                      key={entry.host}
-                      type="button"
-                      className={styles.hostChipSuggested}
-                      disabled={alreadyConfigured}
-                      onClick={() => handleAddHost(entry.host)}
-                      title={`source: ${TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}`}
-                    >
-                      <Plus size={11} />
+          {trustedHosts && (
+            <>
+              <div className={styles.dbInfoBlock}>
+                <span className={styles.fieldLabel}>Always trusted</span>
+                <div className={styles.hostChipGroup}>
+                  {trustedHosts.baseline.map((entry) => (
+                    <span key={entry.host} className={styles.hostChipBaseline} title={`source: ${TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}`}>
                       {entry.host}
                       <span className={styles.hostChipSource}>{TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}</span>
-                    </button>
-                  )
-                })}
+                    </span>
+                  ))}
+                </div>
               </div>
+
+              <div className={styles.dbInfoBlock}>
+                <span className={styles.fieldLabel}>Configured</span>
+                {trustedHosts.configured.length > 0 ? (
+                  <div className={styles.hostChipGroup}>
+                    {trustedHosts.configured.map((host) => (
+                      <span key={host} className={styles.hostChip}>
+                        {host}
+                        <button
+                          type="button"
+                          className={styles.hostChipRemove}
+                          onClick={() => handleRemoveHost(host)}
+                          aria-label={`Remove ${host}`}
+                          disabled={!trustedHostsReady}
+                        >
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className={styles.hostEmpty}>No custom hostnames added yet.</span>
+                )}
+              </div>
+
+              {trustedHosts.suggestions.length > 0 && (
+                <div className={styles.dbInfoBlock}>
+                  <span className={styles.fieldLabel}>Detected on this device</span>
+                  <div className={styles.hostChipGroup}>
+                    {trustedHosts.suggestions.map((entry) => {
+                      const alreadyConfigured = trustedHosts.configured.includes(entry.host)
+                      return (
+                        <button
+                          key={entry.host}
+                          type="button"
+                          className={styles.hostChipSuggested}
+                          disabled={!trustedHostsReady || alreadyConfigured}
+                          onClick={() => handleAddHost(entry.host)}
+                          title={`source: ${TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}`}
+                        >
+                          <Plus size={11} />
+                          {entry.host}
+                          <span className={styles.hostChipSource}>{TRUSTED_HOST_SOURCE_LABELS[entry.source] ?? entry.source}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {!trustedHosts && !trustedHostsLoading && !trustedHostsError && (
+            <div className={styles.dbInfoBlock}>
+              <span className={styles.hostEmpty}>Trusted hostname data has not loaded yet.</span>
             </div>
           )}
 
@@ -1020,11 +1148,12 @@ export default function OperatorPanel() {
                 onChange={(e) => setHostDraft(e.target.value)}
                 autoComplete="off"
                 spellCheck={false}
+                disabled={!trustedHostsReady}
               />
               <button
                 type="submit"
                 className={styles.controlBtnPrimary}
-                disabled={!hostDraft.trim()}
+                disabled={!trustedHostsReady || !hostDraft.trim()}
               >
                 <Globe size={14} />
                 Add
@@ -1032,14 +1161,16 @@ export default function OperatorPanel() {
               <button
                 type="button"
                 className={styles.controlBtn}
-                onClick={refreshTrustedHosts}
+                onClick={() => refreshTrustedHosts(true, true)}
+                disabled={trustedHostsLoading}
               >
-                <RefreshCw size={14} />
+                <RefreshCw size={14} className={trustedHostsLoading ? spinClass : undefined} />
                 Rescan
               </button>
             </form>
             <span className={styles.fieldHint}>
               Port defaults to {status?.port ?? '7860'} when omitted. Schemes (<code>http://</code>) are stripped automatically.
+              {!trustedHostsReady ? ' Load the current snapshot before editing so existing trusted hosts are preserved.' : ''}
             </span>
           </div>
         </div>
@@ -1362,6 +1493,123 @@ export default function OperatorPanel() {
             <button className={styles.controlBtnDanger} disabled={!!effectiveBusy || vacuumDiskWarning} onClick={handleRunVacuumNow}>
               <Hammer size={14} />
               Run Vacuum Now
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Image Processing */}
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <span className={styles.sectionTitle}>Image Processing</span>
+        </div>
+        <div className={styles.sectionBody}>
+          <div className={styles.dbInfoGrid}>
+            <div className={styles.dbInfoBlock}>
+              <span className={styles.statusLabel}>Effective Runtime</span>
+              <span className={styles.dbInlineText}>
+                concurrency {sharpStatus?.effectiveSettings.concurrency ?? '—'}
+                {' · '}
+                cache {sharpStatus ? `${sharpStatus.effectiveSettings.cacheMemoryMb} MiB / ${sharpStatus.effectiveSettings.cacheFiles} files / ${sharpStatus.effectiveSettings.cacheItems} items` : '—'}
+              </span>
+            </div>
+            <div className={styles.dbInfoBlock}>
+              <span className={styles.statusLabel}>Defaults</span>
+              <span className={styles.dbInlineText}>
+                concurrency {sharpStatus?.defaults.concurrency ?? '—'}
+                {' · '}
+                cache {sharpStatus ? `${sharpStatus.defaults.cacheMemoryMb} MiB / ${sharpStatus.defaults.cacheFiles} files / ${sharpStatus.defaults.cacheItems} items` : '—'}
+              </span>
+            </div>
+          </div>
+
+          <div className={styles.tuningGrid}>
+            <label className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>Concurrency</span>
+              <NumericInput
+                min={1}
+                max={16}
+                step={1}
+                className={styles.fieldInput}
+                placeholder={`Default (${sharpStatus?.defaults.concurrency ?? 4})`}
+                value={sharpSettings.concurrency ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setSharpSettings((prev) => ({ ...prev, concurrency: value }))}
+              />
+              <span className={styles.fieldHint}>Blank uses the backend default. New image work picks up changes immediately.</span>
+            </label>
+
+            <label className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>Cache memory (MiB)</span>
+              <NumericInput
+                min={8}
+                max={512}
+                step={8}
+                className={styles.fieldInput}
+                placeholder={`Default (${sharpStatus?.defaults.cacheMemoryMb ?? 64})`}
+                value={sharpSettings.cacheMemoryMb ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setSharpSettings((prev) => ({ ...prev, cacheMemoryMb: value }))}
+              />
+            </label>
+
+            <label className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>Cache files</span>
+              <NumericInput
+                min={0}
+                max={2048}
+                step={16}
+                className={styles.fieldInput}
+                placeholder={`Default (${sharpStatus?.defaults.cacheFiles ?? 128})`}
+                value={sharpSettings.cacheFiles ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setSharpSettings((prev) => ({ ...prev, cacheFiles: value }))}
+              />
+            </label>
+
+            <label className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>Cache items</span>
+              <NumericInput
+                min={1}
+                max={4096}
+                step={16}
+                className={styles.fieldInput}
+                placeholder={`Default (${sharpStatus?.defaults.cacheItems ?? 256})`}
+                value={sharpSettings.cacheItems ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setSharpSettings((prev) => ({ ...prev, cacheItems: value }))}
+              />
+            </label>
+          </div>
+
+          <div className={styles.controls}>
+            <button
+              className={styles.controlBtnPrimary}
+              disabled={!!effectiveBusy}
+              onClick={handleSaveSharpSettings}
+            >
+              <HardDrive size={14} />
+              Apply Sharp Settings
+            </button>
+            <button
+              className={styles.controlBtn}
+              disabled={!!effectiveBusy}
+              onClick={handleResetSharpSettings}
+            >
+              <RefreshCw size={14} />
+              Reset to Defaults
+            </button>
+            <button
+              className={styles.controlBtn}
+              disabled={!!effectiveBusy}
+              onClick={refreshSharpSettings}
+            >
+              <RefreshCw size={14} />
+              Refresh
             </button>
           </div>
         </div>

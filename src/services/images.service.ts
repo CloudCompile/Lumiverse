@@ -1,4 +1,4 @@
-import sharp from "sharp";
+import sharp from "../utils/sharp-config";
 import { getDb } from "../db/connection";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -12,6 +12,10 @@ const IMAGES_DIR = "images";
 const DEFAULT_SMALL_SIZE = 300;
 const DEFAULT_LARGE_SIZE = 700;
 const WEBP_QUALITY = 80;
+
+type ThumbnailSource = Buffer | string;
+
+const inflightThumbnailGenerations = new Map<string, Promise<boolean>>();
 
 export type ThumbTier = "sm" | "lg";
 
@@ -61,12 +65,12 @@ function thumbSuffix(tier: ThumbTier): string {
 }
 
 async function generateThumbnail(
-  sourceBuffer: Buffer,
+  source: ThumbnailSource,
   outputPath: string,
   size: number
 ): Promise<boolean> {
   try {
-    await sharp(sourceBuffer)
+    await sharp(source)
       .resize(size, size, { fit: "cover" })
       .webp({ quality: WEBP_QUALITY })
       .toFile(outputPath);
@@ -74,6 +78,22 @@ async function generateThumbnail(
   } catch {
     return false;
   }
+}
+
+async function ensureThumbnail(
+  cacheKey: string,
+  source: ThumbnailSource,
+  outputPath: string,
+  size: number,
+): Promise<boolean> {
+  const existing = inflightThumbnailGenerations.get(cacheKey);
+  if (existing) return existing;
+
+  const job = generateThumbnail(source, outputPath, size).finally(() => {
+    inflightThumbnailGenerations.delete(cacheKey);
+  });
+  inflightThumbnailGenerations.set(cacheKey, job);
+  return job;
 }
 
 export async function uploadImage(userId: string, file: File): Promise<Image> {
@@ -196,11 +216,10 @@ export async function getImageFilePathPublic(id: string, tier?: ThumbTier): Prom
     // Lazy generate if original exists
     const originalPath = join(dir, row.filename);
     if (!existsSync(originalPath)) return null;
-    const buffer = Buffer.from(await Bun.file(originalPath).arrayBuffer());
     const userId = row.user_id;
     const sizes = getThumbnailSettings(userId);
     const size = tier === "sm" ? sizes.smallSize : sizes.largeSize;
-    const ok = await generateThumbnail(buffer, thumbPath, size);
+    const ok = await ensureThumbnail(`${id}:${tier}:public`, originalPath, thumbPath, size);
     return ok ? thumbPath : originalPath;
   }
 
@@ -238,11 +257,7 @@ export async function getImageFilePath(
     if (existsSync(originalPath)) {
       const sizes = getThumbnailSettings(userId);
       const size = tier === "sm" ? sizes.smallSize : sizes.largeSize;
-      const ok = await generateThumbnail(
-        Buffer.from(await Bun.file(originalPath).arrayBuffer()),
-        tieredPath,
-        size
-      );
+      const ok = await ensureThumbnail(`${image.id}:${tier}:${userId}`, originalPath, tieredPath, size);
       if (ok) {
         getDb()
           .query("UPDATE images SET has_thumbnail = 1 WHERE id = ?")
@@ -311,10 +326,9 @@ export async function rebuildAllThumbnails(
         }
 
         // Regenerate both tiers
-        const buffer = Buffer.from(await Bun.file(originalPath).arrayBuffer());
         const [smOk, lgOk] = await Promise.all([
-          generateThumbnail(buffer, join(dir, `${img.id}${thumbSuffix("sm")}`), sizes.smallSize),
-          generateThumbnail(buffer, join(dir, `${img.id}${thumbSuffix("lg")}`), sizes.largeSize),
+          generateThumbnail(originalPath, join(dir, `${img.id}${thumbSuffix("sm")}`), sizes.smallSize),
+          generateThumbnail(originalPath, join(dir, `${img.id}${thumbSuffix("lg")}`), sizes.largeSize),
         ]);
 
         if (smOk || lgOk) {

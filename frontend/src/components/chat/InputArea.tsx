@@ -755,9 +755,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
         startStreaming(res.generationId)
         consumeOneshotGuides()
       } else {
-        // Empty send with no queued messages = silent continue (nudge)
-        beginStreaming(undefined, 'continue')
-        const res = await generateApi.continueGeneration(genOpts)
+        // Empty send from the input bar is a nudge for a fresh reply, not the
+        // explicit Continue action that appends onto the previous assistant message.
+        beginStreaming()
+        const res = await generateApi.start(genOpts)
         if (generationNonceRef.current !== nonce) return
         startStreaming(res.generationId)
         consumeOneshotGuides()
@@ -2048,14 +2049,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 ? `Send message (${queueModLabel}+click to queue)`
                 : hasQueuedMessages
                   ? 'Send queued messages'
-                  : 'Silent continue (nudge)'
+                  : 'Nudge for a fresh reply'
             }
             aria-label={
               text.trim() || pendingAttachments.length > 0
                 ? 'Send message'
                 : hasQueuedMessages
                   ? 'Send queued messages'
-                  : 'Silent continue'
+                  : 'Nudge for a fresh reply'
             }
           >
             <Send size={16} />

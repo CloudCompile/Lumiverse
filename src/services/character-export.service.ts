@@ -1,4 +1,4 @@
-import sharp from "sharp";
+import sharp from "../utils/sharp-config";
 import { extname } from "path";
 import { zipSync } from "fflate";
 import { getCharacter } from "./characters.service";

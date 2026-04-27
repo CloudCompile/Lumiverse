@@ -91,6 +91,7 @@ export interface FinalizeWorldInfoOptions {
 // ─── Activation cache (short-TTL for rapid dry-run optimization) ───
 
 const WI_ACTIVATION_CACHE_TTL_MS = 30_000;
+const WI_ACTIVATION_CACHE_MAX_ENTRIES = 256;
 
 interface CachedActivationResult {
   result: ActivationResult;
@@ -98,6 +99,20 @@ interface CachedActivationResult {
 }
 
 const wiActivationCache = new Map<string, CachedActivationResult>();
+
+function pruneWiActivationCache(now = Date.now()): void {
+  for (const [key, cached] of wiActivationCache) {
+    if (now - cached.cachedAt > WI_ACTIVATION_CACHE_TTL_MS) {
+      wiActivationCache.delete(key);
+    }
+  }
+
+  while (wiActivationCache.size >= WI_ACTIVATION_CACHE_MAX_ENTRIES) {
+    const oldest = wiActivationCache.keys().next();
+    if (oldest.done) break;
+    wiActivationCache.delete(oldest.value);
+  }
+}
 
 function computeWiActivationCacheKey(input: ActivationInput): string {
   const entries = input.entries;
@@ -134,6 +149,7 @@ function getCachedActivationResult(cacheKey: string): ActivationResult | null {
 }
 
 function setCachedActivationResult(cacheKey: string, result: ActivationResult): void {
+  pruneWiActivationCache();
   wiActivationCache.set(cacheKey, {
     result: {
       ...result,

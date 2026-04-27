@@ -109,6 +109,7 @@ export const DEFAULT_CUSTOM_BODY: CustomBody = {
 
 export const DEFAULT_PROMPT_BEHAVIOR: PromptBehavior = {
   continueNudge: '[Continue your last message without repeating its original content.]',
+  emptySendNudge: '[Write the next reply only as {{char}}.]',
   impersonationPrompt: '[Write your next reply from the point of view of {{user}}, using the chat history so far as a guideline for the writing style of {{user}}. Don\'t write as {{char}} or system. Don\'t describe actions of {{char}}.]',
   groupNudge: '[Write the next reply only as {{char}}.]',
   newChatPrompt: '[Start a new Chat]',

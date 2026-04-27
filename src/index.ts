@@ -63,7 +63,11 @@ console.log(
 
 // Load the operator-configured trusted host allowlist now that the owner is
 // known — the Host-header middleware in app.ts reads from this cache.
-const { load: loadTrustedHosts } = await import("./services/trusted-hosts.service");
+const {
+  load: loadTrustedHosts,
+  getSnapshot: getTrustedHostsSnapshot,
+  detectHostnameSuggestions,
+} = await import("./services/trusted-hosts.service");
 loadTrustedHosts();
 
 runStartupDatabaseMaintenance(db, getDatabasePath(), getFirstUserId());
@@ -85,6 +89,10 @@ if (env.stMigrate) {
 // Seed built-in tokenizers after migrations are applied
 const { seedTokenizers } = await import("./services/tokenizer-seed");
 seedTokenizers();
+
+// Apply operator-configured sharp runtime settings before image work starts.
+const { initSharpSettings } = await import("./services/sharp-settings.service");
+initSharpSettings();
 
 // Start background vectorization maintenance only after the database is ready.
 const { startVectorizationQueueMaintenance } = await import("./services/vectorization-queue.service");
@@ -156,11 +164,19 @@ setTimeout(() => {
   });
 }, 0);
 
+// Pre-warm trusted-host suggestions after the server starts listening so the
+// Operator tab usually hits a warm cache without slowing down boot.
+setTimeout(() => {
+  const snapshot = getTrustedHostsSnapshot();
+  detectHostnameSuggestions({ forceRefresh: true, baseline: snapshot.baseline }).catch((err) => {
+    console.warn("[trusted-hosts] Startup warm failed:", err instanceof Error ? err.message : err);
+  });
+}, 0);
+
 // Log trusted origins so it's visible in the runner and easy to verify that LAN IPs were detected and applied automatically.
 if (env.trustAnyOrigin) {
   console.log("[Auth] Trusted origins: ALL (TRUST_ANY_ORIGIN enabled)");
 } else {
-  const { getSnapshot: getTrustedHostsSnapshot } = await import("./services/trusted-hosts.service");
   const snapshot = getTrustedHostsSnapshot();
   const baselineLines = snapshot.baseline.map((e) => `  • ${e.host} (${e.source})`);
   const configuredLines = snapshot.configured.map((h) => `  • ${h} (configured)`);
