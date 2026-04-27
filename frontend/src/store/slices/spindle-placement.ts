@@ -38,6 +38,10 @@ export interface FloatWidgetState {
   root: HTMLElement
   x: number
   y: number
+  defaultX: number
+  defaultY: number
+  defaultWidth: number
+  defaultHeight: number
   width: number
   height: number
   visible: boolean

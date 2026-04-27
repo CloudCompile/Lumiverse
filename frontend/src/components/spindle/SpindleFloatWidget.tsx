@@ -117,16 +117,29 @@ export default function SpindleFloatWidget({ widget }: Props) {
       key: 'reset',
       label: 'Reset Position',
       onClick: () => {
+        const pad = 12
+        const resetWidth = widget.defaultWidth
+        const resetHeight = widget.defaultHeight
         const reset = {
-          x: window.innerWidth - size.width - 16,
-          y: window.innerHeight - size.height - 16,
+          x: Math.max(pad, Math.min(widget.defaultX, window.innerWidth - resetWidth - pad)),
+          y: Math.max(pad, Math.min(widget.defaultY, window.innerHeight - resetHeight - pad)),
+          width: resetWidth,
+          height: resetHeight,
         }
-        setPos(reset)
+        setPos({ x: reset.x, y: reset.y })
         updateFloatWidget(widget.id, reset)
         setContextMenu(null)
       },
     },
-  ], [setPlacementHidden, updateFloatWidget, widget.id, size.width, size.height])
+  ], [
+    setPlacementHidden,
+    updateFloatWidget,
+    widget.defaultHeight,
+    widget.defaultWidth,
+    widget.defaultX,
+    widget.defaultY,
+    widget.id,
+  ])
 
   if (!widget.visible) return null
 
