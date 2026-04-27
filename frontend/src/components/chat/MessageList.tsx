@@ -100,6 +100,21 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     setPrependVisualOffsetState((prev) => (prev === clamped ? prev : clamped))
   }, [])
 
+  const flushPrependVisualOffset = useCallback(() => {
+    const el = scrollRef.current
+    const pendingOffset = prependVisualOffsetRef.current
+    if (!el || pendingOffset <= 0) return
+
+    // Convert any temporary visual-only prepend offset back into real scroll
+    // position once touch momentum settles so history loading can't get stuck
+    // behind a synthetic top gap.
+    isProgrammaticScrollRef.current = true
+    el.scrollTop += pendingOffset
+    lastScrollTopRef.current = el.scrollTop
+    lastScrollHeightRef.current = el.scrollHeight
+    setPrependVisualOffset(0)
+  }, [setPrependVisualOffset])
+
   const warmMobileRange = useCallback((duration = MOBILE_RANGE_WARM_MS) => {
     setMobileRangeWarm(true)
     if (rangeWarmTimerRef.current != null) {
@@ -416,9 +431,10 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     }
     touchMomentumTimerRef.current = window.setTimeout(() => {
       touchMomentumHoldRef.current = false
+      flushPrependVisualOffset()
       touchMomentumTimerRef.current = null
     }, MOBILE_MOMENTUM_SETTLE_MS)
-  }, [])
+  }, [flushPrependVisualOffset])
 
   // Scroll anchoring: when older messages are prepended, adjust scrollTop so
   // the user's viewport stays on the same content instead of jumping to the top.
@@ -432,7 +448,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       warmMobileRange(900)
       const heightDiff = el.scrollHeight - lastScrollHeightRef.current
       if (heightDiff > 0 && lastScrollHeightRef.current > 0) {
-        if (!isPinnedRef.current) {
+        if (!isPinnedRef.current && isCoarsePointer && touchMomentumHoldRef.current) {
           setPrependVisualOffset(prependVisualOffsetRef.current + heightDiff)
         } else {
           isProgrammaticScrollRef.current = true
