@@ -21,6 +21,14 @@ function getStore() {
   return useStore.getState()
 }
 
+function clampFloatWidgetRect(x: number, y: number, width: number, height: number) {
+  const pad = 12
+  return {
+    x: Math.max(pad, Math.min(x, window.innerWidth - width - pad)),
+    y: Math.max(pad, Math.min(y, window.innerHeight - height - pad)),
+  }
+}
+
 // ── Drawer Tab ──
 
 export function createDrawerTabHandle(
@@ -133,6 +141,22 @@ export function createFloatWidgetHandle(
     getPosition() {
       const w = getStore().floatWidgets.find((w) => w.id === widgetId)
       return { x: w?.x ?? x, y: w?.y ?? y }
+    },
+    setSize(newWidth: number, newHeight: number) {
+      const store = getStore()
+      const w = store.floatWidgets.find((w) => w.id === widgetId)
+      if (!w || w.fullscreen) return
+
+      const width = Math.max(1, Math.round(newWidth))
+      const height = Math.max(1, Math.round(newHeight))
+      const pos = clampFloatWidgetRect(w.x, w.y, width, height)
+
+      store.updateFloatWidget(widgetId, {
+        width,
+        height,
+        x: pos.x,
+        y: pos.y,
+      })
     },
     setVisible(visible: boolean) {
       getStore().updateFloatWidget(widgetId, { visible })
