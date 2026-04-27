@@ -8,6 +8,13 @@ const HEADS_KEY = 'lumiverse:chatHeads'
 const CLEARED_KEY = 'lumiverse:chatHeadsAttentionCleared'
 const POS_KEY = 'lumiverse:chatHeadsPos'
 
+export function clearChatHeadsPersistence() {
+  try {
+    localStorage.removeItem(HEADS_KEY)
+    localStorage.removeItem(CLEARED_KEY)
+  } catch {}
+}
+
 function loadHeads(): ChatHeadEntry[] {
   try {
     const raw = localStorage.getItem(HEADS_KEY)

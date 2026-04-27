@@ -69,9 +69,7 @@ export default function WallpaperPanel() {
 
       if (uploadTarget === 'chat' && activeChatId) {
         // Save to chat metadata
-        const chat = await chatsApi.get(activeChatId)
-        const metadata = { ...(chat.metadata || {}), wallpaper: ref }
-        await chatsApi.update(activeChatId, { metadata })
+        await chatsApi.patchMetadata(activeChatId, { wallpaper: ref })
         setActiveChatWallpaper(ref)
       } else {
         // Save as global wallpaper
@@ -91,10 +89,7 @@ export default function WallpaperPanel() {
   const clearChat = async () => {
     if (!activeChatId) return
     try {
-      const chat = await chatsApi.get(activeChatId)
-      const metadata = { ...(chat.metadata || {}) }
-      delete metadata.wallpaper
-      await chatsApi.update(activeChatId, { metadata })
+      await chatsApi.patchMetadata(activeChatId, { wallpaper: null })
       setActiveChatWallpaper(null)
     } catch (err: any) {
       setError(err?.message || 'Failed to clear chat wallpaper.')

@@ -7,6 +7,7 @@ import { ttsConnectionsApi } from '@/api/tts-connections'
 import { imageGenConnectionsApi } from '@/api/image-gen-connections'
 import { personasApi } from '@/api/personas'
 import { packsApi } from '@/api/packs'
+import { resetUserScopedStoreState } from '@/store/user-scoped-reset'
 
 /**
  * Eagerly load shared data that multiple panels depend on.
@@ -23,14 +24,23 @@ import { packsApi } from '@/api/packs'
  */
 export function useAppInit() {
   const isAuthenticated = useStore((s) => s.isAuthenticated)
-  const didInit = useRef(false)
+  const userId = useStore((s) => s.user?.id ?? null)
+  const initializedUserId = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!isAuthenticated || didInit.current) return
-    didInit.current = true
+    if (!isAuthenticated || !userId) {
+      initializedUserId.current = null
+      return
+    }
+
+    if (initializedUserId.current === userId) return
+    if (initializedUserId.current && initializedUserId.current !== userId) {
+      resetUserScopedStoreState()
+    }
+    initializedUserId.current = userId
 
     void initialize()
-  }, [isAuthenticated])
+  }, [isAuthenticated, userId])
 }
 
 async function initialize(): Promise<void> {

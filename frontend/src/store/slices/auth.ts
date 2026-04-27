@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand'
 import type { AuthSlice, AuthUser } from '@/types/store'
 import { authClient, getAuthErrorMessage, readAuthErrorResponseMeta, type AuthErrorResponseMeta } from '@/api/auth'
 import { post, get, del } from '@/api/client'
+import { resetUserScopedStoreState } from '../user-scoped-reset'
 
 export const createAuthSlice: StateCreator<AuthSlice> = (set) => ({
   user: null,
@@ -34,6 +35,7 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set) => ({
       }
 
       if (data?.user) {
+        resetUserScopedStoreState()
         set({
           user: data.user as AuthUser,
           session: { token: data.token } as any,
@@ -51,13 +53,14 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set) => ({
 
   logout: async () => {
     await authClient.signOut()
-      set({
-        user: null,
-        session: null,
-        isAuthenticated: false,
-        isAuthLoading: false,
-        authError: null,
-      })
+    resetUserScopedStoreState()
+    set({
+      user: null,
+      session: null,
+      isAuthenticated: false,
+      isAuthLoading: false,
+      authError: null,
+    })
   },
 
   checkSession: async () => {
@@ -80,6 +83,7 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set) => ({
           authError: null,
         })
       } else {
+        resetUserScopedStoreState()
         set({
           user: null,
           session: null,
@@ -89,6 +93,7 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set) => ({
         })
       }
     } catch (error) {
+      resetUserScopedStoreState()
       set({
         user: null,
         session: null,

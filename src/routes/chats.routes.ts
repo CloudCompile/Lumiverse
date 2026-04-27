@@ -222,7 +222,7 @@ app.post("/import", async (c) => {
       extra: m.extra,
     }));
 
-    const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages);
+    const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages, userId);
 
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
@@ -263,7 +263,7 @@ app.post("/import-st", async (c) => {
       ...(parsed.createdAt ? { created_at: parsed.createdAt } : {}),
     });
 
-    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages);
+    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages, userId);
     return c.json({
       chat_id: chat.id,
       name: chat.name,
@@ -348,7 +348,7 @@ app.post("/import-st-group", async (c) => {
       ...(parsed.createdAt ? { created_at: parsed.createdAt } : {}),
     });
 
-    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages);
+    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages, userId);
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
     return c.json({ error: err.message || "Import failed" }, 500);

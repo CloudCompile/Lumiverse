@@ -29,6 +29,7 @@ import { createOperatorSlice } from './slices/operator'
 import { createFloatingAvatarSlice } from './slices/floating-avatar'
 import { createChatHeadsSlice } from './slices/chat-heads'
 import { createDatabankSlice } from './slices/databank'
+import { registerUserScopedResetStore } from './user-scoped-reset'
 
 export const useStore = create<AppStore>()((...a) => ({
   ...createChatSlice(...a),
@@ -61,3 +62,5 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createChatHeadsSlice(...a),
   ...createDatabankSlice(...a),
 }))
+
+registerUserScopedResetStore(useStore, useStore.getState())

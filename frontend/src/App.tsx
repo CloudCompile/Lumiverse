@@ -57,15 +57,16 @@ export default function App() {
 
   const loadSettings = useStore((s) => s.loadSettings)
   const isAuthenticated = useStore((s) => s.isAuthenticated)
+  const userId = useStore((s) => s.user?.id ?? null)
   const openDrawer = useStore((s) => s.openDrawer)
   const setDrawerTab = useStore((s) => s.setDrawerTab)
   const setActiveProfile = useStore((s) => s.setActiveProfile)
   const setActiveImageGenConnection = useStore((s) => s.setActiveImageGenConnection)
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && userId) {
       loadSettings()
     }
-  }, [isAuthenticated, loadSettings])
+  }, [isAuthenticated, userId, loadSettings])
 
   // Capture BYOP API key returned in URL hash globally so it can be consumed
   // later when the relevant connection form is opened.

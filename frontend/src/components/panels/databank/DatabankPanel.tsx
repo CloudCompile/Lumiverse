@@ -170,7 +170,7 @@ export default function DatabankPanel() {
     setChatDatabankIds(next)
     const meta = { ...chatMetadata, chat_databank_ids: next }
     setChatMetadata(meta)
-    chatsApi.update(activeChatId, { metadata: meta }).catch(() => {})
+    chatsApi.patchMetadata(activeChatId, { chat_databank_ids: next }).catch(() => {})
   }, [activeChatId, chatDatabankIds, chatMetadata])
 
   // ── Load banks on mount and scope change ──

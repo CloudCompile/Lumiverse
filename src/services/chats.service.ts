@@ -277,7 +277,7 @@ export function createChat(userId: string, input: CreateChatInput): Chat {
           greeting_character_id: character.id,
           greeting_index: input.greeting_index ?? 0,
         },
-      });
+      }, userId);
     }
   }
 
@@ -343,8 +343,9 @@ export function updateChat(userId: string, id: string, input: UpdateChatInput): 
   fields.push("updated_at = ?");
   values.push(now);
   values.push(id);
+  values.push(userId);
 
-  getDb().query(`UPDATE chats SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  getDb().query(`UPDATE chats SET ${fields.join(", ")} WHERE id = ? AND user_id = ?`).run(...values);
   const updated = getChat(userId, id)!;
   eventBus.emit(EventType.CHAT_CHANGED, { chat: updated }, userId);
 
@@ -517,7 +518,7 @@ export function reattributeUserMessages(userId: string, chatId: string, personaI
     .query("SELECT id, extra FROM messages WHERE chat_id = ? AND is_user = 1")
     .all(chatId) as Array<{ id: string; extra: string }>;
 
-  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
+  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ? AND chat_id = ?");
   // Wrap the per-message updates in a single transaction so a crash partway
   // through can never leave the chat in a half-renamed state.
   db.transaction(() => {
@@ -529,7 +530,7 @@ export function reattributeUserMessages(userId: string, chatId: string, personaI
         extra = {};
       }
       extra.persona_id = personaId;
-      update.run(personaName, JSON.stringify(extra), row.id);
+      update.run(personaName, JSON.stringify(extra), row.id, chatId);
     }
   })();
 
@@ -553,7 +554,7 @@ export function bulkReattributeByPersonaName(userId: string, personaMap: Map<str
     )
     .all(userId) as Array<{ id: string; chat_id: string; name: string; extra: string }>;
 
-  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
+  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ? AND chat_id = ?");
   let messagesUpdated = 0;
   const updatedChatIds = new Set<string>();
 
@@ -573,7 +574,7 @@ export function bulkReattributeByPersonaName(userId: string, personaMap: Map<str
       if (!match) continue;
 
       extra.persona_id = match.id;
-      update.run(match.name, JSON.stringify(extra), row.id);
+      update.run(match.name, JSON.stringify(extra), row.id, row.chat_id);
       messagesUpdated++;
       updatedChatIds.add(row.chat_id);
     }
@@ -655,7 +656,7 @@ export function getMessage(userId: string, id: string): Message | null {
   return rowToMessage(row);
 }
 
-export function createMessage(chatId: string, input: CreateMessageInput, userId?: string): Message {
+export function createMessage(chatId: string, input: CreateMessageInput, userId: string): Message {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
@@ -678,7 +679,7 @@ export function createMessage(chatId: string, input: CreateMessageInput, userId?
       input.parent_message_id || null, input.branch_id || null, now
     );
 
-  getDb().query("UPDATE chats SET updated_at = ? WHERE id = ?").run(now, chatId);
+  getDb().query("UPDATE chats SET updated_at = ? WHERE id = ? AND user_id = ?").run(now, chatId, userId);
 
   // getMessage without userId — internal use after validated chat
   const row = getDb().query("SELECT * FROM messages WHERE id = ?").get(id) as any;
@@ -702,7 +703,7 @@ export function createMessage(chatId: string, input: CreateMessageInput, userId?
 export function patchMessageExtra(userId: string, id: string, extra: Record<string, any>): void {
   const existing = getMessage(userId, id);
   if (!existing) return;
-  getDb().query("UPDATE messages SET extra = ? WHERE id = ?").run(JSON.stringify(extra), id);
+  getDb().query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?").run(JSON.stringify(extra), id, existing.chat_id);
 }
 
 export function updateMessage(userId: string, id: string, input: UpdateMessageInput): Message | null {
@@ -774,8 +775,9 @@ export function updateMessage(userId: string, id: string, input: UpdateMessageIn
 
   if (fields.length === 0) return existing;
   values.push(id);
+  values.push(existing.chat_id);
 
-  getDb().query(`UPDATE messages SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  getDb().query(`UPDATE messages SET ${fields.join(", ")} WHERE id = ? AND chat_id = ?`).run(...values);
   const updated = getMessage(userId, id)!;
   eventBus.emit(EventType.MESSAGE_EDITED, { chatId: updated.chat_id, message: updated }, userId);
   if (swipeShapeTouched) {
@@ -821,7 +823,7 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
 
   const db = getDb();
   const getStmt = db.query("SELECT * FROM messages WHERE id = ? AND chat_id = ?");
-  const updateStmt = db.query("UPDATE messages SET extra = ? WHERE id = ?");
+  const updateStmt = db.query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?");
 
   const updated: Message[] = [];
 
@@ -837,7 +839,7 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
         delete extra.hidden;
       }
 
-      updateStmt.run(JSON.stringify(extra), msgId);
+      updateStmt.run(JSON.stringify(extra), msgId, chatId);
       const updatedRow = { ...row, extra: JSON.stringify(extra) };
       updated.push(rowToMessage(updatedRow));
     }
@@ -873,7 +875,7 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
 
   const db = getDb();
   const getStmt = db.query("SELECT id FROM messages WHERE id = ? AND chat_id = ?");
-  const deleteStmt = db.query("DELETE FROM messages WHERE id = ?");
+  const deleteStmt = db.query("DELETE FROM messages WHERE id = ? AND chat_id = ?");
 
   let deleted = 0;
   const deletedIds: string[] = [];
@@ -883,7 +885,7 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
       const row = getStmt.get(msgId, chatId) as any;
       if (!row) continue;
 
-      deleteStmt.run(msgId);
+      deleteStmt.run(msgId, chatId);
       deleted++;
       deletedIds.push(msgId);
     }
@@ -914,7 +916,7 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
 export function deleteMessage(userId: string, id: string): boolean {
   const msg = getMessage(userId, id);
   if (!msg) return false;
-  const result = getDb().query("DELETE FROM messages WHERE id = ?").run(id);
+  const result = getDb().query("DELETE FROM messages WHERE id = ? AND chat_id = ?").run(id, msg.chat_id);
   if (result.changes > 0) {
     eventBus.emit(EventType.MESSAGE_DELETED, { chatId: msg.chat_id, messageId: id }, userId);
     invalidateChatMemoryCache(msg.chat_id);
@@ -943,8 +945,8 @@ export function addSwipe(userId: string, messageId: string, content: string): Me
   const newSwipeId = swipes.length - 1;
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ?")
-    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, content, messageId);
+    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ? AND chat_id = ?")
+    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, content, messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
@@ -971,10 +973,10 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
     ? "swipes = ?, content = ?"
     : "swipes = ?";
   const values = swipeIdx === msg.swipe_id
-    ? [JSON.stringify(swipes), content, messageId]
-    : [JSON.stringify(swipes), messageId];
+    ? [JSON.stringify(swipes), content, messageId, msg.chat_id]
+    : [JSON.stringify(swipes), messageId, msg.chat_id];
 
-  getDb().query(`UPDATE messages SET ${updates} WHERE id = ?`).run(...values);
+  getDb().query(`UPDATE messages SET ${updates} WHERE id = ? AND chat_id = ?`).run(...values);
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
     EventType.MESSAGE_SWIPED,
@@ -1014,8 +1016,8 @@ export function deleteSwipe(userId: string, messageId: string, swipeIdx: number)
   const newContent = swipes[newSwipeId] ?? swipes[0];
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ?")
-    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, newContent, messageId);
+    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ? AND chat_id = ?")
+    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, newContent, messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
@@ -1043,8 +1045,8 @@ export function cycleSwipe(userId: string, messageId: string, direction: "left" 
   const nextContent = msg.swipes[nextIdx] ?? msg.content;
 
   getDb()
-    .query("UPDATE messages SET swipe_id = ?, content = ? WHERE id = ?")
-    .run(nextIdx, nextContent, messageId);
+    .query("UPDATE messages SET swipe_id = ?, content = ? WHERE id = ? AND chat_id = ?")
+    .run(nextIdx, nextContent, messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
@@ -1264,7 +1266,7 @@ export function createChatRaw(userId: string, input: { character_id: string; nam
   return getChat(userId, id)!;
 }
 
-export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[]): number {
+export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[], userId: string): number {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
 
@@ -1308,7 +1310,7 @@ export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[])
   // Update chat's updated_at to last message timestamp
   if (messages.length > 0) {
     const lastDate = messages[messages.length - 1].send_date ?? now;
-    db.query("UPDATE chats SET updated_at = ? WHERE id = ?").run(lastDate, chatId);
+    db.query("UPDATE chats SET updated_at = ? WHERE id = ? AND user_id = ?").run(lastDate, chatId, userId);
   }
 
   return messages.length;
@@ -1710,7 +1712,7 @@ async function stampChatMemoryHash(userId: string, chatId: string): Promise<void
     const chat = getChat(userId, chatId);
     if (!chat) return;
     const metadata = { ...chat.metadata, ltcm_config_hash: hash };
-    getDb().query("UPDATE chats SET metadata = ? WHERE id = ?").run(JSON.stringify(metadata), chatId);
+    getDb().query("UPDATE chats SET metadata = ? WHERE id = ? AND user_id = ?").run(JSON.stringify(metadata), chatId, userId);
   } catch { /* non-fatal */ }
 }
 

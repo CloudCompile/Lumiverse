@@ -297,7 +297,7 @@ export async function importChats(
           created_at: chatData.created_at,
         });
 
-        const msgCount = bulkInsertMessages(chat.id, chatData.messages);
+        const msgCount = bulkInsertMessages(chat.id, chatData.messages, userId);
         imported++;
         totalMessages += msgCount;
       } catch (err: any) {
@@ -388,7 +388,7 @@ export async function importGroupChats(
           created_at: chatCreatedAt,
         });
 
-        const msgCount = bulkInsertMessages(chat.id, chatData.messages);
+        const msgCount = bulkInsertMessages(chat.id, chatData.messages, userId);
         imported++;
         totalMessages += msgCount;
       } catch (err: any) {

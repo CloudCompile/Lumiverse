@@ -347,29 +347,20 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       ? getImgUrl(activeChatAvatarId)
       : getCharAvatar(streamCharacterId, streamCharacter?.image_id ?? null)
 
-  const PIN_THRESHOLD = 80
-  const UNPIN_THRESHOLD = 120
+  const BOTTOM_REPIN_EPSILON = 6
 
   const updatePinState = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
     const distance = scrollHeight - scrollTop - clientHeight
-    if (isPinnedRef.current) {
-      if (distance > UNPIN_THRESHOLD) {
-        isPinnedRef.current = false
-      }
-    } else {
-      if (distance < PIN_THRESHOLD) {
-        isPinnedRef.current = true
-      }
-    }
+    isPinnedRef.current = distance <= BOTTOM_REPIN_EPSILON
   }
 
-  // Track if user is near bottom — only update pin state for user-initiated
-  // scrolls so that programmatic auto-scrolls don't fight user intent.
+  // User scroll intent owns pinning: any upward scroll disables auto-follow,
+  // and we only re-arm once the user actually returns to the bottom.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
 
-     const deltaTop = el.scrollTop - lastScrollTopRef.current
+    const deltaTop = el.scrollTop - lastScrollTopRef.current
     lastScrollTopRef.current = el.scrollTop
 
     if (isProgrammaticScrollRef.current) {
@@ -381,10 +372,14 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       setPrependVisualOffset(prependVisualOffsetRef.current + deltaTop)
     }
 
-    if (!suppressNextPinUpdateRef.current) {
+    if (deltaTop < 0) {
+      isPinnedRef.current = false
+      suppressNextPinUpdateRef.current = false
+    } else if (!suppressNextPinUpdateRef.current) {
       updatePinState(el.scrollTop, el.scrollHeight, el.clientHeight)
+    } else {
+      suppressNextPinUpdateRef.current = false
     }
-    suppressNextPinUpdateRef.current = false
 
     const topLoadThreshold = getTopLoadThreshold(el.clientHeight, isCoarsePointer)
     const effectiveScrollTop = el.scrollTop + prependVisualOffsetRef.current

@@ -69,6 +69,8 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
+  width: 100%;
+  min-width: 0;
   padding: 8px 10px;
   border-radius: var(--lumiverse-radius);
   background: var(--lumiverse-primary);
@@ -77,6 +79,10 @@
   font-size: calc(12px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   cursor: pointer;
+}
+
+.menuActionBtn svg {
+  flex-shrink: 0;
 }
 
 .menuActionBtn:disabled {
