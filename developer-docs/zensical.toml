@@ -38,6 +38,7 @@ nav = [
     { "Characters" = "backend-api/characters.md" },
     { "Chats" = "backend-api/chats.md" },
     { "World Books" = "backend-api/world-books.md" },
+    { "Databanks" = "backend-api/databanks.md" },
     { "Personas" = "backend-api/personas.md" },
     { "Chat Mutation" = "backend-api/chat-mutation.md" },
     { "Event Tracking" = "backend-api/event-tracking.md" },
