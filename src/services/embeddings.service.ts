@@ -828,6 +828,17 @@ const UNINDEXED_ROW_THRESHOLD = 2_000; // Rebuild when this many rows are uninde
 const INDEX_HEALTH_CHECK_INTERVAL_MS = 2 * 60_000; // Check index health every 2 min
 let indexHealthTimer: ReturnType<typeof setInterval> | null = null;
 
+function getVectorIndexPartitions(rowCount: number): number | null {
+  if (rowCount < MIN_ROWS_FOR_VECTOR_INDEX) return null;
+
+  // LanceDB's IVF_PQ training becomes noisy when partitions outpace the data.
+  // Keep at least 256 rows per partition to avoid empty-cluster warnings.
+  return Math.max(2, Math.min(
+    Math.floor(Math.sqrt(rowCount)),
+    Math.floor(rowCount / 256),
+  ));
+}
+
 function getWorldBookVectorVersionCacheKey(userId: string): string {
   return `${userId}:${WORLD_BOOK_VECTOR_VERSION}`;
 }
@@ -940,7 +951,8 @@ async function ensureVectorIndex(table: Table): Promise<void> {
   if (vectorIndexReady) return;
   try {
     const rowCount = await table.countRows();
-    if (rowCount < MIN_ROWS_FOR_VECTOR_INDEX) {
+    const numPartitions = getVectorIndexPartitions(rowCount);
+    if (numPartitions === null) {
       // Brute-force search is fast enough for small tables and avoids
       // KMeans warnings about empty clusters when rows < num_partitions * 256.
       vectorIndexReady = true;
@@ -948,12 +960,6 @@ async function ensureVectorIndex(table: Table): Promise<void> {
     }
     // IVF_PQ handles metadata-filtered workloads (every query uses .where())
     // much better than HNSW_PQ, which suffers latency fluctuation with filters.
-    // Cap partitions so KMeans has at least 256 rows per partition to avoid
-    // "more than 10% of clusters are empty" warnings and poor index quality.
-    const numPartitions = Math.max(2, Math.min(
-      Math.floor(Math.sqrt(rowCount)),
-      Math.floor(rowCount / 256),
-    ));
     await table.createIndex("vector", {
       config: Index.ivfPq({
         distanceType: "cosine",
@@ -1112,7 +1118,13 @@ async function checkAndRebuildIndexes(table: Table): Promise<void> {
         const t = await getTableIfExists(true);
         if (!t) return;
         const rowCount = await t.countRows();
-        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+        const numPartitions = getVectorIndexPartitions(rowCount);
+        if (numPartitions === null) {
+          vectorIndexReady = true;
+          unindexedRowEstimate = 0;
+          lastIndexRebuildAt = Date.now();
+          return;
+        }
         await t.createIndex("vector", {
           config: Index.ivfPq({
             distanceType: "cosine",
@@ -1174,9 +1186,9 @@ export async function runStartupVectorMaintenance(): Promise<void> {
 
     if (needsMigration) {
       const rowCount = await table.countRows();
-      if (rowCount >= MIN_ROWS_FOR_VECTOR_INDEX) {
+      const numPartitions = getVectorIndexPartitions(rowCount);
+      if (numPartitions !== null) {
         console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
-        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
         try {
           await table.createIndex("vector", {
             config: Index.ivfPq({
