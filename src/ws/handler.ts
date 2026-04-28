@@ -116,7 +116,14 @@ export const wsHandler = upgradeWebSocket((c) => {
         const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
         if (raw) eventBus.touchClient(raw);
 
-        const data = JSON.parse(event.data as string);
+        // Guard against oversized payloads — legitimate client messages are
+        // small control frames (ping, visibility, spindle results). 64 KB is
+        // generous; anything larger is either a bug or an attack attempting to
+        // burn GC time via a deeply nested JSON parse.
+        const raw_data = event.data as string;
+        if (raw_data.length > 65_536) return;
+
+        const data = JSON.parse(raw_data);
         if (data.type === "ping") {
           ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
           return;
