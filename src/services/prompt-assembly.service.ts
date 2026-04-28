@@ -5006,7 +5006,7 @@ function applyAppendGroup(
 
   let roleCount = 0;
   for (let i = result.length - 1; i >= 0; i--) {
-    if (result[i].role === baseRole) {
+    if (result[i].role === baseRole && isChatHistoryMessage(result[i])) {
       if (roleCount === depth) {
         if (typeof result[i].content === "string") {
           result[i] = {
