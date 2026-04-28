@@ -21,6 +21,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   google: '#4285f4',
   google_vertex: '#34a853',
   openrouter: '#6366f1',
+  infermatic: '#8b5cf6',
   nanogpt: '#10b981',
   pollinations_text: '#f89c73',
   pollinations: '#ff6b35',

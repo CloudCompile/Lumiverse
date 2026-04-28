@@ -27,6 +27,7 @@ interface ConnectionFormProps {
 const FALLBACK_PROVIDERS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
+  { value: 'infermatic', label: 'Infermatic' },
   { value: 'pollinations_text', label: 'Pollinations (Text)' },
   { value: 'pollinations', label: 'Pollinations (Gen)' },
   { value: 'openrouter', label: 'OpenRouter' },
