@@ -256,9 +256,10 @@ export const COMMANDS: Command[] = [
       const last = messages[messages.length - 1]
       const newHidden = !last.extra?.hidden
       try {
-        await messagesApi.update(activeChatId, last.id, {
+        const updated = await messagesApi.update(activeChatId, last.id, {
           extra: { ...last.extra, hidden: newHidden },
         })
+        useStore.getState().updateMessage(updated.id, updated)
         addToast({ type: 'success', message: newHidden ? 'Message hidden from context' : 'Message visible in context' })
       } catch {
         addToast({ type: 'error', message: 'Failed to update message' })

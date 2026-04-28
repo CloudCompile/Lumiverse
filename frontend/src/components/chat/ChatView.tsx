@@ -11,7 +11,7 @@ import { charactersApi } from '@/api/characters'
 import { imagesApi } from '@/api/images'
 import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
-import { resolveBinding } from '@/store/slices/personas'
+import { resolveAutoPersonaBinding } from '@/store/slices/personas'
 import type { WallpaperRef } from '@/types/store'
 import useSwipeKeyboard from '@/hooks/useSwipeKeyboard'
 import useEditKeyboard from '@/hooks/useEditKeyboard'
@@ -102,47 +102,71 @@ export default function ChatView() {
         // back to this chat re-syncs pooled tokens.
         if (!cancelled) await recoverPooledGeneration(chatId)
 
+        let openedCharacter: import('@/types/api').Character | null = null
+        if (chat.character_id) {
+          openedCharacter = useStore.getState().characters.find((c) => c.id === chat.character_id) ?? null
+          if (!openedCharacter) {
+            openedCharacter = await charactersApi.get(chat.character_id).catch(() => null)
+            if (openedCharacter && !cancelled) {
+              useStore.getState().updateCharacter(openedCharacter.id, openedCharacter)
+            }
+          }
+        }
+
         // Character bindings are temporary chat-context overrides. When a chat
         // has no binding, fall back to the user's default persona instead of
         // leaking the previous chat's bound persona into the new chat.
         {
-          const { characterPersonaBindings, personas: allPersonas, setActivePersona, activePersonaId } = useStore.getState()
+          const {
+            characterPersonaBindings,
+            personaTagBindings,
+            personas: allPersonas,
+            setActivePersona,
+            activePersonaId,
+          } = useStore.getState()
           const defaultPersonaId = allPersonas.find((p) => p.is_default)?.id ?? null
-          const rawBinding = chat.character_id ? characterPersonaBindings[chat.character_id] : undefined
-          const binding = rawBinding ? resolveBinding(rawBinding) : null
-          const boundPersona = binding ? allPersonas.find((p) => p.id === binding.personaId) ?? null : null
+          const resolvedBinding = resolveAutoPersonaBinding({
+            characterId: chat.character_id,
+            characterTags: openedCharacter?.tags ?? [],
+            personas: allPersonas,
+            characterPersonaBindings,
+            personaTagBindings,
+          })
+          const boundPersona = resolvedBinding.personaId
+            ? allPersonas.find((p) => p.id === resolvedBinding.personaId) ?? null
+            : null
 
-          if (binding && boundPersona) {
-            if (activePersonaId !== binding.personaId) {
-              setActivePersona(binding.personaId)
+          if (resolvedBinding.personaId && boundPersona) {
+            if (activePersonaId !== resolvedBinding.personaId) {
+              setActivePersona(resolvedBinding.personaId)
               toast.info(`Switched to persona: ${boundPersona.name}`)
             }
-            autoSwitchedPersonaIdRef.current = binding.personaId
+            autoSwitchedPersonaIdRef.current = resolvedBinding.personaId
 
             // Apply bound addon states to the persona
-            if (binding.addonStates && Object.keys(binding.addonStates).length > 0) {
+            if (resolvedBinding.addonStates && Object.keys(resolvedBinding.addonStates).length > 0) {
               try {
-                const p = await personasApi.get(binding.personaId)
+                const p = await personasApi.get(resolvedBinding.personaId)
                 const addons = Array.isArray(p.metadata?.addons) ? p.metadata.addons.map((a: any) => ({ ...a })) : []
                 const globalRefs = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons.map((r: any) => ({ ...r })) : []
                 let changed = false
                 for (const a of addons) {
-                  if (a.id in binding.addonStates && a.enabled !== binding.addonStates[a.id]) {
-                    a.enabled = binding.addonStates[a.id]
+                  if (a.id in resolvedBinding.addonStates && a.enabled !== resolvedBinding.addonStates[a.id]) {
+                    a.enabled = resolvedBinding.addonStates[a.id]
                     changed = true
                   }
                 }
                 for (const r of globalRefs) {
-                  if (r.id in binding.addonStates && r.enabled !== binding.addonStates[r.id]) {
-                    r.enabled = binding.addonStates[r.id]
+                  if (r.id in resolvedBinding.addonStates && r.enabled !== resolvedBinding.addonStates[r.id]) {
+                    r.enabled = resolvedBinding.addonStates[r.id]
                     changed = true
                   }
                 }
                 if (changed) {
-                  const updated = await personasApi.update(binding.personaId, {
+                  const updated = await personasApi.update(resolvedBinding.personaId, {
                     metadata: { ...p.metadata, addons, attached_global_addons: globalRefs },
                   })
-                  useStore.getState().updatePersona(binding.personaId, updated)
+                  useStore.getState().updatePersona(resolvedBinding.personaId, updated)
                 }
               } catch { /* addon state application is best-effort */ }
             }
@@ -239,9 +263,13 @@ export default function ChatView() {
           // Refresh the active character on every chat open so profile/chat
           // surfaces don't rely on a stale cached avatar/image_id.
           if (chat.character_id) {
-            charactersApi.get(chat.character_id).then((char) => {
-              if (!cancelled) useStore.getState().updateCharacter(char.id, char)
-            }).catch(() => {})
+            if (openedCharacter) {
+              if (!cancelled) useStore.getState().updateCharacter(openedCharacter.id, openedCharacter)
+            } else {
+              charactersApi.get(chat.character_id).then((char) => {
+                if (!cancelled) useStore.getState().updateCharacter(char.id, char)
+              }).catch(() => {})
+            }
           }
         }
       } catch (err) {

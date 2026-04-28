@@ -1198,10 +1198,10 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       await request({ type: "theme_apply_palette", requestId, palette, userId });
     },
-    async clear(): Promise<void> {
+    async clear(userId?: string): Promise<void> {
       assertMutationAllowed("spindle.theme.clear()");
       const requestId = crypto.randomUUID();
-      await request({ type: "theme_clear", requestId });
+      await request({ type: "theme_clear", requestId, userId });
     },
     async getCurrent(userId?: string): Promise<{
       id: string; name: string; mode: "light" | "dark";

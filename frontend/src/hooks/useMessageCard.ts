@@ -40,6 +40,8 @@ export function useMessageCard(message: Message, chatId: string) {
   const navigate = useNavigate()
   const editingMessageId = useStore((s) => s.editingMessageId)
   const setEditingMessageId = useStore((s) => s.setEditingMessageId)
+  const updateMessage = useStore((s) => s.updateMessage)
+  const addToast = useStore((s) => s.addToast)
   const isEditing = editingMessageId === message.id
   const [editContent, setEditContent] = useState('')
   const [editReasoning, setEditReasoning] = useState('')
@@ -207,20 +209,23 @@ export function useMessageCard(message: Message, chatId: string) {
     try {
       const trimmedReasoning = editReasoning.trim()
       const cleanContent = editContent.trim()
+      let updated: Message
 
       if (!message.is_user && hadReasoningRef.current) {
         // Let the WS MESSAGE_EDITED payload reconcile the final stored message so
         // extension-postprocessed content is not overwritten by a late local merge.
         const extra = { ...(message.extra || {}), reasoning: trimmedReasoning || undefined }
-        await messagesApi.update(chatId, message.id, { content: cleanContent, extra })
+        updated = await messagesApi.update(chatId, message.id, { content: cleanContent, extra })
       } else {
-        await messagesApi.update(chatId, message.id, { content: cleanContent })
+        updated = await messagesApi.update(chatId, message.id, { content: cleanContent })
       }
+      updateMessage(updated.id, updated)
       setEditingMessageId(null)
     } catch (err) {
       console.error('[MessageCard] Failed to save edit:', err)
+      addToast({ type: 'error', message: 'Failed to save message edit' })
     }
-  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, setEditingMessageId])
+  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, setEditingMessageId, updateMessage, addToast])
 
   const handleCancelEdit = useCallback(() => {
     setEditingMessageId(null)
@@ -254,11 +259,12 @@ export function useMessageCard(message: Message, chatId: string) {
       const newHidden = !message.extra?.hidden
       const extra = { ...(message.extra || {}), hidden: newHidden || undefined }
       if (!newHidden) delete extra.hidden
-      await messagesApi.update(chatId, message.id, { extra })
+      const updated = await messagesApi.update(chatId, message.id, { extra })
+      updateMessage(updated.id, updated)
     } catch (err) {
       console.error('[MessageCard] Failed to toggle hidden:', err)
     }
-  }, [chatId, message.id, message.extra])
+  }, [chatId, message.id, message.extra, updateMessage])
 
   const handleFork = useCallback(() => {
     openModal('confirm', {

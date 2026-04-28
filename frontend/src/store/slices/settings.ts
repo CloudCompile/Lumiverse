@@ -60,6 +60,7 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'personaFilterType',
   // Character-persona bindings
   'characterPersonaBindings',
+  'personaTagBindings',
   // Pack browser preferences
   'packFilterTab',
   'packSortField',

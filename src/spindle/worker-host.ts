@@ -6626,7 +6626,7 @@ export class WorkerHost {
       }
       this.enforceScopedUser(resolvedUserId);
 
-      this.emitPaletteColorOverrides(accent);
+      this.emitPaletteColorOverrides(accent, resolvedUserId);
 
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
@@ -6645,6 +6645,13 @@ export class WorkerHost {
     }
 
     try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) {
+        this.postToWorker({ type: "response", requestId, error: "userId is required for operator-scoped extensions" });
+        return;
+      }
+      this.enforceScopedUser(resolvedUserId);
+
       this.themeOverrides = null;
 
       // Broadcast clear to frontend
@@ -6655,7 +6662,7 @@ export class WorkerHost {
           extensionName: this.manifest.name,
           overrides: null,
         },
-        this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+        resolvedUserId,
       );
 
       this.postToWorker({ type: "response", requestId, result: true });
@@ -6672,7 +6679,7 @@ export class WorkerHost {
    * correct opacity. User preference keys (blur, radii, fonts, scale,
    * transitions) are stripped — applyPalette only changes colors.
    */
-  private emitPaletteColorOverrides(accent: { h: number; s: number; l: number }): void {
+  private emitPaletteColorOverrides(accent: { h: number; s: number; l: number }, userId: string): void {
     const strip = (vars: Record<string, string>) => {
       const out: Record<string, string> = {};
       for (const [k, v] of Object.entries(vars)) {
@@ -6681,9 +6688,7 @@ export class WorkerHost {
       return out;
     };
 
-    const connectedUserIds = this.installScope === "operator"
-      ? eventBus.getConnectedUserIds()
-      : (this.installedByUserId ? [this.installedByUserId] : []);
+    const connectedUserIds = [userId];
 
     for (const uid of connectedUserIds) {
       const themeSetting = settingsSvc.getSetting(uid, "theme");

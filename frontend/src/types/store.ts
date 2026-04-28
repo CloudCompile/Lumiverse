@@ -104,12 +104,29 @@ export type PersonaFilterType = 'all' | 'default' | 'connected'
 export type PersonaSortField = 'name' | 'created'
 export type PersonaSortDirection = 'asc' | 'desc'
 export type PersonaViewMode = 'grid' | 'list'
+export type PersonaTagBindingMode = 'any' | 'all'
+
+export interface PersonaTagBinding {
+  tags: string[]
+  mode: PersonaTagBindingMode
+  addonStates?: Record<string, boolean>
+}
+
+export interface ResolvedPersonaBinding {
+  personaId: string | null
+  source: 'character' | 'tag' | 'none'
+  ambiguous: boolean
+  addonStates?: Record<string, boolean>
+  matchedPersonaIds: string[]
+}
 
 export interface PersonasSlice {
   personas: Persona[]
   activePersonaId: string | null
   /** Map of characterId → personaId or binding object */
   characterPersonaBindings: Record<string, string | import('@/types/api').CharacterPersonaBinding>
+  /** Map of personaId → tag-based auto-switch binding */
+  personaTagBindings: Record<string, PersonaTagBinding>
   personaSearchQuery: string
   personaFilterType: PersonaFilterType
   personaSortField: PersonaSortField
@@ -121,6 +138,8 @@ export interface PersonasSlice {
   setActivePersona: (id: string | null) => void
   /** Bind a persona to a character (or unbind with null). Pass addonStates to snapshot addon enabled state. */
   setCharacterPersonaBinding: (characterId: string, personaId: string | null, addonStates?: Record<string, boolean>) => void
+  /** Bind a persona to character tags (or unbind with null). */
+  setPersonaTagBinding: (personaId: string, binding: PersonaTagBinding | null) => void
   addPersona: (persona: Persona) => void
   updatePersona: (id: string, persona: Persona) => void
   removePersona: (id: string) => void
