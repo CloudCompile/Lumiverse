@@ -54,10 +54,20 @@ export interface ChatSlice {
 }
 
 // ---- Characters Slice ----
-export type CharacterFilterTab = 'all' | 'characters' | 'favorites' | 'groups'
+export type CharacterFilterTab = 'characters' | 'favorites' | 'groups'
 export type CharacterSortField = 'name' | 'recent' | 'created' | 'shuffle'
 export type CharacterSortDirection = 'asc' | 'desc'
 export type CharacterViewMode = 'grid' | 'single' | 'list'
+
+export interface StartupSettings {
+  favorites?: string[]
+  filterTab?: CharacterFilterTab
+  sortField?: CharacterSortField
+  sortDirection?: CharacterSortDirection
+  viewMode?: CharacterViewMode
+  charactersPerPage?: number
+  theme?: ThemeConfig | null
+}
 
 export interface CharactersSlice {
   characters: Character[]
@@ -342,6 +352,7 @@ export interface WorldBookEntryViewPreference {
 
 // ---- Settings Slice ----
 export interface SettingsSlice {
+  settingsLoaded: boolean
   landingPageChatsDisplayed: number
   landingPageLayoutMode: 'cards' | 'compact'
   charactersPerPage: number
@@ -391,6 +402,7 @@ export interface SettingsSlice {
   componentOverrides: Record<string, import('@/lib/componentOverrides').ComponentOverride>
   spindleSettings: SpindleSettings
   voiceSettings: VoiceSettings
+  hydrateStartupSettings: (settings: StartupSettings) => void
   setVoiceSettings: (partial: Partial<VoiceSettings>) => void
   setWallpaper: (settings: Partial<WallpaperSettings>) => void
   setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K]) => void

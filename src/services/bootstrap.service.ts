@@ -5,6 +5,7 @@ import * as packsSvc from "./packs.service";
 import * as personasSvc from "./personas.service";
 import * as regexSvc from "./regex-scripts.service";
 import * as councilSvc from "./council/council-settings.service";
+import * as settingsSvc from "./settings.service";
 import type { RuntimeCouncilToolDefinition } from "./council/tool-runtime";
 import * as managerSvc from "../spindle/manager.service";
 import * as lifecycle from "../spindle/lifecycle";
@@ -34,6 +35,7 @@ import "../image-gen/index";
  * payload out to its existing store setters without any translation layer.
  */
 export interface BootstrapPayload {
+  startupSettings: StartupSettings;
   llm: {
     connections: PaginatedResult<ConnectionProfile>;
     providers: ProviderListEntry[];
@@ -73,9 +75,69 @@ interface ProviderSummaryEntry {
   capabilities: unknown;
 }
 
+interface StartupSettings {
+  favorites?: string[];
+  filterTab?: "characters" | "favorites" | "groups";
+  sortField?: "name" | "recent" | "created" | "shuffle";
+  sortDirection?: "asc" | "desc";
+  viewMode?: "grid" | "single" | "list";
+  charactersPerPage?: number;
+  theme?: unknown;
+}
+
 const LIST_LIMIT_CONNECTIONS = 100;
 const LIST_LIMIT_PACKS_PERSONAS = 200;
 const LIST_LIMIT_REGEX = 1000;
+const STARTUP_SETTINGS_KEYS = [
+  "favorites",
+  "filterTab",
+  "sortField",
+  "sortDirection",
+  "viewMode",
+  "charactersPerPage",
+  "theme",
+] as const;
+
+function getStartupSettings(userId: string): StartupSettings {
+  const rows = settingsSvc.getSettingsByKeys(userId, [...STARTUP_SETTINGS_KEYS]);
+  const startupSettings: StartupSettings = {};
+
+  const favorites = rows.get("favorites");
+  if (Array.isArray(favorites)) startupSettings.favorites = favorites;
+
+  const filterTab = rows.get("filterTab");
+  if (filterTab === "characters" || filterTab === "favorites" || filterTab === "groups") {
+    startupSettings.filterTab = filterTab;
+  } else if (filterTab === "all") {
+    startupSettings.filterTab = "characters";
+  }
+
+  const sortField = rows.get("sortField");
+  if (sortField === "name" || sortField === "recent" || sortField === "created" || sortField === "shuffle") {
+    startupSettings.sortField = sortField;
+  }
+
+  const sortDirection = rows.get("sortDirection");
+  if (sortDirection === "asc" || sortDirection === "desc") {
+    startupSettings.sortDirection = sortDirection;
+  }
+
+  const viewMode = rows.get("viewMode");
+  if (viewMode === "grid" || viewMode === "single" || viewMode === "list") {
+    startupSettings.viewMode = viewMode;
+  }
+
+  const charactersPerPage = rows.get("charactersPerPage");
+  if (typeof charactersPerPage === "number" && Number.isFinite(charactersPerPage)) {
+    startupSettings.charactersPerPage = charactersPerPage;
+  }
+
+  if (rows.has("theme")) {
+    startupSettings.theme = rows.get("theme");
+  }
+
+  return startupSettings;
+}
 
 function listLlmProviders(): ProviderListEntry[] {
   return getProviderList().map((p) => ({
@@ -151,6 +213,7 @@ export async function buildBootstrapPayload(
   });
 
   const [
+    startupSettings,
     llmConnections, llmProviders,
     ttsConnections, ttsProviders,
     imageGenConnections, imageGenProviders,
@@ -158,6 +221,7 @@ export async function buildBootstrapPayload(
     councilSettings, councilTools,
     spindle,
   ] = await Promise.all([
+    safe("startupSettings", () => getStartupSettings(userId), {} as StartupSettings),
     safe("llm.connections", () => connectionsSvc.listConnections(userId, pagLargeConnections), emptyPage<ConnectionProfile>(LIST_LIMIT_CONNECTIONS)),
     safe("llm.providers", () => listLlmProviders(), [] as ProviderListEntry[]),
     safe("tts.connections", () => ttsConnectionsSvc.listConnections(userId, pagLargeConnections), emptyPage<TtsConnectionProfile>(LIST_LIMIT_CONNECTIONS)),
@@ -173,6 +237,7 @@ export async function buildBootstrapPayload(
   ]);
 
   const payload: BootstrapPayload = {
+    startupSettings,
     llm: { connections: llmConnections, providers: llmProviders },
     tts: { connections: ttsConnections, providers: ttsProviders },
     imageGen: { connections: imageGenConnections, providers: imageGenProviders },

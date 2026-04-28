@@ -67,6 +67,15 @@ export function listCharacterSummaries(
   const db = getDb();
   const { search, tags, sort, direction = "desc", favoriteIds, filterMode = "all", seed } = options;
 
+  if (filterMode === "favorites" && (!favoriteIds || favoriteIds.length === 0)) {
+    return {
+      data: [],
+      total: 0,
+      limit: pagination.limit,
+      offset: pagination.offset,
+    };
+  }
+
   // Use discover sort if requested
   if (sort === "discover") {
     return listCharacterSummariesDiscover(userId, pagination, options);
@@ -135,26 +144,16 @@ export function listCharacterSummaries(
       default:
         orderBy = `ORDER BY c.updated_at ${direction === "desc" ? "DESC" : "ASC"}`;
         break;
-    }
+      }
   }
 
-  // Count
-  const countRow = db
-    .query(`SELECT COUNT(*) as count FROM ${fromClause} WHERE ${whereStr}`)
-    .get(...whereParams) as { count: number } | null;
-  const total = countRow?.count ?? 0;
-
-  // Data
-  const rows = db
-    .query(`SELECT ${SUMMARY_COLUMNS} FROM ${fromClause} WHERE ${whereStr} ${orderBy} LIMIT ? OFFSET ?`)
-    .all(...whereParams, pagination.limit, pagination.offset) as any[];
-
-  return {
-    data: rows.map(rowToSummary),
-    total,
-    limit: pagination.limit,
-    offset: pagination.offset,
-  };
+  return paginatedQuery(
+    `SELECT ${SUMMARY_COLUMNS} FROM ${fromClause} WHERE ${whereStr} ${orderBy}`,
+    `SELECT COUNT(*) as count FROM ${fromClause} WHERE ${whereStr}`,
+    whereParams,
+    pagination,
+    rowToSummary
+  );
 }
 
 function listCharacterSummariesDiscover(
@@ -166,6 +165,15 @@ function listCharacterSummariesDiscover(
   const nowSeconds = Math.floor(Date.now() / 1000);
   const shuffleSeed = options.seed ?? Math.floor(Date.now() / 86_400_000);
   const { search, tags, favoriteIds, filterMode = "all" } = options;
+
+  if (filterMode === "favorites" && (!favoriteIds || favoriteIds.length === 0)) {
+    return {
+      data: [],
+      total: 0,
+      limit: pagination.limit,
+      offset: pagination.offset,
+    };
+  }
 
   const whereClauses: string[] = ["c.user_id = ?"];
   const whereParams: any[] = [userId];

@@ -14,9 +14,9 @@ import { resetUserScopedStoreState } from '@/store/user-scoped-reset'
  * Runs once after authentication succeeds.
  *
  * Primary path: `GET /api/v1/bootstrap` — a single aggregated request that
- * returns connections, providers, packs, personas, regex scripts, council
- * settings + tools, and spindle extensions + tools all at once. Saves ~8
- * HTTP round trips at cold start.
+ * returns startup settings, connections, providers, packs, personas, regex
+ * scripts, council settings + tools, and spindle extensions + tools all at
+ * once. Saves ~8 HTTP round trips at cold start.
  *
  * Fallback path: if the bootstrap call fails entirely, or reports per-section
  * errors, the original per-endpoint fan-out fires for just the missing
@@ -55,6 +55,7 @@ async function initialize(): Promise<void> {
     // Complete bootstrap failure — every section needs the fallback path.
     console.warn('[useAppInit] bootstrap failed, falling back to per-endpoint fetches:', err)
     errors = {
+      'startupSettings': 'fallback',
       'llm.connections': 'fallback', 'llm.providers': 'fallback',
       'tts.connections': 'fallback', 'tts.providers': 'fallback',
       'imageGen.connections': 'fallback', 'imageGen.providers': 'fallback',
@@ -65,6 +66,9 @@ async function initialize(): Promise<void> {
   }
 
   if (payload) applyBootstrap(payload, errors)
+  if (payload && !errors['startupSettings']) {
+    void useStore.getState().loadSettings()
+  }
   if (Object.keys(errors).length > 0) await runFallbacks(errors)
 
   // Council member pack items — always run after settings are loaded.
@@ -87,6 +91,10 @@ async function initialize(): Promise<void> {
  *  the backend reported as failed (the fallback pass will retry those). */
 function applyBootstrap(payload: BootstrapPayload, errors: Record<string, string>): void {
   const store = useStore.getState()
+
+  if (!errors['startupSettings']) {
+    store.hydrateStartupSettings(payload.startupSettings)
+  }
 
   if (!errors['llm.connections']) store.setProfiles(payload.llm.connections.data)
   if (!errors['llm.providers']) store.setProviders(payload.llm.providers)
@@ -129,6 +137,10 @@ function applyBootstrap(payload: BootstrapPayload, errors: Record<string, string
  *  failing section can't block the others. */
 async function runFallbacks(errors: Record<string, string>): Promise<void> {
   const store = useStore.getState()
+
+  if (errors['startupSettings']) {
+    await store.loadSettings().catch(() => {})
+  }
 
   if (errors['llm.connections'] || errors['llm.providers']) {
     Promise.allSettled([

@@ -6,6 +6,7 @@ import type {
   Pack, Persona, PaginatedResult,
 } from '@/types/api'
 import type { RegexScript } from '@/types/regex'
+import type { StartupSettings } from '@/types/store'
 import type { CouncilSettings, CouncilToolDefinition, ExtensionInfo, ToolRegistration } from 'lumiverse-spindle-types'
 
 /**
@@ -14,6 +15,7 @@ import type { CouncilSettings, CouncilToolDefinition, ExtensionInfo, ToolRegistr
  * fan the result straight into the existing store setters.
  */
 export interface BootstrapPayload {
+  startupSettings: StartupSettings
   llm: {
     connections: PaginatedResult<ConnectionProfile>
     providers: ProviderInfo[]

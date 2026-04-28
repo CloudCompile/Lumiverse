@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand'
-import type { SettingsSlice, ThemeConfig, ReasoningSettings } from '@/types/store'
+import type { SettingsSlice, StartupSettings, ThemeConfig, ReasoningSettings } from '@/types/store'
 import { settingsApi } from '@/api/settings'
 import { BASE_URL } from '@/api/client'
 import { generateUUID } from '@/lib/uuid'
@@ -242,6 +242,7 @@ if (typeof window !== 'undefined') {
 }
 
 export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
+  settingsLoaded: false,
   landingPageChatsDisplayed: 12,
   landingPageLayoutMode: 'cards',
   charactersPerPage: 50,
@@ -339,6 +340,20 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       quoted: 'speech' as const,
       undecorated: 'narration' as const,
     },
+  },
+
+  hydrateStartupSettings: (settings: StartupSettings) => {
+    const patch: Record<string, any> = { settingsLoaded: true }
+
+    if (Array.isArray(settings.favorites)) patch.favorites = settings.favorites
+    if (settings.filterTab) patch.filterTab = settings.filterTab
+    if (settings.sortField) patch.sortField = settings.sortField
+    if (settings.sortDirection) patch.sortDirection = settings.sortDirection
+    if (settings.viewMode) patch.viewMode = settings.viewMode
+    if (typeof settings.charactersPerPage === 'number') patch.charactersPerPage = settings.charactersPerPage
+    if ('theme' in settings) patch.theme = settings.theme
+
+    set(patch as any)
   },
 
   setVoiceSettings: (partial) =>
@@ -471,6 +486,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       const rows = await settingsApi.getAll()
       const patch: Record<string, any> = {}
       const defaults = get()
+      let migratedCharacterFilterTab = false
       // Retroactive purge: `activeLumiPresetId` was a defunct preset pointer
       // that still ghost-drove generation for users with a stale value. It has
       // no UI setter; wipe it from the DB on load so it stops resolving to a
@@ -503,8 +519,19 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       if (patch.theme && 'baseColors' in patch.theme && !('accent' in patch.theme)) {
         patch.theme = null
       }
+      if (patch.filterTab === 'all') {
+        patch.filterTab = 'characters'
+        migratedCharacterFilterTab = true
+      }
+      if (pendingKeys?.filterTab === 'all') {
+        pendingKeys.filterTab = 'characters'
+        migratedCharacterFilterTab = true
+      }
       if (Object.keys(patch).length > 0) {
         set(patch as any)
+      }
+      if (migratedCharacterFilterTab) {
+        settingsApi.put('filterTab', 'characters').catch(() => {})
       }
 
       // Flush recovered pending keys to the DB so subsequent loads are correct,
@@ -518,6 +545,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       }
     } catch (err) {
       console.error('[settings] Failed to load settings:', err)
+    } finally {
+      set({ settingsLoaded: true })
     }
   },
 })

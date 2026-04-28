@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { toast } from '@/lib/toast'
 import { charactersApi } from '@/api/characters'
@@ -17,6 +17,7 @@ const SEARCH_DEBOUNCE_MS = 150
 export function useCharacterBrowser() {
   const navigate = useNavigate()
   const [currentPage, setCurrentPage] = useState(1)
+  const settingsLoaded = useStore((s) => s.settingsLoaded)
   const charactersPerPage = useStore((s) => s.charactersPerPage)
   const setSetting = useStore((s) => s.setSetting)
 
@@ -124,6 +125,9 @@ export function useCharacterBrowser() {
   const [browserItems, setBrowserItems] = useState<CharacterSummary[]>([])
   const [browserTotal, setBrowserTotal] = useState(0)
   const [allTags, setAllTags] = useState<TagCount[]>([])
+  const [favoriteCharacters, setFavoriteCharacters] = useState<CharacterSummary[]>([])
+  const favoriteMutationSeqRef = useRef(0)
+  const favoritesRef = useRef(favorites)
 
   // Debounced search
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -132,45 +136,60 @@ export function useCharacterBrowser() {
     return () => clearTimeout(debounceRef.current)
   }, [searchQuery])
 
+  useEffect(() => {
+    favoritesRef.current = favorites
+  }, [favorites])
+
+  const buildSummaryParams = useCallback(
+    (options?: {
+      page?: number
+      favoritesOverride?: string[]
+      limit?: number
+      offset?: number
+    }) => {
+      const activeFavorites = options?.favoritesOverride ?? favoritesRef.current
+      const limit = options?.limit ?? charactersPerPage
+      const offset = options?.offset ?? ((options?.page ?? currentPage) - 1) * charactersPerPage
+      const params: Record<string, any> = { limit, offset }
+
+      if (sortField === 'shuffle') {
+        params.sort = 'discover'
+        params.seed = shuffleSeed
+      } else {
+        params.sort = sortField
+        params.direction = sortDirection
+      }
+
+      if (debouncedQuery.trim()) {
+        params.search = debouncedQuery.trim()
+      }
+
+      if (selectedTags.length > 0) {
+        params.tags = selectedTags.join(',')
+      }
+
+      if (filterTab === 'favorites' || filterTab === 'characters') {
+        params.filter = filterTab === 'favorites' ? 'favorites' : 'non-favorites'
+        if (activeFavorites.length > 0) {
+          params.favorite_ids = activeFavorites.join(',')
+        }
+      }
+
+      return params
+    },
+    [charactersPerPage, currentPage, sortField, sortDirection, shuffleSeed, debouncedQuery, selectedTags, filterTab]
+  )
+
   // ─── Fetch current page from server ─────────────────────────────────────
   useEffect(() => {
+    if (!settingsLoaded) return
+
     let cancelled = false
+    favoriteMutationSeqRef.current += 1
     setLoading(true)
 
-    const params: Record<string, any> = {
-      limit: charactersPerPage,
-      offset: (currentPage - 1) * charactersPerPage,
-    }
-
-    // Sort
-    if (sortField === 'shuffle') {
-      params.sort = 'discover'
-      params.seed = shuffleSeed
-    } else {
-      params.sort = sortField
-      params.direction = sortDirection
-    }
-
-    // Search
-    if (debouncedQuery.trim()) {
-      params.search = debouncedQuery.trim()
-    }
-
-    // Tag filter
-    if (selectedTags.length > 0) {
-      params.tags = selectedTags.join(',')
-    }
-
-    // Favorites filter
-    if (filterTab === 'favorites' || filterTab === 'characters') {
-      params.filter = filterTab === 'favorites' ? 'favorites' : 'non-favorites'
-      if (favorites.length > 0) {
-        params.favorite_ids = favorites.join(',')
-      }
-    }
-
     charactersApi
-      .listSummaries(params)
+      .listSummaries(buildSummaryParams())
       .then((result) => {
         if (cancelled) return
         setBrowserItems(result.data)
@@ -185,7 +204,7 @@ export function useCharacterBrowser() {
       })
 
     return () => { cancelled = true }
-  }, [currentPage, charactersPerPage, sortField, sortDirection, shuffleSeed, debouncedQuery, selectedTags, filterTab, favorites, fetchVersion])
+  }, [buildSummaryParams, fetchVersion, settingsLoaded])
 
   // ─── Load tags once ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -220,11 +239,34 @@ export function useCharacterBrowser() {
   const totalPages = Math.max(1, Math.ceil(browserTotal / charactersPerPage))
   const safePage = Math.min(currentPage, totalPages)
 
-  // Favorite characters (from store, for slider — uses full character data)
-  const favoriteCharacters = useMemo(
-    () => characters.filter((c) => favorites.includes(c.id)),
-    [characters, favorites]
-  )
+  // Favorite slider: fetch summaries directly so it doesn't wait for the
+  // background full-character crawl to complete.
+  useEffect(() => {
+    if (!settingsLoaded) return
+    if (favorites.length === 0) {
+      setFavoriteCharacters([])
+      return
+    }
+
+    let cancelled = false
+    charactersApi
+      .listSummaries({
+        limit: favorites.length,
+        offset: 0,
+        sort: 'recent',
+        direction: 'desc',
+        filter: 'favorites',
+        favorite_ids: favorites.join(','),
+      })
+      .then((result) => {
+        if (!cancelled) setFavoriteCharacters(result.data)
+      })
+      .catch((err) => {
+        if (!cancelled) console.error('[CharacterBrowser] Failed to load favorite summaries:', err)
+      })
+
+    return () => { cancelled = true }
+  }, [favorites, settingsLoaded, fetchVersion])
 
   // Reshuffle
   const handleToggleSortDirection = useCallback(() => {
@@ -549,13 +591,77 @@ export function useCharacterBrowser() {
     setFetchVersion((v) => v + 1)
   }, [])
 
+  const handleToggleFavorite = useCallback(
+    (id: string) => {
+      const wasFavorite = favorites.includes(id)
+      const nextFavorites = wasFavorite
+        ? favorites.filter((favoriteId) => favoriteId !== id)
+        : [...favorites, id].slice(0, 15)
+      const requestSeq = ++favoriteMutationSeqRef.current
+
+      toggleFavorite(id)
+
+      if (filterTab !== 'favorites' && filterTab !== 'characters') {
+        return
+      }
+
+      const shouldRemoveFromCurrentView =
+        (filterTab === 'favorites' && wasFavorite)
+        || (filterTab === 'characters' && !wasFavorite)
+
+      if (!shouldRemoveFromCurrentView) {
+        return
+      }
+
+      const nextTotal = Math.max(0, browserTotal - 1)
+      const nextTotalPages = Math.max(1, Math.ceil(nextTotal / charactersPerPage))
+      const nextItemsLength = Math.max(0, browserItems.length - 1)
+      const pageStart = (currentPage - 1) * charactersPerPage
+
+      setBrowserItems((items) => items.filter((item) => item.id !== id))
+      setBrowserTotal(nextTotal)
+
+      if (currentPage > nextTotalPages) {
+        setCurrentPage(nextTotalPages)
+        return
+      }
+
+      if (nextItemsLength >= charactersPerPage || nextTotal <= pageStart + nextItemsLength) {
+        return
+      }
+
+      const backfillOffset = pageStart + nextItemsLength
+
+      charactersApi
+        .listSummaries(buildSummaryParams({
+          favoritesOverride: nextFavorites,
+          limit: 1,
+          offset: backfillOffset,
+        }))
+        .then((result) => {
+          if (favoriteMutationSeqRef.current !== requestSeq || result.data.length === 0) return
+          const [replacement] = result.data
+          setBrowserItems((items) => {
+            if (items.some((item) => item.id === replacement.id) || items.length >= charactersPerPage) {
+              return items
+            }
+            return [...items, replacement]
+          })
+        })
+        .catch((err) => {
+          console.error('[CharacterBrowser] Failed to backfill summaries:', err)
+        })
+    },
+    [favorites, toggleFavorite, filterTab, browserTotal, browserItems.length, charactersPerPage, currentPage, buildSummaryParams]
+  )
+
   return {
     // State — browser items come from server-side pagination
     characters: browserItems,
     allCharacters: characters,
     totalFiltered: browserTotal,
     favoriteCharacters,
-    loading,
+    loading: loading || !settingsLoaded,
     importLoading,
     importProgress,
     importError,
@@ -593,7 +699,7 @@ export function useCharacterBrowser() {
     setViewMode,
     setSelectedTags,
     toggleSelectedTag,
-    toggleFavorite,
+    toggleFavorite: handleToggleFavorite,
     setBatchMode,
     toggleBatchSelect,
     selectAllBatch,

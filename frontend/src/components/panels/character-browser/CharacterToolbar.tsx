@@ -1,7 +1,6 @@
 import {
   Search,
   X,
-  Users,
   Star,
   LayoutGrid,
   RectangleVertical,
@@ -110,19 +109,11 @@ export default function CharacterToolbar({
         <div className={styles.filterTabs}>
           <button
             type="button"
-            className={clsx(styles.tabBtn, filterTab === 'all' && styles.tabBtnActive)}
-            onClick={() => onFilterTabChange('all')}
-            title="All"
-          >
-            <Layers size={14} />
-          </button>
-          <button
-            type="button"
             className={clsx(styles.tabBtn, filterTab === 'characters' && styles.tabBtnActive)}
             onClick={() => onFilterTabChange('characters')}
             title="Characters"
           >
-            <Users size={14} />
+            <Layers size={14} />
           </button>
           <button
             type="button"
