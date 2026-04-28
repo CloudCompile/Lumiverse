@@ -28,6 +28,7 @@ import clsx from 'clsx'
 
 export default function ChatView() {
   const { chatId } = useParams<{ chatId: string }>()
+  const autoSwitchedPersonaIdRef = useRef<string | null>(null)
   const setActiveChat = useStore((s) => s.setActiveChat)
   const setMessages = useStore((s) => s.setMessages)
   const messages = useStore((s) => s.messages)
@@ -101,46 +102,62 @@ export default function ChatView() {
         // back to this chat re-syncs pooled tokens.
         if (!cancelled) await recoverPooledGeneration(chatId)
 
-        // Auto-switch persona if this character has a binding
-        if (chat.character_id) {
-          const { characterPersonaBindings, personas: allPersonas, setActivePersona } = useStore.getState()
-          const rawBinding = characterPersonaBindings[chat.character_id]
-          if (rawBinding) {
-            const binding = resolveBinding(rawBinding)
-            if (allPersonas.some((p) => p.id === binding.personaId)) {
-              const boundPersona = allPersonas.find((p) => p.id === binding.personaId)
+        // Character bindings are temporary chat-context overrides. When a chat
+        // has no binding, fall back to the user's default persona instead of
+        // leaking the previous chat's bound persona into the new chat.
+        {
+          const { characterPersonaBindings, personas: allPersonas, setActivePersona, activePersonaId } = useStore.getState()
+          const defaultPersonaId = allPersonas.find((p) => p.is_default)?.id ?? null
+          const rawBinding = chat.character_id ? characterPersonaBindings[chat.character_id] : undefined
+          const binding = rawBinding ? resolveBinding(rawBinding) : null
+          const boundPersona = binding ? allPersonas.find((p) => p.id === binding.personaId) ?? null : null
+
+          if (binding && boundPersona) {
+            if (activePersonaId !== binding.personaId) {
               setActivePersona(binding.personaId)
-              if (boundPersona) {
-                toast.info(`Switched to persona: ${boundPersona.name}`)
-              }
-              // Apply bound addon states to the persona
-              if (binding.addonStates && Object.keys(binding.addonStates).length > 0) {
-                try {
-                  const p = await personasApi.get(binding.personaId)
-                  const addons = Array.isArray(p.metadata?.addons) ? p.metadata.addons.map((a: any) => ({ ...a })) : []
-                  const globalRefs = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons.map((r: any) => ({ ...r })) : []
-                  let changed = false
-                  for (const a of addons) {
-                    if (a.id in binding.addonStates && a.enabled !== binding.addonStates[a.id]) {
-                      a.enabled = binding.addonStates[a.id]
-                      changed = true
-                    }
-                  }
-                  for (const r of globalRefs) {
-                    if (r.id in binding.addonStates && r.enabled !== binding.addonStates[r.id]) {
-                      r.enabled = binding.addonStates[r.id]
-                      changed = true
-                    }
-                  }
-                  if (changed) {
-                    const updated = await personasApi.update(binding.personaId, {
-                      metadata: { ...p.metadata, addons, attached_global_addons: globalRefs },
-                    })
-                    useStore.getState().updatePersona(binding.personaId, updated)
-                  }
-                } catch { /* addon state application is best-effort */ }
-              }
+              toast.info(`Switched to persona: ${boundPersona.name}`)
             }
+            autoSwitchedPersonaIdRef.current = binding.personaId
+
+            // Apply bound addon states to the persona
+            if (binding.addonStates && Object.keys(binding.addonStates).length > 0) {
+              try {
+                const p = await personasApi.get(binding.personaId)
+                const addons = Array.isArray(p.metadata?.addons) ? p.metadata.addons.map((a: any) => ({ ...a })) : []
+                const globalRefs = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons.map((r: any) => ({ ...r })) : []
+                let changed = false
+                for (const a of addons) {
+                  if (a.id in binding.addonStates && a.enabled !== binding.addonStates[a.id]) {
+                    a.enabled = binding.addonStates[a.id]
+                    changed = true
+                  }
+                }
+                for (const r of globalRefs) {
+                  if (r.id in binding.addonStates && r.enabled !== binding.addonStates[r.id]) {
+                    r.enabled = binding.addonStates[r.id]
+                    changed = true
+                  }
+                }
+                if (changed) {
+                  const updated = await personasApi.update(binding.personaId, {
+                    metadata: { ...p.metadata, addons, attached_global_addons: globalRefs },
+                  })
+                  useStore.getState().updatePersona(binding.personaId, updated)
+                }
+              } catch { /* addon state application is best-effort */ }
+            }
+          } else {
+            const shouldRestoreDefault =
+              autoSwitchedPersonaIdRef.current !== null &&
+              defaultPersonaId !== null &&
+              activePersonaId !== defaultPersonaId &&
+              (activePersonaId === null || autoSwitchedPersonaIdRef.current === activePersonaId)
+
+            if (shouldRestoreDefault) {
+              setActivePersona(defaultPersonaId)
+            }
+
+            autoSwitchedPersonaIdRef.current = null
           }
         }
 
