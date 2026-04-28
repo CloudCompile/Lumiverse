@@ -154,13 +154,17 @@ function SortableCategoryItem({
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </Button>
       <div className={s.categoryMeta} onClick={onToggleCollapse}>
-        <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>{displayName}</span>
-        <span className={s.categoryCount}>({childCount})</span>
-        {block.categoryMode && (
-          <span className={s.groupBadge}>
-            {block.categoryMode === 'radio' ? 'pick one' : 'multi'}
-          </span>
-        )}
+        <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>
+          <span className={s.categoryNameText}>{displayName}</span>
+        </span>
+        <span className={s.categoryMetaBadges}>
+          <span className={s.categoryCount}>({childCount})</span>
+          {block.categoryMode && (
+            <span className={s.groupBadge}>
+              {block.categoryMode === 'radio' ? 'pick one' : 'multi'}
+            </span>
+          )}
+        </span>
       </div>
       <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
@@ -212,24 +216,26 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
       <div className={clsx(s.blockContent, s.truncTooltip)} data-tooltip={block.name}>
         <div className={s.blockNameRow}>
           <span className={s.blockName}>
-            {isMarker && <Hash size={12} style={{ marginRight: '4px', opacity: 0.6 }} />}
-            {block.isLocked && <Lock size={10} style={{ marginRight: '4px', opacity: 0.4 }} />}
-            {block.name}
+            {isMarker && <Hash size={12} className={s.blockNameIcon} />}
+            {block.isLocked && <Lock size={10} className={clsx(s.blockNameIcon, s.blockNameIconMuted)} />}
+            <span className={s.blockNameText}>{block.name}</span>
           </span>
-          {!isMarker && (
-            <span className={clsx(s.badge, ROLE_BADGES[block.role] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[block.role] || block.role}</span>
-          )}
-          {isMarker && (
-            <span className={clsx(s.badge, s.badgeMarker)}>marker</span>
-          )}
-          {block.injectionTrigger?.length > 0 && (
-            <span style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
-              {block.injectionTrigger.map(t => {
-                const meta = INJECTION_TRIGGER_TYPES.find(tt => tt.value === t)
-                return meta ? <span key={t} className={s.triggerBadge}>{meta.shortLabel}</span> : null
-              })}
-            </span>
-          )}
+          <span className={s.blockMetaRow}>
+            {!isMarker && (
+              <span className={clsx(s.badge, ROLE_BADGES[block.role] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[block.role] || block.role}</span>
+            )}
+            {isMarker && (
+              <span className={clsx(s.badge, s.badgeMarker)}>marker</span>
+            )}
+            {block.injectionTrigger?.length > 0 && (
+              <span className={s.triggerBadgeList}>
+                {block.injectionTrigger.map(t => {
+                  const meta = INJECTION_TRIGGER_TYPES.find(tt => tt.value === t)
+                  return meta ? <span key={t} className={s.triggerBadge}>{meta.shortLabel}</span> : null
+                })}
+              </span>
+            )}
+          </span>
         </div>
         {preview && !isMarker && <span className={s.blockPreview}>{preview}</span>}
       </div>
