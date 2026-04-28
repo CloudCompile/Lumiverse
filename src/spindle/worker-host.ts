@@ -442,6 +442,8 @@ export class WorkerHost {
   private commandInvokedHandlers = new Set<string>(); // tracked for cleanup only
   private onWorkerReady: (() => void) | null = null;
   private onWorkerShutdownAck: (() => void) | null = null;
+  private onRuntimeExit: (() => void) | null = null;
+  private runtimeExitPromise: Promise<void> | null = null;
   private runtimeStopping = false;
   private runtimeStatsInterval: ReturnType<typeof setInterval> | null = null;
   private readonly installScope: "operator" | "user";
@@ -571,6 +573,9 @@ export class WorkerHost {
     const storagePath = this.getStorageRootPath(this.manifest.identifier);
     const repoPath = managerSvc.getRepoPath(this.manifest.identifier);
     this.runtimeStopping = false;
+    this.runtimeExitPromise = new Promise<void>((resolve) => {
+      this.onRuntimeExit = resolve;
+    });
     const startTime = performance.now();
 
     this.runtime = createRuntimeTransport({
@@ -602,7 +607,15 @@ export class WorkerHost {
         }
       },
       onExit: (exitCode, signalCode, error) => {
-        if (this.runtimeStopping) return;
+        const wasStopping = this.runtimeStopping;
+        this.onWorkerShutdownAck?.();
+        this.onWorkerShutdownAck = null;
+        this.onRuntimeExit?.();
+        this.onRuntimeExit = null;
+        if (wasStopping) {
+          this.cleanup();
+          return;
+        }
         const details = error?.message || `Runtime exited (code=${exitCode ?? "null"}, signal=${signalCode ?? "null"})`;
         console.error(`[Spindle:${this.manifest.identifier}] Runtime exited unexpectedly:`, details);
         eventBus.emit(EventType.SPINDLE_EXTENSION_ERROR, {
@@ -645,6 +658,8 @@ export class WorkerHost {
 
   async stop(): Promise<void> {
     if (!this.runtime) return;
+    const runtime = this.runtime;
+    const runtimeExitPromise = this.runtimeExitPromise;
     this.runtimeStopping = true;
     this.stopRuntimeStatsSampling();
 
@@ -668,7 +683,7 @@ export class WorkerHost {
       const timer = setTimeout(() => {
         // Fallback: worker never acknowledged. Force-terminate.
         try {
-          this.runtime?.terminate();
+          runtime.terminate();
         } catch {
           // ignore — terminate is best-effort
         }
@@ -685,13 +700,47 @@ export class WorkerHost {
       }
     });
 
-    await this.emitRuntimeStats("shutdown");
+    if (runtime.mode === "worker") {
+      await this.emitRuntimeStats("shutdown");
+      this.cleanup();
+      return;
+    }
 
-    this.cleanup();
+    if (runtimeExitPromise) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(forceKillTimer);
+          clearTimeout(finalTimeout);
+          resolve();
+        };
+
+        const forceKillTimer = setTimeout(() => {
+          try {
+            runtime.terminate(true);
+          } catch {
+            // ignore — SIGKILL is best-effort
+          }
+        }, 5_000);
+
+        // Last-resort guard so update paths do not hang forever if Bun fails
+        // to report subprocess exit after termination.
+        const finalTimeout = setTimeout(finish, 7_500);
+
+        void runtimeExitPromise.finally(finish);
+      });
+    }
   }
 
   private cleanup(): void {
     this.stopRuntimeStatsSampling();
+    this.onWorkerReady = null;
+    this.onWorkerShutdownAck = null;
+    this.onRuntimeExit?.();
+    this.onRuntimeExit = null;
+    this.runtimeExitPromise = null;
     // Unsubscribe from all events
     for (const unsub of this.eventUnsubscribers.values()) {
       unsub();

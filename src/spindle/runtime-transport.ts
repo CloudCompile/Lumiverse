@@ -11,7 +11,7 @@ export interface RuntimeTransport {
   readonly mode: RuntimeTransportMode;
   readonly pid: number | null;
   postMessage(message: unknown): void;
-  terminate(): void;
+  terminate(force?: boolean): void;
 }
 
 export interface CreateRuntimeTransportOptions {
@@ -153,8 +153,8 @@ function createSubprocessTransport(
     postMessage(message: unknown): void {
       proc.send(message);
     },
-    terminate(): void {
-      proc.kill("SIGTERM");
+    terminate(force = false): void {
+      proc.kill(force ? "SIGKILL" : "SIGTERM");
     },
   };
 }
