@@ -19,8 +19,6 @@ import {
 const REF_DARK_BG: RGB = { r: 10, g: 10, b: 15 }
 /** Reference light theme background (approximate) for contrast checks. */
 const REF_LIGHT_BG: RGB = { r: 250, g: 250, b: 252 }
-/** WCAG AA minimum for large text / UI elements. */
-const MIN_UI_CONTRAST = 3.0
 /** WCAG AA minimum for normal text. */
 const MIN_TEXT_CONTRAST = 4.5
 
@@ -41,13 +39,35 @@ export interface CharacterThemeOverlay {
     primary?: string
     secondary?: string
     background?: string
+    text?: string
   }
   /** Mode-aware base colors for light mode (different lightness targets). */
   baseColorsLight: {
     primary?: string
     secondary?: string
     background?: string
+    text?: string
   }
+}
+
+function rgbToCss(color: RGB): string {
+  return `rgb(${color.r} ${color.g} ${color.b})`
+}
+
+function deriveSecondaryTone(seed: RGB, surface: RGB, mode: 'dark' | 'light'): RGB {
+  const hsl = rgbToHsl(seed.r, seed.g, seed.b)
+  let secondary = hslToRgb(
+    hsl.h,
+    clamp(hsl.s, mode === 'dark' ? 20 : 16, mode === 'dark' ? 58 : 48),
+    mode === 'dark' ? clamp(hsl.l, 42, 60) : clamp(hsl.l, 30, 46)
+  )
+
+  secondary = ensureContrast(secondary, surface, MIN_TEXT_CONTRAST)
+  secondary = mode === 'dark'
+    ? constrainLuminance(secondary, undefined, DARK_MODE_MAX_LUM)
+    : constrainLuminance(secondary, LIGHT_MODE_MIN_LUM, undefined)
+
+  return secondary
 }
 
 /**
@@ -61,56 +81,27 @@ export interface CharacterThemeOverlay {
  *   4. Derive a very subtle background tint from the average color
  */
 export function deriveCharacterOverlay(palette: ImagePalette): CharacterThemeOverlay {
-  const { dominant, regions } = palette
+  const darkAccent = palette.ui.dark.accent
+  const lightAccent = palette.ui.light.accent
+  const primaryHsl = rgbToHsl(darkAccent.r, darkAccent.g, darkAccent.b)
 
-  // Primary accent: derive from dominant
-  const domHsl = rgbToHsl(dominant.r, dominant.g, dominant.b)
-  // Clamp saturation to 35-70% — below 35% reads as gray, above 70% is garish
-  // (especially blue/purple at high saturation). Lightness 48-65% keeps the
-  // accent usable as a button/interactive color on both dark and light backgrounds.
-  const accentS = clamp(domHsl.s, 35, 70)
-  const accentL = clamp(domHsl.l, 48, 65)
-
-  let primaryRgb = hslToRgb(domHsl.h, accentS, accentL)
-  // Primary is used for buttons / interactive elements — ensure 3:1 on both modes.
-  primaryRgb = ensureContrast(primaryRgb, REF_DARK_BG, MIN_UI_CONTRAST)
-  primaryRgb = ensureContrast(primaryRgb, REF_LIGHT_BG, MIN_UI_CONTRAST)
-  // Dark mode: cap brightness so the accent never glares.
-  primaryRgb = constrainLuminance(primaryRgb, undefined, DARK_MODE_MAX_LUM)
-  const primaryHsl = rgbToHsl(primaryRgb.r, primaryRgb.g, primaryRgb.b)
-
-  // Secondary: derived from the center region (the character's "core")
-  const centerHsl = rgbToHsl(regions.center.r, regions.center.g, regions.center.b)
-  const secondaryS = clamp(centerHsl.s, 20, 60)
-  const secondaryL = clamp(centerHsl.l, 35, 55)
-
-  let secondaryRgb = hslToRgb(centerHsl.h, secondaryS, secondaryL)
-  // Secondary is often used for labels / sub-text — enforce 4.5:1 on both modes.
-  secondaryRgb = ensureContrast(secondaryRgb, REF_DARK_BG, MIN_TEXT_CONTRAST)
-  secondaryRgb = ensureContrast(secondaryRgb, REF_LIGHT_BG, MIN_TEXT_CONTRAST)
-  // Dark mode: cap brightness so labels never glare.
-  secondaryRgb = constrainLuminance(secondaryRgb, undefined, DARK_MODE_MAX_LUM)
-  const secondaryHsl = rgbToHsl(secondaryRgb.r, secondaryRgb.g, secondaryRgb.b)
-
-  // Light mode: lower lightness so colors contrast against bright backgrounds,
-  // but enforce a luminance floor so they do not feel like harsh smudges.
-  let primaryLightRgb = hslToRgb(primaryHsl.h, primaryHsl.s, clamp(primaryHsl.l, 30, 45))
-  primaryLightRgb = constrainLuminance(primaryLightRgb, LIGHT_MODE_MIN_LUM, undefined)
-  const primaryLightHsl = rgbToHsl(primaryLightRgb.r, primaryLightRgb.g, primaryLightRgb.b)
-
-  let secondaryLightRgb = hslToRgb(secondaryHsl.h, secondaryHsl.s, clamp(secondaryHsl.l, 25, 40))
-  secondaryLightRgb = constrainLuminance(secondaryLightRgb, LIGHT_MODE_MIN_LUM, undefined)
-  const secondaryLightHsl = rgbToHsl(secondaryLightRgb.r, secondaryLightRgb.g, secondaryLightRgb.b)
+  const secondarySeed = palette.palette[1] ?? palette.regions.center
+  const secondaryDark = deriveSecondaryTone(secondarySeed, palette.ui.dark.surface, 'dark')
+  const secondaryLight = deriveSecondaryTone(secondarySeed, palette.ui.light.surface, 'light')
 
   return {
     accent: { h: primaryHsl.h, s: primaryHsl.s, l: primaryHsl.l },
     baseColors: {
-      primary: `hsl(${primaryHsl.h}, ${primaryHsl.s}%, ${primaryHsl.l}%)`,
-      secondary: `hsl(${secondaryHsl.h}, ${secondaryHsl.s}%, ${secondaryHsl.l}%)`,
+      primary: rgbToCss(darkAccent),
+      secondary: rgbToCss(secondaryDark),
+      background: rgbToCss(palette.ui.dark.surface),
+      text: rgbToCss(palette.ui.dark.text),
     },
     baseColorsLight: {
-      primary: `hsl(${primaryLightHsl.h}, ${primaryLightHsl.s}%, ${primaryLightHsl.l}%)`,
-      secondary: `hsl(${secondaryLightHsl.h}, ${secondaryLightHsl.s}%, ${secondaryLightHsl.l}%)`,
+      primary: rgbToCss(lightAccent),
+      secondary: rgbToCss(secondaryLight),
+      background: rgbToCss(palette.ui.light.surface),
+      text: rgbToCss(palette.ui.light.text),
     },
   }
 }
@@ -142,13 +133,14 @@ export function deriveHeroTextVars(
     b: Math.round(regions.bottom.b * 0.6 + regions.center.b * 0.4),
   }
 
-  // Dark mode: bright text — 92% toward white, 8% image tint
-  let contrastDark = shiftTowards(textZone, { r: 250, g: 251, b: 255 }, 0.92)
-  let mutedDark = shiftTowards(contrastDark, { r: 214, g: 220, b: 236 }, 0.22)
+  // Seed hero text from the extractor's surface-aware readable UI colors so
+  // the text family already tracks practical surface luminance, then blend in
+  // the actual text-zone tint so it still feels image-aware.
+  let contrastDark = shiftTowards(textZone, palette.ui.dark.text, 0.84)
+  let mutedDark = shiftTowards(contrastDark, palette.ui.dark.mutedText, 0.28)
 
-  // Light mode: dark text — 92% toward black, 8% image tint
-  let contrastLight = shiftTowards(textZone, { r: 16, g: 18, b: 24 }, 0.92)
-  let mutedLight = shiftTowards(contrastLight, { r: 32, g: 36, b: 46 }, 0.22)
+  let contrastLight = shiftTowards(textZone, palette.ui.light.text, 0.84)
+  let mutedLight = shiftTowards(contrastLight, palette.ui.light.mutedText, 0.28)
 
   // Determine the effective backing surface for contrast checks.
   // When the caller provides a `surfaceColor` (e.g. the computed page
@@ -256,6 +248,7 @@ function pickMostVibrant(palette: ImagePalette): { h: number; s: number; l: numb
     { rgb: palette.regions.left, flatness: palette.flatness.left },
     { rgb: palette.regions.right, flatness: palette.flatness.right },
     { rgb: palette.average, flatness: 0 }, // average has no meaningful flatness
+    ...palette.palette.map((rgb) => ({ rgb, flatness: 0 })),
   ]
 
   let best: { h: number; s: number; l: number } | null = null

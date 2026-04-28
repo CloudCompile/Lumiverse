@@ -12,6 +12,14 @@ import { getDb } from "../db/connection";
 export interface RGB { r: number; g: number; b: number }
 export interface HSL { h: number; s: number; l: number }
 
+export interface ReadableColorScheme {
+  surface: RGB;
+  text: RGB;
+  mutedText: RGB;
+  accent: RGB;
+  accentText: RGB;
+}
+
 export interface ColorExtractionResult {
   dominant: RGB;
   regions: {
@@ -32,9 +40,35 @@ export interface ColorExtractionResult {
   average: RGB;
   isLight: boolean;
   dominantHsl: HSL;
+  palette: RGB[];
+  diversity: {
+    score: number;
+    isUniform: boolean;
+    usedFallback: boolean;
+  };
+  ui: {
+    dark: ReadableColorScheme;
+    light: ReadableColorScheme;
+  };
 }
 
 const SAMPLE_SIZE = 48;
+const DEFAULT_FALLBACK_HUE = 263;
+const MIN_UI_CONTRAST = 3;
+const MIN_TEXT_CONTRAST = 4.5;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function mixColors(color: RGB, target: RGB, weight: number): RGB {
+  const w = clamp(weight, 0, 1);
+  return {
+    r: Math.round(color.r + (target.r - color.r) * w),
+    g: Math.round(color.g + (target.g - color.g) * w),
+    b: Math.round(color.b + (target.b - color.b) * w),
+  };
+}
 
 function rgbToHsl(r: number, g: number, b: number): HSL {
   r /= 255; g /= 255; b /= 255;
@@ -166,19 +200,95 @@ function luminance(r: number, g: number, b: number): number {
 
 interface DominantResult { color: RGB; flatness: number }
 
-function dominantFromPixels(data: Buffer, channels: number, pixelCount: number): DominantResult {
-  const buckets = new Map<string, { count: number; r: number; g: number; b: number }>();
-  let totalOpaque = 0;
+interface BucketStats { count: number; r: number; g: number; b: number }
+
+interface CandidateColor {
+  color: RGB;
+  score: number;
+}
+
+interface PixelAnalysis {
+  dominant: DominantResult;
+  average: RGB;
+  diversityScore: number;
+  candidates: CandidateColor[];
+}
+
+function chooseQuantizationStep(avgDeviation: number): number {
+  if (avgDeviation < 12) return 36;
+  if (avgDeviation < 22) return 28;
+  if (avgDeviation < 36) return 22;
+  return 16;
+}
+
+function colorDistance(a: RGB, b: RGB): number {
+  const dr = a.r - b.r;
+  const dg = a.g - b.g;
+  const db = a.b - b.b;
+  const dl = luminance(a.r, a.g, a.b) - luminance(b.r, b.g, b.b);
+  return Math.sqrt((dr * dr * 0.35) + (dg * dg * 0.45) + (db * db * 0.2) + (dl * dl * 0.6));
+}
+
+function scoreCandidate(color: RGB, weight: number): number {
+  const hsl = rgbToHsl(color.r, color.g, color.b);
+  const satWeight = 0.45 + (hsl.s / 100) * 0.95;
+  const lightPenalty = hsl.l < 12 || hsl.l > 92 ? 0.45 : hsl.l < 20 || hsl.l > 84 ? 0.72 : 1;
+  return Math.sqrt(Math.max(1, weight)) * satWeight * lightPenalty;
+}
+
+function analyzePixels(data: ArrayLike<number>, channels: number, pixelCount: number): PixelAnalysis {
+  let rSum = 0;
+  let gSum = 0;
+  let bSum = 0;
+  let opaqueCount = 0;
 
   for (let i = 0; i < pixelCount; i++) {
     const offset = i * channels;
-    // Skip transparent pixels (if alpha channel exists)
     if (channels === 4 && data[offset + 3] < 48) continue;
-    totalOpaque++;
-    const r = data[offset], g = data[offset + 1], b = data[offset + 2];
-    const qr = Math.round(r / 24) * 24;
-    const qg = Math.round(g / 24) * 24;
-    const qb = Math.round(b / 24) * 24;
+    rSum += data[offset];
+    gSum += data[offset + 1];
+    bSum += data[offset + 2];
+    opaqueCount++;
+  }
+
+  if (opaqueCount === 0) {
+    const grey = { r: 128, g: 128, b: 128 };
+    return {
+      dominant: { color: grey, flatness: 1 },
+      average: grey,
+      diversityScore: 0,
+      candidates: [{ color: grey, score: 1 }],
+    };
+  }
+
+  const average = {
+    r: Math.round(rSum / opaqueCount),
+    g: Math.round(gSum / opaqueCount),
+    b: Math.round(bSum / opaqueCount),
+  };
+
+  let deviationSum = 0;
+  for (let i = 0; i < pixelCount; i++) {
+    const offset = i * channels;
+    if (channels === 4 && data[offset + 3] < 48) continue;
+    deviationSum += Math.abs(data[offset] - average.r);
+    deviationSum += Math.abs(data[offset + 1] - average.g);
+    deviationSum += Math.abs(data[offset + 2] - average.b);
+  }
+
+  const avgDeviation = deviationSum / (opaqueCount * 3);
+  const quantStep = chooseQuantizationStep(avgDeviation);
+  const buckets = new Map<string, BucketStats>();
+
+  for (let i = 0; i < pixelCount; i++) {
+    const offset = i * channels;
+    if (channels === 4 && data[offset + 3] < 48) continue;
+    const r = data[offset];
+    const g = data[offset + 1];
+    const b = data[offset + 2];
+    const qr = Math.round(r / quantStep) * quantStep;
+    const qg = Math.round(g / quantStep) * quantStep;
+    const qb = Math.round(b / quantStep) * quantStep;
     const key = `${qr}-${qg}-${qb}`;
     const hit = buckets.get(key);
     if (hit) {
@@ -191,38 +301,151 @@ function dominantFromPixels(data: Buffer, channels: number, pixelCount: number):
     }
   }
 
-  let best: { count: number; r: number; g: number; b: number } | null = null;
+  let best: BucketStats | null = null;
   for (const bucket of buckets.values()) {
     if (!best || bucket.count > best.count) best = bucket;
   }
 
-  if (!best || best.count === 0) return { color: { r: 128, g: 128, b: 128 }, flatness: 1 };
-  const flatness = totalOpaque > 0 ? best.count / totalOpaque : 1;
-  return {
+  if (!best || best.count === 0) {
+    const grey = { r: 128, g: 128, b: 128 };
+    return {
+      dominant: { color: grey, flatness: 1 },
+      average,
+      diversityScore: 0,
+      candidates: [{ color: grey, score: 1 }],
+    };
+  }
+
+  const dominant = {
     color: {
       r: Math.round(best.r / best.count),
       g: Math.round(best.g / best.count),
       b: Math.round(best.b / best.count),
     },
-    flatness,
+    flatness: best.count / opaqueCount,
   };
+
+  const candidates = Array.from(buckets.values())
+    .map((bucket) => {
+      const color = {
+        r: Math.round(bucket.r / bucket.count),
+        g: Math.round(bucket.g / bucket.count),
+        b: Math.round(bucket.b / bucket.count),
+      };
+      return {
+        color,
+        score: scoreCandidate(color, bucket.count),
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const bucketSpread = clamp(buckets.size / 24, 0, 1);
+  const diversityScore = clamp((avgDeviation / 52) * 0.72 + bucketSpread * 0.28, 0, 1);
+
+  return { dominant, average, diversityScore, candidates };
 }
 
-function averageFromPixels(data: Buffer, channels: number, pixelCount: number): RGB {
-  let rSum = 0, gSum = 0, bSum = 0, count = 0;
-  for (let i = 0; i < pixelCount; i++) {
-    const offset = i * channels;
-    if (channels === 4 && data[offset + 3] < 48) continue;
-    rSum += data[offset];
-    gSum += data[offset + 1];
-    bSum += data[offset + 2];
-    count++;
+function dominantFromPixels(data: ArrayLike<number>, channels: number, pixelCount: number): DominantResult {
+  return analyzePixels(data, channels, pixelCount).dominant;
+}
+
+function selectDistinctColors(candidates: CandidateColor[], desiredCount: number, diversityScore: number): RGB[] {
+  const chosen: RGB[] = [];
+  const thresholds = [
+    diversityScore > 0.28 ? 68 : diversityScore > 0.16 ? 54 : diversityScore > 0.08 ? 40 : 28,
+    diversityScore > 0.28 ? 54 : diversityScore > 0.16 ? 42 : diversityScore > 0.08 ? 30 : 22,
+    14,
+  ];
+
+  for (const threshold of thresholds) {
+    for (const candidate of candidates) {
+      if (chosen.length >= desiredCount) return chosen;
+      if (chosen.some((selected) => colorDistance(selected, candidate.color) < 8)) continue;
+      if (chosen.length === 0 || chosen.every((selected) => colorDistance(selected, candidate.color) >= threshold)) {
+        chosen.push(candidate.color);
+      }
+    }
   }
-  if (count === 0) return { r: 128, g: 128, b: 128 };
+
+  return chosen;
+}
+
+function pickFallbackHue(dominant: RGB, average: RGB): number {
+  const dominantHsl = rgbToHsl(dominant.r, dominant.g, dominant.b);
+  if (dominantHsl.s >= 16) return dominantHsl.h;
+  const averageHsl = rgbToHsl(average.r, average.g, average.b);
+  if (averageHsl.s >= 12) return averageHsl.h;
+  return DEFAULT_FALLBACK_HUE;
+}
+
+function buildFallbackPalette(dominant: RGB, average: RGB): RGB[] {
+  const hue = pickFallbackHue(dominant, average);
+  return [
+    hslToRgb(hue, 68, 58),
+    hslToRgb((hue + 18) % 360, 46, 42),
+    hslToRgb((hue + 340) % 360, 34, 72),
+    hslToRgb((hue + 160) % 360, 28, 38),
+    hslToRgb((hue + 205) % 360, 16, 84),
+  ];
+}
+
+function pickReadableTextColor(surface: RGB, tint: RGB, minRatio: number): RGB {
+  const lightTarget = { r: 247, g: 249, b: 252 };
+  const darkTarget = { r: 17, g: 22, b: 28 };
+  const candidates = [
+    ensureContrast(mixColors(tint, lightTarget, 0.88), surface, minRatio),
+    ensureContrast(mixColors(tint, darkTarget, 0.88), surface, minRatio),
+    ensureContrast(lightTarget, surface, minRatio),
+    ensureContrast(darkTarget, surface, minRatio),
+  ];
+  const ranked = candidates
+    .map((color) => ({ color, ratio: contrastRatio(color, surface) }))
+    .sort((a, b) => b.ratio - a.ratio);
+  const prefersLightText = relativeLuminance(surface.r, surface.g, surface.b) < 0.36;
+  const preferred = ranked.find(({ color, ratio }) => {
+    if (ratio < minRatio) return false;
+    return prefersLightText ? relativeLuminance(color.r, color.g, color.b) > 0.5 : relativeLuminance(color.r, color.g, color.b) < 0.2;
+  });
+
+  if (preferred) return preferred.color;
+  return ranked[0].color;
+}
+
+function tuneAccentForSurface(accentBase: RGB, surface: RGB, mode: "dark" | "light"): RGB {
+  const accentHsl = rgbToHsl(accentBase.r, accentBase.g, accentBase.b);
+  const tuned = hslToRgb(
+    accentHsl.h,
+    clamp(accentHsl.s, 44, 80),
+    mode === "dark" ? clamp(accentHsl.l, 56, 70) : clamp(accentHsl.l, 34, 48),
+  );
+  return ensureContrast(tuned, surface, MIN_UI_CONTRAST);
+}
+
+function deriveReadableScheme(surfaceBase: RGB, accentBase: RGB, mode: "dark" | "light"): ReadableColorScheme {
+  let surface = mode === "dark"
+    ? mixColors(surfaceBase, { r: 12, g: 15, b: 22 }, 0.84)
+    : mixColors(surfaceBase, { r: 248, g: 250, b: 252 }, 0.9);
+
+  surface = mode === "dark"
+    ? constrainLuminance(surface, undefined, 62)
+    : constrainLuminance(surface, 225, undefined);
+
+  const accent = tuneAccentForSurface(accentBase, surface, mode);
+  const accentText = pickReadableTextColor(accent, surface, MIN_TEXT_CONTRAST);
+  const text = pickReadableTextColor(surface, accentBase, MIN_TEXT_CONTRAST);
+  const mutedSeed = mixColors(text, surface, 0.28);
+  const mutedText = ensureContrast(mutedSeed, surface, 3.6);
+
+  return { surface, text, mutedText, accent, accentText };
+}
+
+function deriveUiSchemes(palette: RGB[], dominant: RGB, average: RGB): { dark: ReadableColorScheme; light: ReadableColorScheme } {
+  const accentBase = palette[0] ?? dominant;
+  const surfaceSeed = palette[1] ?? average;
+  const surfaceBase = mixColors(surfaceSeed, average, 0.35);
   return {
-    r: Math.round(rSum / count),
-    g: Math.round(gSum / count),
-    b: Math.round(bSum / count),
+    dark: deriveReadableScheme(surfaceBase, accentBase, "dark"),
+    light: deriveReadableScheme(surfaceBase, accentBase, "light"),
   };
 }
 
@@ -243,49 +466,85 @@ function getRegions(w: number, h: number): Record<string, Region> {
 /**
  * Extract color palette from an image stored in the images table.
  */
+export function extractColorsFromRawPixels(
+  data: ArrayLike<number>,
+  width: number,
+  height: number,
+  channels: number,
+): ColorExtractionResult {
+  const pixelCount = width * height;
+  const fullAnalysis = analyzePixels(data, channels, pixelCount);
+  const regionDefs = getRegions(width, height);
+  const regions = {} as ColorExtractionResult["regions"];
+  const flatness = { full: fullAnalysis.dominant.flatness } as ColorExtractionResult["flatness"];
+  const regionCandidates: CandidateColor[] = [];
+
+  for (const [name, rect] of Object.entries(regionDefs)) {
+    const regionPixels: number[] = [];
+    for (let y = rect.top; y < rect.top + rect.height && y < height; y++) {
+      for (let x = rect.left; x < rect.left + rect.width && x < width; x++) {
+        const offset = (y * width + x) * channels;
+        for (let channel = 0; channel < channels; channel++) {
+          regionPixels.push(data[offset + channel]);
+        }
+      }
+    }
+
+    const regionPixelCount = regionPixels.length / channels;
+    const result = dominantFromPixels(regionPixels, channels, regionPixelCount);
+    (regions as any)[name] = result.color;
+    (flatness as any)[name] = result.flatness;
+
+    regionCandidates.push({
+      color: result.color,
+      score: scoreCandidate(result.color, Math.max(1, regionPixelCount * Math.max(0.35, 1 - result.flatness))),
+    });
+  }
+
+  const diversePalette = selectDistinctColors(
+    [
+      ...fullAnalysis.candidates,
+      ...regionCandidates,
+      { color: fullAnalysis.average, score: scoreCandidate(fullAnalysis.average, pixelCount * 0.18) },
+    ],
+    5,
+    fullAnalysis.diversityScore,
+  );
+
+  const isUniform = fullAnalysis.diversityScore < 0.16 || flatness.full > 0.56 || diversePalette.length < 3;
+  const usedFallback = isUniform;
+  const palette = usedFallback
+    ? buildFallbackPalette(fullAnalysis.dominant.color, fullAnalysis.average)
+    : diversePalette;
+  const ui = deriveUiSchemes(palette, fullAnalysis.dominant.color, fullAnalysis.average);
+  const dominantHsl = rgbToHsl(fullAnalysis.dominant.color.r, fullAnalysis.dominant.color.g, fullAnalysis.dominant.color.b);
+  const isLight = luminance(fullAnalysis.dominant.color.r, fullAnalysis.dominant.color.g, fullAnalysis.dominant.color.b) > 152;
+
+  return {
+    dominant: fullAnalysis.dominant.color,
+    regions,
+    flatness,
+    average: fullAnalysis.average,
+    isLight,
+    dominantHsl,
+    palette,
+    diversity: {
+      score: Number(fullAnalysis.diversityScore.toFixed(3)),
+      isUniform,
+      usedFallback,
+    },
+    ui,
+  };
+}
+
 export async function extractColorsFromImage(imageId: string): Promise<ColorExtractionResult> {
-  // Look up image file path
   const row = getDb().query("SELECT filename FROM images WHERE id = ?").get(imageId) as { filename: string } | null;
   if (!row) throw new Error(`Image not found: ${imageId}`);
 
   const imagesDir = join(env.dataDir, "images");
   const filePath = join(imagesDir, row.filename);
-
-  // Resize to sample size and extract raw pixel data
   const resized = sharp(filePath).resize(SAMPLE_SIZE, SAMPLE_SIZE, { fit: "cover" });
   const { data, info } = await resized.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  const channels = info.channels; // 4 (RGBA after ensureAlpha)
-  const w = info.width;
-  const h = info.height;
 
-  // Full-image analysis
-  const pixelCount = w * h;
-  const fullResult = dominantFromPixels(data, channels, pixelCount);
-  const average = averageFromPixels(data, channels, pixelCount);
-
-  // Per-region analysis
-  const regionDefs = getRegions(w, h);
-  const regions = {} as ColorExtractionResult["regions"];
-  const flatness = { full: fullResult.flatness } as ColorExtractionResult["flatness"];
-
-  for (const [name, rect] of Object.entries(regionDefs)) {
-    // Extract region pixels from the raw buffer
-    const regionPixels: number[] = [];
-    for (let y = rect.top; y < rect.top + rect.height && y < h; y++) {
-      for (let x = rect.left; x < rect.left + rect.width && x < w; x++) {
-        const offset = (y * w + x) * channels;
-        regionPixels.push(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]);
-      }
-    }
-    const regionBuf = Buffer.from(regionPixels);
-    const regionPixelCount = regionPixels.length / channels;
-    const result = dominantFromPixels(regionBuf, channels, regionPixelCount);
-    (regions as any)[name] = result.color;
-    (flatness as any)[name] = result.flatness;
-  }
-
-  const isLight = luminance(fullResult.color.r, fullResult.color.g, fullResult.color.b) > 152;
-  const dominantHsl = rgbToHsl(fullResult.color.r, fullResult.color.g, fullResult.color.b);
-
-  return { dominant: fullResult.color, regions, flatness, average, isLight, dominantHsl };
+  return extractColorsFromRawPixels(data, info.width, info.height, info.channels);
 }
