@@ -24,7 +24,6 @@ const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
 const LANCEDB_PATH = join(env.dataDir, "lancedb");
 const EMBEDDINGS_TABLE = "embeddings";
-const EMBEDDINGS_TABLE_PATH = join(LANCEDB_PATH, `${EMBEDDINGS_TABLE}.lance`);
 const WORLD_BOOK_VECTOR_VERSION = 2;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
 /** Default safety timeout for embedding API requests. Prevents a hanging
@@ -337,6 +336,8 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
 };
 
 let connPromise: Promise<Connection> | null = null;
+let connHandle: Connection | null = null;
+let connGeneration = 0;
 let vectorIndexReady = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
 const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
@@ -447,6 +448,16 @@ function resetInMemoryVectorStoreState(): void {
   optimizeQueuedAt = null;
   stopIndexHealthMonitor();
   embeddingCache.clear();
+
+  try {
+    tableHandle?.close();
+  } catch {}
+  try {
+    connHandle?.close();
+  } catch {}
+
+  connGeneration += 1;
+  connHandle = null;
   connPromise = null;
   invalidateTableHandle();
   vectorIndexReady = false;
@@ -475,12 +486,16 @@ function resetSqliteVectorizationState(): void {
 
 function performBrokenEmbeddingsTableRecovery(reason: string, err: unknown): void {
   resetInMemoryVectorStoreState();
-  const deleted = existsSync(EMBEDDINGS_TABLE_PATH);
+
+  // This store only contains one shared table, so deleting just embeddings.lance
+  // can leave parent-level LanceDB metadata claiming the table still exists.
+  // Reset the entire store so the next operation can recreate it cleanly.
+  const deleted = existsSync(LANCEDB_PATH);
   if (deleted) {
-    rmSync(EMBEDDINGS_TABLE_PATH, { recursive: true, force: true });
+    rmSync(LANCEDB_PATH, { recursive: true, force: true });
   }
   resetSqliteVectorizationState();
-  console.warn(`[embeddings] Recovered incomplete LanceDB table after ${reason}; deleted ${EMBEDDINGS_TABLE_PATH}`, err);
+  console.warn(`[embeddings] Recovered incomplete LanceDB table after ${reason}; deleted ${LANCEDB_PATH}`, err);
 }
 
 async function recoverBrokenEmbeddingsTable(reason: string, err: unknown, lockHeld = false): Promise<boolean> {
@@ -678,8 +693,21 @@ export function getChatMemoryParams(mode: "conservative" | "balanced" | "aggress
 }
 
 async function getConnection(): Promise<Connection> {
+  if (connHandle) return connHandle;
+
+  const generation = connGeneration;
   if (!connPromise) connPromise = connect(LANCEDB_PATH);
-  return connPromise;
+
+  const conn = await connPromise;
+  if (generation !== connGeneration) {
+    try {
+      conn.close();
+    } catch {}
+    return getConnection();
+  }
+
+  connHandle = conn;
+  return conn;
 }
 
 async function tableExists(conn: Connection, name: string): Promise<boolean> {
