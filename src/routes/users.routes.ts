@@ -30,8 +30,8 @@ app.post("/me/password", passwordLimiter, async (c) => {
     return c.json({ error: "currentPassword and newPassword are required" }, 400);
   }
 
-  if (body.newPassword.length < 8) {
-    return c.json({ error: "Password must be at least 8 characters" }, 400);
+  if (body.newPassword.length < 8 || body.newPassword.length > 128) {
+    return c.json({ error: "Password must be between 8 and 128 characters" }, 400);
   }
 
   const account = getDb()
@@ -87,6 +87,10 @@ admin.post("/", async (c) => {
     return c.json({ error: "username and password are required" }, 400);
   }
 
+  if (body.password.length < 8 || body.password.length > 128) {
+    return c.json({ error: "Password must be between 8 and 128 characters" }, 400);
+  }
+
   // Reject arbitrary role strings up front — only the roles registered with
   // BetterAuth's admin plugin are valid.
   if (body.role !== undefined && !VALID_ROLES.has(body.role)) {
@@ -124,8 +128,8 @@ admin.post("/:id/reset-password", passwordLimiter, async (c) => {
     return c.json({ error: "newPassword is required" }, 400);
   }
 
-  if (body.newPassword.length < 8) {
-    return c.json({ error: "Password must be at least 8 characters" }, 400);
+  if (body.newPassword.length < 8 || body.newPassword.length > 128) {
+    return c.json({ error: "Password must be between 8 and 128 characters" }, 400);
   }
 
   const hashed = await hashPassword(body.newPassword);
