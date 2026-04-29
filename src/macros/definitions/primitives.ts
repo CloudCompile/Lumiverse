@@ -1,3 +1,4 @@
+import type { AstNode, MacroNode } from "../types";
 import { registry } from "../MacroRegistry";
 
 const ELSE_MARKER = "\x00ELSE_MARKER\x00";
@@ -169,8 +170,8 @@ export function registerCoreMacros(): void {
       const result = negate ? !isTruthy : isTruthy;
 
       if (ctx.isScoped) {
-        const parts = splitOnElse(ctx.body);
-        return result ? parts.truthy : parts.falsy;
+        const parts = splitOnElseNodes(ctx.bodyRaw);
+        return await ctx.resolveNodes(result ? parts.truthy : parts.falsy);
       }
 
       return result ? "true" : "";
@@ -257,13 +258,17 @@ function evaluateCondition(value: string): boolean {
   return true;
 }
 
-function splitOnElse(body: string): { truthy: string; falsy: string } {
-  const idx = body.indexOf(ELSE_MARKER);
-  if (idx < 0) return { truthy: body, falsy: "" };
+function splitOnElseNodes(body: AstNode[]): { truthy: AstNode[]; falsy: AstNode[] } {
+  const idx = body.findIndex((node) => isElseNode(node));
+  if (idx < 0) return { truthy: body, falsy: [] };
   return {
-    truthy: body.substring(0, idx),
-    falsy: body.substring(idx + ELSE_MARKER.length),
+    truthy: body.slice(0, idx),
+    falsy: body.slice(idx + 1),
   };
+}
+
+function isElseNode(node: AstNode): node is MacroNode {
+  return node.type === "macro" && !node.flags.close && node.name.toLowerCase() === "else";
 }
 
 /** Strip leading/trailing blank lines, then remove common indentation. */

@@ -52,6 +52,7 @@ nav = [
     { "Push Notifications" = "backend-api/push-notifications.md" },
     { "User Presence" = "backend-api/user-presence.md" },
     { "Frontend Communication" = "backend-api/frontend-communication.md" },
+    { "Frontend Process Lifecycle" = "backend-api/frontend-processes.md" },
     { "Version" = "backend-api/version.md" },
   ] },
   { "Frontend API" = [
@@ -60,6 +61,7 @@ nav = [
     { "Events" = "frontend-api/events.md" },
     { "UI Placement" = "frontend-api/ui-placement.md" },
     { "Backend Communication" = "frontend-api/backend-communication.md" },
+    { "Frontend Process Lifecycle" = "frontend-api/processes.md" },
     { "Message Tags" = "frontend-api/message-tags.md" },
     { "File Uploads" = "frontend-api/file-uploads.md" },
   ] },
@@ -70,6 +72,7 @@ nav = [
     { "Prompt Interceptor" = "examples/prompt-interceptor.md" },
     { "Frontend Only" = "examples/frontend-only.md" },
     { "Full Stack" = "examples/full-stack.md" },
+    { "Frontend Process Watchdog" = "examples/frontend-process-watchdog.md" },
   ] },
   { "REST API" = "rest-api.md" },
 ]

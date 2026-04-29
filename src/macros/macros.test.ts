@@ -239,6 +239,38 @@ describe("if / else", () => {
     expect(await ev("{{if::!.flag}}is falsy{{/if}}", env)).toBe("is falsy");
   });
 
+  test("scoped if does not execute false branch side effects", async () => {
+    const env = makeEnv({ localVars: { diceroll_setup: "true" }, chatVars: { runs: "0" } });
+    await ev("{{if !.diceroll_setup}}{{addchatvar::runs::1}}{{/if}}", env);
+    expect(env.variables.chat.get("runs")).toBe("0");
+  });
+
+  test("single-pass if guard with local flag only runs setup once", async () => {
+    const env = makeEnv({ chatVars: { runs: "0" } });
+    const template = `{{if !.diceroll_setup}}
+{{setchatvar::pov::1stW}}
+{{setchatvar::prose::ClinicW}}
+{{setchatvar::lens::HedonismW}}
+{{setchatvar::tone::SultryW}}
+{{setchatvar::sex::CrashW}}
+{{addchatvar::runs::1}}
+
+{{.diceroll_setup = true}}
+{{/if}}`;
+
+    await ev(template, env);
+    expect(env.variables.chat.get("pov")).toBe("1stW");
+    expect(env.variables.chat.get("prose")).toBe("ClinicW");
+    expect(env.variables.chat.get("lens")).toBe("HedonismW");
+    expect(env.variables.chat.get("tone")).toBe("SultryW");
+    expect(env.variables.chat.get("sex")).toBe("CrashW");
+    expect(env.variables.chat.get("runs")).toBe("1");
+    expect(env.variables.local.get("diceroll_setup")).toBe("true");
+
+    await ev(template, env);
+    expect(env.variables.chat.get("runs")).toBe("1");
+  });
+
   test("if with $gvar shorthand", async () => {
     const env = makeEnv({ globalVars: { mode: "dark" } });
     expect(await ev("{{if $mode}}has mode{{/if}}", env)).toBe("has mode");
@@ -749,6 +781,30 @@ describe("Logic macros", () => {
     expect(await ev("{{switch::{{.mode}}::light::Sun::dark::Moon::Star}}", env)).toBe("Moon");
   });
 
+  test("switch only resolves matched branch result", async () => {
+    const env = makeEnv();
+    const result = await ev(
+      "{{switch::b::a::{{setchatvar::bad::1}}Alpha::b::{{setchatvar::good::1}}Beta::{{setchatvar::defaulted::1}}Default}}",
+      env,
+    );
+    expect(result).toBe("Beta");
+    expect(env.variables.chat.get("good")).toBe("1");
+    expect(env.variables.chat.has("bad")).toBe(false);
+    expect(env.variables.chat.has("defaulted")).toBe(false);
+  });
+
+  test("switch only resolves default when no case matches", async () => {
+    const env = makeEnv();
+    const result = await ev(
+      "{{switch::z::a::{{setchatvar::bad::1}}Alpha::b::{{setchatvar::also_bad::1}}Beta::{{setchatvar::defaulted::1}}Default}}",
+      env,
+    );
+    expect(result).toBe("Default");
+    expect(env.variables.chat.get("defaulted")).toBe("1");
+    expect(env.variables.chat.has("bad")).toBe(false);
+    expect(env.variables.chat.has("also_bad")).toBe(false);
+  });
+
   test("default truthy", async () => {
     expect(await ev("{{default::hello::fallback}}")).toBe("hello");
   });
@@ -769,6 +825,20 @@ describe("Logic macros", () => {
     expect(await ev("{{coalesce::hello::world}}")).toBe("hello");
   });
 
+  test("default does not resolve fallback when value is truthy", async () => {
+    const env = makeEnv();
+    const result = await ev("{{default::value::{{setchatvar::fallback_ran::1}}fallback}}", env);
+    expect(result).toBe("value");
+    expect(env.variables.chat.has("fallback_ran")).toBe(false);
+  });
+
+  test("default resolves fallback when value is falsy", async () => {
+    const env = makeEnv();
+    const result = await ev("{{default::::{{setchatvar::fallback_ran::1}}fallback}}", env);
+    expect(result).toBe("fallback");
+    expect(env.variables.chat.get("fallback_ran")).toBe("1");
+  });
+
   test("and all truthy", async () => {
     expect(await ev("{{and::1::yes::true}}")).toBe("true");
   });
@@ -783,6 +853,20 @@ describe("Logic macros", () => {
 
   test("or all falsy", async () => {
     expect(await ev("{{or::0::false::}}")).toBe("");
+  });
+
+  test("and short-circuits after first falsy arg", async () => {
+    const env = makeEnv();
+    const result = await ev("{{and::0::{{setchatvar::and_ran::1}}yes}}", env);
+    expect(result).toBe("");
+    expect(env.variables.chat.has("and_ran")).toBe(false);
+  });
+
+  test("or short-circuits after first truthy arg", async () => {
+    const env = makeEnv();
+    const result = await ev("{{or::yes::{{setchatvar::or_ran::1}}later}}", env);
+    expect(result).toBe("true");
+    expect(env.variables.chat.has("or_ran")).toBe(false);
   });
 
   test("not truthy", async () => {

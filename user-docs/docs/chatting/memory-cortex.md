@@ -176,6 +176,7 @@ Memory Cortex data is available in your presets through macros. Add these via **
 | `{{memorySalience}}` | The single highest-importance memory from retrieval |
 | `{{cortexActive}}` | `"yes"` or `"no"` for conditional blocks |
 | `{{entityCount}}` | Number of entities in the current context |
+| `{{characterColors}}` | Character speech / thought / narration color guidance derived from cortex state |
 
 The standard memory macros (`{{memories}}`, `{{memoriesRaw}}`, etc.) continue to work alongside cortex macros. When the cortex is enabled, `{{memories}}` returns cortex-enhanced results formatted in shadow-prompt style.
 

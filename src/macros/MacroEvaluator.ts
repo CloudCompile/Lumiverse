@@ -265,8 +265,12 @@ async function evaluateScopedMacroNode(
     }
   }
 
-  // Resolve body
-  const body = await evaluateNodes(node.body, env, registry, globalOffset, depth + 1, diagnostics);
+  // Delayed-resolution scoped macros (currently {{if}}) need access to the raw
+  // body so they can choose which branch to resolve without triggering side
+  // effects in the unselected branch.
+  const body = def.delayArgResolution
+    ? reconstructNodes(node.body)
+    : await evaluateNodes(node.body, env, registry, globalOffset, depth + 1, diagnostics);
 
   const ctx: MacroExecContext = {
     name: node.name,
@@ -389,5 +393,33 @@ function reconstructMacro(node: MacroNode): string {
     }
   }
   str += "}}";
+  return str;
+}
+
+function reconstructScopedMacro(node: ScopedMacroNode): string {
+  let str = "{{";
+  if (node.flags.immediate) str += "!";
+  if (node.flags.delayed) str += "?";
+  if (node.flags.reevaluate) str += "~";
+  if (node.flags.filter) str += ">";
+  if (node.flags.preserveWhitespace) str += "#";
+  str += node.name;
+  for (const arg of node.args) {
+    str += "::";
+    str += reconstructNodes(arg);
+  }
+  str += "}}";
+  str += reconstructNodes(node.body);
+  str += `{{/${node.name}}}`;
+  return str;
+}
+
+function reconstructNodes(nodes: AstNode[]): string {
+  let str = "";
+  for (const node of nodes) {
+    if (node.type === "text") str += node.value;
+    else if (node.type === "macro") str += reconstructMacro(node);
+    else str += reconstructScopedMacro(node);
+  }
   return str;
 }
