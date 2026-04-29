@@ -19,6 +19,7 @@ export interface CreateRuntimeTransportOptions {
   extensionIdentifier: string;
   repoPath: string;
   storagePath: string;
+  mode?: RuntimeTransportMode;
   onMessage: (message: unknown) => void;
   onError: (message: string) => void;
   onExit: (exitCode: number | null, signalCode: number | null, error?: Error | undefined) => void;
@@ -85,7 +86,8 @@ function writeSandboxProfile(identifier: string, repoPath: string, storagePath: 
   return profilePath;
 }
 
-function resolveRuntimeMode(): RuntimeTransportMode {
+function resolveRuntimeMode(modeOverride?: RuntimeTransportMode): RuntimeTransportMode {
+  if (modeOverride) return modeOverride;
   const raw = process.env.LUMIVERSE_SPINDLE_RUNTIME_MODE?.trim().toLowerCase();
   if (raw === "worker") return "worker";
   if (raw === "sandbox") return "sandbox";
@@ -160,7 +162,7 @@ function createSubprocessTransport(
 }
 
 export function createRuntimeTransport(opts: CreateRuntimeTransportOptions): RuntimeTransport {
-  const mode = resolveRuntimeMode();
+  const mode = resolveRuntimeMode(opts.mode);
   if (mode === "worker") {
     return createWorkerTransport(opts);
   }

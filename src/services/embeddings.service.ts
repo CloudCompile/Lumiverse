@@ -1,6 +1,6 @@
 import { connect, Index, rerankers, type Connection, type Table } from "@lancedb/lancedb";
-import { join } from "path";
-import { rmSync, existsSync } from "fs";
+import { dirname, join } from "path";
+import { mkdirSync, readdirSync, renameSync, rmSync, existsSync } from "fs";
 import { env } from "../env";
 import { getDb } from "../db/connection";
 import * as settingsSvc from "./settings.service";
@@ -21,10 +21,12 @@ import { getProvider } from "../llm/registry";
 import { getFirstUserId } from "../auth/seed";
 import { sanitizeForVectorization } from "../utils/content-sanitizer";
 import { describeProviderError } from "../utils/provider-errors";
+import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../utils/lancedb-path";
 
 const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
 const LANCEDB_PATH = join(env.dataDir, "lancedb");
+const LANCEDB_URI = resolveLanceDbConnectUri(LANCEDB_PATH);
 const EMBEDDINGS_TABLE = "embeddings";
 const WORLD_BOOK_VECTOR_VERSION = 2;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
@@ -712,6 +714,46 @@ function rowId(userId: string, sourceType: string, sourceId: string, chunkIndex:
   return `${userId}:${sourceType}:${sourceId}:${chunkIndex}`;
 }
 
+let termuxMirrorCleanupAttempted = false;
+
+function pruneEmptyAncestors(path: string, stopAt: string): void {
+  let current = dirname(path);
+  while (current.startsWith(stopAt) && current !== stopAt) {
+    try {
+      if (readdirSync(current).length > 0) break;
+      rmSync(current, { recursive: false, force: true });
+    } catch {
+      break;
+    }
+    current = dirname(current);
+  }
+}
+
+function cleanupBrokenTermuxLanceDbMirror(): void {
+  if (termuxMirrorCleanupAttempted) return;
+  termuxMirrorCleanupAttempted = true;
+
+  const brokenPath = resolveBrokenTermuxLanceDbMirrorPath(LANCEDB_PATH);
+  if (!brokenPath || brokenPath === LANCEDB_PATH || !existsSync(brokenPath)) return;
+
+  const workspaceRoot = process.cwd();
+  try {
+    if (existsSync(LANCEDB_PATH)) {
+      rmSync(brokenPath, { recursive: true, force: true });
+      pruneEmptyAncestors(brokenPath, workspaceRoot);
+      console.warn(`[embeddings] Removed broken Termux LanceDB mirror at ${brokenPath}`);
+      return;
+    }
+
+    mkdirSync(dirname(LANCEDB_PATH), { recursive: true });
+    renameSync(brokenPath, LANCEDB_PATH);
+    pruneEmptyAncestors(brokenPath, workspaceRoot);
+    console.warn(`[embeddings] Moved broken Termux LanceDB mirror into place: ${brokenPath} -> ${LANCEDB_PATH}`);
+  } catch (err) {
+    console.warn(`[embeddings] Failed to clean up broken Termux LanceDB mirror at ${brokenPath}`, err);
+  }
+}
+
 export function getChatMemoryParams(mode: "conservative" | "balanced" | "aggressive") {
   switch (mode) {
     case "conservative":
@@ -746,7 +788,8 @@ async function getConnection(): Promise<Connection> {
   if (connHandle) return connHandle;
 
   const generation = connGeneration;
-  if (!connPromise) connPromise = connect(LANCEDB_PATH);
+  cleanupBrokenTermuxLanceDbMirror();
+  if (!connPromise) connPromise = connect(LANCEDB_URI);
 
   const conn = await connPromise;
   if (generation !== connGeneration) {

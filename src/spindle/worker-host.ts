@@ -173,6 +173,88 @@ type FrontendProcessRecord = FrontendProcessInfo & {
   stopReason?: string;
 };
 
+type BackendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type BackendProcessExitReason =
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "timed_out"
+  | "backend_unloaded"
+  | "replaced";
+
+type BackendProcessInfo = {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  state: BackendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: BackendProcessExitReason;
+  error?: string;
+};
+
+type BackendProcessLifecycleEvent = {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: BackendProcessState;
+  previousState?: BackendProcessState;
+  at: string;
+  exitReason?: BackendProcessExitReason;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type BackendProcessRecord = BackendProcessInfo & {
+  requestId: string;
+  runtime: RuntimeTransport;
+  startupTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setTimeout> | null;
+  stopTimer: ReturnType<typeof setTimeout> | null;
+  startupTimeoutMs: number;
+  heartbeatTimeoutMs: number;
+  stopReason?: string;
+};
+
+type BackendProcessRuntimeInit = {
+  processId: string;
+  entry: string;
+  entryPath: string;
+  kind: string;
+  key?: string;
+  payload?: unknown;
+  metadata?: Record<string, unknown>;
+  userId?: string;
+};
+
+type HostToBackendProcessRuntime =
+  | { type: "init"; process: BackendProcessRuntimeInit }
+  | { type: "stop"; reason?: string }
+  | { type: "message"; payload: unknown };
+
+type BackendProcessRuntimeToHost =
+  | { type: "ready" }
+  | { type: "heartbeat" }
+  | { type: "message"; payload: unknown }
+  | { type: "complete" }
+  | { type: "fail"; error: string }
+  | { type: "stopped" };
+
 type RuntimeWorkerToHost =
   | WorkerToHost
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
@@ -292,7 +374,40 @@ type RuntimeWorkerToHost =
       processId: string;
       options?: { userId?: string; reason?: string };
     }
-  | { type: "frontend_process_send"; processId: string; payload: unknown; userId?: string };
+  | { type: "frontend_process_send"; processId: string; payload: unknown; userId?: string }
+  | {
+      type: "backend_process_spawn";
+      requestId: string;
+      options: {
+        entry: string;
+        kind?: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "backend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: BackendProcessState;
+      };
+    }
+  | { type: "backend_process_get"; requestId: string; processId: string }
+  | {
+      type: "backend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string };
 
 type RuntimeHostToWorker =
   | HostToWorker
@@ -307,7 +422,9 @@ type RuntimeHostToWorker =
       ctx: MacroInterceptorCtx;
     }
   | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
-  | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string };
+  | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
+  | { type: "backend_process_lifecycle"; event: BackendProcessLifecycleEvent }
+  | { type: "backend_process_message"; processId: string; payload: unknown; userId: string };
 
 let cachedBackendVersion: string | null = null;
 let cachedFrontendVersion: string | null = null;
@@ -528,6 +645,7 @@ export class WorkerHost {
   private static readonly TOAST_RATE_WINDOW_MS = 10_000;
   private registeredCommands: SpindleCommandDTO[] = [];
   private static readonly MAX_COMMANDS_PER_EXTENSION = 20;
+  private static readonly MAX_BACKEND_PROCESSES = 16;
   private commandInvokedHandlers = new Set<string>(); // tracked for cleanup only
   private onWorkerReady: (() => void) | null = null;
   private onWorkerShutdownAck: (() => void) | null = null;
@@ -539,6 +657,8 @@ export class WorkerHost {
   private readonly installedByUserId: string | null;
   private frontendProcesses = new Map<string, FrontendProcessRecord>();
   private frontendProcessKeyIndex = new Map<string, string>();
+  private backendProcesses = new Map<string, BackendProcessRecord>();
+  private backendProcessKeyIndex = new Map<string, string>();
 
   constructor(
     public readonly extensionId: string,
@@ -577,7 +697,7 @@ export class WorkerHost {
     }
 
     if (typeof userId !== "string" || !userId.trim()) {
-      throw new Error("userId is required when spawning a frontend process");
+      throw new Error("userId is required when spawning a managed process");
     }
 
     return userId.trim();
@@ -718,6 +838,291 @@ export class WorkerHost {
       if (record.key) {
         this.frontendProcessKeyIndex.delete(
           this.buildFrontendProcessKey(record.userId ?? "", record.kind, record.key)
+        );
+      }
+    }
+  }
+
+  private getBackendProcessRuntimeMode(): Extract<import("./runtime-transport").RuntimeTransportMode, "process" | "sandbox"> {
+    const raw = process.env.LUMIVERSE_SPINDLE_RUNTIME_MODE?.trim().toLowerCase();
+    return raw === "sandbox" ? "sandbox" : "process";
+  }
+
+  private buildBackendProcessKey(userId: string, kind: string, key: string): string {
+    return `${userId}:${kind}:${key}`;
+  }
+
+  private snapshotBackendProcess(record: BackendProcessRecord): BackendProcessInfo {
+    return {
+      processId: record.processId,
+      entry: record.entry,
+      kind: record.kind,
+      ...(record.key ? { key: record.key } : {}),
+      state: record.state,
+      ...(record.userId ? { userId: record.userId } : {}),
+      ...(record.metadata ? { metadata: record.metadata } : {}),
+      startedAt: record.startedAt,
+      ...(record.readyAt ? { readyAt: record.readyAt } : {}),
+      ...(record.lastHeartbeatAt ? { lastHeartbeatAt: record.lastHeartbeatAt } : {}),
+      ...(record.endedAt ? { endedAt: record.endedAt } : {}),
+      ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+      ...(record.error ? { error: record.error } : {}),
+    };
+  }
+
+  private clearBackendProcessTimers(record: BackendProcessRecord): void {
+    if (record.startupTimer) {
+      clearTimeout(record.startupTimer);
+      record.startupTimer = null;
+    }
+    if (record.heartbeatTimer) {
+      clearTimeout(record.heartbeatTimer);
+      record.heartbeatTimer = null;
+    }
+    if (record.stopTimer) {
+      clearTimeout(record.stopTimer);
+      record.stopTimer = null;
+    }
+  }
+
+  private emitBackendProcessLifecycle(
+    record: BackendProcessRecord,
+    previousState?: BackendProcessState
+  ): void {
+    this.postToWorker({
+      type: "backend_process_lifecycle",
+      event: {
+        processId: record.processId,
+        entry: record.entry,
+        kind: record.kind,
+        ...(record.key ? { key: record.key } : {}),
+        ...(record.userId ? { userId: record.userId } : {}),
+        state: record.state,
+        ...(previousState ? { previousState } : {}),
+        at: record.endedAt ?? record.lastHeartbeatAt ?? record.readyAt ?? record.startedAt,
+        ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+        ...(record.error ? { error: record.error } : {}),
+        ...(record.metadata ? { metadata: record.metadata } : {}),
+      },
+    });
+  }
+
+  private armBackendHeartbeatTimer(record: BackendProcessRecord): void {
+    if (record.heartbeatTimeoutMs <= 0) return;
+    if (record.heartbeatTimer) clearTimeout(record.heartbeatTimer);
+    record.heartbeatTimer = setTimeout(() => {
+      const latest = this.backendProcesses.get(record.processId);
+      if (!latest) return;
+      try {
+        latest.runtime.terminate(true);
+      } catch {
+        // ignore
+      }
+      this.finalizeBackendProcess(latest, "timed_out", "timed_out", "Backend process heartbeat timed out");
+    }, record.heartbeatTimeoutMs);
+  }
+
+  private armBackendStopTimer(record: BackendProcessRecord): void {
+    if (record.stopTimer) clearTimeout(record.stopTimer);
+    record.stopTimer = setTimeout(() => {
+      const latest = this.backendProcesses.get(record.processId);
+      if (!latest) return;
+      try {
+        latest.runtime.terminate(true);
+      } catch {
+        // ignore
+      }
+      this.finalizeBackendProcess(latest, "stopped", "stopped", "Backend process force-stopped after stop timeout");
+    }, 5_000);
+  }
+
+  private transitionBackendProcess(
+    record: BackendProcessRecord,
+    nextState: BackendProcessState,
+    extras?: { readyAt?: string; lastHeartbeatAt?: string; endedAt?: string; exitReason?: BackendProcessExitReason; error?: string }
+  ): void {
+    if (record.state === nextState && !extras) return;
+    const previousState = record.state;
+    record.state = nextState;
+    if (extras?.readyAt) record.readyAt = extras.readyAt;
+    if (extras?.lastHeartbeatAt) record.lastHeartbeatAt = extras.lastHeartbeatAt;
+    if (extras?.endedAt) record.endedAt = extras.endedAt;
+    if (extras?.exitReason) record.exitReason = extras.exitReason;
+    if (extras && "error" in extras) {
+      record.error = extras.error;
+    }
+    this.emitBackendProcessLifecycle(record, previousState);
+  }
+
+  private finalizeBackendProcess(
+    record: BackendProcessRecord,
+    state: Extract<BackendProcessState, "stopped" | "completed" | "failed" | "timed_out">,
+    exitReason: BackendProcessExitReason,
+    error?: string,
+  ): void {
+    this.clearBackendProcessTimers(record);
+    this.transitionBackendProcess(record, state, {
+      endedAt: new Date().toISOString(),
+      exitReason,
+      ...(error ? { error } : { error: undefined }),
+    });
+    this.backendProcesses.delete(record.processId);
+    if (record.key) {
+      this.backendProcessKeyIndex.delete(
+        this.buildBackendProcessKey(record.userId ?? "", record.kind, record.key)
+      );
+    }
+  }
+
+  private getBackendProcessRecord(processId: string): BackendProcessRecord | null {
+    return this.backendProcesses.get(processId) ?? null;
+  }
+
+  private async resolveBackendProcessEntryPath(entry: string): Promise<string> {
+    const normalized = typeof entry === "string" ? entry.trim().replace(/\\/g, "/") : "";
+    if (!normalized) throw new Error("entry is required");
+    if (normalized.startsWith("/") || normalized.split("/").includes("..")) {
+      throw new Error("entry must be a relative path inside the extension repo");
+    }
+    if (!normalized.startsWith("dist/")) {
+      throw new Error("backend process entries must live under dist/");
+    }
+    if (!/\.(?:cjs|mjs|js)$/.test(normalized)) {
+      throw new Error("backend process entry must be a built JavaScript file");
+    }
+
+    const repoPath = managerSvc.getRepoPath(this.manifest.identifier);
+    const repoAbs = resolve(repoPath);
+    const entryPath = resolve(repoAbs, normalized);
+    const insideRepo = entryPath === repoAbs || entryPath.startsWith(`${repoAbs}${sep}`);
+    if (!insideRepo) {
+      throw new Error(`Path traversal detected in backend process entry: ${entry}`);
+    }
+    if (!(await Bun.file(entryPath).exists())) {
+      throw new Error(`Backend process entry not found: ${normalized}`);
+    }
+
+    const blocked = managerSvc.detectDangerousBackendCapabilities(await Bun.file(entryPath).text());
+    if (blocked.length > 0) {
+      throw new Error(
+        `Backend process entry \"${normalized}\" uses blocked backend capabilities: ${blocked.join(", ")}`
+      );
+    }
+
+    return entryPath;
+  }
+
+  private handleBackendProcessRuntimeMessage(
+    processId: string,
+    message: BackendProcessRuntimeToHost
+  ): void {
+    const record = this.backendProcesses.get(processId);
+    if (!record) return;
+
+    switch (message.type) {
+      case "ready": {
+        if (record.state !== "starting") return;
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        const now = new Date().toISOString();
+        this.transitionBackendProcess(record, "running", {
+          readyAt: now,
+          lastHeartbeatAt: now,
+        });
+        this.armBackendHeartbeatTimer(record);
+        this.postToWorker({
+          type: "response",
+          requestId: record.requestId,
+          result: this.snapshotBackendProcess(record),
+        });
+        return;
+      }
+
+      case "heartbeat": {
+        if (record.state !== "running") return;
+        const now = new Date().toISOString();
+        this.transitionBackendProcess(record, "running", { lastHeartbeatAt: now });
+        this.armBackendHeartbeatTimer(record);
+        return;
+      }
+
+      case "message": {
+        this.postToWorker({
+          type: "backend_process_message",
+          processId: record.processId,
+          payload: message.payload,
+          userId: record.userId ?? "",
+        });
+        return;
+      }
+
+      case "complete": {
+        if (record.state === "starting") {
+          this.rejectRequest(record.requestId, new Error("Backend process completed before it became ready"));
+        }
+        this.finalizeBackendProcess(record, "completed", "completed");
+        return;
+      }
+
+      case "fail": {
+        const error = message.error?.trim() || "Backend process failed";
+        if (record.state === "starting") {
+          this.rejectRequest(record.requestId, new Error(error));
+        }
+        this.finalizeBackendProcess(record, "failed", "failed", error);
+        return;
+      }
+
+      case "stopped": {
+        if (record.state === "starting") {
+          this.rejectRequest(record.requestId, new Error("Backend process stopped before it became ready"));
+        }
+        this.finalizeBackendProcess(record, "stopped", "stopped");
+        return;
+      }
+    }
+  }
+
+  private handleBackendProcessRuntimeExit(
+    processId: string,
+    exitCode: number | null,
+    signalCode: number | null,
+    error?: Error,
+  ): void {
+    const record = this.backendProcesses.get(processId);
+    if (!record) return;
+
+    const details = error?.message || `Backend process exited (code=${exitCode ?? "null"}, signal=${signalCode ?? "null"})`;
+    if (record.state === "starting") {
+      this.rejectRequest(record.requestId, new Error(details));
+      this.finalizeBackendProcess(record, "failed", "failed", details);
+      return;
+    }
+    if (record.state === "stopping") {
+      this.finalizeBackendProcess(record, "stopped", "stopped");
+      return;
+    }
+    this.finalizeBackendProcess(record, "failed", "failed", details);
+  }
+
+  private stopAllBackendProcesses(exitReason: BackendProcessExitReason): void {
+    for (const record of Array.from(this.backendProcesses.values())) {
+      this.clearBackendProcessTimers(record);
+      try {
+        record.runtime.terminate(true);
+      } catch {
+        // ignore
+      }
+      this.transitionBackendProcess(record, "stopped", {
+        endedAt: new Date().toISOString(),
+        exitReason,
+      });
+      this.backendProcesses.delete(record.processId);
+      if (record.key) {
+        this.backendProcessKeyIndex.delete(
+          this.buildBackendProcessKey(record.userId ?? "", record.kind, record.key)
         );
       }
     }
@@ -909,6 +1314,7 @@ export class WorkerHost {
     this.runtimeStopping = true;
     this.stopRuntimeStatsSampling();
     this.stopAllFrontendProcesses("backend_unloaded");
+    this.stopAllBackendProcesses("backend_unloaded");
 
     // Wait for the worker to acknowledge shutdown (posted right before
     // process.exit(0) in worker-runtime.ts) — or fall back to terminate()
@@ -984,6 +1390,7 @@ export class WorkerHost {
   private cleanup(): void {
     this.stopRuntimeStatsSampling();
     this.stopAllFrontendProcesses("backend_unloaded");
+    this.stopAllBackendProcesses("backend_unloaded");
     this.onWorkerReady = null;
     this.onWorkerShutdownAck = null;
     this.onRuntimeExit?.();
@@ -1875,6 +2282,21 @@ export class WorkerHost {
         break;
       case "frontend_process_send":
         this.handleFrontendProcessSend(msg.processId, msg.payload, msg.userId);
+        break;
+      case "backend_process_spawn":
+        void this.handleBackendProcessSpawn(msg.requestId, msg.options);
+        break;
+      case "backend_process_list":
+        this.handleBackendProcessList(msg.requestId, msg.filter);
+        break;
+      case "backend_process_get":
+        this.handleBackendProcessGet(msg.requestId, msg.processId);
+        break;
+      case "backend_process_stop":
+        this.handleBackendProcessStop(msg.requestId, msg.processId, msg.options);
+        break;
+      case "backend_process_send":
+        this.handleBackendProcessSend(msg.processId, msg.payload, msg.userId);
         break;
       // ─── Macro Resolution (free tier — no permission needed) ────────────
       case "macros_resolve":
@@ -6816,6 +7238,222 @@ export class WorkerHost {
       processId,
       payload,
     });
+  }
+
+  private async handleBackendProcessSpawn(
+    requestId: string,
+    options: {
+      entry: string;
+      kind?: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }
+  ): Promise<void> {
+    try {
+      const entryPath = await this.resolveBackendProcessEntryPath(options?.entry ?? "");
+      const entry = typeof options?.entry === "string" ? options.entry.trim().replace(/\\/g, "/") : "";
+      const kind = typeof options?.kind === "string" && options.kind.trim() ? options.kind.trim() : entry;
+      const userId = this.resolveFrontendProcessUserId(options?.userId);
+      const processId = crypto.randomUUID();
+      const key = typeof options?.key === "string" && options.key.trim() ? options.key.trim() : undefined;
+      const startupTimeoutMs = Math.max(1_000, Math.min(120_000, Math.round(options?.startupTimeoutMs ?? 15_000)));
+      const heartbeatTimeoutMs = Math.max(0, Math.min(120_000, Math.round(options?.heartbeatTimeoutMs ?? 15_000)));
+
+      if (key) {
+        const dedupeKey = this.buildBackendProcessKey(userId, kind, key);
+        const existingId = this.backendProcessKeyIndex.get(dedupeKey);
+        if (existingId) {
+          const existing = this.backendProcesses.get(existingId);
+          if (existing) {
+            if (!options?.replaceExisting) {
+              throw new Error(`Backend process already exists for kind \"${kind}\" and key \"${key}\"`);
+            }
+            if (existing.state === "starting") {
+              this.rejectRequest(existing.requestId, new Error("Backend process was replaced before it became ready"));
+            }
+            this.clearBackendProcessTimers(existing);
+            try {
+              existing.runtime.terminate(true);
+            } catch {
+              // ignore
+            }
+            this.finalizeBackendProcess(existing, "stopped", "replaced");
+          }
+        }
+      }
+
+      if (this.backendProcesses.size >= WorkerHost.MAX_BACKEND_PROCESSES) {
+        throw new Error(`Backend process limit reached (${WorkerHost.MAX_BACKEND_PROCESSES})`);
+      }
+
+      const runtimePath = join(import.meta.dir, "backend-process-runtime.ts");
+      const storagePath = this.getStorageRootPath(this.manifest.identifier);
+      const repoPath = managerSvc.getRepoPath(this.manifest.identifier);
+      const runtime = createRuntimeTransport({
+        runtimePath,
+        extensionIdentifier: this.manifest.identifier,
+        repoPath,
+        storagePath,
+        mode: this.getBackendProcessRuntimeMode(),
+        onMessage: (message) => {
+          this.handleBackendProcessRuntimeMessage(processId, message as BackendProcessRuntimeToHost);
+        },
+        onError: (message) => {
+          const record = this.backendProcesses.get(processId);
+          if (!record) return;
+          this.finalizeBackendProcess(record, "failed", "failed", message);
+        },
+        onExit: (exitCode, signalCode, error) => {
+          this.handleBackendProcessRuntimeExit(processId, exitCode, signalCode, error);
+        },
+      });
+
+      const record: BackendProcessRecord = {
+        requestId,
+        runtime,
+        processId,
+        entry,
+        kind,
+        ...(key ? { key } : {}),
+        state: "starting",
+        userId,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+        startedAt: new Date().toISOString(),
+        startupTimer: null,
+        heartbeatTimer: null,
+        stopTimer: null,
+        startupTimeoutMs,
+        heartbeatTimeoutMs,
+      };
+
+      this.backendProcesses.set(processId, record);
+      if (key) {
+        this.backendProcessKeyIndex.set(
+          this.buildBackendProcessKey(userId, kind, key),
+          processId
+        );
+      }
+
+      this.emitBackendProcessLifecycle(record);
+
+      record.startupTimer = setTimeout(() => {
+        const latest = this.backendProcesses.get(processId);
+        if (!latest || latest.state !== "starting") return;
+        try {
+          latest.runtime.terminate(true);
+        } catch {
+          // ignore
+        }
+        this.finalizeBackendProcess(latest, "timed_out", "timed_out", "Backend process startup timed out");
+        this.rejectRequest(requestId, new Error("Backend process startup timed out"));
+      }, startupTimeoutMs);
+
+      runtime.postMessage({
+        type: "init",
+        process: {
+          processId,
+          entry,
+          entryPath,
+          kind,
+          ...(key ? { key } : {}),
+          payload: options?.payload,
+          ...(options?.metadata ? { metadata: options.metadata } : {}),
+          ...(userId ? { userId } : {}),
+        },
+      } satisfies HostToBackendProcessRuntime);
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessList(
+    requestId: string,
+    filter?: { userId?: string; kind?: string; key?: string; state?: BackendProcessState }
+  ): void {
+    try {
+      const userId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof filter?.userId === "string" && filter.userId.trim()
+            ? filter.userId.trim()
+            : undefined;
+      const items = Array.from(this.backendProcesses.values())
+        .filter((record) => {
+          if (userId && record.userId !== userId) return false;
+          if (filter?.kind && record.kind !== filter.kind) return false;
+          if (filter?.key && record.key !== filter.key) return false;
+          if (filter?.state && record.state !== filter.state) return false;
+          return true;
+        })
+        .map((record) => this.snapshotBackendProcess(record));
+      this.postToWorker({ type: "response", requestId, result: items });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessGet(requestId: string, processId: string): void {
+    try {
+      const record = this.getBackendProcessRecord(processId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: record ? this.snapshotBackendProcess(record) : null,
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessStop(
+    requestId: string,
+    processId: string,
+    options?: { userId?: string; reason?: string }
+  ): void {
+    try {
+      const record = this.getBackendProcessRecord(processId);
+      if (!record) {
+        this.postToWorker({ type: "response", requestId, result: undefined });
+        return;
+      }
+      const resolvedUserId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof options?.userId === "string" && options.userId.trim()
+            ? options.userId.trim()
+            : undefined;
+      if (resolvedUserId && record.userId !== resolvedUserId) {
+        throw new Error("processId does not belong to the requested userId");
+      }
+      if (record.state === "starting" || record.state === "running") {
+        record.stopReason = options?.reason;
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        this.transitionBackendProcess(record, "stopping");
+        this.armBackendStopTimer(record);
+      }
+      record.runtime.postMessage({
+        type: "stop",
+        ...(options?.reason ? { reason: options.reason } : {}),
+      } satisfies HostToBackendProcessRuntime);
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessSend(processId: string, payload: unknown, userId?: string): void {
+    const record = this.getBackendProcessRecord(processId);
+    if (!record) return;
+    if (this.installScope === "operator" && userId && record.userId !== userId) return;
+    record.runtime.postMessage({ type: "message", payload } satisfies HostToBackendProcessRuntime);
   }
 
   // ─── Version (free tier) ────────────────────────────────────────────

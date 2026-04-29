@@ -10,7 +10,7 @@ Lumiverse can run a backend extension in one of three runtime modes:
 
 The backend and frontend extension APIs do **not** change across these modes. Existing extensions should keep using the same `spindle` API and the same frontend `ctx` APIs.
 
-That includes the new frontend process lifecycle surface: `spindle.frontendProcesses` on the backend and `ctx.processes.register(...)` on the frontend behave the same across `process`, `sandbox`, and `worker` runtime modes.
+That includes the process lifecycle surfaces: `spindle.frontendProcesses` on the backend and `ctx.processes.register(...)` on the frontend behave the same across `process`, `sandbox`, and `worker` runtime modes, and `spindle.backendProcesses` always spawns an isolated subprocess boundary for child backend work.
 
 ## Default Behavior
 
@@ -112,3 +112,11 @@ You should **not** need to change:
 - permission handling patterns
 
 Runtime mode is an execution detail owned by Lumiverse, not by extension authors.
+
+## Per-Task Isolation
+
+Runtime mode controls how the main backend extension runtime starts.
+
+If one part of your extension needs a stronger kill boundary than the rest, use [`spindle.backendProcesses`](../backend-api/backend-processes.md) to move just that slice into a host-supervised child subprocess.
+
+That is especially useful when a loop could block its own event loop. In that case, the host can still fire watchdog timers and terminate the child even though the child can no longer cooperate.

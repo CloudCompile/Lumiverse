@@ -53,6 +53,7 @@ nav = [
     { "User Presence" = "backend-api/user-presence.md" },
     { "Frontend Communication" = "backend-api/frontend-communication.md" },
     { "Frontend Process Lifecycle" = "backend-api/frontend-processes.md" },
+    { "Backend Process Lifecycle" = "backend-api/backend-processes.md" },
     { "Version" = "backend-api/version.md" },
   ] },
   { "Frontend API" = [
@@ -73,6 +74,7 @@ nav = [
     { "Frontend Only" = "examples/frontend-only.md" },
     { "Full Stack" = "examples/full-stack.md" },
     { "Frontend Process Watchdog" = "examples/frontend-process-watchdog.md" },
+    { "Backend Process Watchdog" = "examples/backend-process-watchdog.md" },
   ] },
   { "REST API" = "rest-api.md" },
 ]
