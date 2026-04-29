@@ -308,6 +308,12 @@ function hasSignificantInlineStyles(html: string): boolean {
   return false
 }
 
+function hasBalancedStyleTags(html: string): boolean {
+  const opens = (html.match(/<style[\s>]/gi) || []).length
+  const closes = (html.match(/<\/style\s*>/gi) || []).length
+  return opens === closes
+}
+
 function extractHtmlIslands(
   raw: string,
   isStreaming: boolean,
@@ -376,8 +382,14 @@ function extractHtmlIslands(
         continue
       }
 
-      // Isolate if balanced and contains <style> or significant inline styling
-      if (depth <= 0 && (/<style[\s>]/i.test(blockContent) || hasSignificantInlineStyles(blockContent))) {
+      const isIslandCandidate = /<style[\s>]/i.test(blockContent) || hasSignificantInlineStyles(blockContent)
+      const canRenderStreamingPreview = isStreaming && hasBalancedStyleTags(blockContent)
+
+      // While a styled HTML wrapper is still streaming, keep it inside a Shadow DOM
+      // island as soon as its internal <style> tags are balanced. That preserves the
+      // authored presentation instead of falling back to prose sanitization until the
+      // outer wrapper finally closes.
+      if (isIslandCandidate && (depth <= 0 || canRenderStreamingPreview)) {
         const idx = islands.length
         islands.push(blockContent)
         output.push('', `<!--${HTML_ISLAND_TOKEN}_${idx}-->`, '')
