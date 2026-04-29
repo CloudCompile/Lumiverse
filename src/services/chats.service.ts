@@ -312,6 +312,7 @@ export function deleteChat(userId: string, id: string): boolean {
     try {
       memoryCortex.invalidateCortexCache(id);
       memoryCortex.invalidateLinkedCortexCache(id);
+      memoryCortex.clearIngestionState(id);
     } catch { /* ignore if not loaded */ }
 
     // Drop any debounced vectorization timers tied to this chat — without
@@ -1640,24 +1641,30 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
           }
         : undefined;
 
-      memoryCortex.processChunk(
-        {
-          chunkId: chunk.id,
-          chatId,
-          userId,
-          content: chunk.content,
-          messageIds: JSON.parse(chunk.message_ids || "[]"),
-          startMessageIndex: 0,
-          endMessageIndex: 0,
-          createdAt: chunk.created_at,
-        },
-        characterNames,
-        generateRawFn,
-        sidecarConnectionId,
-        descriptionAliases.size > 0 ? descriptionAliases : undefined,
-      ).catch(err => {
-        console.warn("[chats] Memory cortex processing failed:", err);
-      });
+      const chunkPayload = {
+        chunkId: chunk.id,
+        chatId,
+        userId,
+        content: chunk.content,
+        messageIds: JSON.parse(chunk.message_ids || "[]"),
+        startMessageIndex: 0,
+        endMessageIndex: 0,
+        createdAt: chunk.created_at,
+      };
+
+      // Kick the cortex pass onto the next macrotask so chat creation and
+      // MESSAGE_SENT delivery complete before CPU-bound heuristics begin.
+      setTimeout(() => {
+        memoryCortex.processChunk(
+          chunkPayload,
+          characterNames,
+          generateRawFn,
+          sidecarConnectionId,
+          descriptionAliases.size > 0 ? descriptionAliases : undefined,
+        ).catch(err => {
+          console.warn("[chats] Memory cortex processing failed:", err);
+        });
+      }, 0);
     }
   } catch (err) {
     // Non-fatal: cortex processing should never break chunk creation

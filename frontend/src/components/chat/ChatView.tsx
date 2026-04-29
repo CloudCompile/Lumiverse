@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useCallback, useState } from 'react'
 import { useParams } from 'react-router'
 import { UserRound, ListChecks } from 'lucide-react'
 import { useStore } from '@/store'
 import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
+import { memoryCortexApi, type CortexIngestionStatus } from '@/api/memory-cortex'
 import { generateApi } from '@/api/generate'
 import { loadoutsApi } from '@/api/loadouts'
 import { councilApi } from '@/api/council'
@@ -26,12 +27,116 @@ import CouncilPill from './CouncilPill'
 import PortraitPanel from './PortraitPanel'
 import ExpressionDisplay from './expressions/ExpressionDisplay'
 import FloatingAvatarViewer from './FloatingAvatarViewer'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/ws/events'
 import styles from './ChatView.module.css'
 import clsx from 'clsx'
+
+interface CortexNotice {
+  variant: 'processing' | 'error'
+  title: string
+  detail: string
+  percent?: number
+}
+
+interface CortexRebuildStatus {
+  chatId?: string
+  status: string
+  current?: number
+  total?: number
+  percent?: number
+  error?: string
+  source?: string
+}
+
+function formatIngestionDetail(status: CortexIngestionStatus): string {
+  const phaseDetail: Record<CortexIngestionStatus['phase'], string> = {
+    queued: 'Queued for processing',
+    font: 'Extracting font and style cues',
+    heuristics: 'Scoring salience and relationships',
+    sidecar: 'Running sidecar analysis',
+    persisting: 'Saving memory updates',
+    complete: 'Complete',
+    error: status.error || 'Processing failed',
+  }
+
+  return phaseDetail[status.phase] + (status.pendingJobs > 1 ? `, ${status.pendingJobs} jobs pending` : '')
+}
+
+function formatChunkProgress(payload: CortexRebuildStatus): string {
+  const current = payload.current ?? 0
+  const total = payload.total ?? 0
+  return total > 0 ? `, ${current}/${total} chunks` : ''
+}
+
+function formatRebuildDetail(payload: CortexRebuildStatus): string {
+  const action = payload.source === 'warmup'
+    ? 'Preparing Long-Term Chat Memory'
+    : 'Rebuilding Long-Term Chat Memory'
+
+  return action + formatChunkProgress(payload)
+}
+
+function buildCortexNotice(ingestionStatus: CortexIngestionStatus | null, rebuildStatus: CortexRebuildStatus | null): CortexNotice | null {
+  if (rebuildStatus?.status === 'error') {
+    return {
+      variant: 'error',
+      title: 'Memory',
+      detail: rebuildStatus.error || 'Chat memory rebuild failed.',
+      percent: rebuildStatus.percent,
+    }
+  }
+
+  if (ingestionStatus?.status === 'error') {
+    return {
+      variant: 'error',
+      title: 'Memory',
+      detail: ingestionStatus.error || 'Background memory processing failed.',
+    }
+  }
+
+  const rebuildProcessing = rebuildStatus?.status === 'processing'
+  const ingestionProcessing = ingestionStatus?.status === 'processing'
+
+  if (rebuildProcessing && ingestionProcessing) {
+    return {
+      variant: 'processing',
+      title: 'Memory',
+      detail: `Preparing Long-Term Chat Memory + Cortex${formatChunkProgress(rebuildStatus)}`,
+      percent: rebuildStatus.percent,
+    }
+  }
+
+  if (rebuildProcessing) {
+    return {
+      variant: 'processing',
+      title: 'Memory',
+      detail: formatRebuildDetail(rebuildStatus),
+      percent: rebuildStatus.percent,
+    }
+  }
+
+  if (ingestionProcessing) {
+    return {
+      variant: 'processing',
+      title: 'Memory',
+      detail: formatIngestionDetail(ingestionStatus),
+    }
+  }
+
+  return null
+}
+
+function normalizeRebuildStatus(payload: CortexRebuildStatus | null): CortexRebuildStatus | null {
+  if (!payload) return null
+  return payload.status === 'idle' || payload.status === 'complete' ? null : payload
+}
 
 export default function ChatView() {
   const { chatId } = useParams<{ chatId: string }>()
   const autoSwitchedPersonaIdRef = useRef<string | null>(null)
+  const [ingestionStatus, setIngestionStatus] = useState<CortexIngestionStatus | null>(null)
+  const [rebuildStatus, setRebuildStatus] = useState<CortexRebuildStatus | null>(null)
   const setActiveChat = useStore((s) => s.setActiveChat)
   const setMessages = useStore((s) => s.setMessages)
   const messages = useStore((s) => s.messages)
@@ -54,6 +159,42 @@ export default function ChatView() {
 
   useSwipeKeyboard()
   useEditKeyboard()
+
+  const cortexNotice = useMemo(() => buildCortexNotice(ingestionStatus, rebuildStatus), [ingestionStatus, rebuildStatus])
+
+  useEffect(() => {
+    if (!chatId) return
+    let cancelled = false
+    setIngestionStatus(null)
+    setRebuildStatus(null)
+
+    Promise.all([
+      memoryCortexApi.getIngestionStatus(chatId).catch(() => null),
+      memoryCortexApi.getRebuildStatus(chatId).catch(() => null),
+    ]).then(([ingestion, rebuild]) => {
+      if (cancelled) return
+      setIngestionStatus(ingestion)
+      setRebuildStatus(normalizeRebuildStatus(rebuild))
+    })
+
+    memoryCortexApi.warm(chatId).catch(() => {})
+
+    const offIngestion = wsClient.on(EventType.CORTEX_INGESTION_PROGRESS, (payload: any) => {
+      if (!payload || payload.chatId !== chatId) return
+      setIngestionStatus(payload)
+    })
+
+    const offRebuild = wsClient.on(EventType.CORTEX_REBUILD_PROGRESS, (payload: any) => {
+      if (!payload || payload.chatId !== chatId) return
+      setRebuildStatus(normalizeRebuildStatus(payload))
+    })
+
+    return () => {
+      cancelled = true
+      offIngestion()
+      offRebuild()
+    }
+  }, [chatId])
 
   const innerStyle = useMemo(() => {
     switch (chatWidthMode) {
@@ -428,6 +569,22 @@ export default function ChatView() {
         )}
 
         <div className={styles.chatColumn}>
+          {cortexNotice && (
+            <div className={styles.cortexNoticeDock} aria-live="polite" aria-atomic="true">
+              <div className={clsx(styles.cortexNotice, cortexNotice.variant === 'error' && styles.cortexNoticeError)}>
+                <span className={styles.cortexNoticeStatus} aria-hidden="true" />
+                <span className={styles.cortexNoticeTitle}>{cortexNotice.title}</span>
+                <span className={styles.cortexNoticeSeparator} aria-hidden="true">•</span>
+                <span className={styles.cortexNoticeDetail}>{cortexNotice.detail}</span>
+                <span className={styles.cortexNoticePercent}>{typeof cortexNotice.percent === 'number' ? `${cortexNotice.percent}%` : ''}</span>
+                {typeof cortexNotice.percent === 'number' && (
+                  <span className={styles.cortexNoticeBar} aria-hidden="true">
+                    <span className={styles.cortexNoticeFill} style={{ transform: `scaleX(${Math.max(0, Math.min(1, cortexNotice.percent / 100))})` }} />
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           <div className={styles.chatColumnInner} style={innerStyle} data-select-mode={messageSelectMode || undefined}>
             <div className={styles.chatToolbar}>
               <button

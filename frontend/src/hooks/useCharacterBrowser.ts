@@ -495,10 +495,19 @@ export function useCharacterBrowser() {
   )
 
   const openModal = useStore((s) => s.openModal)
+  const showChatCreationToast = useCallback(
+    () => toast.info('Creating chat and preparing Memory Cortex in the background…', {
+      title: 'Starting Chat',
+      duration: 60_000,
+      dismissible: false,
+    }),
+    []
+  )
 
   // Open chat
   const openChat = useCallback(
     async (character: Character | CharacterSummary) => {
+      let creationToastId: string | null = null
       try {
         const chats = await get<any[]>('/chats/character-chats/' + character.id)
 
@@ -528,32 +537,42 @@ export function useCharacterBrowser() {
           openModal('greetingPicker', {
             character: fullChar,
             onSelect: async (greetingIndex: number) => {
+              const toastId = showChatCreationToast()
               try {
                 const chat = await chatsApi.create({
                   character_id: character.id,
                   greeting_index: greetingIndex,
                 })
+                toast.dismiss(toastId)
                 navigate(`/chat/${chat.id}`)
               } catch (err) {
+                toast.dismiss(toastId)
                 console.error('[CharacterBrowser] Failed to create chat:', err)
+                toast.error('Failed to create chat')
               }
             },
           })
           return
         }
 
+        creationToastId = showChatCreationToast()
         const chat = await chatsApi.create({ character_id: character.id })
+        toast.dismiss(creationToastId)
+        creationToastId = null
         navigate(`/chat/${chat.id}`)
       } catch (err) {
+        if (creationToastId) toast.dismiss(creationToastId)
         console.error('[CharacterBrowser] Failed to open chat:', err)
+        toast.error('Failed to open chat')
       }
     },
-    [navigate, openModal]
+    [navigate, openModal, showChatCreationToast]
   )
 
   // Start a new chat
   const startNewChat = useCallback(
     async (character: Character | CharacterSummary) => {
+      let creationToastId: string | null = null
       try {
         const hasAlternates = 'has_alternate_greetings' in character
           ? character.has_alternate_greetings
@@ -564,27 +583,36 @@ export function useCharacterBrowser() {
           openModal('greetingPicker', {
             character: fullChar,
             onSelect: async (greetingIndex: number) => {
+              const toastId = showChatCreationToast()
               try {
                 const chat = await chatsApi.create({
                   character_id: character.id,
                   greeting_index: greetingIndex,
                 })
+                toast.dismiss(toastId)
                 navigate(`/chat/${chat.id}`)
               } catch (err) {
+                toast.dismiss(toastId)
                 console.error('[CharacterBrowser] Failed to create chat:', err)
+                toast.error('Failed to create chat')
               }
             },
           })
           return
         }
 
+        creationToastId = showChatCreationToast()
         const chat = await chatsApi.create({ character_id: character.id })
+        toast.dismiss(creationToastId)
+        creationToastId = null
         navigate(`/chat/${chat.id}`)
       } catch (err) {
+        if (creationToastId) toast.dismiss(creationToastId)
         console.error('[CharacterBrowser] Failed to start new chat:', err)
+        toast.error('Failed to start new chat')
       }
     },
-    [navigate, openModal]
+    [navigate, openModal, showChatCreationToast]
   )
 
   // ─── Trigger a re-fetch of the current browser page ─────────────────────

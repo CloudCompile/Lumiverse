@@ -93,6 +93,15 @@ export interface GroupDefinition {
   createDate?: string;
 }
 
+export interface ReadChatFileOptions {
+  stDataDir: string;
+  charDirName: string;
+  chatFileName: string;
+  personaNameToId: Map<string, string>;
+  filenameToId?: Map<string, string>;
+  fs?: FileSystem;
+}
+
 // ─── Default filesystem singleton ──────────────────────────────────────────
 
 const defaultFs = new LocalFileSystem();
@@ -542,6 +551,30 @@ export async function readChatsForCharacter(
   }
 
   return results;
+}
+
+export async function readCharacterChatFile({
+  stDataDir,
+  charDirName,
+  chatFileName,
+  personaNameToId,
+  filenameToId,
+  fs = defaultFs,
+}: ReadChatFileOptions): Promise<ChatPayload | null> {
+  const filePath = fs.join(stDataDir, "chats", charDirName, chatFileName);
+
+  try {
+    const parsed = parseStGroupChatJsonl(
+      await fs.readText(filePath),
+      fs.basename(chatFileName, ".jsonl"),
+      personaNameToId,
+      filenameToId,
+    );
+    if (!parsed) return null;
+    return { name: parsed.name, created_at: parsed.createdAt, messages: parsed.messages };
+  } catch {
+    return null;
+  }
 }
 
 export async function readGroupDefinitions(stDataDir: string, fs: FileSystem = defaultFs): Promise<GroupDefinition[]> {

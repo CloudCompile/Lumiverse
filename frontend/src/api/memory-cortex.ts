@@ -7,6 +7,10 @@ export interface CortexConfig {
   presetMode: "simple" | "standard" | "advanced" | null;
   entityTracking: boolean;
   entityExtractionMode: "heuristic" | "sidecar" | "off";
+  thoughtMarkers: {
+    prefix: string;
+    suffix: string;
+  };
   salienceScoring: boolean;
   salienceScoringMode: "heuristic" | "sidecar";
   sidecar: {
@@ -52,6 +56,14 @@ export interface CortexConfig {
     minConfidence: number;
   };
   entityWhitelist: string[];
+  entityExtractionFilters: Record<
+    "character" | "location" | "item" | "faction" | "concept" | "event",
+    {
+      protectedTerms: string[];
+      rejectedTerms: string[];
+      cleanupPatterns: string[];
+    }
+  >;
 }
 
 export interface SalienceBreakdown {
@@ -121,6 +133,48 @@ export interface CortexUsageStats {
   mentionCount: number;
   relationCount: number;
   estimatedEmbeddingCalls: number;
+  ingestionTelemetry: CortexIngestionTelemetry;
+}
+
+export interface CortexIngestionTimings {
+  mode: "heuristic" | "sidecar" | "mixed";
+  fontMs: number;
+  heuristicMs: number;
+  heuristicSalienceMs: number;
+  heuristicEntityMs: number;
+  heuristicRelationshipMs: number;
+  heuristicAliasMs: number;
+  sidecarMs: number;
+  graphMs: number;
+  dbMs: number;
+  totalMs: number;
+  completedAt: number;
+  chunkId: string;
+}
+
+export interface CortexIngestionTelemetry {
+  samples: number;
+  last: CortexIngestionTimings | null;
+  averages: {
+    fontMs: number;
+    heuristicMs: number;
+    sidecarMs: number;
+    graphMs: number;
+    dbMs: number;
+    totalMs: number;
+  };
+}
+
+export interface CortexIngestionStatus {
+  chatId: string;
+  status: "idle" | "processing" | "complete" | "error";
+  phase: "queued" | "font" | "heuristics" | "sidecar" | "persisting" | "complete" | "error";
+  chunkId: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  pendingJobs: number;
+  error?: string;
+  timings?: CortexIngestionTimings | null;
 }
 
 export interface CortexHealthCheck {
@@ -297,6 +351,10 @@ export const memoryCortexApi = {
     post<{ status: string; chatId: string }>(`${BASE}/chats/${chatId}/rebuild`),
   getRebuildStatus: (chatId: string) =>
     get<{ status: string; current?: number; total?: number; percent?: number; result?: any; error?: string }>(`${BASE}/chats/${chatId}/rebuild-status`),
+  getIngestionStatus: (chatId: string) =>
+    get<CortexIngestionStatus>(`${BASE}/chats/${chatId}/ingestion-status`),
+  warm: (chatId: string) =>
+    post<{ status: string; reason?: string; chatId: string }>(`${BASE}/chats/${chatId}/warm`),
 
   // Vaults
   createVault: (chatId: string, name: string, description?: string) =>

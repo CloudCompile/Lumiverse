@@ -1094,6 +1094,7 @@ export interface MigrationSlice {
   setMigrationStarted: (id: string) => void
   setMigrationProgress: (payload: import('@/types/ws-events').MigrationProgressPayload) => void
   addMigrationLog: (payload: import('@/types/ws-events').MigrationLogPayload) => void
+  replaceMigrationLogs: (logs: { level: string; message: string; timestamp: number }[]) => void
   setMigrationCompleted: (payload: import('@/types/ws-events').MigrationCompletedPayload) => void
   setMigrationFailed: (payload: import('@/types/ws-events').MigrationFailedPayload) => void
   resetMigration: () => void

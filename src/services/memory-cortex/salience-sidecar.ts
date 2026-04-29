@@ -57,6 +57,7 @@ Do NOT extract:
 - ALL-CAPS words (emphasis/shouting in roleplay, not proper nouns)
 - Meta-references: User, You, AI, Player, Narrator, Character, Assistant, System, Bot, Human, NPC, OOC
 - Pronouns or pronoun-only references — if someone is only called "she" or "he", skip them
+- Recurring tracker/header blocks used as formatting scaffolding: timestamps, dates, weather, status readouts, HUD-style labels, emoji markers, or other repeated metadata wrappers. Treat these as scene metadata, not entities, unless they cleanly contain a real proper name that matters outside the tracker itself.
 - When uncertain, skip it. Missing an entity is fine; extracting garbage corrupts the database.
 
 ## NICKNAME / ALIAS DISCOVERY

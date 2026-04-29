@@ -939,29 +939,47 @@ export default function InputArea({ chatId }: InputAreaProps) {
       return
     }
     if (!activeCharacterId) return
+    let creationToastId: string | null = null
     try {
       const character = await charactersApi.get(activeCharacterId)
       if (character.alternate_greetings?.length > 0) {
         openModal('greetingPicker', {
           character,
           onSelect: async (greetingIndex: number) => {
+            const toastId = toast.info('Creating chat and preparing Memory Cortex in the background…', {
+              title: 'Starting Chat',
+              duration: 60_000,
+              dismissible: false,
+            })
             try {
               const chat = await chatsApi.create({
                 character_id: character.id,
                 greeting_index: greetingIndex,
               })
+              toast.dismiss(toastId)
               navigate(`/chat/${chat.id}`)
             } catch (err) {
+              toast.dismiss(toastId)
               console.error('[InputArea] Failed to create chat:', err)
+              toast.error('Failed to create chat')
             }
           },
         })
         return
       }
+      creationToastId = toast.info('Creating chat and preparing Memory Cortex in the background…', {
+        title: 'Starting Chat',
+        duration: 60_000,
+        dismissible: false,
+      })
       const chat = await chatsApi.create({ character_id: character.id })
+      toast.dismiss(creationToastId)
+      creationToastId = null
       navigate(`/chat/${chat.id}`)
     } catch (err) {
+      if (creationToastId) toast.dismiss(creationToastId)
       console.error('[InputArea] Failed to start new chat:', err)
+      toast.error('Failed to start new chat')
     }
   }, [activeCharacterId, isGroupChat, groupCharacterIds, navigate, openModal])
 

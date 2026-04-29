@@ -54,6 +54,50 @@ function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+async function resolveCortexParticipants(userId: string, chat: ReturnType<typeof getChat>) {
+  const characterNames: string[] = [];
+  const aliasMaps: Map<string, string>[] = [];
+
+  if (!chat) return { characterNames, descriptionAliases: undefined as Map<string, string> | undefined };
+
+  const character = getCharacter(userId, chat.character_id);
+  if (character) {
+    const normalized = memoryCortex.normalizeCharacterName(character.name);
+    characterNames.push(normalized);
+    aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, character.description, character.personality, character.scenario));
+  }
+
+  if (chat.metadata?.character_ids) {
+    for (const cid of chat.metadata.character_ids as string[]) {
+      const ch = getCharacter(userId, cid);
+      if (!ch) continue;
+      const normalized = memoryCortex.normalizeCharacterName(ch.name);
+      if (!characterNames.includes(normalized)) {
+        characterNames.push(normalized);
+        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, ch.description, ch.personality));
+      }
+    }
+  }
+
+  try {
+    const { resolvePersonaOrDefault } = require("../services/personas.service");
+    const persona = resolvePersonaOrDefault(userId);
+    if (persona?.name) {
+      const normalized = memoryCortex.normalizeCharacterName(persona.name);
+      if (!characterNames.includes(normalized)) {
+        characterNames.push(normalized);
+        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, persona.description));
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  const descriptionAliases = memoryCortex.mergeDescriptionAliases(...aliasMaps);
+  return {
+    characterNames,
+    descriptionAliases: descriptionAliases.size > 0 ? descriptionAliases : undefined,
+  };
+}
+
 // ─── Configuration ─────────────────────────────────────────────
 
 /** GET /config — Get the current cortex configuration */
@@ -845,7 +889,17 @@ app.get("/chats/:chatId/cortex-stats", (c) => {
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
   const stats = memoryCortex.getCortexUsageStats(chatId);
-  return c.json(stats);
+  const telemetry = memoryCortex.getIngestionTelemetry(chatId);
+  return c.json({ ...stats, ingestionTelemetry: telemetry });
+});
+
+app.get("/chats/:chatId/ingestion-status", (c) => {
+  const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const status = memoryCortex.getIngestionStatus(chatId);
+  if (!status) return c.json({ status: "idle", phase: "complete", chatId, chunkId: null, startedAt: null, updatedAt: Date.now(), pendingJobs: 0, timings: null });
+  return c.json(status);
 });
 
 // ─── Rebuild ───────────────────────────────────────────────────
@@ -870,39 +924,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   const chat = getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  // Gather character names + description aliases for entity extraction
-  const characterNames: string[] = [];
-  const aliasMaps: Map<string, string>[] = [];
-  const character = getCharacter(userId, chat.character_id);
-  if (character) {
-    const normalized = memoryCortex.normalizeCharacterName(character.name);
-    characterNames.push(normalized);
-    aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, character.description, character.personality, character.scenario));
-  }
-  if (chat.metadata?.character_ids) {
-    for (const cid of chat.metadata.character_ids as string[]) {
-      const ch = getCharacter(userId, cid);
-      if (!ch) continue;
-      const normalized = memoryCortex.normalizeCharacterName(ch.name);
-      if (!characterNames.includes(normalized)) {
-        characterNames.push(normalized);
-        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, ch.description, ch.personality));
-      }
-    }
-  }
-  try {
-    const { resolvePersonaOrDefault } = require("../services/personas.service");
-    const persona = resolvePersonaOrDefault(userId);
-    if (persona?.name) {
-      const normalized = memoryCortex.normalizeCharacterName(persona.name);
-      if (!characterNames.includes(normalized)) {
-        characterNames.push(normalized);
-        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, persona.description));
-      }
-    }
-  } catch { /* non-fatal */ }
-  // Merge with collision detection (safe for group chats)
-  const descriptionAliases = memoryCortex.mergeDescriptionAliases(...aliasMaps);
+  const { characterNames, descriptionAliases } = await resolveCortexParticipants(userId, chat);
 
   // Build sidecar adapter if Tier 2 is configured
   const cortexConfig = memoryCortex.getCortexConfig(userId);
@@ -958,7 +980,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
         percent: Math.round((current / total) * 100),
       }, userId);
     },
-    descriptionAliases.size > 0 ? descriptionAliases : undefined,
+    descriptionAliases,
   ).then((result) => {
     eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
       chatId,
@@ -975,6 +997,75 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   });
 
   return c.json({ status: "started", chatId });
+});
+
+app.post("/chats/:chatId/warm", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const chat = getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Chat not found" }, 404);
+
+  const config = memoryCortex.getCortexConfig(userId);
+  if (!config.enabled) {
+    return c.json({ status: "skipped", reason: "cortex_disabled", chatId });
+  }
+
+  const stats = memoryCortex.getCortexUsageStats(chatId);
+  const rebuild = memoryCortex.getRebuildStatus(chatId);
+  const ingestion = memoryCortex.getIngestionStatus(chatId);
+
+  if (rebuild?.status === "processing") {
+    return c.json({ status: "skipped", reason: "rebuild_in_progress", chatId });
+  }
+  if (ingestion?.status === "processing") {
+    return c.json({ status: "skipped", reason: "ingestion_in_progress", chatId });
+  }
+  if (stats.chunkCount === 0) {
+    return c.json({ status: "skipped", reason: "no_chunks", chatId });
+  }
+  if (stats.chunkCount <= 2 && Math.floor(Date.now() / 1000) - chat.updated_at < 20) {
+    return c.json({ status: "skipped", reason: "recent_chat", chatId });
+  }
+  if (stats.salienceRecordCount >= stats.chunkCount && stats.entityCount > 0) {
+    return c.json({ status: "skipped", reason: "already_ready", chatId });
+  }
+
+  const { characterNames, descriptionAliases } = await resolveCortexParticipants(userId, chat);
+  memoryCortex.rebuildCortex(
+    userId,
+    chatId,
+    characterNames,
+    undefined,
+    undefined,
+    (current, total) => {
+      eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
+        chatId,
+        status: "processing",
+        current,
+        total,
+        percent: Math.round((current / total) * 100),
+        source: "warmup",
+      }, userId);
+    },
+    descriptionAliases,
+  ).then((result) => {
+    eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
+      chatId,
+      status: "complete",
+      source: "warmup",
+      ...result,
+    }, userId);
+  }).catch((err) => {
+    console.error("[memory-cortex] Warmup rebuild failed:", err);
+    eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
+      chatId,
+      status: "error",
+      source: "warmup",
+      error: err?.message || "Warmup failed",
+    }, userId);
+  });
+
+  return c.json({ status: "started", reason: "warmup_started", chatId });
 });
 
 // ─── Heuristics Engine Migration ──────────────────────────────

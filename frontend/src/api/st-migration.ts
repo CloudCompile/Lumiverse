@@ -86,6 +86,18 @@ export interface MigrationStatus {
   migrationId?: string
   phase?: string
   startedAt?: number
+  progress?: {
+    phase: string
+    label: string
+    current: number
+    total: number
+    updatedAt: number
+  }
+  recentLogs?: Array<{
+    level: 'info' | 'warn' | 'error'
+    message: string
+    timestamp: number
+  }>
   results?: Record<string, any>
   error?: string
 }

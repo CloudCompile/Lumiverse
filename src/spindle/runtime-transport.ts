@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { join, resolve } from "path";
 
 import { env } from "../env";
+import { shouldUseBunWorkers, warnBunWorkerFallback } from "../utils/bun-worker-guard";
 import { bunCmd } from "./manager.service";
 
 export type RuntimeTransportMode = "worker" | "process" | "sandbox";
@@ -163,8 +164,14 @@ function createSubprocessTransport(
 
 export function createRuntimeTransport(opts: CreateRuntimeTransportOptions): RuntimeTransport {
   const mode = resolveRuntimeMode(opts.mode);
-  if (mode === "worker") {
+  if (mode === "worker" && shouldUseBunWorkers()) {
     return createWorkerTransport(opts);
   }
+
+  if (mode === "worker") {
+    warnBunWorkerFallback(`spindle runtime for ${opts.extensionIdentifier}`);
+    return createSubprocessTransport(opts, "process");
+  }
+
   return createSubprocessTransport(opts, mode);
 }

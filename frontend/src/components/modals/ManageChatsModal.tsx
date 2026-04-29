@@ -218,6 +218,11 @@ export default function ManageChatsModal() {
   }, [deleteTarget])
 
   const handleNewChat = useCallback(async () => {
+    const toastId = toast.info('Creating chat and preparing Memory Cortex in the background…', {
+      title: 'Starting Chat',
+      duration: 60_000,
+      dismissible: false,
+    })
     try {
       const chat = isGroupContext
         ? await chatsApi.createGroup({
@@ -225,10 +230,13 @@ export default function ManageChatsModal() {
             greeting_character_id: characterId,
           })
         : await chatsApi.create({ character_id: characterId })
+      toast.dismiss(toastId)
       closeModal()
       navigate('/chat/' + chat.id)
     } catch (err) {
+      toast.dismiss(toastId)
       console.error('[ManageChats] Failed to create chat:', err)
+      toast.error('Failed to create chat')
     }
   }, [characterId, closeModal, groupCharacterIds, isGroupContext, navigate])
 

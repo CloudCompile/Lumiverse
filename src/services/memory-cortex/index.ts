@@ -20,6 +20,9 @@ import { getCortexConfig, putCortexConfig, type MemoryCortexConfig } from "./con
 import { scoreChunkHeuristic } from "./salience-heuristic";
 import { extractWithSidecar, extractBatchWithSidecar, getToolChoiceParams, getExtractionStructuredParams } from "./salience-sidecar";
 import { extractEntitiesHeuristic, extractMentionExcerpt, detectNicknameIntroductions } from "./entity-extractor";
+import { refineHeuristicDetections } from "./detection-refiner";
+import { filterEntitiesByExtractionFilters } from "./entity-extraction-filters";
+import { runHeuristicAnalysisInWorker } from "./heuristic-worker-host";
 import * as entityGraph from "./entity-graph";
 import * as entityContext from "./entity-context";
 import * as consolidation from "./consolidation";
@@ -32,6 +35,8 @@ import { extractRelationshipsHeuristic } from "./relationship-extractor";
 import { extractNPsFromChunk } from "./np-chunker";
 import { stripLoomTags, stripDetailsBlocks } from "../../utils/content-sanitizer";
 import { getLinkedCortexData, reindexVault, getVaultRow } from "./vault";
+import { eventBus } from "../../ws/bus";
+import { EventType } from "../../ws/events";
 import type {
   ChunkIngestionData,
   CortexQuery,
@@ -97,6 +102,47 @@ export { queryVaultCortex } from "./retrieval";
 export type { Vault, VaultEntity, VaultRelation, VaultChunk, ChatLink } from "./vault";
 export type { LinkedCortexResult, VaultCortexData, InterlinkCortexData } from "./types";
 
+export interface CortexIngestionTimings {
+  mode: "heuristic" | "sidecar" | "mixed";
+  fontMs: number;
+  heuristicMs: number;
+  heuristicSalienceMs: number;
+  heuristicEntityMs: number;
+  heuristicRelationshipMs: number;
+  heuristicAliasMs: number;
+  sidecarMs: number;
+  graphMs: number;
+  dbMs: number;
+  totalMs: number;
+  completedAt: number;
+  chunkId: string;
+}
+
+export interface CortexIngestionTelemetry {
+  samples: number;
+  last: CortexIngestionTimings | null;
+  averages: {
+    fontMs: number;
+    heuristicMs: number;
+    sidecarMs: number;
+    graphMs: number;
+    dbMs: number;
+    totalMs: number;
+  };
+}
+
+export interface CortexIngestionStatus {
+  chatId: string;
+  status: "idle" | "processing" | "complete" | "error";
+  phase: "queued" | "font" | "heuristics" | "sidecar" | "persisting" | "complete" | "error";
+  chunkId: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  pendingJobs: number;
+  error?: string;
+  timings?: CortexIngestionTimings | null;
+}
+
 // ─── Result Cache ─────────────────────────────────────────────
 // Warm cache of cortex retrieval results per chat. Background queries
 // populate the cache so prompt assembly can read non-blockingly — cortex
@@ -139,6 +185,10 @@ function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined)
       (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
     );
   });
+}
+
+async function yieldToEventLoop(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 function buildCortexQueryKey(query: CortexQuery, config: MemoryCortexConfig): string {
@@ -225,6 +275,162 @@ export function getCachedLinkedCortexResult(chatId: string): LinkedCortexResult 
 
 export function invalidateLinkedCortexCache(chatId: string): void {
   linkedCortexResultCache.delete(chatId);
+}
+
+// ─── Ingestion Status / Telemetry ──────────────────────────────
+
+const cortexIngestionStatus = new Map<string, CortexIngestionStatus>();
+const cortexIngestionSamples = new Map<string, {
+  samples: number;
+  fontMsTotal: number;
+  heuristicMsTotal: number;
+  sidecarMsTotal: number;
+  graphMsTotal: number;
+  dbMsTotal: number;
+  totalMsTotal: number;
+  last: CortexIngestionTimings | null;
+}>();
+
+function getOrCreateIngestionStatus(chatId: string): CortexIngestionStatus {
+  const existing = cortexIngestionStatus.get(chatId);
+  if (existing) return existing;
+  const created: CortexIngestionStatus = {
+    chatId,
+    status: "idle",
+    phase: "complete",
+    chunkId: null,
+    startedAt: null,
+    updatedAt: Date.now(),
+    pendingJobs: 0,
+    timings: null,
+  };
+  cortexIngestionStatus.set(chatId, created);
+  return created;
+}
+
+function emitIngestionStatus(userId: string, status: CortexIngestionStatus): void {
+  eventBus.emit(EventType.CORTEX_INGESTION_PROGRESS, status, userId);
+}
+
+function updateIngestionStatus(
+  userId: string,
+  chatId: string,
+  patch: Partial<CortexIngestionStatus>,
+): CortexIngestionStatus {
+  const next = {
+    ...getOrCreateIngestionStatus(chatId),
+    ...patch,
+    chatId,
+    updatedAt: Date.now(),
+  };
+  cortexIngestionStatus.set(chatId, next);
+  emitIngestionStatus(userId, next);
+  return next;
+}
+
+function beginIngestionTracking(userId: string, chatId: string, chunkId: string): number {
+  const current = getOrCreateIngestionStatus(chatId);
+  const pendingJobs = current.pendingJobs + 1;
+  updateIngestionStatus(userId, chatId, {
+    status: "processing",
+    phase: "queued",
+    chunkId,
+    startedAt: current.startedAt ?? Date.now(),
+    pendingJobs,
+    error: undefined,
+  });
+  return pendingJobs;
+}
+
+function completeIngestionTracking(
+  userId: string,
+  chatId: string,
+  chunkId: string,
+  timings: CortexIngestionTimings,
+): void {
+  const current = getOrCreateIngestionStatus(chatId);
+  const pendingJobs = Math.max(0, current.pendingJobs - 1);
+  updateIngestionStatus(userId, chatId, {
+    status: pendingJobs > 0 ? "processing" : "complete",
+    phase: pendingJobs > 0 ? "queued" : "complete",
+    chunkId: pendingJobs > 0 ? current.chunkId : chunkId,
+    startedAt: pendingJobs > 0 ? current.startedAt : null,
+    pendingJobs,
+    error: undefined,
+    timings,
+  });
+
+  const aggregate = cortexIngestionSamples.get(chatId) ?? {
+    samples: 0,
+    fontMsTotal: 0,
+    heuristicMsTotal: 0,
+    sidecarMsTotal: 0,
+    graphMsTotal: 0,
+    dbMsTotal: 0,
+    totalMsTotal: 0,
+    last: null,
+  };
+  aggregate.samples += 1;
+  aggregate.fontMsTotal += timings.fontMs;
+  aggregate.heuristicMsTotal += timings.heuristicMs;
+  aggregate.sidecarMsTotal += timings.sidecarMs;
+  aggregate.graphMsTotal += timings.graphMs;
+  aggregate.dbMsTotal += timings.dbMs;
+  aggregate.totalMsTotal += timings.totalMs;
+  aggregate.last = timings;
+  cortexIngestionSamples.set(chatId, aggregate);
+}
+
+function failIngestionTracking(userId: string, chatId: string, error: string): void {
+  const current = getOrCreateIngestionStatus(chatId);
+  const pendingJobs = Math.max(0, current.pendingJobs - 1);
+  updateIngestionStatus(userId, chatId, {
+    status: "error",
+    phase: "error",
+    startedAt: pendingJobs > 0 ? current.startedAt : null,
+    pendingJobs,
+    error,
+  });
+}
+
+export function getIngestionStatus(chatId: string): CortexIngestionStatus | null {
+  return cortexIngestionStatus.get(chatId) ?? null;
+}
+
+export function getIngestionTelemetry(chatId: string): CortexIngestionTelemetry {
+  const aggregate = cortexIngestionSamples.get(chatId);
+  if (!aggregate || aggregate.samples === 0) {
+    return {
+      samples: 0,
+      last: null,
+      averages: {
+        fontMs: 0,
+        heuristicMs: 0,
+        sidecarMs: 0,
+        graphMs: 0,
+        dbMs: 0,
+        totalMs: 0,
+      },
+    };
+  }
+
+  return {
+    samples: aggregate.samples,
+    last: aggregate.last,
+    averages: {
+      fontMs: aggregate.fontMsTotal / aggregate.samples,
+      heuristicMs: aggregate.heuristicMsTotal / aggregate.samples,
+      sidecarMs: aggregate.sidecarMsTotal / aggregate.samples,
+      graphMs: aggregate.graphMsTotal / aggregate.samples,
+      dbMs: aggregate.dbMsTotal / aggregate.samples,
+      totalMs: aggregate.totalMsTotal / aggregate.samples,
+    },
+  };
+}
+
+export function clearIngestionState(chatId: string): void {
+  cortexIngestionStatus.delete(chatId);
+  cortexIngestionSamples.delete(chatId);
 }
 
 /** Invalidate every linked-cortex cache entry whose linked data set includes
@@ -485,65 +691,103 @@ export async function processChunk(
 
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
+  const pipelineStartedAt = performance.now();
+  beginIngestionTracking(data.userId, data.chatId, data.chunkId);
 
-  let salienceResult: SalienceResult;
-  let sidecarEntities: Array<{ name: string; type: string; role?: string }> = [];
-  let sidecarRelationships: Array<{ source: string; target: string; type: string; label: string; sentiment: number }> = [];
-  let sidecarFacts: string[] = [];
-  let sidecarDiscoveredAliases: Array<{ canonicalName: string; alias: string; evidence?: string }> = [];
+  const timings = {
+    fontMs: 0,
+    heuristicMs: 0,
+    heuristicSalienceMs: 0,
+    heuristicEntityMs: 0,
+    heuristicRelationshipMs: 0,
+    heuristicAliasMs: 0,
+    sidecarMs: 0,
+    graphMs: 0,
+    dbMs: 0,
+  };
 
-  // ── Font Color Extraction (runs before everything else) ──
-  // Must run first so the sidecar and heuristics both get clean content.
+  try {
+    let salienceResult: SalienceResult;
+    let sidecarEntities: Array<{ name: string; type: string; role?: string }> = [];
+    let sidecarRelationships: Array<{ source: string; target: string; type: string; label: string; sentiment: number }> = [];
+    let sidecarFacts: string[] = [];
+    let sidecarFontColors: Array<{ hexColor: string; characterName: string; usageType: "speech" | "thought" | "narration" }> = [];
+    let sidecarDiscoveredAliases: Array<{ canonicalName: string; alias: string; evidence?: string }> = [];
 
-  const knownEntities = entityGraph.getActiveEntities(data.chatId);
-  const entityIdByName = new Map<string, string>();
-  for (const e of knownEntities) {
-    entityIdByName.set(e.name.toLowerCase(), e.id);
-    for (const alias of e.aliases) entityIdByName.set(alias.toLowerCase(), e.id);
-  }
+    const rawChunkContent = hydrateChunkContentFromMessages(data.messageIds, data.content);
+    const thoughtDelimiters = config.thoughtMarkers;
 
-  // Build entity context with aliases for the sidecar (canonical names + known aliases)
-  const entityContext = knownEntities.map((e) => ({
-    name: e.name,
-    type: e.entityType,
-    aliases: e.aliases,
-  }));
+    const knownEntities = entityGraph.getActiveEntities(data.chatId);
+    const entityIdByName = new Map<string, string>();
+    for (const e of knownEntities) {
+      entityIdByName.set(e.name.toLowerCase(), e.id);
+      for (const alias of e.aliases) entityIdByName.set(alias.toLowerCase(), e.id);
+    }
 
-  const fontResult = processChunkFontColors(
-    data.chatId,
-    data.content,
-    [...new Set([...characterNames, ...knownEntities.map((e) => e.name)])],
-    entityIdByName,
-  );
-  const cleanContent = fontResult.strippedContent;
+    const entityContext = knownEntities.map((e) => ({
+      name: e.name,
+      type: e.entityType,
+      aliases: e.aliases,
+    }));
 
-  // ── Salience Scoring ──
+    updateIngestionStatus(data.userId, data.chatId, { phase: "font", chunkId: data.chunkId });
+    const fontStart = performance.now();
+    const fontResult = processChunkFontColors(
+      data.chatId,
+      rawChunkContent,
+      [...new Set([...characterNames, ...knownEntities.map((e) => e.name)])],
+      entityIdByName,
+      thoughtDelimiters,
+    );
+    timings.fontMs = performance.now() - fontStart;
+    const cleanContent = fontResult.strippedContent;
 
-  if (config.salienceScoring) {
-    // Use sidecar if a sidecar adapter was provided. The caller (ingestion hook or
-    // rebuild route) already decided the sidecar should be used — we honor that
-    // regardless of the config mode setting. This prevents the config mode from
-    // silently overriding an explicit sidecar rebuild.
-    if (generateRawFn && sidecarConnectionId) {
-      // Sidecar mode: send RAW content (with font tags) so the LLM can
-      // also attribute colors. The LLM handles HTML tags gracefully.
-      // Pass known entities with aliases so the LLM uses canonical names.
+    const shouldRunHeuristicWorker =
+      (config.entityTracking && config.entityExtractionMode !== "off") ||
+      !config.salienceScoring ||
+      !generateRawFn ||
+      !sidecarConnectionId;
+
+    const heuristicPromise = shouldRunHeuristicWorker
+      ? runHeuristicAnalysisInWorker({
+          cleanContent,
+          knownEntities: knownEntities.map((entity) => ({
+            name: entity.name,
+            entityType: entity.entityType,
+            aliases: entity.aliases,
+          })),
+          characterNames,
+          entityWhitelist: config.entityWhitelist,
+          minConfidence: config.entityPruning.minConfidence,
+          entityExtractionFilters: config.entityExtractionFilters,
+          descriptionAliases: descriptionAliases
+            ? [...descriptionAliases.entries()].map(([alias, canonicalName]) => ({ alias, canonicalName }))
+            : undefined,
+        })
+      : null;
+    if (heuristicPromise) {
+      updateIngestionStatus(data.userId, data.chatId, { phase: "heuristics", chunkId: data.chunkId });
+    }
+
+    let heuristicResult = null as Awaited<typeof heuristicPromise>;
+
+    let extraction: Awaited<ReturnType<typeof extractWithSidecar>> | null = null;
+    if (config.salienceScoring && generateRawFn && sidecarConnectionId) {
+      updateIngestionStatus(data.userId, data.chatId, { phase: "sidecar", chunkId: data.chunkId });
+      const sidecarStart = performance.now();
       const sidecarTimeout = config.sidecarTimeoutMs ?? 30000;
       const ac = sidecarTimeout > 0 ? new AbortController() : null;
       const timer = ac ? setTimeout(() => {
         console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
         ac.abort();
       }, sidecarTimeout) : null;
-
-      // Wrap generateRawFn to inject the abort signal
       const boundGenFn: typeof generateRawFn = ac
         ? (opts) => generateRawFn({ ...opts, signal: ac.signal })
         : generateRawFn;
 
-      let extraction: Awaited<ReturnType<typeof extractWithSidecar>> | null;
       try {
         extraction = await extractWithSidecar(
-          data.content,
+          rawChunkContent,
           boundGenFn,
           sidecarConnectionId,
           { characterNames, knownEntities: entityContext },
@@ -556,168 +800,192 @@ export async function processChunk(
           throw err;
         }
       } finally {
+        timings.sidecarMs = performance.now() - sidecarStart;
         if (timer) clearTimeout(timer);
       }
+    }
 
-      if (extraction) {
-        salienceResult = {
-          score: extraction.score,
-          source: "sidecar",
-          emotionalTags: extraction.emotionalTags,
-          statusChanges: extraction.statusChanges,
-          narrativeFlags: extraction.narrativeFlags,
-          hasDialogue: /[""\u201C]/.test(data.content),
-          hasAction: /\*[^*]{10,}\*/.test(data.content),
-          hasInternalThought: /\b(thought|wondered|realized|felt|knew)\b/i.test(data.content),
-          wordCount: data.content.split(/\s+/).length,
-        };
-        sidecarEntities = extraction.entitiesPresent;
-        sidecarRelationships = extraction.relationshipsShown;
-        sidecarFacts = extraction.keyFacts;
-        sidecarDiscoveredAliases = extraction.discoveredAliases;
+    if (heuristicPromise) {
+      heuristicResult = await heuristicPromise;
+      timings.heuristicMs = heuristicResult.timings.totalMs;
+      timings.heuristicSalienceMs = heuristicResult.timings.salienceMs;
+      timings.heuristicEntityMs = heuristicResult.timings.entityMs;
+      timings.heuristicRelationshipMs = heuristicResult.timings.relationshipMs;
+      timings.heuristicAliasMs = heuristicResult.timings.aliasMs;
+    }
 
-        // LLM font color attributions override/supplement heuristic
-        if (extraction.fontColors.length > 0) {
-          for (const fc of extraction.fontColors) {
-            const entityId = entityIdByName.get(fc.characterName.toLowerCase()) || null;
-            recordColorAttribution(
-              data.chatId,
-              fc.hexColor,
-              entityId,
-              fc.usageType as any,
-              null,
-            );
-          }
+    if (extraction) {
+      salienceResult = {
+        score: extraction.score,
+        source: "sidecar",
+        emotionalTags: extraction.emotionalTags,
+        statusChanges: extraction.statusChanges,
+        narrativeFlags: extraction.narrativeFlags,
+        hasDialogue: /[""\u201C]/.test(rawChunkContent),
+        hasAction: /\*[^*]{10,}\*/.test(rawChunkContent),
+        hasInternalThought: /\b(thought|wondered|realized|felt|knew)\b/i.test(cleanContent),
+        wordCount: cleanContent.split(/\s+/).length,
+      };
+      sidecarEntities = extraction.entitiesPresent;
+      sidecarRelationships = extraction.relationshipsShown;
+      sidecarFacts = extraction.keyFacts;
+      sidecarFontColors = extraction.fontColors;
+      sidecarDiscoveredAliases = extraction.discoveredAliases;
+
+      if (extraction.fontColors.length > 0) {
+        const dbStart = performance.now();
+        for (const fc of extraction.fontColors) {
+          const entityId = entityIdByName.get(fc.characterName.toLowerCase()) || null;
+          recordColorAttribution(data.chatId, fc.hexColor, entityId, fc.usageType as any, null);
         }
-      } else {
-        salienceResult = scoreChunkHeuristic(cleanContent);
+        timings.dbMs += performance.now() - dbStart;
       }
+    } else if (heuristicResult) {
+      salienceResult = heuristicResult.salienceResult;
     } else {
       salienceResult = scoreChunkHeuristic(cleanContent);
     }
 
-    // Insert salience record
-    db.query(
-      `INSERT INTO memory_salience
-        (id, chunk_id, chat_id, score, score_source, emotional_tags, status_changes,
-         narrative_flags, has_dialogue, has_action, has_internal_thought, word_count,
-         scored_at, scored_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(chunk_id) DO UPDATE SET
-         score = excluded.score,
-         score_source = excluded.score_source,
-         emotional_tags = excluded.emotional_tags,
-         status_changes = excluded.status_changes,
-         narrative_flags = excluded.narrative_flags,
-         scored_at = excluded.scored_at`,
-    ).run(
-      crypto.randomUUID(), data.chunkId, data.chatId,
-      salienceResult.score, salienceResult.source,
-      JSON.stringify(salienceResult.emotionalTags),
-      JSON.stringify(salienceResult.statusChanges),
-      JSON.stringify(salienceResult.narrativeFlags),
-      salienceResult.hasDialogue ? 1 : 0,
-      salienceResult.hasAction ? 1 : 0,
-      salienceResult.hasInternalThought ? 1 : 0,
-      salienceResult.wordCount,
-      now, salienceResult.source === "sidecar" ? "sidecar" : null, now,
-    );
+    updateIngestionStatus(data.userId, data.chatId, { phase: "persisting", chunkId: data.chunkId });
 
-    // Update denormalized fields on chat_chunks
-    db.query(
-      "UPDATE chat_chunks SET salience_score = ?, emotional_tags = ? WHERE id = ?",
-    ).run(
-      salienceResult.score,
-      JSON.stringify(salienceResult.emotionalTags),
-      data.chunkId,
-    );
-  } else {
-    // No salience scoring — use neutral defaults
-    salienceResult = scoreChunkHeuristic(cleanContent);
-  }
-
-  // ── Entity Extraction & Graph Update ──
-
-  if (config.entityTracking && config.entityExtractionMode !== "off") {
-    // Start with heuristic extraction on CLEAN (font-stripped) content
-    // Pass whitelist and confidence threshold from config
-    const heuristicEntities = extractEntitiesHeuristic(
-      cleanContent,
-      knownEntities,
-      characterNames,
-      config.entityWhitelist,
-      config.entityPruning.minConfidence,
-    );
-
-    // Merge sidecar entities if available
-    const mergedEntities = mergeExtractedEntities(heuristicEntities, sidecarEntities);
-
-    // Extract heuristic relationships between entities found in this chunk
-    const entityNamesInChunk = mergedEntities.map((e) => e.name);
-    const heuristicRelationships = extractRelationshipsHeuristic(
-      cleanContent,
-      entityNamesInChunk,
-      salienceResult.emotionalTags,
-    );
-
-    // Merge sidecar + heuristic relationships (sidecar takes priority for same pair+type)
-    const allRelationships = mergeRelationships(heuristicRelationships, sidecarRelationships);
-
-    // Gather all discovered aliases (sidecar + heuristic) before ingestion so
-    // relationship writes can resolve brand-new nicknames in the same chunk.
-    const heuristicAliases = detectNicknameIntroductions(cleanContent, knownEntities, characterNames);
-    const allDiscoveredAliases = [...sidecarDiscoveredAliases, ...heuristicAliases];
-
-    // Ingest into the entity graph (using font-stripped content)
-    const entityIds = entityGraph.ingestChunkEntities(
-      data.chatId,
-      data.chunkId,
-      data.createdAt,
-      mergedEntities,
-      allRelationships as any[],
-      salienceResult.score,
-      salienceResult.emotionalTags,
-      cleanContent,
-      undefined, // arcId
-      allDiscoveredAliases,
-    );
-
-    // Update denormalized entity_ids on chat_chunks
-    db.query("UPDATE chat_chunks SET entity_ids = ? WHERE id = ?")
-      .run(JSON.stringify(entityIds), data.chunkId);
-
-    // Auto-populate descriptions for newly created entities (using clean content)
-    for (const ext of mergedEntities) {
-      const entity = entityGraph.findEntityByName(data.chatId, ext.name);
-      if (entity && !entity.description) {
-        const excerpt = extractMentionExcerpt(ext.name, cleanContent);
-        if (excerpt) entityGraph.populateEntityDescription(entity.id, excerpt);
-      }
+    if (config.salienceScoring) {
+      const dbStart = performance.now();
+      db.query(
+        `INSERT INTO memory_salience
+          (id, chunk_id, chat_id, score, score_source, emotional_tags, status_changes,
+           narrative_flags, has_dialogue, has_action, has_internal_thought, word_count,
+           scored_at, scored_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chunk_id) DO UPDATE SET
+           score = excluded.score,
+           score_source = excluded.score_source,
+           emotional_tags = excluded.emotional_tags,
+           status_changes = excluded.status_changes,
+           narrative_flags = excluded.narrative_flags,
+           scored_at = excluded.scored_at`,
+      ).run(
+        crypto.randomUUID(), data.chunkId, data.chatId,
+        salienceResult.score, salienceResult.source,
+        JSON.stringify(salienceResult.emotionalTags),
+        JSON.stringify(salienceResult.statusChanges),
+        JSON.stringify(salienceResult.narrativeFlags),
+        salienceResult.hasDialogue ? 1 : 0,
+        salienceResult.hasAction ? 1 : 0,
+        salienceResult.hasInternalThought ? 1 : 0,
+        salienceResult.wordCount,
+        now, salienceResult.source === "sidecar" ? "sidecar" : null, now,
+      );
+      db.query("UPDATE chat_chunks SET salience_score = ?, emotional_tags = ? WHERE id = ?").run(
+        salienceResult.score,
+        JSON.stringify(salienceResult.emotionalTags),
+        data.chunkId,
+      );
+      timings.dbMs += performance.now() - dbStart;
     }
 
-    // Periodically prune stale entities (every 50 chunks)
-    if (config.entityPruning.enabled) {
-      const chunkCount = db.query("SELECT COUNT(*) as c FROM chat_chunks WHERE chat_id = ?").get(data.chatId) as any;
-      if (chunkCount?.c && chunkCount.c % 50 === 0) {
-        entityGraph.pruneStaleEntities(data.chatId, config.entityPruning.staleAfterMessages);
-      }
-    }
+    if (config.entityTracking && config.entityExtractionMode !== "off") {
+      const heuristicEntities = heuristicResult?.entities ?? extractEntitiesHeuristic(
+        cleanContent,
+        knownEntities,
+        characterNames,
+        config.entityWhitelist,
+        config.entityPruning.minConfidence,
+        config.entityExtractionFilters,
+      );
 
-    // Apply sidecar-extracted facts to entities
-    if (sidecarFacts.length > 0 && sidecarEntities.length > 0) {
-      // Distribute facts to the primary subject entity
-      const subjectEntity = sidecarEntities.find((e) => e.role === "subject") ?? sidecarEntities[0];
-      const entity = entityGraph.findEntityByName(data.chatId, subjectEntity.name);
-      if (entity) {
-        entityGraph.addEntityFacts(entity.id, sidecarFacts);
-      }
-    }
+      const refinedFallback = heuristicResult ? null : refineHeuristicDetections({
+        content: cleanContent,
+        knownEntities,
+        characterNames,
+        entities: heuristicEntities,
+        relationships: [],
+        aliases: detectNicknameIntroductions(cleanContent, knownEntities, characterNames).map((alias) => ({
+          ...alias,
+          evidence: "nickname introduction",
+        })),
+        descriptionAliases: descriptionAliases
+          ? [...descriptionAliases.entries()].map(([alias, canonicalName]) => ({ alias, canonicalName }))
+          : undefined,
+      });
 
-    // Apply status changes from sidecar extraction
-    if (salienceResult.statusChanges.length > 0) {
-      for (const change of salienceResult.statusChanges) {
-        const entity = entityGraph.findEntityByName(data.chatId, change.entity);
-        if (entity) {
+      const refinedEntities = refinedFallback?.entities ?? heuristicEntities;
+
+      const mergedEntities = filterEntitiesByExtractionFilters(
+        mergeExtractedEntities(refinedEntities, sidecarEntities),
+        cleanContent,
+        config.entityExtractionFilters,
+      );
+
+      const heuristicRelationships = heuristicResult?.relationships ?? refinedFallback?.relationships ?? extractRelationshipsHeuristic(
+        cleanContent,
+        mergedEntities.map((e) => e.name),
+        salienceResult.emotionalTags,
+      );
+
+      const allowedEntityNames = new Set(mergedEntities.map((entity) => entity.name.toLowerCase()));
+      const allRelationships = mergeRelationships(heuristicRelationships, sidecarRelationships).filter(
+        (rel) => allowedEntityNames.has(rel.source.toLowerCase()) && allowedEntityNames.has(rel.target.toLowerCase()),
+      );
+
+      const heuristicAliases = heuristicResult?.aliases ?? refinedFallback?.aliases ?? detectNicknameIntroductions(cleanContent, knownEntities, characterNames);
+      const allDiscoveredAliases = [...sidecarDiscoveredAliases, ...heuristicAliases];
+
+      const graphStart = performance.now();
+      const entityIds = entityGraph.ingestChunkEntities(
+        data.chatId,
+        data.chunkId,
+        data.createdAt,
+        mergedEntities,
+        allRelationships as any[],
+        salienceResult.score,
+        salienceResult.emotionalTags,
+        cleanContent,
+        undefined,
+        allDiscoveredAliases,
+      );
+      timings.graphMs += performance.now() - graphStart;
+
+      const dbStart = performance.now();
+      db.query("UPDATE chat_chunks SET entity_ids = ? WHERE id = ?").run(JSON.stringify(entityIds), data.chunkId);
+      for (const attr of fontResult.attributions) {
+        if (!attr.entityName) continue;
+        const entity = entityGraph.findEntityByName(data.chatId, attr.entityName);
+        if (!entity) continue;
+        recordColorAttribution(data.chatId, attr.hexColor, entity.id, attr.usageType, null);
+      }
+      for (const fc of sidecarFontColors) {
+        const entity = entityGraph.findEntityByName(data.chatId, fc.characterName);
+        if (!entity) continue;
+        recordColorAttribution(data.chatId, fc.hexColor, entity.id, fc.usageType, null);
+      }
+      timings.dbMs += performance.now() - dbStart;
+
+      const postGraphStart = performance.now();
+      for (const ext of mergedEntities) {
+        const entity = entityGraph.findEntityByName(data.chatId, ext.name);
+        if (entity && !entity.description) {
+          const excerpt = extractMentionExcerpt(ext.name, cleanContent);
+          if (excerpt) entityGraph.populateEntityDescription(entity.id, excerpt);
+        }
+      }
+
+      if (config.entityPruning.enabled) {
+        const chunkCount = db.query("SELECT COUNT(*) as c FROM chat_chunks WHERE chat_id = ?").get(data.chatId) as any;
+        if (chunkCount?.c && chunkCount.c % 50 === 0) {
+          entityGraph.pruneStaleEntities(data.chatId, config.entityPruning.staleAfterMessages);
+        }
+      }
+
+      if (sidecarFacts.length > 0 && sidecarEntities.length > 0) {
+        const subjectEntity = sidecarEntities.find((e) => e.role === "subject") ?? sidecarEntities[0];
+        const entity = entityGraph.findEntityByName(data.chatId, subjectEntity.name);
+        if (entity) entityGraph.addEntityFacts(entity.id, sidecarFacts);
+      }
+
+      if (salienceResult.statusChanges.length > 0) {
+        for (const change of salienceResult.statusChanges) {
+          const entity = entityGraph.findEntityByName(data.chatId, change.entity);
+          if (!entity) continue;
           const statusMap: Record<string, string> = {
             died: "deceased",
             destroyed: "destroyed",
@@ -725,22 +993,14 @@ export async function processChunk(
             transformed: "active",
           };
           const newStatus = statusMap[change.change];
-          if (newStatus) {
-            entityGraph.updateEntityStatus(entity.id, newStatus as any);
-          }
-          // Add the status change as a fact
+          if (newStatus) entityGraph.updateEntityStatus(entity.id, newStatus as any);
           entityGraph.addEntityFacts(entity.id, [`${change.change}: ${change.detail}`]);
         }
       }
-    }
 
-    // Persist discovered aliases (sidecar + heuristic) to the entity graph.
-    // These were already used during ingestChunkEntities for relationship resolution;
-    // now we persist them as actual alias records + facts for future chunks.
-    for (const discovered of allDiscoveredAliases) {
-      const canonicalEntity = entityGraph.findEntityByName(data.chatId, discovered.canonicalName);
-      if (canonicalEntity) {
-        // Register the alias on the canonical entity via upsert (mergeAliases handles dedup)
+      for (const discovered of allDiscoveredAliases) {
+        const canonicalEntity = entityGraph.findEntityByName(data.chatId, discovered.canonicalName);
+        if (!canonicalEntity) continue;
         entityGraph.upsertEntity(data.chatId, {
           name: canonicalEntity.name,
           type: canonicalEntity.entityType,
@@ -748,18 +1008,14 @@ export async function processChunk(
           confidence: Number(canonicalEntity.confidence) || 0.9,
         }, data.chunkId, data.createdAt);
 
-        // Record the alias discovery as a fact for traceability (sidecar aliases may have evidence)
         const evidence = "evidence" in discovered ? (discovered as any).evidence : undefined;
-        if (evidence) {
-          entityGraph.addEntityFacts(canonicalEntity.id, [
-            `Also known as "${discovered.alias}" (${evidence})`,
-          ]);
-        } else {
-          entityGraph.addEntityFacts(canonicalEntity.id, [
-            `Also known as "${discovered.alias}"`,
-          ]);
-        }
+        entityGraph.addEntityFacts(canonicalEntity.id, [
+          evidence
+            ? `Also known as "${discovered.alias}" (${evidence})`
+            : `Also known as "${discovered.alias}"`,
+        ]);
       }
+      timings.graphMs += performance.now() - postGraphStart;
     }
 
     // ── NP Chunker — Phase 1 entity discovery (IMP 4) ──
@@ -860,6 +1116,29 @@ export async function processChunk(
         }
       }
     }
+
+    const mode: CortexIngestionTimings["mode"] = extraction
+      ? (heuristicResult ? "mixed" : "sidecar")
+      : "heuristic";
+    const completedTimings: CortexIngestionTimings = {
+      mode,
+      fontMs: timings.fontMs,
+      heuristicMs: timings.heuristicMs,
+      heuristicSalienceMs: timings.heuristicSalienceMs,
+      heuristicEntityMs: timings.heuristicEntityMs,
+      heuristicRelationshipMs: timings.heuristicRelationshipMs,
+      heuristicAliasMs: timings.heuristicAliasMs,
+      sidecarMs: timings.sidecarMs,
+      graphMs: timings.graphMs,
+      dbMs: timings.dbMs,
+      totalMs: performance.now() - pipelineStartedAt,
+      completedAt: Date.now(),
+      chunkId: data.chunkId,
+    };
+    completeIngestionTracking(data.userId, data.chatId, data.chunkId, completedTimings);
+  } catch (err: any) {
+    failIngestionTracking(data.userId, data.chatId, err?.message || "Cortex ingestion failed");
+    throw err;
   }
 
   // ── Consolidation Check ──
@@ -969,6 +1248,7 @@ export async function rebuildCortex(
         state.current = i + 1;
         state.percent = Math.round(((i + 1) / chunks.length) * 100);
         if (onProgress) onProgress(i + 1, chunks.length);
+        await yieldToEventLoop();
       }
     } else {
       // Sidecar path: bounded concurrency queue.
@@ -985,11 +1265,12 @@ export async function rebuildCortex(
         while (nextChunkIdx < chunks.length) {
           const idx = nextChunkIdx++;
           const chunk = chunks[idx];
+          const rawChunkContent = hydrateChunkContentFromMessages(safeJsonArray(chunk.message_ids), chunk.content);
 
           try {
             // Single request per chunk — sends tools, waits for ALL tool_calls to resolve
             const sidecarResult = await extractWithSidecar(
-              chunk.content,
+              rawChunkContent,
               generateRawFn!,
               sidecarConnectionId!,
               { characterNames },
@@ -1283,6 +1564,22 @@ function mergeExtractedEntities(
 function safeJsonArray(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try { return JSON.parse(raw); } catch { return []; }
+}
+
+function hydrateChunkContentFromMessages(messageIds: string[], fallbackContent: string): string {
+  if (messageIds.length === 0) return fallbackContent;
+
+  const db = getDb();
+  const stmt = db.query("SELECT name, content, is_user FROM messages WHERE id = ?");
+  const lines: string[] = [];
+
+  for (const messageId of messageIds) {
+    const row = stmt.get(messageId) as { name: string; content: string; is_user: number } | null;
+    if (!row) return fallbackContent;
+    lines.push(`[${row.is_user ? "USER" : "CHARACTER"} | ${row.name}]: ${row.content}`);
+  }
+
+  return lines.join("\n");
 }
 
 /**

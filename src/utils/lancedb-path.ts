@@ -14,8 +14,8 @@ function isTermuxEnvironment(dbPath: string, env: Record<string, string | undefi
     || dbPath.startsWith(TERMUX_PATH_PREFIX);
 }
 
-function isRelativeSubpath(path: string): boolean {
-  return !!path && path !== "." && !path.startsWith("../") && path !== ".." && !isAbsolute(path);
+function isRelativePath(path: string): boolean {
+  return !!path && path !== "." && !isAbsolute(path);
 }
 
 export function resolveLanceDbConnectUri(
@@ -33,7 +33,7 @@ export function resolveLanceDbConnectUri(
   if (!runningInTermux) return dbPath;
 
   const relativePath = relative(cwd, dbPath);
-  return isRelativeSubpath(relativePath) ? relativePath : dbPath;
+  return isRelativePath(relativePath) ? relativePath : dbPath;
 }
 
 export function resolveBrokenTermuxLanceDbMirrorPath(

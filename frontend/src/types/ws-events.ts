@@ -122,6 +122,7 @@ export enum EventType {
 
   // Memory Cortex
   CORTEX_REBUILD_PROGRESS = 'CORTEX_REBUILD_PROGRESS',
+  CORTEX_INGESTION_PROGRESS = 'CORTEX_INGESTION_PROGRESS',
 
   // MCP Servers
   MCP_SERVER_CONNECTED = 'MCP_SERVER_CONNECTED',
@@ -361,7 +362,7 @@ export interface SpindleToastPayload {
 // ---- Migration ----
 export interface MigrationProgressPayload {
   migrationId: string
-  phase: 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats'
+  phase: 'starting' | 'scanning' | 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats' | 'completed' | 'failed'
   label: string
   current: number
   total: number

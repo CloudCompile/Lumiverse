@@ -16,11 +16,18 @@ describe("resolveLanceDbConnectUri", () => {
     })).toBe("data/lancedb");
   });
 
-  test("keeps the absolute path when the database is outside the cwd", () => {
+  test("uses a parent-relative path when the database is outside the cwd", () => {
     expect(resolveLanceDbConnectUri("/data/data/com.termux/files/home/shared/lancedb", {
       cwd: "/data/data/com.termux/files/home/Lumiverse",
       env: { TERMUX_VERSION: "0.119.0" },
-    })).toBe("/data/data/com.termux/files/home/shared/lancedb");
+    })).toBe("../shared/lancedb");
+  });
+
+  test("uses a parent-relative path for Termux data dirs outside the repo", () => {
+    expect(resolveLanceDbConnectUri("/data/data/com.termux/files/home/data/lancedb", {
+      cwd: "/data/data/com.termux/files/home/Lumiverse",
+      env: { TERMUX_VERSION: "0.119.0" },
+    })).toBe("../data/lancedb");
   });
 
   test("resolves the broken Termux mirror path created by a stripped leading slash", () => {
@@ -28,6 +35,13 @@ describe("resolveLanceDbConnectUri", () => {
       cwd: "/data/data/com.termux/files/home/Lumiverse",
       env: { TERMUX_VERSION: "0.119.0" },
     })).toBe("/data/data/com.termux/files/home/Lumiverse/data/data/com.termux/files/home/Lumiverse/data/lancedb");
+  });
+
+  test("resolves the broken Termux mirror path for parent-relative data dirs", () => {
+    expect(resolveBrokenTermuxLanceDbMirrorPath("/data/data/com.termux/files/home/data/lancedb", {
+      cwd: "/data/data/com.termux/files/home/Lumiverse",
+      env: { TERMUX_VERSION: "0.119.0" },
+    })).toBe("/data/data/com.termux/files/home/Lumiverse/data/data/com.termux/files/home/data/lancedb");
   });
 
   test("does not report a broken mirror when no relative workaround is needed", () => {

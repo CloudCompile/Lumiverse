@@ -16,6 +16,7 @@ import {
   Zap,
   BookOpen,
   Heart,
+  MessageSquareQuote,
 } from "lucide-react";
 import { Toggle } from "@/components/shared/Toggle";
 import NumericInput from "@/components/shared/NumericInput";
@@ -29,6 +30,18 @@ import styles from "./MemoryCortexSettings.module.css";
 import clsx from "clsx";
 
 type PresetMode = "simple" | "standard" | "advanced";
+type EntityFilterType = "character" | "location" | "item" | "faction" | "concept" | "event";
+
+const ENTITY_FILTER_LABELS: Record<EntityFilterType, string> = {
+  character: "Characters",
+  location: "Locations",
+  item: "Items",
+  faction: "Factions",
+  concept: "Concepts",
+  event: "Events",
+};
+
+const ENTITY_FILTER_TYPES = Object.keys(ENTITY_FILTER_LABELS) as EntityFilterType[];
 
 const PRESET_DESCRIPTIONS: Record<PresetMode, { label: string; desc: string; icon: typeof Zap }> = {
   simple: {
@@ -55,6 +68,12 @@ const FORMATTER_OPTIONS = [
   { value: "minimal", label: "Minimal", desc: "Just memory chunks, no entity data" },
 ];
 
+const THOUGHT_MARKER_PRESETS = [
+  { label: "<think>", prefix: "<think>\n", suffix: "\n</think>" },
+  { label: "<thinking>", prefix: "<thinking>\n", suffix: "\n</thinking>" },
+  { label: "<reasoning>", prefix: "<reasoning>\n", suffix: "\n</reasoning>" },
+];
+
 export default function MemoryCortexSettings() {
   const addToast = useStore((s) => s.addToast);
   const openModal = useStore((s) => s.openModal);
@@ -74,6 +93,10 @@ export default function MemoryCortexSettings() {
 
   // Active chat for stats (if available)
   const activeChatId = useStore((s) => s.activeChatId);
+
+  const activeThoughtPreset = THOUGHT_MARKER_PRESETS.find(
+    (preset) => preset.prefix === config?.thoughtMarkers.prefix && preset.suffix === config?.thoughtMarkers.suffix,
+  );
 
   const handleOpenDiagnostics = useCallback(() => {
     openModal("memoryCortexDiagnostics", { chatId: activeChatId || null });
@@ -184,6 +207,16 @@ export default function MemoryCortexSettings() {
     }
   };
 
+  const updateThoughtMarkers = useCallback((patch: Partial<CortexConfig["thoughtMarkers"]>) => {
+    if (!config) return;
+    updateConfig({
+      thoughtMarkers: {
+        ...config.thoughtMarkers,
+        ...patch,
+      },
+    });
+  }, [config]);
+
   const applyPreset = async (mode: PresetMode) => {
     try {
       const updated = await memoryCortexApi.applyPreset(mode);
@@ -225,6 +258,28 @@ export default function MemoryCortexSettings() {
   const removeWhitelistTerm = (term: string) => {
     if (!config) return;
     updateConfig({ entityWhitelist: config.entityWhitelist.filter((t) => t !== term) });
+  };
+
+  const parseFilterLines = (value: string) => value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const updateEntityFilter = (
+    type: EntityFilterType,
+    field: "protectedTerms" | "rejectedTerms" | "cleanupPatterns",
+    value: string,
+  ) => {
+    if (!config) return;
+    updateConfig({
+      entityExtractionFilters: {
+        ...config.entityExtractionFilters,
+        [type]: {
+          ...config.entityExtractionFilters[type],
+          [field]: parseFilterLines(value),
+        },
+      },
+    });
   };
 
   if (loading || !config) {
@@ -308,6 +363,50 @@ export default function MemoryCortexSettings() {
                   <div className={styles.formatterDesc}>{opt.desc}</div>
                 </button>
               ))}
+            </div>
+          </div>
+
+          <div className={styles.section}>
+            <div className={styles.sectionHeader}>
+              <MessageSquareQuote size={14} />
+              <span>Thought Marker Detection</span>
+            </div>
+            <div className={styles.hintText}>
+              Memory Cortex uses these markers to classify colored text as thoughts instead of narration. Quoted dialogue is still detected automatically, and `*asterisk-wrapped thoughts*` remain supported.
+            </div>
+            <div className={styles.presetRow}>
+              {THOUGHT_MARKER_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  className={clsx(styles.presetBtn, activeThoughtPreset?.label === preset.label && styles.presetBtnActive)}
+                  onClick={() => updateThoughtMarkers({ prefix: preset.prefix, suffix: preset.suffix })}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <div className={styles.markerGrid}>
+              <label className={styles.markerField}>
+                <span className={styles.markerLabel}>Thought prefix</span>
+                <textarea
+                  className={styles.textareaInput}
+                  value={config.thoughtMarkers.prefix}
+                  onChange={(e) => updateThoughtMarkers({ prefix: e.target.value })}
+                  placeholder="<think>"
+                  rows={3}
+                />
+              </label>
+              <label className={styles.markerField}>
+                <span className={styles.markerLabel}>Thought suffix</span>
+                <textarea
+                  className={styles.textareaInput}
+                  value={config.thoughtMarkers.suffix}
+                  onChange={(e) => updateThoughtMarkers({ suffix: e.target.value })}
+                  placeholder="</think>"
+                  rows={3}
+                />
+              </label>
             </div>
           </div>
 
@@ -426,7 +525,7 @@ export default function MemoryCortexSettings() {
           <div className={styles.section}>
             <div className={styles.sectionHeader}>
               <Shield size={14} />
-              <span>Protected terms</span>
+              <span>Whitelist</span>
             </div>
             <div className={styles.whitelistHint}>
               Words the entity extractor should never filter out. Use this for fantasy proper nouns that look like common words
@@ -520,6 +619,58 @@ export default function MemoryCortexSettings() {
                       <Toggle.Checkbox checked={config.consolidation.enabled} onChange={(v) => updateConfig({ consolidation: { ...config.consolidation, enabled: v } })} label="Enable memory consolidation" hint="Compress older memories into summaries. Reduces token usage for long campaigns." />
                     </div>
                   </div>
+
+                  <div className={styles.section}>
+                    <div className={styles.sectionHeader}>
+                      <Shield size={14} />
+                      <span>Entity extraction filters</span>
+                    </div>
+                    <div className={styles.whitelistHint}>
+                      Protected terms seed a specific memory type from matching lines. Rejected terms block that type from matching lines.
+                      Cleanup regexes run in order and remove matched text from protected lines before the entity is saved.
+                      Use JavaScript-style regex strings like <code>/^.*📍\s*/</code>.
+                    </div>
+                    {ENTITY_FILTER_TYPES.map((type) => {
+                      const rules = config.entityExtractionFilters[type];
+                      return (
+                        <div key={type} className={styles.filterGroup}>
+                          <div className={styles.filterGroupHeader}>{ENTITY_FILTER_LABELS[type]}</div>
+                          <div className={styles.filterGrid}>
+                            <label className={styles.filterField}>
+                              <span>Protected terms</span>
+                              <textarea
+                                key={`${type}-protected-${rules.protectedTerms.join("\n")}`}
+                                defaultValue={rules.protectedTerms.join("\n")}
+                                onBlur={(e) => updateEntityFilter(type, "protectedTerms", e.target.value)}
+                                className={styles.textareaInput}
+                                placeholder="One string or /regex/ per line"
+                              />
+                            </label>
+                            <label className={styles.filterField}>
+                              <span>Rejected terms</span>
+                              <textarea
+                                key={`${type}-rejected-${rules.rejectedTerms.join("\n")}`}
+                                defaultValue={rules.rejectedTerms.join("\n")}
+                                onBlur={(e) => updateEntityFilter(type, "rejectedTerms", e.target.value)}
+                                className={styles.textareaInput}
+                                placeholder="One string or /regex/ per line"
+                              />
+                            </label>
+                            <label className={styles.filterField}>
+                              <span>Cleanup regexes</span>
+                              <textarea
+                                key={`${type}-cleanup-${rules.cleanupPatterns.join("\n")}`}
+                                defaultValue={rules.cleanupPatterns.join("\n")}
+                                onBlur={(e) => updateEntityFilter(type, "cleanupPatterns", e.target.value)}
+                                className={styles.textareaInput}
+                                placeholder="Regex removals, one /pattern/flags per line"
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </>
               )}
             </>
@@ -562,6 +713,22 @@ export default function MemoryCortexSettings() {
                 <div className={styles.infoRow}>
                   <span className={styles.infoLabel}>Est. embedding calls</span>
                   <span className={styles.infoValue}>{stats.estimatedEmbeddingCalls}</span>
+                </div>
+                <div className={styles.infoRow}>
+                  <span className={styles.infoLabel}>Last ingestion</span>
+                  <span className={styles.infoValue}>
+                    {stats.ingestionTelemetry.last
+                      ? `${Math.round(stats.ingestionTelemetry.last.totalMs)}ms total (${stats.ingestionTelemetry.last.mode})`
+                      : "No samples yet"}
+                  </span>
+                </div>
+                <div className={styles.infoRow}>
+                  <span className={styles.infoLabel}>Avg. ingestion</span>
+                  <span className={styles.infoValue}>
+                    {stats.ingestionTelemetry.samples > 0
+                      ? `${Math.round(stats.ingestionTelemetry.averages.totalMs)}ms over ${stats.ingestionTelemetry.samples} run${stats.ingestionTelemetry.samples === 1 ? "" : "s"}`
+                      : "No samples yet"}
+                  </span>
                 </div>
               </div>
             </div>
