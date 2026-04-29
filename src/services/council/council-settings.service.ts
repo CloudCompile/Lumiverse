@@ -29,7 +29,7 @@ async function isToolGateEnabled(userId: string, tool: RuntimeCouncilToolDefinit
   }
 }
 
-function normalizeCouncilSettings(settings: CouncilSettings): CouncilSettings {
+export function normalizeCouncilSettings(settings: CouncilSettings): CouncilSettings {
   return {
     ...settings,
     toolsSettings: {

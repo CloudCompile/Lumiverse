@@ -539,8 +539,15 @@ export interface CouncilToolsFailedInfo {
   failedCount: number
 }
 
+export interface CouncilPersistenceTarget {
+  type: 'global' | 'defaults' | 'character' | 'chat'
+  characterId?: string | null
+  chatId?: string | null
+}
+
 export interface CouncilSlice {
   councilSettings: CouncilSettings
+  councilPersistenceTarget: CouncilPersistenceTarget
   councilToolResults: CouncilToolResult[]
   councilExecutionResult: CouncilExecutionResult | null
   availableCouncilTools: CouncilToolDefinition[]
@@ -549,6 +556,7 @@ export interface CouncilSlice {
   councilToolsFailure: CouncilToolsFailedInfo | null
 
   setCouncilSettings: (settings: CouncilSettings) => void
+  setCouncilPersistenceTarget: (target: CouncilPersistenceTarget) => void
   setCouncilToolResults: (results: CouncilToolResult[]) => void
   setCouncilExecutionResult: (result: CouncilExecutionResult | null) => void
   setAvailableCouncilTools: (tools: CouncilToolDefinition[]) => void

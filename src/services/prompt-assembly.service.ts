@@ -75,10 +75,10 @@ import * as packsSvc from "./packs.service";
 import * as embeddingsSvc from "./embeddings.service";
 import * as imagesSvc from "./images.service";
 import * as presetProfilesSvc from "./preset-profiles.service";
+import * as councilProfilesSvc from "./council/council-profiles.service";
 import { readCachedChatMemory } from "./chat-memory-cache.service";
 import { deduplicateWorldInfoEntries } from "./world-info-dedup.service";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
-import { getCouncilSettings } from "./council/council-settings.service";
 import * as memoryCortex from "./memory-cortex";
 import { buildEmotionalContext } from "./memory-cortex";
 import * as databankSvc from "./databank";
@@ -2616,7 +2616,12 @@ export function populateLumiaLoomContext(
   });
 
   // ---- Council ----
-  const councilSettings = getCouncilSettings(userId);
+  const councilSettings = councilProfilesSvc.resolveProfile(
+    userId,
+    chat.id,
+    chat.character_id,
+    { isGroup: chat.metadata?.group === true },
+  ).council_settings;
 
   // Batch-load full Lumia items for council members (single query)
   const memberItemIds = councilSettings.members.map((m: any) => m.itemId);

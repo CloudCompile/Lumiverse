@@ -31,6 +31,7 @@ import {
 import { executeHostCouncilTool } from "./host-tools";
 import { getExpressionLabels, hasExpressions } from "../expressions.service";
 import { getSidecarSettings } from "../sidecar-settings.service";
+import type { SidecarSettings } from "../sidecar-settings.service";
 import { getToolChoiceParams } from "../memory-cortex/salience-sidecar";
 import type { SidecarConfig } from "lumiverse-spindle-types";
 
@@ -57,6 +58,7 @@ interface ExecuteInput {
   connectionId?: string;
   /** Pre-resolved settings — avoids re-fetching and ensures consistency with caller. */
   settings?: CouncilSettings;
+  sidecarSettings?: SidecarSettings;
   /** Abort signal — when fired, stops executing further council tools. */
   signal?: AbortSignal;
   /** Pre-computed enrichment from the generation chain. When provided, council tools
@@ -90,7 +92,7 @@ export async function executeCouncil(
   const hasTools = settings.members.some((m) => m.tools.length > 0);
 
   // Resolve sidecar connection from shared settings (falls back to legacy council config)
-  const sidecar = getSidecarSettings(input.userId);
+  const sidecar = input.sidecarSettings ?? getSidecarSettings(input.userId);
   if (hasTools && (!sidecar.connectionProfileId || !sidecar.model)) {
     console.warn("[council] Tools skipped: sidecar connection not configured (profileId=%s, model=%s)", sidecar.connectionProfileId, sidecar.model);
   }

@@ -118,6 +118,7 @@ function applyBootstrap(payload: BootstrapPayload, errors: Record<string, string
       ...payload.council.settings,
       toolsSettings: { ...COUNCIL_TOOLS_DEFAULTS, ...storedTools },
     })
+    store.setCouncilPersistenceTarget({ type: 'global' })
   }
 
   // Council tools merge needs spindle data; only hydrate when both sections

@@ -54,6 +54,7 @@ import {
   getCouncilSettings,
   getAvailableTools,
 } from "./council/council-settings.service";
+import * as councilProfilesSvc from "./council/council-profiles.service";
 import * as tokenizerSvc from "./tokenizer.service";
 import * as breakdownSvc from "./breakdown.service";
 import * as regexScriptsSvc from "./regex-scripts.service";
@@ -1317,7 +1318,13 @@ export async function startGeneration(
       await new Promise<void>((r) => setTimeout(r, 0));
       try {
         // Execute council if enabled (before prompt assembly so it doesn't slow the critical path visibly)
-        const councilSettings = getCouncilSettings(input.userId);
+        const resolvedCouncilProfile = councilProfilesSvc.resolveProfile(
+          input.userId,
+          input.chat_id,
+          chat?.character_id ?? null,
+          { isGroup: chat?.metadata?.group === true },
+        );
+        const councilSettings = resolvedCouncilProfile.council_settings;
         let councilResult: CouncilExecutionResult | null = null;
         let inlineTools: ToolDefinition[] | undefined;
         let inlineToolDefsByName:
@@ -1535,6 +1542,7 @@ export async function startGeneration(
                 personaId: input.persona_id,
                 connectionId: input.connection_id,
                 settings: councilSettings,
+                sidecarSettings: resolvedCouncilProfile.sidecar_settings,
                 signal: abortController.signal,
                 enrichment: councilEnrichment,
               });
@@ -1629,10 +1637,11 @@ export async function startGeneration(
                       chatId: input.chat_id,
                       personaId: input.persona_id,
                       connectionId: input.connection_id,
-                      settings: councilSettings,
-                      signal: abortController.signal,
-                      enrichment: councilEnrichment,
-                      retryToolNames: failedResults.map((r) => r.toolName),
+                        settings: councilSettings,
+                        sidecarSettings: resolvedCouncilProfile.sidecar_settings,
+                        signal: abortController.signal,
+                        enrichment: councilEnrichment,
+                        retryToolNames: failedResults.map((r) => r.toolName),
                     });
 
                     checkAborted();
@@ -1878,6 +1887,7 @@ export async function startGeneration(
           inlineTools,
           inlineToolDefsByName,
           inlineMembersByPrefix,
+          councilSettings.toolsSettings.timeoutMs,
           pipeline.assistantPrefill,
           pipeline.macroEnv,
         );
@@ -2065,6 +2075,7 @@ async function runGeneration(
   tools?: ToolDefinition[],
   inlineToolDefsByName?: Map<string, RuntimeCouncilToolDefinition>,
   inlineMembersByPrefix?: Map<string, CouncilMember>,
+  inlineToolTimeoutMs?: number,
   assistantPrefill?: string,
   macroEnv?: import("../macros/types").MacroEnv,
 ): Promise<void> {
@@ -2337,7 +2348,7 @@ async function runGeneration(
   let emittedStopped = false;
   try {
     const inlineMcpTimeoutMs = tools?.length
-      ? getCouncilSettings(userId).toolsSettings.timeoutMs
+      ? inlineToolTimeoutMs ?? getCouncilSettings(userId).toolsSettings.timeoutMs
       : 30_000;
     let generationMessages = messages;
 

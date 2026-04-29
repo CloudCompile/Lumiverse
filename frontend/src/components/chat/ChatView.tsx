@@ -6,8 +6,10 @@ import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
 import { loadoutsApi } from '@/api/loadouts'
+import { councilApi } from '@/api/council'
 import { recoverPooledGeneration } from '@/lib/generation-recovery'
 import { charactersApi } from '@/api/characters'
+import { packsApi } from '@/api/packs'
 import { imagesApi } from '@/api/images'
 import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
@@ -15,6 +17,7 @@ import { resolveAutoPersonaBinding } from '@/store/slices/personas'
 import type { WallpaperRef } from '@/types/store'
 import useSwipeKeyboard from '@/hooks/useSwipeKeyboard'
 import useEditKeyboard from '@/hooks/useEditKeyboard'
+import { councilSourceToTarget } from '@/hooks/useCouncilProfiles'
 import MessageList from './MessageList'
 import MessageSelectBar from './MessageSelectBar'
 import InputArea from './InputArea'
@@ -194,6 +197,31 @@ export default function ChatView() {
             toast.info(`Applied loadout: ${resolved.loadout.name}`)
           }
         } catch { /* no loadout binding — that's fine */ }
+
+        try {
+          const resolvedCouncil = await councilApi.resolve(chatId)
+          if (!cancelled) {
+            const store = useStore.getState()
+            store.setCouncilSettings(resolvedCouncil.council_settings)
+            store.setCouncilPersistenceTarget(councilSourceToTarget(resolvedCouncil.source, {
+              chatId,
+              characterId: chat.character_id,
+            }))
+
+            const memberPackIds = new Set(
+              resolvedCouncil.council_settings.members.map((member) => member.packId).filter(Boolean),
+            )
+            for (const packId of memberPackIds) {
+              if (!store.packsWithItems[packId]) {
+                packsApi.get(packId)
+                  .then((data) => useStore.getState().setPackWithItems(packId, data))
+                  .catch(() => {})
+              }
+            }
+          }
+        } catch {
+          // no council profile binding or resolution issue - keep current settings
+        }
 
         // Load per-chat wallpaper from metadata
         const wp = chat.metadata?.wallpaper as import('@/types/store').WallpaperRef | undefined

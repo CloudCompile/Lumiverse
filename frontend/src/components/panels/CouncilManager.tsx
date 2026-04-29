@@ -1,10 +1,9 @@
 import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react'
-import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu, Info, Edit2, Check, X, User, Sparkles, ChevronRight } from 'lucide-react'
+import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu, Info, Edit2, Check, X, User, Sparkles, ChevronRight, Camera, RotateCcw, Link } from 'lucide-react'
 import { IconAdjustments, IconAdjustmentsHorizontal } from '@tabler/icons-react'
 import clsx from 'clsx'
 import { useStore } from '@/store'
 import { connectionsApi } from '@/api/connections'
-import { settingsApi } from '@/api/settings'
 import { Toggle } from '@/components/shared/Toggle'
 import { Button, EditorSection, FormField } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
@@ -16,6 +15,7 @@ import AddMemberDropdown from './council/AddMemberDropdown'
 import QuickAddPackDropdown from './council/QuickAddPackDropdown'
 import LumiaSelector from '@/components/modals/LumiaSelector'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
+import { useCouncilProfiles } from '@/hooks/useCouncilProfiles'
 import type { CouncilMember } from 'lumiverse-spindle-types'
 import promptStyles from './PromptPanel.module.css'
 import styles from './CouncilManager.module.css'
@@ -100,22 +100,6 @@ function SelectionBtn({
   )
 }
 
-interface SidecarConfig {
-  connectionProfileId: string
-  model: string
-  temperature: number
-  topP: number
-  maxTokens: number
-}
-
-const SIDECAR_DEFAULTS: SidecarConfig = {
-  connectionProfileId: '',
-  model: '',
-  temperature: 0.7,
-  topP: 0.9,
-  maxTokens: 1024,
-}
-
 export default function CouncilManager() {
   const councilSettings = useStore((s) => s.councilSettings)
   const availableCouncilTools = useStore((s) => s.availableCouncilTools)
@@ -138,55 +122,14 @@ export default function CouncilManager() {
   const loadAvailableTools = useStore((s) => s.loadAvailableTools)
   const activeLoomPresetId = useStore((s) => s.activeLoomPresetId)
   const presets = useStore((s) => s.presets)
+  const councilProfiles = useCouncilProfiles()
 
-  // Shared sidecar settings (independent of council)
-  const [sidecarConfig, setSidecarConfig] = useState<SidecarConfig>(SIDECAR_DEFAULTS)
   const [sidecarModels, setSidecarModels] = useState<string[]>([])
   const [sidecarModelLabels, setSidecarModelLabels] = useState<Record<string, string>>({})
   const [sidecarModelsLoading, setSidecarModelsLoading] = useState(false)
 
-  useEffect(() => {
-    const applyLegacy = (cs: any) => {
-      const legacy = cs?.toolsSettings?.sidecar
-      if (legacy?.connectionProfileId) {
-        setSidecarConfig({
-          connectionProfileId: legacy.connectionProfileId,
-          model: legacy.model || '',
-          temperature: legacy.temperature ?? 0.7,
-          topP: legacy.topP ?? 0.9,
-          maxTokens: legacy.maxTokens ?? 1024,
-        })
-      }
-    }
-    settingsApi.get('sidecarSettings')
-      .then((row) => {
-        if (row?.value?.connectionProfileId) {
-          setSidecarConfig({ ...SIDECAR_DEFAULTS, ...(row.value as Partial<SidecarConfig>) })
-        } else {
-          // No dedicated setting — try legacy council sidecar
-          settingsApi.get('council_settings')
-            .then((cs) => applyLegacy(cs?.value))
-            .catch(() => {})
-        }
-      })
-      .catch(() => {
-        // sidecarSettings key doesn't exist — try legacy
-        settingsApi.get('council_settings')
-          .then((cs) => applyLegacy(cs?.value))
-          .catch(() => {})
-      })
-  }, [])
-
-  const saveSidecar = useCallback((partial: Partial<SidecarConfig>) => {
-    setSidecarConfig((prev) => {
-      const updated = { ...prev, ...partial }
-      settingsApi.put('sidecarSettings', updated).catch(() => {})
-      return updated
-    })
-  }, [])
-
   const fetchSidecarModels = useCallback(async () => {
-    if (!sidecarConfig.connectionProfileId) {
+    if (!councilProfiles.sidecarConfig.connectionProfileId) {
       setSidecarModels([])
       setSidecarModelLabels({})
       return
@@ -194,7 +137,7 @@ export default function CouncilManager() {
 
     setSidecarModelsLoading(true)
     try {
-      const result = await connectionsApi.models(sidecarConfig.connectionProfileId)
+      const result = await connectionsApi.models(councilProfiles.sidecarConfig.connectionProfileId)
       setSidecarModels(result.models || [])
       setSidecarModelLabels(result.model_labels || {})
     } catch {
@@ -203,16 +146,16 @@ export default function CouncilManager() {
     } finally {
       setSidecarModelsLoading(false)
     }
-  }, [sidecarConfig.connectionProfileId])
+  }, [councilProfiles.sidecarConfig.connectionProfileId])
 
   useEffect(() => {
-    if (!sidecarConfig.connectionProfileId) {
+    if (!councilProfiles.sidecarConfig.connectionProfileId) {
       setSidecarModels([])
       setSidecarModelLabels({})
       return
     }
     fetchSidecarModels()
-  }, [fetchSidecarModels, sidecarConfig.connectionProfileId])
+  }, [fetchSidecarModels, councilProfiles.sidecarConfig.connectionProfileId])
 
   const functionCallingEnabled = useMemo(() => {
     if (!activeLoomPresetId) return true
@@ -301,6 +244,123 @@ export default function CouncilManager() {
             <Power size={14} />
             {councilSettings.councilMode ? 'Council Enabled' : 'Council Disabled'}
           </button>
+        </div>
+
+        <div className={styles.profileBar}>
+          <div className={styles.profileHeader}>
+            <span className={styles.profileLabel}>Profiles</span>
+
+            {councilProfiles.activeSource !== 'none' && (
+              <span className={styles.profileSourceBadge}>
+                {councilProfiles.activeSource === 'chat' ? 'CHAT'
+                  : councilProfiles.activeSource === 'character' ? 'CHAR'
+                    : 'DEFAULT'}
+              </span>
+            )}
+          </div>
+
+          <div className={styles.profileBtnGroup}>
+            {!councilProfiles.hasDefaults ? (
+              <button
+                className={styles.profileBtn}
+                onClick={councilProfiles.captureDefaults}
+                disabled={councilProfiles.isLoading}
+                title="Save the current council and sidecar settings as the default council profile"
+                type="button"
+              >
+                <Camera size={10} /> Defaults
+              </button>
+            ) : (
+              <button
+                className={clsx(styles.profileBtn, styles.profileBtnActive)}
+                onClick={councilProfiles.captureDefaults}
+                disabled={councilProfiles.isLoading}
+                title="Resave the current council and sidecar settings as the default council profile"
+                type="button"
+              >
+                <RotateCcw size={10} /> Defaults
+                <span
+                  className={styles.profileBtnDismiss}
+                  onClick={(e) => { e.stopPropagation(); councilProfiles.clearDefaults() }}
+                  title="Clear the default council profile"
+                  role="button"
+                  tabIndex={0}
+                >
+                  <X size={8} />
+                </span>
+              </button>
+            )}
+
+            {councilProfiles.characterBindingEnabled && (!councilProfiles.hasCharacterBinding ? (
+              <button
+                className={styles.profileBtn}
+                onClick={councilProfiles.bindToCharacter}
+                disabled={councilProfiles.isLoading || !councilProfiles.activeCharacterId}
+                title={
+                  councilProfiles.activeCharacterId
+                    ? 'Save the current council and sidecar settings to this character'
+                    : 'No active character - open a chat first'
+                }
+                type="button"
+              >
+                <Link size={10} /> Character
+              </button>
+            ) : (
+              <button
+                className={clsx(styles.profileBtn, styles.profileBtnActive)}
+                onClick={councilProfiles.bindToCharacter}
+                disabled={councilProfiles.isLoading || !councilProfiles.activeCharacterId}
+                title="Resave the current council and sidecar settings to this character"
+                type="button"
+              >
+                <RotateCcw size={10} /> Character
+                <span
+                  className={styles.profileBtnDismiss}
+                  onClick={(e) => { e.stopPropagation(); councilProfiles.unbindCharacter() }}
+                  title="Remove character council binding"
+                  role="button"
+                  tabIndex={0}
+                >
+                  <X size={8} />
+                </span>
+              </button>
+            ))}
+
+            {!councilProfiles.hasChatBinding ? (
+              <button
+                className={styles.profileBtn}
+                onClick={councilProfiles.bindToChat}
+                disabled={councilProfiles.isLoading || !councilProfiles.activeChatId}
+                title={
+                  councilProfiles.activeChatId
+                    ? 'Save the current council and sidecar settings to this chat'
+                    : 'No active chat - open a chat first'
+                }
+                type="button"
+              >
+                <Link size={10} /> Chat
+              </button>
+            ) : (
+              <button
+                className={clsx(styles.profileBtn, styles.profileBtnActive)}
+                onClick={councilProfiles.bindToChat}
+                disabled={councilProfiles.isLoading || !councilProfiles.activeChatId}
+                title="Resave the current council and sidecar settings to this chat"
+                type="button"
+              >
+                <RotateCcw size={10} /> Chat
+                <span
+                  className={styles.profileBtnDismiss}
+                  onClick={(e) => { e.stopPropagation(); councilProfiles.unbindChat() }}
+                  title="Remove chat council binding"
+                  role="button"
+                  tabIndex={0}
+                >
+                  <X size={8} />
+                </span>
+              </button>
+            )}
+          </div>
         </div>
 
         <EditorSection Icon={Package} title="Council Loadout">
@@ -436,8 +496,8 @@ export default function CouncilManager() {
 
           <FormField label="Connection Profile">
             <SearchableSelect
-              value={sidecarConfig.connectionProfileId}
-              onChange={(val) => saveSidecar({ connectionProfileId: val })}
+              value={councilProfiles.sidecarConfig.connectionProfileId}
+              onChange={(val) => councilProfiles.saveSidecar({ connectionProfileId: val })}
               options={profileOptions}
               placeholder="Select a connection…"
               searchPlaceholder="Search connections…"
@@ -449,26 +509,26 @@ export default function CouncilManager() {
 
           <FormField label="Model">
             <ModelCombobox
-              value={sidecarConfig.model}
-              onChange={(val) => saveSidecar({ model: val })}
+              value={councilProfiles.sidecarConfig.model}
+              onChange={(val) => councilProfiles.saveSidecar({ model: val })}
               placeholder="e.g. claude-3-haiku-20240307"
               models={sidecarModels}
               modelLabels={sidecarModelLabels}
               loading={sidecarModelsLoading}
               onRefresh={fetchSidecarModels}
               autoRefreshOnFocus
-              refreshKey={sidecarConfig.connectionProfileId}
-              disabled={!sidecarConfig.connectionProfileId}
-              emptyMessage={sidecarConfig.connectionProfileId ? 'No models returned for this connection. Enter one manually.' : 'Select a connection profile to browse models.'}
-              browseHint={sidecarConfig.connectionProfileId ? 'Click into the field to browse models for the selected connection, or type one manually.' : 'Select a connection profile first, then click into the field to browse models.'}
+              refreshKey={councilProfiles.sidecarConfig.connectionProfileId}
+              disabled={!councilProfiles.sidecarConfig.connectionProfileId}
+              emptyMessage={councilProfiles.sidecarConfig.connectionProfileId ? 'No models returned for this connection. Enter one manually.' : 'Select a connection profile to browse models.'}
+              browseHint={councilProfiles.sidecarConfig.connectionProfileId ? 'Click into the field to browse models for the selected connection, or type one manually.' : 'Select a connection profile first, then click into the field to browse models.'}
             />
           </FormField>
 
           <div className={styles.fieldRow}>
             <FormField label="Temperature">
               <NumberStepper
-                value={sidecarConfig.temperature}
-                onChange={(val) => saveSidecar({ temperature: val })}
+                value={councilProfiles.sidecarConfig.temperature}
+                onChange={(val) => councilProfiles.saveSidecar({ temperature: val })}
                 min={0}
                 max={2}
                 step={0.05}
@@ -476,8 +536,8 @@ export default function CouncilManager() {
             </FormField>
             <FormField label="Top P">
               <NumberStepper
-                value={sidecarConfig.topP}
-                onChange={(val) => saveSidecar({ topP: val })}
+                value={councilProfiles.sidecarConfig.topP}
+                onChange={(val) => councilProfiles.saveSidecar({ topP: val })}
                 min={0}
                 max={1}
                 step={0.05}
@@ -485,8 +545,8 @@ export default function CouncilManager() {
             </FormField>
             <FormField label="Max Tokens">
               <NumberStepper
-                value={sidecarConfig.maxTokens}
-                onChange={(val) => saveSidecar({ maxTokens: val })}
+                value={councilProfiles.sidecarConfig.maxTokens}
+                onChange={(val) => councilProfiles.saveSidecar({ maxTokens: val })}
                 min={256}
                 max={4096}
                 step={50}

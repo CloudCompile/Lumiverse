@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand'
-import type { CouncilSlice } from '@/types/store'
+import type { CouncilPersistenceTarget, CouncilSlice } from '@/types/store'
 import type { CouncilMember, CouncilSettings, CouncilToolsSettings, CouncilToolDefinition, ExtensionInfo, ToolRegistration } from 'lumiverse-spindle-types'
 import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS } from 'lumiverse-spindle-types'
 import { councilApi } from '@/api/council'
@@ -7,6 +7,25 @@ import { spindleApi } from '@/api/spindle'
 import { generateUUID } from '@/lib/uuid'
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+
+async function persistCouncilSettings(settings: CouncilSettings, target: CouncilPersistenceTarget) {
+  switch (target.type) {
+    case 'defaults':
+      await councilApi.putDefaults({ council_settings: settings })
+      return
+    case 'character':
+      if (!target.characterId) return
+      await councilApi.putCharacterBinding(target.characterId, { council_settings: settings })
+      return
+    case 'chat':
+      if (!target.chatId) return
+      await councilApi.putChatBinding(target.chatId, { council_settings: settings })
+      return
+    case 'global':
+    default:
+      await councilApi.putSettings(settings)
+  }
+}
 
 /** Merge rules shared between network refresh (`loadAvailableTools`) and
  *  bootstrap hydration (`hydrateCouncilTools`). Spindle extension tools are
@@ -42,10 +61,10 @@ function mergeCouncilAndSpindleTools(
   return Array.from(merged.values())
 }
 
-function debouncedSave(settings: CouncilSettings) {
+function debouncedSave(settings: CouncilSettings, target: CouncilPersistenceTarget) {
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
-    councilApi.putSettings(settings).catch((err) => {
+    persistCouncilSettings(settings, target).catch((err) => {
       console.error('[council] Failed to save settings:', err)
     })
   }, 500)
@@ -53,6 +72,7 @@ function debouncedSave(settings: CouncilSettings) {
 
 export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
   councilSettings: { ...COUNCIL_SETTINGS_DEFAULTS },
+  councilPersistenceTarget: { type: 'global' },
   councilToolResults: [],
   councilExecutionResult: null,
   availableCouncilTools: [],
@@ -61,6 +81,7 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
   councilToolsFailure: null,
 
   setCouncilSettings: (settings) => set({ councilSettings: settings }),
+  setCouncilPersistenceTarget: (target) => set({ councilPersistenceTarget: target }),
   setCouncilToolResults: (results) => set({ councilToolResults: results }),
   setCouncilExecutionResult: (result) => set({ councilExecutionResult: result }),
   setAvailableCouncilTools: (tools) => set({ availableCouncilTools: tools }),
@@ -82,6 +103,7 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
             ...storedTools,
           },
         },
+        councilPersistenceTarget: { type: 'global' },
       })
     } catch (err) {
       console.error('[council] Failed to load settings:', err)
@@ -103,7 +125,7 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
         : current.toolsSettings,
     }
     set({ councilSettings: merged })
-    debouncedSave(merged)
+    debouncedSave(merged, get().councilPersistenceTarget)
   },
 
   loadAvailableTools: async () => {
@@ -136,7 +158,7 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
     const settings = { ...get().councilSettings }
     settings.members = [...settings.members, member]
     set({ councilSettings: settings })
-    debouncedSave(settings)
+    debouncedSave(settings, get().councilPersistenceTarget)
   },
 
   addCouncilMembersFromPack: (packId: string): number => {
@@ -166,7 +188,7 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
     if (newMembers.length === 0) return 0
     settings.members = [...settings.members, ...newMembers]
     set({ councilSettings: settings })
-    debouncedSave(settings)
+    debouncedSave(settings, state.councilPersistenceTarget)
     return newMembers.length
   },
 
@@ -176,14 +198,14 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
       m.id === id ? { ...m, ...updates } : m
     )
     set({ councilSettings: settings })
-    debouncedSave(settings)
+    debouncedSave(settings, get().councilPersistenceTarget)
   },
 
   removeCouncilMember: (id: string) => {
     const settings = { ...get().councilSettings }
     settings.members = settings.members.filter((m) => m.id !== id)
     set({ councilSettings: settings })
-    debouncedSave(settings)
+    debouncedSave(settings, get().councilPersistenceTarget)
   },
 
   setCouncilToolsSettings: (partial: Partial<CouncilToolsSettings>) => {
@@ -193,6 +215,6 @@ export const createCouncilSlice: StateCreator<CouncilSlice> = (set, get) => ({
       ...partial,
     }
     set({ councilSettings: settings })
-    debouncedSave(settings)
+    debouncedSave(settings, get().councilPersistenceTarget)
   },
 })
