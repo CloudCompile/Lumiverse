@@ -22,6 +22,8 @@ let lastUpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
 /** Whether a destructive operation is in progress. */
 let operationInProgress: string | null = null;
 
+const RESPONSE_FLUSH_DELAY_MS = 150;
+
 let isDev = false;
 
 export function setDevMode(dev: boolean): void {
@@ -42,6 +44,10 @@ function respond(id: string, success: boolean, data?: any, error?: string): void
 
 function progress(id: string, operation: string, message: string): void {
   sendToServer({ type: "progress", id, payload: { operation, message } });
+}
+
+function waitForResponseFlush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, RESPONSE_FLUSH_DELAY_MS));
 }
 
 export async function handleIPCMessage(msg: any): Promise<void> {
@@ -82,10 +88,12 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       // success is what an "expected" restart looks like on the wire.
       respond(id, true, { message: "Applying update..." });
       try {
+        await waitForResponseFlush();
         progress(id, "update", "Starting update...");
         await applyUpdate(
           () => stopServer(),
-          () => { startServer(isDev); return Promise.resolve(); }
+          () => { startServer(isDev); return Promise.resolve(); },
+          (message) => progress(id, "update", message),
         );
         lastUpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
       } catch (err) {
@@ -116,11 +124,13 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       operationInProgress = "branch-switch";
       respond(id, true, { message: `Switching to ${target}...` });
       try {
+        await waitForResponseFlush();
         progress(id, "branch-switch", `Switching to ${target}...`);
         await switchBranch(
           target,
           () => stopServer(),
-          () => { startServer(isDev); return Promise.resolve(); }
+          () => { startServer(isDev); return Promise.resolve(); },
+          (message) => progress(id, "branch-switch", message),
         );
       } catch (err) {
         console.error("[runner] Branch switch failed:", err);
@@ -145,6 +155,7 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       // a dead socket; the frontend will pick up the WS disconnect.
       respond(id, true, { enabled: enable, message: enable ? "Enabling remote mode..." : "Disabling remote mode..." });
       try {
+        await waitForResponseFlush();
         progress(id, "remote-toggle", enable ? "Enabling remote mode..." : "Disabling remote mode...");
         await writeTrustAnyOrigin(enable);
         // Restart for .env changes to take effect
@@ -165,8 +176,7 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       operationInProgress = "restart";
       try {
         respond(id, true, { message: "Restarting..." });
-        // Small delay to let the response be sent before the server is killed
-        await new Promise((r) => setTimeout(r, 100));
+        await waitForResponseFlush();
         await restartServer(isDev);
       } finally {
         operationInProgress = null;
@@ -250,6 +260,7 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       // the frontend only finds out via the WS reconnect path.
       respond(id, true, { message: "Rebuilding frontend..." });
       try {
+        await waitForResponseFlush();
         const frontendDir = join(PROJECT_ROOT, "frontend");
 
         progress(id, "rebuild", "Stopping server for dependency checks and frontend rebuild...");

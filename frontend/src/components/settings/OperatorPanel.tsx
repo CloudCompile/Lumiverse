@@ -39,8 +39,32 @@ import { EventType } from '@/ws/events'
 import styles from './OperatorPanel.module.css'
 import clsx from 'clsx'
 
+const OPERATOR_OPERATION_LABELS: Record<string, string> = {
+  update: 'updating',
+  updating: 'updating',
+  'branch-switch': 'switching branch',
+  'switching branch': 'switching branch',
+  restart: 'restarting',
+  restarting: 'restarting',
+  'remote-toggle': 'toggling remote',
+  'toggling remote': 'toggling remote',
+  rebuild: 'rebuilding frontend',
+  'rebuilding frontend': 'rebuilding frontend',
+  'clear-cache': 'clearing cache',
+  'clearing cache': 'clearing cache',
+  'ensure-deps': 'installing dependencies',
+  'installing dependencies': 'installing dependencies',
+  'database-maintenance': 'database maintenance',
+  'database maintenance': 'database maintenance',
+}
+
 /** Operations that cause the server to restart and require reconnection handling. */
 const RESTART_OPERATIONS = new Set(['updating', 'switching branch', 'restarting', 'toggling remote', 'rebuilding frontend'])
+
+function normalizeOperatorOperation(operation: string | null | undefined): string | null {
+  if (!operation) return null
+  return OPERATOR_OPERATION_LABELS[operation] ?? operation
+}
 
 const TRUSTED_HOST_SOURCE_LABELS: Record<TrustedHostEntry['source'], string> = {
   hostname: 'hostname',
@@ -273,7 +297,8 @@ export default function OperatorPanel() {
   const pendingRestartOp = useRef<string | null>(null)
   const trustedHostsRequestId = useRef(0)
 
-  const effectiveBusy = reconnecting ? 'reconnecting' : (storeBusy || busy)
+  const normalizedStoreBusy = normalizeOperatorOperation(storeBusy)
+  const effectiveBusy = reconnecting ? 'reconnecting' : (normalizedStoreBusy || normalizeOperatorOperation(busy))
   const ipcAvailable = status?.ipcAvailable ?? false
   const ipcHint = status ? IPC_REASON_COPY[status.ipcReason] : null
 
@@ -442,6 +467,11 @@ export default function OperatorPanel() {
   }, [reconnecting, isShutdown])
 
   // ── WS disconnect / reconnect detection ─────────────────────────────────
+
+  useEffect(() => {
+    if (!normalizedStoreBusy || !RESTART_OPERATIONS.has(normalizedStoreBusy)) return
+    pendingRestartOp.current = normalizedStoreBusy
+  }, [normalizedStoreBusy])
 
   useEffect(() => {
     // Poll for WS disconnect when we're expecting a server restart.

@@ -18,6 +18,8 @@ export interface UpdateState {
   latestMessage: string;
 }
 
+type ProgressReporter = (message: string) => void;
+
 const FRONTEND_BUILD_IGNORED_PATHS = [
   "frontend/dist/",
 ];
@@ -129,7 +131,8 @@ export async function checkForUpdates(): Promise<UpdateState> {
  */
 export async function applyUpdate(
   stopServer: () => Promise<void>,
-  startServer: () => Promise<void>
+  startServer: () => Promise<void>,
+  reportProgress?: ProgressReporter,
 ): Promise<void> {
   log("Preparing update...");
   const previousHead = getHeadRef();
@@ -180,16 +183,20 @@ export async function applyUpdate(
   const changedFiles = getChangedFilesBetween(previousHead, currentHead);
 
   // Install dependencies and rebuild only if pulled files touched frontend inputs.
+  reportProgress?.("Installing backend and frontend dependencies...");
   await ensureDependencies(frontendDir);
   if (shouldRebuildFrontend(changedFiles)) {
     const summary = summarizeFrontendChanges(changedFiles);
+    reportProgress?.(`Waiting for Vite build to finish${summary ? ` (${summary})` : ""}...`);
     log(`Frontend changes detected in update; waiting for Vite build (${summary}).`);
     await rebuildFrontend(frontendDir);
   } else {
+    reportProgress?.("No frontend changes detected; restarting server...");
     log("No frontend source/config changes detected in pulled files; skipping local Vite rebuild.");
   }
 
   log("Update complete. Restarting server...");
+  reportProgress?.("Starting server...");
   await startServer();
 }
 
@@ -200,7 +207,8 @@ export async function applyUpdate(
 export async function switchBranch(
   target: string,
   stopServer: () => Promise<void>,
-  startServer: () => Promise<void>
+  startServer: () => Promise<void>,
+  reportProgress?: ProgressReporter,
 ): Promise<void> {
   if (!AVAILABLE_BRANCHES.includes(target as any)) {
     throw new Error(`Invalid branch: ${target}. Available: ${AVAILABLE_BRANCHES.join(", ")}`);
@@ -270,16 +278,20 @@ export async function switchBranch(
   const currentHead = getHeadRef();
   const changedFiles = getChangedFilesBetween(previousHead, currentHead);
 
+  reportProgress?.("Installing backend and frontend dependencies...");
   await ensureDependencies(frontendDir);
   if (shouldRebuildFrontend(changedFiles)) {
     const summary = summarizeFrontendChanges(changedFiles);
+    reportProgress?.(`Waiting for Vite build to finish${summary ? ` (${summary})` : ""}...`);
     log(`Frontend changes detected after branch switch; waiting for Vite build (${summary}).`);
     await rebuildFrontend(frontendDir);
   } else {
+    reportProgress?.("No frontend changes detected; restarting server...");
     log("No frontend source/config changes detected after branch switch; skipping local Vite rebuild.");
   }
 
   log(`Branch switch complete. Now on '${target}'. Restarting server...`);
+  reportProgress?.("Starting server...");
   await startServer();
 }
 
