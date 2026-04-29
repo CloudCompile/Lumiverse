@@ -846,6 +846,31 @@ export async function processChunk(
       salienceResult = scoreChunkHeuristic(cleanContent);
     }
 
+    // Warmup rebuild works from a chunk snapshot, so the source chunk may have
+    // been deleted by a concurrent chat chunk rebuild before we persist.
+    const chunkStillExists = db
+      .query("SELECT 1 FROM chat_chunks WHERE id = ? AND chat_id = ?")
+      .get(data.chunkId, data.chatId);
+    if (!chunkStillExists) {
+      const skippedTimings: CortexIngestionTimings = {
+        mode: extraction ? (heuristicResult ? "mixed" : "sidecar") : "heuristic",
+        fontMs: timings.fontMs,
+        heuristicMs: timings.heuristicMs,
+        heuristicSalienceMs: timings.heuristicSalienceMs,
+        heuristicEntityMs: timings.heuristicEntityMs,
+        heuristicRelationshipMs: timings.heuristicRelationshipMs,
+        heuristicAliasMs: timings.heuristicAliasMs,
+        sidecarMs: timings.sidecarMs,
+        graphMs: timings.graphMs,
+        dbMs: timings.dbMs,
+        totalMs: performance.now() - pipelineStartedAt,
+        completedAt: Date.now(),
+        chunkId: data.chunkId,
+      };
+      completeIngestionTracking(data.userId, data.chatId, data.chunkId, skippedTimings);
+      return;
+    }
+
     updateIngestionStatus(data.userId, data.chatId, { phase: "persisting", chunkId: data.chunkId });
 
     if (config.salienceScoring) {

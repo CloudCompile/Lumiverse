@@ -1017,6 +1017,9 @@ app.post("/chats/:chatId/warm", async (c) => {
   if (rebuild?.status === "processing") {
     return c.json({ status: "skipped", reason: "rebuild_in_progress", chatId });
   }
+  if (chatsSvc.isChatChunkRebuildInProgress(chatId)) {
+    return c.json({ status: "skipped", reason: "chunk_rebuild_in_progress", chatId });
+  }
   if (ingestion?.status === "processing") {
     return c.json({ status: "skipped", reason: "ingestion_in_progress", chatId });
   }

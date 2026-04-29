@@ -1765,6 +1765,10 @@ export async function ensureChatMemoryFresh(userId: string, chatId: string): Pro
 const _rebuildInflight = new Map<string, Promise<void>>();
 const _rebuildPending = new Set<string>();
 
+export function isChatChunkRebuildInProgress(chatId: string): boolean {
+  return _rebuildInflight.has(chatId);
+}
+
 /**
  * Rebuild all chunks for a chat from scratch.
  * Used for migration or when chunk structure needs to be reset.
