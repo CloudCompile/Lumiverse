@@ -30,6 +30,13 @@ describe("resolveLanceDbConnectUri", () => {
     })).toBe("../data/lancedb");
   });
 
+  test("uses a parent-relative path when running in proot-distro", () => {
+    expect(resolveLanceDbConnectUri("/home/darren/data/lancedb", {
+      cwd: "/home/darren/Lumiverse-Backend",
+      env: { LUMIVERSE_IS_PROOT: "true" },
+    })).toBe("../data/lancedb");
+  });
+
   test("resolves the broken Termux mirror path created by a stripped leading slash", () => {
     expect(resolveBrokenTermuxLanceDbMirrorPath("/data/data/com.termux/files/home/Lumiverse/data/lancedb", {
       cwd: "/data/data/com.termux/files/home/Lumiverse",

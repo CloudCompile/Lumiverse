@@ -9,6 +9,8 @@ interface ResolveLanceDbConnectUriOptions {
 
 function isTermuxEnvironment(dbPath: string, env: Record<string, string | undefined>): boolean {
   return Boolean(env.TERMUX_VERSION)
+    || env.LUMIVERSE_IS_TERMUX === "true"
+    || env.LUMIVERSE_IS_PROOT === "true"
     || env.PREFIX?.startsWith(TERMUX_PATH_PREFIX)
     || env.HOME?.startsWith(`${TERMUX_PATH_PREFIX}files/home`)
     || dbPath.startsWith(TERMUX_PATH_PREFIX);
