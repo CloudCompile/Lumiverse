@@ -2,10 +2,14 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router'
 import { registerSW } from 'virtual:pwa-register'
+import { getSafeInAppNavigationUrl } from './lib/navigationSafety'
+import { installWindowOpenGuard } from './lib/windowOpenGuard'
 import { router } from './router'
 import './theme/variables.css'
 import './theme/reset.css'
 import './theme/global.css'
+
+installWindowOpenGuard()
 
 // Register service worker for PWA support — autoUpdate sends SKIP_WAITING
 // automatically when a new SW is detected.
@@ -36,7 +40,7 @@ navigator.serviceWorker?.addEventListener('controllerchange', () => {
 // Navigate when a push notification is clicked (SW posts NAVIGATE message)
 navigator.serviceWorker?.addEventListener('message', (event) => {
   if (event.data?.type === 'NAVIGATE') {
-    router.navigate(event.data.url)
+    router.navigate(getSafeInAppNavigationUrl(event.data.url))
   }
 })
 

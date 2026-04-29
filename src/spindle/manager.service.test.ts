@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { detectDangerousBackendCapabilities } from "./manager.service";
+import { detectDangerousBackendCapabilities, PRIVILEGED_PERMISSIONS } from "./manager.service";
 
 describe("detectDangerousBackendCapabilities", () => {
   test("flags blocked runtime capabilities", () => {
@@ -38,5 +38,11 @@ describe("detectDangerousBackendCapabilities", () => {
     `;
 
     expect(detectDangerousBackendCapabilities(code)).toEqual([]);
+  });
+});
+
+describe("PRIVILEGED_PERMISSIONS", () => {
+  test("requires explicit approval for app manipulation", () => {
+    expect(PRIVILEGED_PERMISSIONS.has("app_manipulation")).toBe(true);
   });
 });

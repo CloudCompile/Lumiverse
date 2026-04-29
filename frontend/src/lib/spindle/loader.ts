@@ -10,6 +10,7 @@ import {
   destroyAllPlacementsForExtension,
 } from './placement-helper'
 import { generateUUID } from '@/lib/uuid'
+import { installSpindleNavigationGuards } from './navigation-guards'
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { useStore } from '@/store'
@@ -116,6 +117,7 @@ async function doLoadFrontendExtension(
     const permissionsPromise = spindleApi.getPermissions(extensionId)
       .then((permRes) => permRes.granted)
       .catch(() => [] as string[])
+    installSpindleNavigationGuards()
 
     const response = await responsePromise
     if (!response.ok) return // No frontend bundle

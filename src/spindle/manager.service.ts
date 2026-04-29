@@ -19,6 +19,7 @@ import {
 import { join, resolve, dirname, sep } from "path";
 import { getUserExtensionPath } from "../auth/provision";
 import { spawnAsync } from "./spawn-async";
+import { normalizeSpindleHttpsUrl } from "./url-safety";
 
 export type InstallScope = "operator" | "user";
 type ManagedSpindlePermission = SpindlePermission | "databanks";
@@ -160,9 +161,8 @@ async function readManifest(identifier: string): Promise<SpindleManifest> {
   if (!manifest.version) throw new Error("Missing version in spindle.json");
   if (!manifest.name) throw new Error("Missing name in spindle.json");
   if (!manifest.author) throw new Error("Missing author in spindle.json");
-  if (!manifest.github) {
-    (manifest as any).github = `local://${manifest.identifier}`;
-  }
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github, "github");
+  manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
 
   return manifest;
 }
@@ -186,13 +186,10 @@ async function readManifestFromPath(
   if (!manifest.version) throw new Error("Missing version in spindle.json");
   if (!manifest.name) throw new Error("Missing name in spindle.json");
   if (!manifest.author) throw new Error("Missing author in spindle.json");
-  if (!manifest.github) {
-    if (options?.allowMissingGithub) {
-      (manifest as any).github = `local://${manifest.identifier}`;
-    } else {
-      throw new Error("Missing github in spindle.json");
-    }
-  }
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github, "github", {
+    required: !options?.allowMissingGithub,
+  });
+  manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
 
   return manifest;
 }
@@ -266,6 +263,7 @@ function insertExtensionFromManifest(manifest: SpindleManifest): void {
 
 // Permissions that require explicit admin approval before granting
 export const PRIVILEGED_PERMISSIONS = new Set([
+  "app_manipulation",
   "cors_proxy",
   "generation",
   "interceptor",
@@ -670,6 +668,10 @@ export async function install(
       `Invalid identifier "${manifest.identifier}". Must match /^[a-z][a-z0-9_]*$/`
     );
   }
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github || githubUrl, "github", {
+    required: true,
+  });
+  manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
 
   // Check if already installed
   const db = getDb();

@@ -10,6 +10,7 @@ import SpindleSettings from './SpindleSettings'
 import { Spinner } from '@/components/shared/Spinner'
 import { Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { getSafeHttpsUrl } from '@/lib/navigationSafety'
 import { toast } from '@/lib/toast'
 import styles from './SpindlePanel.module.css'
 import clsx from 'clsx'
@@ -538,10 +539,10 @@ export default function SpindlePanel() {
                     ? <Spinner size={14} fast />
                     : <RotateCw size={14} />}
                 />
-                {ext.github && (
+                {getSafeHttpsUrl(ext.github) && (
                   <a
                     className={styles.githubLink}
-                    href={ext.github}
+                    href={getSafeHttpsUrl(ext.github)!}
                     target="_blank"
                     rel="noopener noreferrer"
                     title="GitHub"

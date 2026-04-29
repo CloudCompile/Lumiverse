@@ -75,6 +75,7 @@ import { getEphemeralPoolConfig } from "./ephemeral-pool.service";
 import { createRuntimeTransport, type RuntimeTransport } from "./runtime-transport";
 import { getTextContent, type LlmMessage } from "../llm/types";
 import { getDb } from "../db/connection";
+import { normalizeSpindleAppNavigationPath } from "./url-safety";
 import {
   getMessages as getChatMessages,
   createMessage as createChatMessage,
@@ -6815,7 +6816,10 @@ export class WorkerHost {
         title: sanitizedTitle,
         body: body || "",
         tag: tag ? `ext-${this.manifest.identifier}-${tag}`.slice(0, 100) : undefined,
-        data: { url: url || "/", characterName: this.manifest.name },
+        data: {
+          url: normalizeSpindleAppNavigationPath(url),
+          characterName: this.manifest.name,
+        },
         icon: sanitizedIcon,
         image: sanitizedImage,
       };
