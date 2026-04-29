@@ -10,6 +10,8 @@ Lumiverse can run a backend extension in one of three runtime modes:
 
 The backend and frontend extension APIs do **not** change across these modes. Existing extensions should keep using the same `spindle` API and the same frontend `ctx` APIs.
 
+That includes the new frontend process lifecycle surface: `spindle.frontendProcesses` on the backend and `ctx.processes.register(...)` on the frontend behave the same across `process`, `sandbox`, and `worker` runtime modes.
+
 ## Default Behavior
 
 If `LUMIVERSE_SPINDLE_RUNTIME_MODE` is not set, Lumiverse defaults to:

@@ -523,6 +523,38 @@ function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] 
   return pieces
 }
 
+function attachCodeCopyHandler(root: HTMLElement | ShadowRoot): () => void {
+  const handleClick = (e: MouseEvent) => {
+    const target = e.target
+    if (!(target instanceof Element)) return
+
+    const btn = target.closest('[data-code-copy]') as HTMLButtonElement | null
+    if (!btn) return
+
+    const codeBlock = btn.closest(`.${styles.codeBlock}`)
+    const codeEl = codeBlock?.querySelector('code')
+    if (!codeEl) return
+
+    const text = codeEl.textContent || ''
+    copyTextToClipboard(text).then(() => {
+      const label = btn.querySelector('span')
+      if (label) {
+        label.textContent = 'Copied!'
+        btn.classList.add(styles.codeCopied)
+        setTimeout(() => {
+          label.textContent = 'Copy'
+          btn.classList.remove(styles.codeCopied)
+        }, 2000)
+      }
+    }).catch((err) => {
+      console.error('[MessageContent] Copy failed:', err)
+    })
+  }
+
+  root.addEventListener('click', handleClick)
+  return () => root.removeEventListener('click', handleClick)
+}
+
 function IsolatedHtml({ html }: { html: string }) {
   const ref = useRef<HTMLDivElement>(null)
 
@@ -531,6 +563,7 @@ function IsolatedHtml({ html }: { html: string }) {
     if (!el) return
     const shadow = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
     shadow.innerHTML = html
+    return attachCodeCopyHandler(shadow)
   }, [html])
 
   return <div ref={ref} className={styles.htmlIsland} />
@@ -747,29 +780,7 @@ export default function MessageContent({
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const handleClick = (e: MouseEvent) => {
-      const btn = (e.target as HTMLElement).closest('[data-code-copy]') as HTMLButtonElement | null
-      if (!btn) return
-      const codeBlock = btn.closest(`.${styles.codeBlock}`)
-      const codeEl = codeBlock?.querySelector('code')
-      if (!codeEl) return
-      const text = codeEl.textContent || ''
-      copyTextToClipboard(text).then(() => {
-        const label = btn.querySelector('span')
-        if (label) {
-          label.textContent = 'Copied!'
-          btn.classList.add(styles.codeCopied)
-          setTimeout(() => {
-            label.textContent = 'Copy'
-            btn.classList.remove(styles.codeCopied)
-          }, 2000)
-        }
-      }).catch((err) => {
-        console.error('[MessageContent] Copy failed:', err)
-      })
-    }
-    container.addEventListener('click', handleClick)
-    return () => container.removeEventListener('click', handleClick)
+    return attachCodeCopyHandler(container)
   }, [])
 
   useLayoutEffect(() => {

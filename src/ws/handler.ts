@@ -214,6 +214,52 @@ export const wsHandler = upgradeWebSocket((c) => {
           host.sendFrontendMessage(data.payload, userId!);
         }
 
+        if (data.type === "SPINDLE_FRONTEND_PROCESS_EVENT") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const processId = typeof data.processId === "string" ? data.processId : null;
+          const processEvent = typeof data.event === "string" ? data.event : null;
+          if (!extensionId || !processId || !processEvent || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          if (
+            processEvent !== "ready" &&
+            processEvent !== "heartbeat" &&
+            processEvent !== "complete" &&
+            processEvent !== "fail" &&
+            processEvent !== "frontend_unloaded"
+          ) {
+            return;
+          }
+
+          host.handleFrontendProcessEvent(
+            processId,
+            userId,
+            processEvent,
+            typeof data.error === "string" ? data.error : undefined,
+          );
+          return;
+        }
+
+        if (data.type === "SPINDLE_FRONTEND_PROCESS_MSG") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const processId = typeof data.processId === "string" ? data.processId : null;
+          if (!extensionId || !processId || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          host.handleFrontendProcessMessage(processId, userId, data.payload);
+          return;
+        }
+
         if (data.type === "SPINDLE_COMMAND_INVOKE") {
           const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
           const commandId = typeof data.commandId === "string" ? data.commandId : null;

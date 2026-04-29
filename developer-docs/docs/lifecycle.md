@@ -12,7 +12,7 @@
 ## Enable / Disable
 
 - **Enable:** starts the backend runtime and schedules the frontend module to load
-- **Disable:** sends `shutdown` to the backend runtime (5s grace period), tears down the frontend module, unregisters all macros/interceptors/tools/context handlers
+- **Disable:** sends `shutdown` to the backend runtime (5s grace period), tears down the frontend module, unregisters all macros/interceptors/tools/context handlers, and stops any active frontend processes owned by the extension
 
 By default, backend runtimes start in `process` mode. See [Runtime Modes](getting-started/runtime.md) for platform-specific behavior.
 

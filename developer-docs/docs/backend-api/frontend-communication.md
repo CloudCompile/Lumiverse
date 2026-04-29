@@ -2,6 +2,8 @@
 
 Send arbitrary messages between your backend runtime and frontend module.
 
+For supervised, long-lived frontend work with startup acknowledgement and heartbeat watchdogs, use [Frontend Process Lifecycle](frontend-processes.md) instead.
+
 ## Sending to Frontend
 
 ```ts

@@ -52,6 +52,43 @@ type TokenCountResult = {
   approximate: boolean;
 };
 
+type FrontendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type FrontendProcessInfo = {
+  processId: string;
+  kind: string;
+  key?: string;
+  state: FrontendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: string;
+  error?: string;
+};
+
+type FrontendProcessLifecycleEvent = {
+  processId: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: FrontendProcessState;
+  previousState?: FrontendProcessState;
+  at: string;
+  exitReason?: string;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
 type MacroInvocationState = {
   commit: boolean;
 };
@@ -143,7 +180,39 @@ type RuntimeWorkerToHost =
       type: "macro_interceptor_result";
       requestId: string;
       result: unknown;
-    };
+    }
+  | {
+      type: "frontend_process_spawn";
+      requestId: string;
+      options: {
+        kind: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "frontend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: FrontendProcessState;
+      };
+    }
+  | { type: "frontend_process_get"; requestId: string; processId: string }
+  | {
+      type: "frontend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "frontend_process_send"; processId: string; payload: unknown; userId?: string };
 
 type RuntimeHostToWorker =
   | HostToWorker
@@ -156,7 +225,9 @@ type RuntimeHostToWorker =
       type: "macro_interceptor_request";
       requestId: string;
       ctx: unknown;
-    };
+    }
+  | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
+  | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string };
 
 type RuntimeSpindleAPI = SpindleAPI & {
   registerMessageContentProcessor(
@@ -213,6 +284,31 @@ type RuntimeSpindleAPI = SpindleAPI & {
       modifiedAt: string;
     }>;
   };
+  frontendProcesses: {
+    spawn(options: {
+      kind: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }): Promise<{
+      processId: string;
+      kind: string;
+      key?: string;
+      info: FrontendProcessInfo;
+      send(payload: unknown): void;
+      stop(options?: { userId?: string; reason?: string }): Promise<void>;
+      refresh(): Promise<FrontendProcessInfo | null>;
+    }>;
+    list(filter?: { userId?: string; kind?: string; key?: string; state?: FrontendProcessState }): Promise<FrontendProcessInfo[]>;
+    get(processId: string): Promise<FrontendProcessInfo | null>;
+    stop(processId: string, options?: { userId?: string; reason?: string }): Promise<void>;
+    onLifecycle(handler: (event: FrontendProcessLifecycleEvent) => void): () => void;
+    onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void): () => void;
+  };
 };
 
 // ─── State ───────────────────────────────────────────────────────────────
@@ -249,6 +345,8 @@ const frontendMessageHandlers = new Set<(payload: unknown, userId: string) => vo
 const commandInvokedHandlers = new Set<(commandId: string, context: any) => void | Promise<void>>();
 const permissionDeniedHandlers = new Set<(detail: PermissionDeniedDetail) => void>();
 const permissionChangedHandlers = new Set<(detail: PermissionChangedDetail) => void>();
+const frontendProcessLifecycleHandlers = new Set<(event: FrontendProcessLifecycleEvent) => void>();
+const frontendProcessMessageHandlers = new Set<(event: { processId: string; payload: unknown; userId: string }) => void>();
 const grantedPermissions = new Set<string>();
 const extensionMacroHandlers = new Map<string, (ctx: unknown) => unknown | Promise<unknown>>();
 const macroInvocationStack: MacroInvocationState[] = [];
@@ -268,6 +366,40 @@ function request(msg: RuntimeWorkerToHost & { requestId: string }): Promise<unkn
     pendingResponses.set(msg.requestId, { resolve, reject });
     post(msg);
   });
+}
+
+function createFrontendProcessHandle(info: FrontendProcessInfo): {
+  processId: string;
+  kind: string;
+  key?: string;
+  info: FrontendProcessInfo;
+  send(payload: unknown): void;
+  stop(options?: { userId?: string; reason?: string }): Promise<void>;
+  refresh(): Promise<FrontendProcessInfo | null>;
+} {
+  return {
+    processId: info.processId,
+    kind: info.kind,
+    ...(info.key ? { key: info.key } : {}),
+    info,
+    send(payload: unknown) {
+      post({ type: "frontend_process_send", processId: info.processId, payload });
+    },
+    async stop(options?: { userId?: string; reason?: string }) {
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "frontend_process_stop",
+        requestId,
+        processId: info.processId,
+        options,
+      });
+    },
+    async refresh() {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "frontend_process_get", requestId, processId: info.processId });
+      return result as FrontendProcessInfo | null;
+    },
+  };
 }
 
 function getActiveMacroInvocation(): MacroInvocationState | null {
@@ -1852,6 +1984,62 @@ const spindleApi: RuntimeSpindleAPI = {
     };
   },
 
+  frontendProcesses: {
+    async spawn(options: {
+      kind: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "frontend_process_spawn",
+        requestId,
+        options,
+      });
+      return createFrontendProcessHandle(result as FrontendProcessInfo);
+    },
+    async list(filter?: { userId?: string; kind?: string; key?: string; state?: FrontendProcessState }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "frontend_process_list",
+        requestId,
+        filter,
+      });
+      return result as FrontendProcessInfo[];
+    },
+    async get(processId: string) {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "frontend_process_get", requestId, processId });
+      return result as FrontendProcessInfo | null;
+    },
+    async stop(processId: string, options?: { userId?: string; reason?: string }) {
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "frontend_process_stop",
+        requestId,
+        processId,
+        options,
+      });
+    },
+    onLifecycle(handler: (event: FrontendProcessLifecycleEvent) => void) {
+      frontendProcessLifecycleHandlers.add(handler);
+      return () => {
+        frontendProcessLifecycleHandlers.delete(handler);
+      };
+    },
+    onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void) {
+      frontendProcessMessageHandlers.add(handler);
+      return () => {
+        frontendProcessMessageHandlers.delete(handler);
+      };
+    },
+  },
+
   log: {
     info(msg: string) {
       post({ type: "log", level: "info", message: msg });
@@ -2350,6 +2538,36 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
             type: "log",
             level: "error",
             message: `Frontend message handler error: ${err.message}`,
+          });
+        }
+      }
+      break;
+    }
+
+    case "frontend_process_lifecycle": {
+      for (const handler of frontendProcessLifecycleHandlers) {
+        try {
+          handler(msg.event);
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Frontend process lifecycle handler error: ${err.message}`,
+          });
+        }
+      }
+      break;
+    }
+
+    case "frontend_process_message": {
+      for (const handler of frontendProcessMessageHandlers) {
+        try {
+          handler({ processId: msg.processId, payload: msg.payload, userId: msg.userId });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Frontend process message handler error: ${err.message}`,
           });
         }
       }

@@ -3,7 +3,7 @@ import { wsClient } from './client'
 import { EventType } from './events'
 import { useStore } from '@/store'
 import { hasUnsavedSettings } from '@/store/slices/settings'
-import { routeBackendMessage, loadFrontendExtension } from '@/lib/spindle/loader'
+import { routeBackendMessage, routeFrontendProcessEvent, loadFrontendExtension } from '@/lib/spindle/loader'
 import { spindleApi } from '@/api/spindle'
 import { messagesApi } from '@/api/chats'
 import { imageGenApi } from '@/api/image-gen'
@@ -772,6 +772,36 @@ export function useWebSocket() {
 
       wsClient.on(EventType.SPINDLE_FRONTEND_MSG, (payload: { extensionId: string; data: unknown }) => {
         routeBackendMessage(payload.extensionId, payload.data)
+      }),
+
+      wsClient.on(EventType.SPINDLE_FRONTEND_PROCESS, (payload: { extensionId: string } & Record<string, unknown>) => {
+        if (!payload?.extensionId || typeof payload.action !== 'string' || typeof payload.processId !== 'string') return
+        if (payload.action === 'spawn' && typeof payload.kind === 'string') {
+          routeFrontendProcessEvent(payload.extensionId, {
+            action: 'spawn',
+            processId: payload.processId,
+            kind: payload.kind,
+            key: typeof payload.key === 'string' ? payload.key : undefined,
+            payload: payload.payload,
+            metadata: payload.metadata && typeof payload.metadata === 'object' ? payload.metadata as Record<string, unknown> : undefined,
+          })
+          return
+        }
+        if (payload.action === 'message') {
+          routeFrontendProcessEvent(payload.extensionId, {
+            action: 'message',
+            processId: payload.processId,
+            payload: payload.payload,
+          })
+          return
+        }
+        if (payload.action === 'stop') {
+          routeFrontendProcessEvent(payload.extensionId, {
+            action: 'stop',
+            processId: payload.processId,
+            reason: typeof payload.reason === 'string' ? payload.reason : undefined,
+          })
+        }
       }),
 
       wsClient.on(EventType.SPINDLE_TEXT_EDITOR_OPEN, (payload: { requestId: string; extensionId: string; title: string; value: string; placeholder: string }) => {

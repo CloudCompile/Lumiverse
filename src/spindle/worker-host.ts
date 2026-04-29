@@ -118,6 +118,61 @@ type TokenCountResult = {
   approximate: boolean;
 };
 
+type FrontendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type FrontendProcessExitReason =
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "timed_out"
+  | "frontend_unloaded"
+  | "backend_unloaded"
+  | "replaced";
+
+type FrontendProcessInfo = {
+  processId: string;
+  kind: string;
+  key?: string;
+  state: FrontendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: FrontendProcessExitReason;
+  error?: string;
+};
+
+type FrontendProcessLifecycleEvent = {
+  processId: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: FrontendProcessState;
+  previousState?: FrontendProcessState;
+  at: string;
+  exitReason?: FrontendProcessExitReason;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type FrontendProcessRecord = FrontendProcessInfo & {
+  requestId: string;
+  startupTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setTimeout> | null;
+  startupTimeoutMs: number;
+  heartbeatTimeoutMs: number;
+  stopReason?: string;
+};
+
 type RuntimeWorkerToHost =
   | WorkerToHost
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
@@ -205,7 +260,39 @@ type RuntimeWorkerToHost =
       type: "macro_interceptor_result";
       requestId: string;
       result: unknown;
-    };
+    }
+  | {
+      type: "frontend_process_spawn";
+      requestId: string;
+      options: {
+        kind: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "frontend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: FrontendProcessState;
+      };
+    }
+  | { type: "frontend_process_get"; requestId: string; processId: string }
+  | {
+      type: "frontend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "frontend_process_send"; processId: string; payload: unknown; userId?: string };
 
 type RuntimeHostToWorker =
   | HostToWorker
@@ -218,7 +305,9 @@ type RuntimeHostToWorker =
       type: "macro_interceptor_request";
       requestId: string;
       ctx: MacroInterceptorCtx;
-    };
+    }
+  | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
+  | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string };
 
 let cachedBackendVersion: string | null = null;
 let cachedFrontendVersion: string | null = null;
@@ -448,6 +537,8 @@ export class WorkerHost {
   private runtimeStatsInterval: ReturnType<typeof setInterval> | null = null;
   private readonly installScope: "operator" | "user";
   private readonly installedByUserId: string | null;
+  private frontendProcesses = new Map<string, FrontendProcessRecord>();
+  private frontendProcessKeyIndex = new Map<string, string>();
 
   constructor(
     public readonly extensionId: string,
@@ -474,6 +565,161 @@ export class WorkerHost {
     }
     if (!userId || userId !== this.installedByUserId) {
       throw new Error("Extension is user-scoped and cannot access this user context");
+    }
+  }
+
+  private resolveFrontendProcessUserId(userId?: string): string {
+    if (this.installScope === "user") {
+      if (!this.installedByUserId) {
+        throw new Error("Extension owner is not set");
+      }
+      return this.installedByUserId;
+    }
+
+    if (typeof userId !== "string" || !userId.trim()) {
+      throw new Error("userId is required when spawning a frontend process");
+    }
+
+    return userId.trim();
+  }
+
+  private buildFrontendProcessKey(userId: string, kind: string, key: string): string {
+    return `${userId}:${kind}:${key}`;
+  }
+
+  private snapshotFrontendProcess(record: FrontendProcessRecord): FrontendProcessInfo {
+    return {
+      processId: record.processId,
+      kind: record.kind,
+      ...(record.key ? { key: record.key } : {}),
+      state: record.state,
+      ...(record.userId ? { userId: record.userId } : {}),
+      ...(record.metadata ? { metadata: record.metadata } : {}),
+      startedAt: record.startedAt,
+      ...(record.readyAt ? { readyAt: record.readyAt } : {}),
+      ...(record.lastHeartbeatAt ? { lastHeartbeatAt: record.lastHeartbeatAt } : {}),
+      ...(record.endedAt ? { endedAt: record.endedAt } : {}),
+      ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+      ...(record.error ? { error: record.error } : {}),
+    };
+  }
+
+  private clearFrontendProcessTimers(record: FrontendProcessRecord): void {
+    if (record.startupTimer) {
+      clearTimeout(record.startupTimer);
+      record.startupTimer = null;
+    }
+    if (record.heartbeatTimer) {
+      clearTimeout(record.heartbeatTimer);
+      record.heartbeatTimer = null;
+    }
+  }
+
+  private emitFrontendProcessLifecycle(
+    record: FrontendProcessRecord,
+    previousState?: FrontendProcessState
+  ): void {
+    this.postToWorker({
+      type: "frontend_process_lifecycle",
+      event: {
+        processId: record.processId,
+        kind: record.kind,
+        ...(record.key ? { key: record.key } : {}),
+        ...(record.userId ? { userId: record.userId } : {}),
+        state: record.state,
+        ...(previousState ? { previousState } : {}),
+        at: record.endedAt ?? record.lastHeartbeatAt ?? record.readyAt ?? record.startedAt,
+        ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+        ...(record.error ? { error: record.error } : {}),
+        ...(record.metadata ? { metadata: record.metadata } : {}),
+      },
+    });
+  }
+
+  private armFrontendHeartbeatTimer(record: FrontendProcessRecord): void {
+    if (record.heartbeatTimeoutMs <= 0) return;
+    if (record.heartbeatTimer) clearTimeout(record.heartbeatTimer);
+    record.heartbeatTimer = setTimeout(() => {
+      const latest = this.frontendProcesses.get(record.processId);
+      if (!latest) return;
+      this.requestFrontendProcessStop(latest, "timed_out");
+      this.finalizeFrontendProcess(latest, "timed_out", "timed_out", "Frontend process heartbeat timed out");
+    }, record.heartbeatTimeoutMs);
+  }
+
+  private requestFrontendProcessStop(record: FrontendProcessRecord, reason?: string): void {
+    eventBus.emit(
+      EventType.SPINDLE_FRONTEND_PROCESS,
+      {
+        extensionId: this.extensionId,
+        identifier: this.manifest.identifier,
+        action: "stop",
+        processId: record.processId,
+        ...(reason ? { reason } : {}),
+      },
+      record.userId,
+    );
+  }
+
+  private transitionFrontendProcess(
+    record: FrontendProcessRecord,
+    nextState: FrontendProcessState,
+    extras?: { readyAt?: string; lastHeartbeatAt?: string; endedAt?: string; exitReason?: FrontendProcessExitReason; error?: string }
+  ): void {
+    if (record.state === nextState && !extras) return;
+    const previousState = record.state;
+    record.state = nextState;
+    if (extras?.readyAt) record.readyAt = extras.readyAt;
+    if (extras?.lastHeartbeatAt) record.lastHeartbeatAt = extras.lastHeartbeatAt;
+    if (extras?.endedAt) record.endedAt = extras.endedAt;
+    if (extras?.exitReason) record.exitReason = extras.exitReason;
+    if (extras && "error" in extras) {
+      record.error = extras.error;
+    }
+    this.emitFrontendProcessLifecycle(record, previousState);
+  }
+
+  private finalizeFrontendProcess(
+    record: FrontendProcessRecord,
+    state: Extract<FrontendProcessState, "stopped" | "completed" | "failed" | "timed_out">,
+    exitReason: FrontendProcessExitReason,
+    error?: string,
+  ): void {
+    this.clearFrontendProcessTimers(record);
+    this.transitionFrontendProcess(record, state, {
+      endedAt: new Date().toISOString(),
+      exitReason,
+      ...(error ? { error } : { error: undefined }),
+    });
+    this.frontendProcesses.delete(record.processId);
+    if (record.key) {
+      this.frontendProcessKeyIndex.delete(
+        this.buildFrontendProcessKey(record.userId ?? "", record.kind, record.key)
+      );
+    }
+  }
+
+  private getFrontendProcessRecord(processId: string): FrontendProcessRecord | null {
+    return this.frontendProcesses.get(processId) ?? null;
+  }
+
+  private getFrontendProcessForUser(processId: string, userId: string): FrontendProcessRecord | null {
+    const record = this.frontendProcesses.get(processId);
+    if (!record) return null;
+    if (record.userId && record.userId !== userId) return null;
+    return record;
+  }
+
+  private stopAllFrontendProcesses(exitReason: FrontendProcessExitReason): void {
+    for (const record of Array.from(this.frontendProcesses.values())) {
+      this.requestFrontendProcessStop(record, exitReason);
+      this.clearFrontendProcessTimers(record);
+      this.frontendProcesses.delete(record.processId);
+      if (record.key) {
+        this.frontendProcessKeyIndex.delete(
+          this.buildFrontendProcessKey(record.userId ?? "", record.kind, record.key)
+        );
+      }
     }
   }
 
@@ -662,6 +908,7 @@ export class WorkerHost {
     const runtimeExitPromise = this.runtimeExitPromise;
     this.runtimeStopping = true;
     this.stopRuntimeStatsSampling();
+    this.stopAllFrontendProcesses("backend_unloaded");
 
     // Wait for the worker to acknowledge shutdown (posted right before
     // process.exit(0) in worker-runtime.ts) — or fall back to terminate()
@@ -736,6 +983,7 @@ export class WorkerHost {
 
   private cleanup(): void {
     this.stopRuntimeStatsSampling();
+    this.stopAllFrontendProcesses("backend_unloaded");
     this.onWorkerReady = null;
     this.onWorkerShutdownAck = null;
     this.onRuntimeExit?.();
@@ -824,6 +1072,99 @@ export class WorkerHost {
 
   sendFrontendMessage(payload: unknown, userId: string): void {
     this.postToWorker({ type: "frontend_message", payload, userId });
+  }
+
+  private sendFrontendProcessEvent(
+    userId: string,
+    payload: Record<string, unknown>,
+  ): void {
+    eventBus.emit(
+      EventType.SPINDLE_FRONTEND_PROCESS,
+      {
+        extensionId: this.extensionId,
+        identifier: this.manifest.identifier,
+        ...payload,
+      },
+      userId,
+    );
+  }
+
+  handleFrontendProcessEvent(
+    processId: string,
+    userId: string,
+    event: "ready" | "heartbeat" | "complete" | "fail" | "frontend_unloaded",
+    error?: string,
+  ): void {
+    const record = this.getFrontendProcessForUser(processId, userId);
+    if (!record) return;
+
+    switch (event) {
+      case "ready": {
+        if (record.state !== "starting") return;
+        const now = new Date().toISOString();
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        this.transitionFrontendProcess(record, "running", {
+          readyAt: now,
+          lastHeartbeatAt: now,
+          error: undefined,
+        });
+        this.armFrontendHeartbeatTimer(record);
+        this.resolveRequest(record.requestId, this.snapshotFrontendProcess(record));
+        break;
+      }
+      case "heartbeat": {
+        if (record.state !== "running" && record.state !== "stopping") return;
+        const now = new Date().toISOString();
+        record.lastHeartbeatAt = now;
+        this.armFrontendHeartbeatTimer(record);
+        break;
+      }
+      case "complete": {
+        if (record.state === "completed" || record.state === "failed" || record.state === "timed_out" || record.state === "stopped") {
+          return;
+        }
+        this.finalizeFrontendProcess(
+          record,
+          record.state === "stopping" ? "stopped" : "completed",
+          record.state === "stopping" ? "stopped" : "completed",
+        );
+        break;
+      }
+      case "fail": {
+        if (record.state === "completed" || record.state === "failed" || record.state === "timed_out" || record.state === "stopped") {
+          return;
+        }
+        const message = error?.trim() || "Frontend process failed";
+        if (record.state === "starting") {
+          this.clearFrontendProcessTimers(record);
+          this.finalizeFrontendProcess(record, "failed", "failed", message);
+          this.rejectRequest(processId, new Error(message));
+        } else {
+          this.finalizeFrontendProcess(record, "failed", "failed", message);
+        }
+        break;
+      }
+      case "frontend_unloaded": {
+        if (record.state === "starting") {
+          const message = "Frontend extension unloaded before the process became ready";
+          this.clearFrontendProcessTimers(record);
+          this.finalizeFrontendProcess(record, "failed", "frontend_unloaded", message);
+          this.rejectRequest(processId, new Error(message));
+          return;
+        }
+        this.finalizeFrontendProcess(record, "stopped", "frontend_unloaded", error);
+        break;
+      }
+    }
+  }
+
+  handleFrontendProcessMessage(processId: string, userId: string, payload: unknown): void {
+    const record = this.getFrontendProcessForUser(processId, userId);
+    if (!record) return;
+    this.postToWorker({ type: "frontend_process_message", processId, payload, userId });
   }
 
   /**
@@ -1518,6 +1859,22 @@ export class WorkerHost {
         break;
       case "input_prompt_open":
         this.handleInputPromptOpen(msg.requestId, msg.title, msg.message, msg.placeholder, msg.defaultValue, msg.submitLabel, msg.cancelLabel, msg.multiline, msg.userId);
+        break;
+      // ─── Frontend Process Lifecycle (free tier) ───────────────────────
+      case "frontend_process_spawn":
+        this.handleFrontendProcessSpawn(msg.requestId, msg.options);
+        break;
+      case "frontend_process_list":
+        this.handleFrontendProcessList(msg.requestId, msg.filter);
+        break;
+      case "frontend_process_get":
+        this.handleFrontendProcessGet(msg.requestId, msg.processId);
+        break;
+      case "frontend_process_stop":
+        this.handleFrontendProcessStop(msg.requestId, msg.processId, msg.options);
+        break;
+      case "frontend_process_send":
+        this.handleFrontendProcessSend(msg.processId, msg.payload, msg.userId);
         break;
       // ─── Macro Resolution (free tier — no permission needed) ────────────
       case "macros_resolve":
@@ -6287,6 +6644,180 @@ export class WorkerHost {
     }
   }
 
+  // ─── Frontend Process Lifecycle (free tier) ─────────────────────────
+
+  private handleFrontendProcessSpawn(
+    requestId: string,
+    options: {
+      kind: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }
+  ): void {
+    try {
+      const kind = typeof options?.kind === "string" ? options.kind.trim() : "";
+      if (!kind) throw new Error("kind is required");
+
+      const userId = this.resolveFrontendProcessUserId(options?.userId);
+      const processId = crypto.randomUUID();
+      const key = typeof options?.key === "string" && options.key.trim() ? options.key.trim() : undefined;
+      const startupTimeoutMs = Math.max(1_000, Math.min(120_000, Math.round(options?.startupTimeoutMs ?? 15_000)));
+      const heartbeatTimeoutMs = Math.max(0, Math.min(120_000, Math.round(options?.heartbeatTimeoutMs ?? 15_000)));
+
+      if (key) {
+        const dedupeKey = this.buildFrontendProcessKey(userId, kind, key);
+        const existingId = this.frontendProcessKeyIndex.get(dedupeKey);
+        if (existingId) {
+          const existing = this.frontendProcesses.get(existingId);
+          if (existing) {
+            if (!options?.replaceExisting) {
+              throw new Error(`Frontend process already exists for kind \"${kind}\" and key \"${key}\"`);
+            }
+            this.requestFrontendProcessStop(existing, "replaced");
+            if (existing.state === "starting") {
+              this.rejectRequest(existing.requestId, new Error("Frontend process was replaced before it became ready"));
+            }
+            this.finalizeFrontendProcess(existing, "stopped", "replaced");
+          }
+        }
+      }
+
+      const record: FrontendProcessRecord = {
+        requestId,
+        processId,
+        kind,
+        ...(key ? { key } : {}),
+        state: "starting",
+        userId,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+        startedAt: new Date().toISOString(),
+        startupTimer: null,
+        heartbeatTimer: null,
+        startupTimeoutMs,
+        heartbeatTimeoutMs,
+      };
+
+      this.frontendProcesses.set(processId, record);
+      if (key) {
+        this.frontendProcessKeyIndex.set(
+          this.buildFrontendProcessKey(userId, kind, key),
+          processId
+        );
+      }
+
+      this.emitFrontendProcessLifecycle(record);
+
+      record.startupTimer = setTimeout(() => {
+        const latest = this.frontendProcesses.get(processId);
+        if (!latest || latest.state !== "starting") return;
+        this.requestFrontendProcessStop(latest, "timed_out");
+        this.finalizeFrontendProcess(latest, "timed_out", "timed_out", "Frontend process startup timed out");
+        this.rejectRequest(requestId, new Error("Frontend process startup timed out"));
+      }, startupTimeoutMs);
+
+      this.sendFrontendProcessEvent(userId, {
+        action: "spawn",
+        processId,
+        kind,
+        ...(key ? { key } : {}),
+        payload: options?.payload,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessList(
+    requestId: string,
+    filter?: { userId?: string; kind?: string; key?: string; state?: FrontendProcessState }
+  ): void {
+    try {
+      const userId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof filter?.userId === "string" && filter.userId.trim()
+            ? filter.userId.trim()
+            : undefined;
+      const items = Array.from(this.frontendProcesses.values())
+        .filter((record) => {
+          if (userId && record.userId !== userId) return false;
+          if (filter?.kind && record.kind !== filter.kind) return false;
+          if (filter?.key && record.key !== filter.key) return false;
+          if (filter?.state && record.state !== filter.state) return false;
+          return true;
+        })
+        .map((record) => this.snapshotFrontendProcess(record));
+      this.postToWorker({ type: "response", requestId, result: items });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessGet(requestId: string, processId: string): void {
+    try {
+      const record = this.getFrontendProcessRecord(processId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: record ? this.snapshotFrontendProcess(record) : null,
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessStop(
+    requestId: string,
+    processId: string,
+    options?: { userId?: string; reason?: string }
+  ): void {
+    try {
+      const record = this.getFrontendProcessRecord(processId);
+      if (!record) {
+        this.postToWorker({ type: "response", requestId, result: undefined });
+        return;
+      }
+      const resolvedUserId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof options?.userId === "string" && options.userId.trim()
+            ? options.userId.trim()
+            : undefined;
+      if (resolvedUserId && record.userId !== resolvedUserId) {
+        throw new Error("processId does not belong to the requested userId");
+      }
+      if (record.state === "starting" || record.state === "running") {
+        record.stopReason = options?.reason;
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        this.transitionFrontendProcess(record, "stopping");
+      }
+      this.requestFrontendProcessStop(record, options?.reason ?? "stopped");
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessSend(processId: string, payload: unknown, userId?: string): void {
+    const record = this.getFrontendProcessRecord(processId);
+    if (!record) return;
+    if (this.installScope === "operator" && userId && record.userId !== userId) return;
+    this.sendFrontendProcessEvent(record.userId ?? this.resolveFrontendProcessUserId(userId), {
+      action: "message",
+      processId,
+      payload,
+    });
+  }
+
   // ─── Version (free tier) ────────────────────────────────────────────
 
   private async handleVersionGetBackend(requestId: string): Promise<void> {
@@ -6768,7 +7299,12 @@ export class WorkerHost {
     }
 
     try {
-      if (!palette?.accent || typeof palette.accent.h !== "number" || typeof palette.accent.s !== "number" || typeof palette.accent.l !== "number") {
+      if (palette == null) {
+        this.handleThemeClear(requestId, userId);
+        return;
+      }
+
+      if (!palette.accent || typeof palette.accent.h !== "number" || typeof palette.accent.s !== "number" || typeof palette.accent.l !== "number") {
         this.postToWorker({ type: "response", requestId, error: "palette.accent must be { h: number, s: number, l: number }" });
         return;
       }

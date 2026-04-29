@@ -4,6 +4,8 @@
 
 Send a message to your backend runtime.
 
+For backend-spawned, long-lived frontend loops with `ready()`, `heartbeat()`, and graceful stop handling, use [Frontend Process Lifecycle](processes.md) instead.
+
 ```ts
 ctx.sendToBackend({ type: 'fetch_data', query: 'hello' })
 ```
