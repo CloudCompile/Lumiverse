@@ -2747,10 +2747,29 @@ export function collectWorldInfoSources(
   const entries: import("../types/world-book").WorldBookEntry[] = [];
   if (worldBookIds.length > 0) {
     const entryMap = worldBooksSvc.listEntriesForBooks(userId, worldBookIds);
+    const embeddedCharacterBook = character.extensions?.character_book;
     // Preserve original per-book ordering (character → persona → chat → global).
     for (const id of worldBookIds) {
       const bookEntries = entryMap.get(id);
-      if (bookEntries && bookEntries.length > 0) entries.push(...bookEntries);
+      if (bookEntries && bookEntries.length > 0) {
+        entries.push(...bookEntries);
+        continue;
+      }
+
+      if (!embeddedCharacterBook) continue;
+
+      const book = worldBooksSvc.getWorldBook(userId, id);
+      if (
+        book?.metadata?.source === "character" &&
+        book.metadata?.source_character_id === character.id
+      ) {
+        entries.push(
+          ...worldBooksSvc.materializeCharacterBookEntriesForRuntime(
+            id,
+            embeddedCharacterBook,
+          ),
+        );
+      }
     }
   }
 

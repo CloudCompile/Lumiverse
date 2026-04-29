@@ -11,6 +11,7 @@ import type { Character, CharacterSummary, TagCount } from '@/types/api'
 import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
 import type { ExpressionsImportInfo } from '@/components/modals/ExpressionsImportModal'
 import type { AlternateFieldsSummaryInfo } from '@/components/modals/AlternateFieldsSummaryModal'
+import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
 
 const SEARCH_DEBOUNCE_MS = 150
 
@@ -303,7 +304,7 @@ export function useCharacterBrowser() {
         addCharacter(result.character)
         setBrowserTotal((t) => t + 1)
         setFetchVersion((v) => v + 1)
-        if (result.character.extensions?.character_book?.entries?.length > 0
+        if (getEmbeddedCharacterBookEntryCount(result.character.extensions) > 0
             && !(result.character.extensions?.world_book_ids?.length > 0)) {
           setPendingLorebookImport(result.character)
         }
@@ -394,7 +395,7 @@ export function useCharacterBrowser() {
         setBrowserTotal((t) => t + 1)
         setFetchVersion((v) => v + 1)
         toast.success(`${result.character.name} was imported`)
-        if (result.character.extensions?.character_book?.entries?.length > 0
+        if (getEmbeddedCharacterBookEntryCount(result.character.extensions) > 0
             && !(result.character.extensions?.world_book_ids?.length > 0)) {
           setPendingLorebookImport(result.character)
         }

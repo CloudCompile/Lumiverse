@@ -7,6 +7,7 @@ import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
 import { parsePagination } from "../services/pagination";
 import {
+  collectWorldInfoSources,
   collectVectorActivatedWorldInfoDetailed,
   getWorldInfoVectorQueryPreview,
   mergeActivatedWorldInfoEntries,
@@ -469,7 +470,6 @@ app.post("/:id/diagnostics", async (c) => {
   const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
   const messages = chatsSvc.getMessages(userId, chat.id);
   const vectorSummary = svc.getWorldBookVectorSummary(userId, bookId)!;
-  const bookEntries = svc.listEntries(userId, bookId);
   const attachmentSources = {
     character: getCharacterWorldBookIds(character.extensions).includes(bookId),
     persona: persona?.attached_world_book_id === bookId,
@@ -488,6 +488,14 @@ app.post("/:id/diagnostics", async (c) => {
 
   const worldInfoSettings = (settingsSvc.getSetting(userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
+  const wiSources = collectWorldInfoSources(
+    userId,
+    character,
+    persona,
+    globalWorldBooks,
+    chatWorldBookIds,
+  );
+  const bookEntries = wiSources.entries.filter((entry) => entry.world_book_id === bookId);
 
   const wiResult = isAttached
     ? activateWorldInfo({
@@ -760,7 +768,7 @@ app.post("/import-character-book", async (c) => {
   if (!character) return c.json({ error: "Character not found" }, 404);
 
   const characterBook = character.extensions?.character_book;
-  if (!characterBook?.entries?.length) {
+  if (svc.countImportedWorldBookEntries(characterBook?.entries) === 0) {
     return c.json({ error: "No embedded character book found" }, 400);
   }
 

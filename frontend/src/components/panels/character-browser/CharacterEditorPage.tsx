@@ -27,7 +27,11 @@ import { Button } from '@/components/shared/FormComponents'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
-import { getCharacterWorldBookIds, setCharacterWorldBookIds } from '@/utils/character-world-books'
+import {
+  getCharacterWorldBookIds,
+  getEmbeddedCharacterBookEntryCount,
+  setCharacterWorldBookIds,
+} from '@/utils/character-world-books'
 import ExpressionEditorTab from './ExpressionEditorTab'
 import AlternateFieldEditor from './AlternateFieldEditor'
 import AlternateAvatarManager from './AlternateAvatarManager'
@@ -1198,13 +1202,13 @@ export default function CharacterEditorPage() {
                         )}
                       </div>
 
-                      {character.extensions?.character_book?.entries?.length > 0 && (
+                      {getEmbeddedCharacterBookEntryCount(character.extensions) > 0 && (
                         <div className={styles.lorebookImportSection}>
                           <IconNotebook size={14} />
                           <div className={styles.lorebookImportInfo}>
                             <span className={styles.fieldLabel}>Embedded Lorebook</span>
                             <span className={styles.fieldHelper}>
-                              {character.extensions.character_book.entries.length} entries found in character card
+                              {getEmbeddedCharacterBookEntryCount(character.extensions)} entries found in character card
                             </span>
                           </div>
                           {lorebookResult ? (

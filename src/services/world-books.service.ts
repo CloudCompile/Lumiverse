@@ -139,6 +139,189 @@ function normalizeKeywordList(values: string[]): string[] {
   return normalized;
 }
 
+function normalizeImportedEntries(raw: unknown): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") return Object.values(raw as Record<string, any>);
+  return [];
+}
+
+export function countImportedWorldBookEntries(raw: unknown): number {
+  return normalizeImportedEntries(raw).length;
+}
+
+function normalizeImportedPosition(position: unknown): number {
+  if (typeof position === "number" && Number.isFinite(position)) {
+    return position;
+  }
+
+  if (typeof position === "string") {
+    const trimmed = position.trim().toLowerCase();
+    if (!trimmed) return 0;
+
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) return numeric;
+
+    switch (trimmed) {
+      case "before":
+      case "before_char":
+      case "before_character":
+        return 0;
+      case "after":
+      case "after_char":
+      case "after_character":
+        return 1;
+      case "before_an":
+      case "before_authors_note":
+      case "before_author_note":
+        return 2;
+      case "after_an":
+      case "after_authors_note":
+      case "after_author_note":
+        return 3;
+      case "at_depth":
+      case "depth":
+        return 4;
+      case "before_em":
+      case "before_example":
+      case "before_examples":
+      case "before_example_messages":
+        return 5;
+      case "after_em":
+      case "after_example":
+      case "after_examples":
+      case "after_example_messages":
+        return 6;
+    }
+  }
+
+  return 0;
+}
+
+function normalizeImportedEntryInput(raw: any, index: number): CreateWorldBookEntryInput {
+  const keys: string[] = Array.isArray(raw.keys) ? raw.keys
+    : Array.isArray(raw.key) ? raw.key
+    : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
+    : typeof raw.keys === "string" ? raw.keys.split(",").map((k: string) => k.trim()).filter(Boolean)
+    : [];
+  const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys
+    : Array.isArray(raw.keysecondary) ? raw.keysecondary
+    : typeof raw.secondary_keys === "string" ? raw.secondary_keys.split(",").map((k: string) => k.trim()).filter(Boolean)
+    : [];
+
+  const comment = raw.comment || raw.name || "";
+  const enabled = raw.enabled !== undefined ? raw.enabled
+    : raw.disabled !== undefined ? !raw.disabled
+    : raw.disable !== undefined ? !raw.disable
+    : true;
+
+  const knownFields = new Set([
+    "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
+    "enabled", "disabled", "disable",
+    "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
+    "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
+    "group", "group_name", "group_override", "groupOverride",
+    "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
+    "automation_id", "automationId", "selectiveLogic", "selective_logic",
+    "useProbability", "use_probability", "use_regex", "useRegex",
+    "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
+    "delay_until_recursion", "delayUntilRecursion",
+    "priority", "sticky", "cooldown", "delay",
+    "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
+  ]);
+  const extras: Record<string, any> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!knownFields.has(k)) extras[k] = v;
+  }
+
+  return {
+    outlet_name: raw.outlet_name ?? raw.outletName,
+    key: keys,
+    keysecondary: secondaryKeys,
+    content: raw.content || "",
+    comment,
+    disabled: !enabled,
+    order_value: resolveImportOrder(raw, index),
+    position: normalizeImportedPosition(raw.position),
+    depth: raw.depth ?? 4,
+    role: normalizeImportRole(raw.role) || undefined,
+    selective: raw.selective ?? false,
+    constant: raw.constant ?? false,
+    case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,
+    match_whole_words: raw.match_whole_words ?? raw.matchWholeWords ?? false,
+    group_name: raw.group || raw.group_name || "",
+    group_override: raw.group_override ?? raw.groupOverride ?? false,
+    group_weight: raw.group_weight ?? raw.groupWeight ?? 100,
+    probability: raw.probability ?? 100,
+    scan_depth: raw.scan_depth ?? raw.scanDepth ?? undefined,
+    automation_id: raw.automation_id || raw.automationId || undefined,
+    selective_logic: raw.selectiveLogic ?? raw.selective_logic ?? 0,
+    use_probability: raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true),
+    use_regex: raw.use_regex ?? raw.useRegex ?? false,
+    prevent_recursion: raw.prevent_recursion ?? raw.preventRecursion ?? false,
+    exclude_recursion: raw.exclude_recursion ?? raw.excludeRecursion ?? false,
+    delay_until_recursion: raw.delay_until_recursion ?? raw.delayUntilRecursion ?? false,
+    priority: raw.priority ?? 10,
+    sticky: raw.sticky ?? 0,
+    cooldown: raw.cooldown ?? 0,
+    delay: raw.delay ?? 0,
+    vectorized: raw.vectorized ?? false,
+    extensions: { ...raw.extensions, ...extras },
+  };
+}
+
+export function materializeCharacterBookEntriesForRuntime(
+  worldBookId: string,
+  characterBook: any,
+): WorldBookEntry[] {
+  const rawEntries = normalizeImportedEntries(characterBook?.entries);
+  return rawEntries.map((raw, index) => {
+    const input = normalizeImportedEntryInput(raw, index);
+    const outletName = normalizeEntryOutletName(input.outlet_name);
+    return {
+      id: typeof raw.id === "string" && raw.id ? raw.id : crypto.randomUUID(),
+      world_book_id: worldBookId,
+      uid: typeof raw.uid === "string" && raw.uid ? raw.uid : crypto.randomUUID(),
+      outlet_name: outletName,
+      key: input.key ?? [],
+      keysecondary: input.keysecondary ?? [],
+      content: input.content ?? "",
+      comment: input.comment ?? "",
+      position: input.position ?? 0,
+      depth: input.depth ?? 4,
+      role: input.role ?? null,
+      order_value: input.order_value ?? 100,
+      selective: !!input.selective,
+      constant: !!input.constant,
+      disabled: !!input.disabled,
+      group_name: input.group_name ?? "",
+      group_override: !!input.group_override,
+      group_weight: input.group_weight ?? 100,
+      probability: input.probability ?? 100,
+      scan_depth: input.scan_depth ?? null,
+      case_sensitive: !!input.case_sensitive,
+      match_whole_words: !!input.match_whole_words,
+      automation_id: input.automation_id ?? null,
+      use_regex: !!input.use_regex,
+      prevent_recursion: !!input.prevent_recursion,
+      exclude_recursion: !!input.exclude_recursion,
+      delay_until_recursion: !!input.delay_until_recursion,
+      priority: input.priority ?? 10,
+      sticky: input.sticky ?? 0,
+      cooldown: input.cooldown ?? 0,
+      delay: input.delay ?? 0,
+      selective_logic: input.selective_logic ?? 0,
+      use_probability: input.use_probability !== false,
+      vectorized: false,
+      vector_index_status: "not_enabled",
+      vector_indexed_at: null,
+      vector_index_error: null,
+      extensions: cloneEntryExtensions(input.extensions || {}),
+      created_at: 0,
+      updated_at: 0,
+    };
+  });
+}
+
 function getEntriesForBook(userId: string, worldBookId: string, entryIds: string[]): WorldBookEntry[] {
   if (entryIds.length === 0) return [];
   const uniqueIds = [...new Set(entryIds)];
@@ -949,88 +1132,11 @@ export function importWorldBook(
     metadata: { source: "import" },
   });
 
-  // Normalize entries: object-keyed to array
-  let rawEntries: any[] = [];
-  const src = payload.entries;
-  if (Array.isArray(src)) {
-    rawEntries = src;
-  } else if (src && typeof src === "object") {
-    rawEntries = Object.values(src);
-  }
+  const rawEntries = normalizeImportedEntries(payload.entries);
 
   let entryCount = 0;
   for (let i = 0; i < rawEntries.length; i++) {
-    const raw = rawEntries[i];
-    const keys: string[] = Array.isArray(raw.keys) ? raw.keys
-      : Array.isArray(raw.key) ? raw.key
-      : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : typeof raw.keys === "string" ? raw.keys.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : [];
-    const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys
-      : Array.isArray(raw.keysecondary) ? raw.keysecondary
-      : typeof raw.secondary_keys === "string" ? raw.secondary_keys.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : [];
-
-    const comment = raw.comment || raw.name || "";
-    const enabled = raw.enabled !== undefined ? raw.enabled
-      : raw.disabled !== undefined ? !raw.disabled
-      : raw.disable !== undefined ? !raw.disable
-      : true;
-
-    // Fields that map to DB columns — everything else is preserved in extensions
-    const knownFields = new Set([
-      "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
-      "enabled", "disabled", "disable",
-      "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
-      "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
-      "group", "group_name", "group_override", "groupOverride",
-      "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
-      "automation_id", "automationId", "selectiveLogic", "selective_logic",
-      "useProbability", "use_probability", "use_regex", "useRegex",
-      "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
-      "delay_until_recursion", "delayUntilRecursion",
-      "priority", "sticky", "cooldown", "delay",
-      "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
-    ]);
-    const extras: Record<string, any> = {};
-    for (const [k, v] of Object.entries(raw)) {
-      if (!knownFields.has(k)) extras[k] = v;
-    }
-
-    createEntry(userId, worldBook.id, {
-      outlet_name: raw.outlet_name ?? raw.outletName,
-      key: keys,
-      keysecondary: secondaryKeys,
-      content: raw.content || "",
-      comment,
-      disabled: !enabled,
-      order_value: resolveImportOrder(raw, i),
-      position: raw.position ?? 0,
-      depth: raw.depth ?? 4,
-      role: normalizeImportRole(raw.role) || undefined,
-      selective: raw.selective ?? false,
-      constant: raw.constant ?? false,
-      case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,
-      match_whole_words: raw.match_whole_words ?? raw.matchWholeWords ?? false,
-      group_name: raw.group || raw.group_name || "",
-      group_override: raw.group_override ?? raw.groupOverride ?? false,
-      group_weight: raw.group_weight ?? raw.groupWeight ?? 100,
-      probability: raw.probability ?? 100,
-      scan_depth: raw.scan_depth ?? raw.scanDepth ?? undefined,
-      automation_id: raw.automation_id || raw.automationId || undefined,
-      selective_logic: raw.selectiveLogic ?? raw.selective_logic ?? 0,
-      use_probability: raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true),
-      use_regex: raw.use_regex ?? raw.useRegex ?? false,
-      prevent_recursion: raw.prevent_recursion ?? raw.preventRecursion ?? false,
-      exclude_recursion: raw.exclude_recursion ?? raw.excludeRecursion ?? false,
-      delay_until_recursion: raw.delay_until_recursion ?? raw.delayUntilRecursion ?? false,
-      priority: raw.priority ?? 10,
-      sticky: raw.sticky ?? 0,
-      cooldown: raw.cooldown ?? 0,
-      delay: raw.delay ?? 0,
-      vectorized: raw.vectorized ?? false,
-      extensions: { ...raw.extensions, ...extras },
-    });
+    createEntry(userId, worldBook.id, normalizeImportedEntryInput(rawEntries[i], i));
     entryCount++;
   }
 
@@ -1054,13 +1160,7 @@ export function importWorldBookBulk(
     metadata: { source: "import" },
   });
 
-  let rawEntries: any[] = [];
-  const src = payload.entries;
-  if (Array.isArray(src)) {
-    rawEntries = src;
-  } else if (src && typeof src === "object") {
-    rawEntries = Object.values(src);
-  }
+  const rawEntries = normalizeImportedEntries(payload.entries);
 
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
@@ -1082,78 +1182,43 @@ export function importWorldBookBulk(
 
   const tx = db.transaction(() => {
     for (let i = 0; i < rawEntries.length; i++) {
-      const raw = rawEntries[i];
-      const keys: string[] = Array.isArray(raw.keys) ? raw.keys
-        : Array.isArray(raw.key) ? raw.key
-        : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
-        : typeof raw.keys === "string" ? raw.keys.split(",").map((k: string) => k.trim()).filter(Boolean)
-        : [];
-      const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys
-        : Array.isArray(raw.keysecondary) ? raw.keysecondary
-        : typeof raw.secondary_keys === "string" ? raw.secondary_keys.split(",").map((k: string) => k.trim()).filter(Boolean)
-        : [];
-
-      const comment = raw.comment || raw.name || "";
-      const enabled = raw.enabled !== undefined ? raw.enabled
-        : raw.disabled !== undefined ? !raw.disabled
-        : raw.disable !== undefined ? !raw.disable
-        : true;
-
-      // Preserve ST-specific fields (ignoreBudget, characterFilter, triggers, etc.) in extensions
-      const bulkKnownFields = new Set([
-        "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
-        "enabled", "disabled", "disable",
-        "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
-        "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
-        "group", "group_name", "group_override", "groupOverride",
-        "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
-        "automation_id", "automationId", "selectiveLogic", "selective_logic",
-        "useProbability", "use_probability", "use_regex", "useRegex",
-        "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
-        "delay_until_recursion", "delayUntilRecursion",
-        "priority", "sticky", "cooldown", "delay",
-        "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
-      ]);
-      const extras: Record<string, any> = {};
-      for (const [k, v] of Object.entries(raw)) {
-        if (!bulkKnownFields.has(k)) extras[k] = v;
-      }
+      const normalized = normalizeImportedEntryInput(rawEntries[i], i);
       const extensionsJson = buildStoredEntryExtensions(
-        { ...raw.extensions, ...extras },
-        raw.outlet_name ?? raw.outletName,
+        normalized.extensions,
+        normalized.outlet_name,
       );
 
       insert.run(
         crypto.randomUUID(), worldBook.id, crypto.randomUUID(),
-        JSON.stringify(keys),
-        JSON.stringify(secondaryKeys),
-        raw.content || "",
-        comment,
-        raw.position ?? 0,
-        raw.depth ?? 4,
-        normalizeImportRole(raw.role),
-        resolveImportOrder(raw, i),
-        raw.selective ? 1 : 0,
-        raw.constant ? 1 : 0,
-        !enabled ? 1 : 0,
-        raw.group || raw.group_name || "",
-        (raw.group_override ?? raw.groupOverride) ? 1 : 0,
-        raw.group_weight ?? raw.groupWeight ?? 100,
-        raw.probability ?? 100,
-        raw.scan_depth ?? raw.scanDepth ?? null,
-        (raw.case_sensitive ?? raw.caseSensitive) ? 1 : 0,
-        (raw.match_whole_words ?? raw.matchWholeWords) ? 1 : 0,
-        raw.automation_id || raw.automationId || null,
-        (raw.use_regex ?? raw.useRegex) ? 1 : 0,
-        (raw.prevent_recursion ?? raw.preventRecursion) ? 1 : 0,
-        (raw.exclude_recursion ?? raw.excludeRecursion) ? 1 : 0,
-        (raw.delay_until_recursion ?? raw.delayUntilRecursion) ? 1 : 0,
-        raw.priority ?? 10,
-        raw.sticky ?? 0,
-        raw.cooldown ?? 0,
-        raw.delay ?? 0,
-        raw.selectiveLogic ?? raw.selective_logic ?? 0,
-        (raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true)) ? 1 : 0,
+        JSON.stringify(normalized.key || []),
+        JSON.stringify(normalized.keysecondary || []),
+        normalized.content || "",
+        normalized.comment || "",
+        normalized.position ?? 0,
+        normalized.depth ?? 4,
+        normalized.role || null,
+        normalized.order_value ?? 100,
+        normalized.selective ? 1 : 0,
+        normalized.constant ? 1 : 0,
+        normalized.disabled ? 1 : 0,
+        normalized.group_name || "",
+        normalized.group_override ? 1 : 0,
+        normalized.group_weight ?? 100,
+        normalized.probability ?? 100,
+        normalized.scan_depth ?? null,
+        normalized.case_sensitive ? 1 : 0,
+        normalized.match_whole_words ? 1 : 0,
+        normalized.automation_id || null,
+        normalized.use_regex ? 1 : 0,
+        normalized.prevent_recursion ? 1 : 0,
+        normalized.exclude_recursion ? 1 : 0,
+        normalized.delay_until_recursion ? 1 : 0,
+        normalized.priority ?? 10,
+        normalized.sticky ?? 0,
+        normalized.cooldown ?? 0,
+        normalized.delay ?? 0,
+        normalized.selective_logic ?? 0,
+        normalized.use_probability !== false ? 1 : 0,
         0, // vectorized is always false for bulk import; user can re-enable it later
         "not_enabled",
         null,
@@ -1196,82 +1261,11 @@ export function importCharacterBook(
     },
   });
 
-  const entries = characterBook.entries || [];
+  const entries = normalizeImportedEntries(characterBook?.entries);
   let entryCount = 0;
 
   for (let i = 0; i < entries.length; i++) {
-    const raw = entries[i];
-    const keys: string[] = Array.isArray(raw.keys) ? raw.keys
-      : Array.isArray(raw.key) ? raw.key
-      : typeof raw.key === "string" ? raw.key.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : typeof raw.keys === "string" ? raw.keys.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : [];
-    const secondaryKeys: string[] = Array.isArray(raw.secondary_keys) ? raw.secondary_keys
-      : Array.isArray(raw.keysecondary) ? raw.keysecondary
-      : typeof raw.secondary_keys === "string" ? raw.secondary_keys.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : [];
-
-    // Map known CCV2/V3 + ST field names to our schema
-    const comment = raw.comment || raw.name || "";
-    const enabled = raw.enabled !== undefined ? raw.enabled
-      : raw.disabled !== undefined ? !raw.disabled
-      : raw.disable !== undefined ? !raw.disable
-      : true;
-
-    // Fields that map to DB columns — everything else is preserved in extensions
-    const knownFields = new Set([
-      "keys", "key", "secondary_keys", "keysecondary", "content", "comment", "name",
-      "enabled", "disabled", "disable",
-      "insertion_order", "order_value", "order", "displayIndex", "position", "depth", "role", "selective",
-      "constant", "case_sensitive", "caseSensitive", "match_whole_words", "matchWholeWords",
-      "group", "group_name", "group_override", "groupOverride",
-      "group_weight", "groupWeight", "probability", "scan_depth", "scanDepth",
-      "automation_id", "automationId", "selectiveLogic", "selective_logic",
-      "useProbability", "use_probability", "use_regex", "useRegex",
-      "prevent_recursion", "preventRecursion", "exclude_recursion", "excludeRecursion",
-      "delay_until_recursion", "delayUntilRecursion",
-      "priority", "sticky", "cooldown", "delay",
-      "id", "entry", "uid", "vectorized", "extensions", "outlet_name", "outletName",
-    ]);
-    const extras: Record<string, any> = {};
-    for (const [k, v] of Object.entries(raw)) {
-      if (!knownFields.has(k)) extras[k] = v;
-    }
-
-    createEntry(userId, worldBook.id, {
-      outlet_name: raw.outlet_name ?? raw.outletName,
-      key: keys,
-      keysecondary: secondaryKeys,
-      content: raw.content || "",
-      comment,
-      disabled: !enabled,
-      order_value: resolveImportOrder(raw, i),
-      position: raw.position ?? 0,
-      depth: raw.depth ?? 4,
-      role: normalizeImportRole(raw.role) || undefined,
-      selective: raw.selective ?? false,
-      constant: raw.constant ?? false,
-      case_sensitive: raw.case_sensitive ?? raw.caseSensitive ?? false,
-      match_whole_words: raw.match_whole_words ?? raw.matchWholeWords ?? false,
-      group_name: raw.group || raw.group_name || "",
-      group_override: raw.group_override ?? raw.groupOverride ?? false,
-      group_weight: raw.group_weight ?? raw.groupWeight ?? 100,
-      probability: raw.probability ?? 100,
-      scan_depth: raw.scan_depth ?? raw.scanDepth ?? undefined,
-      automation_id: raw.automation_id || raw.automationId || undefined,
-      selective_logic: raw.selectiveLogic ?? raw.selective_logic ?? 0,
-      use_probability: raw.useProbability !== undefined ? raw.useProbability : (raw.use_probability !== undefined ? raw.use_probability : true),
-      use_regex: raw.use_regex ?? raw.useRegex ?? false,
-      prevent_recursion: raw.prevent_recursion ?? raw.preventRecursion ?? false,
-      exclude_recursion: raw.exclude_recursion ?? raw.excludeRecursion ?? false,
-      delay_until_recursion: raw.delay_until_recursion ?? raw.delayUntilRecursion ?? false,
-      priority: raw.priority ?? 10,
-      sticky: raw.sticky ?? 0,
-      cooldown: raw.cooldown ?? 0,
-      delay: raw.delay ?? 0,
-      vectorized: raw.vectorized ?? false,
-      extensions: { ...raw.extensions, ...extras },
-    });
+    createEntry(userId, worldBook.id, normalizeImportedEntryInput(entries[i], i));
     entryCount++;
   }
 

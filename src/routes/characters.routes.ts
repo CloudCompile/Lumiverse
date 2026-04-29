@@ -89,10 +89,7 @@ function autoImportEmbeddedWorldbook(userId: string, characterId: string): void 
   if (!character) return;
 
   const charBook = character.extensions?.character_book;
-  const entries = Array.isArray(charBook?.entries)
-    ? charBook.entries
-    : Object.values(charBook?.entries || {});
-  if (entries.length === 0) return;
+  if (wbSvc.countImportedWorldBookEntries(charBook?.entries) === 0) return;
 
   // Skip if world books are already linked (e.g. from Lumiverse modules)
   const existingIds = getCharacterWorldBookIds(character.extensions);
@@ -724,13 +721,11 @@ app.post("/import-bulk", async (c) => {
         // Check for embedded lorebook
         let lorebook: { name: string; entryCount: number } | undefined;
         const charBook = imported.extensions?.character_book;
-        if (charBook?.entries?.length) {
-          const entries = Array.isArray(charBook.entries)
-            ? charBook.entries
-            : Object.values(charBook.entries);
+        const entryCount = wbSvc.countImportedWorldBookEntries(charBook?.entries);
+        if (entryCount > 0) {
           lorebook = {
             name: charBook.name || `${imported.name}'s Lorebook`,
-            entryCount: entries.length,
+            entryCount,
           };
         }
 
