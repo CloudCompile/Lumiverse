@@ -10,6 +10,7 @@ export enum EventType {
   MESSAGE_DELETED = 'MESSAGE_DELETED',
   MESSAGE_SWIPED = 'MESSAGE_SWIPED',
   CHAT_CHANGED = 'CHAT_CHANGED',
+  CHAT_SWITCHED = 'CHAT_SWITCHED',
   GENERATION_STARTED = 'GENERATION_STARTED',
   GENERATION_IN_PROGRESS = 'GENERATION_IN_PROGRESS',
   STREAM_TOKEN_RECEIVED = 'STREAM_TOKEN_RECEIVED',
@@ -280,6 +281,11 @@ export interface ChatChangedPayload {
   chat?: import('./api').Chat
   chatId?: string
   reattributedUserMessages?: number
+}
+
+export interface ChatSwitchedPayload {
+  /** The chat the user switched to, or `null` when returning to the home screen. */
+  chatId: string | null
 }
 
 export type MessageSwipeAction = 'added' | 'updated' | 'deleted' | 'navigated'

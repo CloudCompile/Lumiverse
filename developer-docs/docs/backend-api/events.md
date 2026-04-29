@@ -24,6 +24,7 @@ unsub()
 | `MESSAGE_SWIPED` | `MessageSwipedPayloadDTO` — see [Swipe Events](#swipe-events) |
 | `SWIPE_EDITED` | `SwipeEditedPayloadDTO` — see [Swipe Events](#swipe-events) |
 | `CHAT_CHANGED` | `{ chatId }` |
+| `CHAT_SWITCHED` | `{ chatId: string \| null }` — `null` when the user returns to the home screen |
 | `CHARACTER_MESSAGE_RENDERED` | `{ chatId, messageId }` |
 | `USER_MESSAGE_RENDERED` | `{ chatId, messageId }` |
 
