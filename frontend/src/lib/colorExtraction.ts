@@ -498,6 +498,66 @@ function tuneAccentForSurface(accentBase: RGB, surface: RGB, mode: 'dark' | 'lig
   return ensureContrast(tuned, surface, MIN_UI_CONTRAST)
 }
 
+function dedupeColors(colors: RGB[]): RGB[] {
+  const unique: RGB[] = []
+  for (const color of colors) {
+    if (unique.some((existing) => colorDistance(existing, color) < 12)) continue
+    unique.push(color)
+  }
+  return unique
+}
+
+function scoreSurfaceColor(color: RGB, mode: 'dark' | 'light'): number {
+  const lum = luminance(color.r, color.g, color.b)
+  const hsl = rgbToHsl(color.r, color.g, color.b)
+  const targetLum = mode === 'dark' ? 34 : 228
+  const lumRange = mode === 'dark' ? 138 : 108
+  const lumScore = 1 - clamp(Math.abs(lum - targetLum) / lumRange, 0, 1)
+  const satPenalty = mode === 'dark'
+    ? clamp(1 - Math.max(0, hsl.s - 34) / 92, 0.48, 1)
+    : clamp(1 - Math.max(0, hsl.s - 28) / 96, 0.54, 1)
+  const extremePenalty = mode === 'dark'
+    ? lum > 132 ? 0.08 : lum > 96 ? 0.34 : lum < 8 ? 0.82 : 1
+    : lum < 92 ? 0.08 : lum < 136 ? 0.36 : lum > 248 ? 0.88 : 1
+  return lumScore * satPenalty * extremePenalty
+}
+
+function pickSurfaceBase(colors: RGB[], average: RGB, mode: 'dark' | 'light'): RGB {
+  const candidates = dedupeColors([average, ...colors])
+  let best = candidates[0] ?? average
+  let bestScore = -1
+
+  for (const candidate of candidates) {
+    const score = scoreSurfaceColor(candidate, mode)
+    if (score > bestScore) {
+      best = candidate
+      bestScore = score
+    }
+  }
+
+  return mixColors(best, average, mode === 'dark' ? 0.14 : 0.18)
+}
+
+function pickAccentBase(colors: RGB[], surface: RGB): RGB {
+  const candidates = dedupeColors(colors)
+  let best = candidates[0] ?? surface
+  let bestScore = -1
+
+  for (const candidate of candidates) {
+    const hsl = rgbToHsl(candidate.r, candidate.g, candidate.b)
+    const vibrancy = 0.4 + (hsl.s / 100) * 0.95
+    const separation = clamp(colorDistance(candidate, surface) / 120, 0, 1)
+    const lightPenalty = hsl.l < 10 || hsl.l > 92 ? 0.35 : hsl.l < 18 || hsl.l > 84 ? 0.68 : 1
+    const score = vibrancy * (0.42 + separation * 0.9) * lightPenalty
+    if (score > bestScore) {
+      best = candidate
+      bestScore = score
+    }
+  }
+
+  return best
+}
+
 function deriveReadableScheme(surfaceBase: RGB, accentBase: RGB, mode: 'dark' | 'light'): ReadableColorScheme {
   let surface = mode === 'dark'
     ? mixColors(surfaceBase, { r: 12, g: 15, b: 22 }, 0.84)
@@ -517,12 +577,14 @@ function deriveReadableScheme(surfaceBase: RGB, accentBase: RGB, mode: 'dark' | 
 }
 
 function deriveUiSchemes(palette: RGB[], dominant: RGB, average: RGB): { dark: ReadableColorScheme; light: ReadableColorScheme } {
-  const accentBase = palette[0] ?? dominant
-  const surfaceSeed = palette[1] ?? average
-  const surfaceBase = mixColors(surfaceSeed, average, 0.35)
+  const colors = dedupeColors([dominant, average, ...palette])
+  const darkSurfaceBase = pickSurfaceBase(colors, average, 'dark')
+  const lightSurfaceBase = pickSurfaceBase(colors, average, 'light')
+  const darkAccentBase = pickAccentBase(colors, darkSurfaceBase)
+  const lightAccentBase = pickAccentBase(colors, lightSurfaceBase)
   return {
-    dark: deriveReadableScheme(surfaceBase, accentBase, 'dark'),
-    light: deriveReadableScheme(surfaceBase, accentBase, 'light'),
+    dark: deriveReadableScheme(darkSurfaceBase, darkAccentBase, 'dark'),
+    light: deriveReadableScheme(lightSurfaceBase, lightAccentBase, 'light'),
   }
 }
 

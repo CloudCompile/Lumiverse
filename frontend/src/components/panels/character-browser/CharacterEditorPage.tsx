@@ -25,6 +25,7 @@ import type { RegexScript } from '@/types/regex'
 import { toast } from '@/lib/toast'
 import { Button } from '@/components/shared/FormComponents'
 import SearchableSelect from '@/components/shared/SearchableSelect'
+import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
 import {
@@ -66,6 +67,7 @@ export default function CharacterEditorPage() {
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
   const allCharacters = useStore((s) => s.characters)
   const activeChatId = useStore((s) => s.activeChatId)
+  const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const setActiveChatAvatarId = useStore((s) => s.setActiveChatAvatarId)
   const updateCharInStore = useStore((s) => s.updateCharacter)
@@ -609,11 +611,19 @@ export default function CharacterEditorPage() {
   )
 
   const handleWorldBookIdsChange = useCallback(
-    (ids: string[]) => {
-      mutateExtensions((ext) => setCharacterWorldBookIds(ext, ids), true)
-      if (ids.length === 0) clearActivatedWorldInfo()
+    async (ids: string[]) => {
+      let approvedIds = ids
+      if (activeChatId && editingCharacterId === activeCharacterId) {
+        const allowedAddedIds = await filterWorldBooksForChatContextAttachment(
+          worldBooks.filter((book) => ids.includes(book.id) && !attachedWorldBookIds.includes(book.id)),
+        )
+        approvedIds = ids.filter((id) => attachedWorldBookIds.includes(id) || allowedAddedIds.includes(id))
+      }
+
+      mutateExtensions((ext) => setCharacterWorldBookIds(ext, approvedIds), true)
+      if (approvedIds.length === 0) clearActivatedWorldInfo()
     },
-    [mutateExtensions, clearActivatedWorldInfo]
+    [activeChatId, activeCharacterId, attachedWorldBookIds, clearActivatedWorldInfo, editingCharacterId, mutateExtensions, worldBooks]
   )
 
   // Avatar
@@ -1166,7 +1176,7 @@ export default function CharacterEditorPage() {
                           <SearchableSelect
                             multi
                             value={attachedWorldBookIds}
-                            onChange={handleWorldBookIdsChange}
+                            onChange={(ids) => { void handleWorldBookIdsChange(ids) }}
                             options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name }))}
                             placeholder="Add world books…"
                             triggerLabel="Add"

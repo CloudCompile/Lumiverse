@@ -7804,8 +7804,8 @@ export class WorkerHost {
 
   // ─── Theme (gated: "app_manipulation") ──────────────────────────────
 
-  /** Active CSS variable overrides for this extension (null = none). */
-  private themeOverrides: ThemeOverrideDTO | null = null;
+  /** Active CSS variable overrides for this extension, keyed by effective userId. */
+  private themeOverrides = new Map<string, ThemeOverrideDTO>();
 
   private handleThemeApply(requestId: string, overrides: ThemeOverrideDTO, userId?: string): void {
     if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
@@ -7818,6 +7818,13 @@ export class WorkerHost {
     }
 
     try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) {
+        this.postToWorker({ type: "response", requestId, error: "userId is required for operator-scoped extensions" });
+        return;
+      }
+      this.enforceScopedUser(resolvedUserId);
+
       // Validate: variables must be a Record<string, string> if provided
       if (overrides.variables) {
         if (typeof overrides.variables !== "object" || Array.isArray(overrides.variables)) {
@@ -7867,7 +7874,7 @@ export class WorkerHost {
         }
       }
 
-      this.commitThemeOverrides(overrides);
+      this.commitThemeOverrides(resolvedUserId, overrides);
 
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
@@ -7886,12 +7893,13 @@ export class WorkerHost {
     return WorkerHost.FULL_THEME_SENTINEL_KEYS.every((key) => key in vars);
   }
 
-  private commitThemeOverrides(overrides: ThemeOverrideDTO): void {
-    const existingByMode = this.themeOverrides?.variablesByMode ?? {};
+  private commitThemeOverrides(userId: string, overrides: ThemeOverrideDTO): void {
+    const current = this.themeOverrides.get(userId);
+    const existingByMode = current?.variablesByMode ?? {};
     const nextVariables = this.shouldReplaceThemeScope(overrides.variables)
       ? { ...(overrides.variables ?? {}) }
       : {
-          ...(this.themeOverrides?.variables ?? {}),
+          ...(current?.variables ?? {}),
           ...(overrides.variables ?? {}),
         };
     const nextDarkVars = overrides.variablesByMode?.dark
@@ -7905,7 +7913,7 @@ export class WorkerHost {
         : { ...existingByMode.light, ...overrides.variablesByMode.light }
       : existingByMode.light;
 
-    this.themeOverrides = {
+    const nextOverrides: ThemeOverrideDTO = {
       variables: nextVariables,
       variablesByMode: (nextDarkVars || nextLightVars)
         ? {
@@ -7915,14 +7923,16 @@ export class WorkerHost {
         : undefined,
     };
 
+    this.themeOverrides.set(userId, nextOverrides);
+
     eventBus.emit(
       EventType.SPINDLE_THEME_OVERRIDES,
       {
         extensionId: this.extensionId,
         extensionName: this.manifest.name,
-        overrides: this.themeOverrides,
+        overrides: nextOverrides,
       },
-      this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+      userId,
     );
   }
 
@@ -7989,7 +7999,7 @@ export class WorkerHost {
       }
       this.enforceScopedUser(resolvedUserId);
 
-      this.themeOverrides = null;
+      this.themeOverrides.delete(resolvedUserId);
 
       // Broadcast clear to frontend
       eventBus.emit(
@@ -8040,6 +8050,8 @@ export class WorkerHost {
           light: strip(generateThemeVariablesFn({ ...base, mode: "light" })),
         },
       } as ThemeOverrideDTO & { paletteAccent: { h: number; s: number; l: number } };
+
+      this.themeOverrides.set(uid, overrides);
 
       eventBus.emit(
         EventType.SPINDLE_THEME_OVERRIDES,
@@ -8143,17 +8155,19 @@ export class WorkerHost {
 
   /** Called on worker shutdown to clean up theme overrides. */
   clearThemeOverrides(): void {
-    if (this.themeOverrides) {
-      this.themeOverrides = null;
-      eventBus.emit(
-        EventType.SPINDLE_THEME_OVERRIDES,
-        {
-          extensionId: this.extensionId,
-          extensionName: this.manifest.name,
-          overrides: null,
-        },
-        this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
-      );
+    if (this.themeOverrides.size > 0) {
+      for (const userId of this.themeOverrides.keys()) {
+        eventBus.emit(
+          EventType.SPINDLE_THEME_OVERRIDES,
+          {
+            extensionId: this.extensionId,
+            extensionName: this.manifest.name,
+            overrides: null,
+          },
+          userId,
+        );
+      }
+      this.themeOverrides.clear();
     }
   }
 

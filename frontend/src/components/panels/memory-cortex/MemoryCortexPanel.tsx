@@ -6,7 +6,7 @@ import {
   Palette, Trash2, AlertTriangle, FileQuestion, Clock, Link2,
 } from "lucide-react";
 import { useStore } from "@/store";
-import { memoryCortexApi, type CortexEntity, type CortexRelation, type CortexUsageStats } from "@/api/memory-cortex";
+import { memoryCortexApi, type CortexEntity, type CortexFontColor, type CortexRelation, type CortexUsageStats } from "@/api/memory-cortex";
 import CortexLinksTab from "./CortexLinksTab";
 import styles from "./MemoryCortexPanel.module.css";
 import clsx from "clsx";
@@ -396,7 +396,7 @@ function EntityCard({
 // ─── Colors View ───────────────────────────────────────────────
 
 function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) => void }) {
-  const [colors, setColors] = useState<any[]>([]);
+  const [colors, setColors] = useState<CortexFontColor[]>([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -435,14 +435,14 @@ function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) =
     );
   }
 
-  // Group by entity
-  const byEntity = new Map<string, any[]>();
-  const unattributed: any[] = [];
+  // Group by detected character name, with legacy entity-name fallback.
+  const byCharacter = new Map<string, CortexFontColor[]>();
+  const unattributed: CortexFontColor[] = [];
   for (const c of colors) {
-    if (c.entityName) {
-      const list = byEntity.get(c.entityName) || [];
+    if (c.displayName) {
+      const list = byCharacter.get(c.displayName) || [];
       list.push(c);
-      byEntity.set(c.entityName, list);
+      byCharacter.set(c.displayName, list);
     } else {
       unattributed.push(c);
     }
@@ -450,14 +450,14 @@ function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) =
 
   return (
     <div className={styles.entityList}>
-      {[...byEntity.entries()].map(([name, entries]) => (
+      {[...byCharacter.entries()].map(([name, entries]) => (
         <div key={name} className={styles.colorGroup}>
           <div className={styles.colorGroupHeader}>{name}</div>
           {entries.map((c) => (
             <div key={c.id} className={styles.colorRow}>
               <span className={styles.colorSwatch} style={{ background: c.hexColor }} />
               <span className={styles.colorHex}>{c.hexColor}</span>
-              <span className={styles.colorUsage}>{c.usageType}</span>
+              <span className={styles.colorUsage}>{c.usageType.replace(/_/g, " ")}</span>
               <span className={styles.colorConfidence}>{(c.confidence * 100).toFixed(0)}%</span>
               <button className={styles.colorDeleteBtn} onClick={() => handleDelete(c.id)} title="Remove">
                 <Trash2 size={11} />
@@ -478,7 +478,7 @@ function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) =
             <div key={c.id} className={styles.colorRow}>
               <span className={styles.colorSwatch} style={{ background: c.hexColor }} />
               <span className={styles.colorHex}>{c.hexColor}</span>
-              <span className={styles.colorUsage}>{c.usageType}</span>
+              <span className={styles.colorUsage}>{c.usageType.replace(/_/g, " ")}</span>
               <span className={styles.colorConfidence}>{(c.confidence * 100).toFixed(0)}%</span>
               <button className={styles.colorDeleteBtn} onClick={() => handleDelete(c.id)} title="Remove">
                 <Trash2 size={11} />

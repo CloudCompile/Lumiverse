@@ -18,6 +18,7 @@ import { activateWorldInfo, finalizeActivatedWorldInfoEntries, type WiState, typ
 import type { WorldBookEntry } from "../types/world-book";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
+import { loadWorldBookVectorSettings } from "../services/world-book-vector-settings.service";
 
 const MAX_IMPORT_RESPONSE_BYTES = 100 * 1024 * 1024; // 100 MB
 
@@ -479,6 +480,9 @@ app.post("/:id/diagnostics", async (c) => {
   const isAttached = attachmentSources.character || attachmentSources.persona || attachmentSources.global || attachmentSources.chat;
 
   const embeddings = await embeddingsSvc.getEmbeddingConfig(userId);
+  const worldBookVectorSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: embeddings.retrieval_top_k,
+  });
   const queryPreview = await getWorldInfoVectorQueryPreview(userId, messages);
   const blockerMessages: string[] = [];
 
@@ -525,8 +529,8 @@ app.post("/:id/diagnostics", async (c) => {
         thresholdRejected: 0,
         hitsAfterRerankCutoff: 0,
         rerankRejected: 0,
-        topK: Math.max(1, embeddings.retrieval_top_k || 4),
-        cap: Math.max(1, embeddings.retrieval_top_k || 4),
+        topK: Math.max(1, worldBookVectorSettings.retrievalTopK || embeddings.retrieval_top_k || 4),
+        cap: Math.max(1, worldBookVectorSettings.retrievalTopK || embeddings.retrieval_top_k || 4),
         blockerMessages: [] as string[],
       };
 

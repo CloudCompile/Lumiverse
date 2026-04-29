@@ -287,6 +287,14 @@
 }
 
 @media (max-width: 720px) {
+  .settingsCardHeader {
+    flex-direction: column;
+  }
+
+  .settingsGridTwo {
+    grid-template-columns: 1fr;
+  }
+
   .embeddingChecklistHeader {
     flex-direction: column;
   }
@@ -796,6 +804,86 @@
 .helperText {
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-dim);
+}
+
+.settingsCard {
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 12px;
+  background: var(--lumiverse-fill-subtle);
+  overflow: hidden;
+}
+
+.settingsCardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--lumiverse-border);
+}
+
+.settingsCardTitle {
+  font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+
+.settingsCardMeta {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  margin-top: 2px;
+}
+
+.settingsCardStatus {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  white-space: nowrap;
+}
+
+.settingsCardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 14px;
+}
+
+.settingsGridTwo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settingsGridCompact {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.presetRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.presetBtn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  transition: border-color var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast), background var(--lumiverse-transition-fast);
+}
+
+.presetBtn:hover {
+  border-color: var(--lumiverse-primary-020);
+  color: var(--lumiverse-text);
+}
+
+.presetBtnActive {
+  border-color: var(--lumiverse-primary);
+  background: var(--lumiverse-primary-010);
+  color: var(--lumiverse-primary);
 }
 
 .warningText {

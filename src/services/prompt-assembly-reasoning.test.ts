@@ -4,7 +4,7 @@ import { applyProviderReasoningOffSwitch } from "./prompt-assembly.service";
 
 describe("applyProviderReasoningOffSwitch", () => {
   test("removes generic reasoning fields for OpenAI-compatible providers", () => {
-    const params = {
+    const params: Record<string, any> = {
       reasoning: { effort: "high" },
       reasoning_effort: "max",
       thinking: { type: "enabled" },
@@ -13,11 +13,14 @@ describe("applyProviderReasoningOffSwitch", () => {
 
     applyProviderReasoningOffSwitch(params, "openai");
 
-    expect(params).toEqual({ temperature: 0.8 });
+    expect(params.reasoning).toBeUndefined();
+    expect(params.reasoning_effort).toBeUndefined();
+    expect(params.thinking).toBeUndefined();
+    expect(params.temperature).toBe(0.8);
   });
 
   test("preserves non-reasoning Anthropic output config while disabling thinking", () => {
-    const params = {
+    const params: Record<string, any> = {
       thinking: { type: "adaptive", display: "summarized" },
       output_config: { effort: "max", other_flag: true },
       temperature: 0.7,
@@ -25,15 +28,13 @@ describe("applyProviderReasoningOffSwitch", () => {
 
     applyProviderReasoningOffSwitch(params, "anthropic", "claude-sonnet-4.7");
 
-    expect(params).toEqual({
-      thinking: { type: "disabled" },
-      output_config: { other_flag: true },
-      temperature: 0.7,
-    });
+    expect(params.thinking).toEqual({ type: "disabled" });
+    expect(params.output_config).toEqual({ other_flag: true });
+    expect(params.temperature).toBe(0.7);
   });
 
   test("forces DeepSeek thinking off and strips effort fields", () => {
-    const params = {
+    const params: Record<string, any> = {
       thinking: { type: "enabled" },
       reasoning_effort: "max",
       reasoning: { effort: "high" },
@@ -42,14 +43,14 @@ describe("applyProviderReasoningOffSwitch", () => {
 
     applyProviderReasoningOffSwitch(params, "deepseek");
 
-    expect(params).toEqual({
-      thinking: { type: "disabled" },
-      top_p: 0.9,
-    });
+    expect(params.thinking).toEqual({ type: "disabled" });
+    expect(params.reasoning).toBeUndefined();
+    expect(params.reasoning_effort).toBeUndefined();
+    expect(params.top_p).toBe(0.9);
   });
 
   test("switches NanoGPT to exclude mode without sending effort", () => {
-    const params = {
+    const params: Record<string, any> = {
       reasoning: { effort: "high", delta_field: true },
       reasoning_effort: "high",
       max_tokens: 256,
@@ -57,9 +58,8 @@ describe("applyProviderReasoningOffSwitch", () => {
 
     applyProviderReasoningOffSwitch(params, "nanogpt");
 
-    expect(params).toEqual({
-      reasoning: { exclude: true },
-      max_tokens: 256,
-    });
+    expect(params.reasoning).toEqual({ exclude: true });
+    expect(params.reasoning_effort).toBeUndefined();
+    expect(params.max_tokens).toBe(256);
   });
 });

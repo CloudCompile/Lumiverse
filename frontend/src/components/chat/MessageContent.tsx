@@ -321,13 +321,6 @@ function extractHtmlIslands(
   const hasStyleTag = /<style[\s>]/i.test(raw)
   if (!hasStyleTag && !/\bstyle\s*=/i.test(raw)) return { content: raw, islands: [] }
 
-  // Don't extract <style>-based islands during streaming if a <style> tag is still unclosed
-  if (isStreaming && hasStyleTag) {
-    const opens = (raw.match(/<style[\s>]/gi) || []).length
-    const closes = (raw.match(/<\/style\s*>/gi) || []).length
-    if (opens > closes) return { content: raw, islands: [] }
-  }
-
   const islands: string[] = []
   const lines = raw.split('\n')
   const output: string[] = []
@@ -411,6 +404,14 @@ function extractHtmlIslands(
         i++
       }
 
+      // During streaming, don't extract an incomplete <style> block as an island.
+      // Let it fall through to prose sanitization until the closing tag arrives.
+      const styleBlock = buf.join('\n')
+      if (isStreaming && !hasBalancedStyleTags(styleBlock)) {
+        output.push(...buf)
+        continue
+      }
+
       let depth = 0
       let blanks = 0
       while (i < lines.length) {
@@ -434,7 +435,7 @@ function extractHtmlIslands(
           if (depth <= 0) {
             let p = i
             while (p < lines.length && !lines[p].trim()) p++
-            if (p >= lines.length || !/^<[a-zA-Z\/]/.test(lines[p].trim())) break
+            if (p >= lines.length || !/^[a-zA-Z\/]/.test(lines[p].trim())) break
           }
         } else {
           break

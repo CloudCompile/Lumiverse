@@ -14,6 +14,10 @@ function rgba(r: number, g: number, b: number, a: number = 1): string {
   return `rgba(${r}, ${g}, ${b}, ${a})`
 }
 
+function rgb(r: number, g: number, b: number): string {
+  return `rgb(${r} ${g} ${b})`
+}
+
 /**
  * Ensure a color has sufficient contrast for readability.
  * Dark mode: enforces minimum lightness (bright enough to read on dark bg).
@@ -52,9 +56,9 @@ function ensureReadable(color: string, isDark: boolean): string {
 /** Parse any CSS color string to [r, g, b]. */
 function parseColorToRgb(color: string): [number, number, number] | null {
   if (color.startsWith('#')) return hexToRgb(color)
-  const rgbMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+  const rgbMatch = color.match(/rgba?\(\s*(\d+)(?:\s*,\s*|\s+)(\d+)(?:\s*,\s*|\s+)(\d+)/)
   if (rgbMatch) return [+rgbMatch[1], +rgbMatch[2], +rgbMatch[3]]
-  const hslMatch = color.match(/hsla?\(\s*(\d+)\s*,\s*(\d+)%\s*,\s*(\d+)%/)
+  const hslMatch = color.match(/hsla?\(\s*(\d+)(?:\s*,\s*|\s+)(\d+)%(?:\s*,\s*|\s+)(\d+)%/)
   if (hslMatch) {
     // Convert HSL to RGB
     const hh = +hslMatch[1] / 360, ss = +hslMatch[2] / 100, ll = +hslMatch[3] / 100
@@ -121,20 +125,20 @@ function hexToRgb(hex: string): [number, number, number] | null {
 
 /** Generate a tinted rgba from a hex color at the given alpha. */
 function hexRgba(hex: string, a: number): string {
-  const rgb = hexToRgb(hex)
-  if (!rgb) return `rgba(128, 128, 128, ${a})`
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${a})`
+  const parsed = parseColorToRgb(hex)
+  if (!parsed) return `rgba(128, 128, 128, ${a})`
+  return `rgba(${parsed[0]}, ${parsed[1]}, ${parsed[2]}, ${a})`
 }
 
-/** Lighten or darken a hex color by a factor (-1 to 1). */
+/** Lighten or darken any CSS color by a factor (-1 to 1). */
 function adjustHex(hex: string, factor: number): string {
-  const rgb = hexToRgb(hex)
-  if (!rgb) return hex
+  const parsed = parseColorToRgb(hex)
+  if (!parsed) return hex
   const adjust = (c: number) => Math.round(clamp(c + factor * 255, 0, 255))
-  const r = adjust(rgb[0])
-  const g = adjust(rgb[1])
-  const b = adjust(rgb[2])
-  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`
+  const r = adjust(parsed[0])
+  const g = adjust(parsed[1])
+  const b = adjust(parsed[2])
+  return rgb(r, g, b)
 }
 
 // ── Main generator ──

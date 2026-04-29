@@ -22,13 +22,15 @@ import { getFirstUserId } from "../auth/seed";
 import { sanitizeForVectorization } from "../utils/content-sanitizer";
 import { describeProviderError } from "../utils/provider-errors";
 import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../utils/lancedb-path";
+import { chunkDocument } from "./databank/document-chunker.service";
+import { loadWorldBookVectorSettings, type WorldBookVectorSettings } from "./world-book-vector-settings.service";
 
 const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
 const LANCEDB_PATH = join(env.dataDir, "lancedb");
 const LANCEDB_URI = resolveLanceDbConnectUri(LANCEDB_PATH);
 const EMBEDDINGS_TABLE = "embeddings";
-const WORLD_BOOK_VECTOR_VERSION = 2;
+const WORLD_BOOK_VECTOR_VERSION = 3;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
 /** Default safety timeout for embedding API requests. Prevents a hanging
  *  upstream server from stalling the entire generation pipeline.
@@ -142,6 +144,8 @@ export interface WorldBookEmbeddingMetadata {
   world_book_id?: string;
   search_text?: string;
   vector_version?: number;
+  chunk_index?: number;
+  chunk_count?: number;
 }
 
 export interface WorldBookSearchCandidate {
@@ -554,6 +558,53 @@ async function recoverBrokenEmbeddingsTable(reason: string, err: unknown, lockHe
   return true;
 }
 
+function isEmbeddingsTableSchemaDriftError(err: unknown): boolean {
+  const text = collectErrorMessages(err).join(" | ").toLowerCase();
+  if (!text) return false;
+  if (text.includes("vector not divisible by 8")) return true;
+
+  const mentionsVectorSchema =
+    text.includes("fixedsizelist") ||
+    text.includes("fixed_size_list") ||
+    text.includes("vector");
+  const mentionsShapeMismatch =
+    text.includes("dimension") ||
+    text.includes("dimensionality") ||
+    text.includes("length") ||
+    text.includes("schema") ||
+    (text.includes("expected") && text.includes("got"));
+
+  return mentionsVectorSchema && mentionsShapeMismatch;
+}
+
+async function retryAfterSchemaDriftReset<T>(reason: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isEmbeddingsTableSchemaDriftError(err)) throw err;
+    console.warn(`[embeddings] ${reason} hit schema drift; force-resetting LanceDB and retrying once`, err);
+    await forceResetLanceDB();
+    return await fn();
+  }
+}
+
+async function upsertEmbeddingRows(rows: EmbeddingRow[], reason: string): Promise<void> {
+  if (rows.length === 0) return;
+  await retryAfterSchemaDriftReset(reason, async () => {
+    await withWriteLock(async () => {
+      const table = await getOrCreateTable(rows, true);
+      await ensureVectorIndex(table);
+      await ensureScalarIndexes(table);
+      await ensureFtsIndex(table);
+      await table
+        .mergeInsert("id")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute(asLanceRows(rows));
+    });
+  });
+}
+
 const worldBookVectorVersionChecked = new Set<string>();
 
 // Periodically clear the version-check cache so it doesn't grow unbounded.
@@ -855,6 +906,7 @@ async function getOrCreateTable(seedRows?: EmbeddingRow[], lockHeld = false): Pr
 }
 
 const MIN_ROWS_FOR_VECTOR_INDEX = 5_000;
+const MIN_ROWS_FOR_PQ_VECTOR_INDEX = 65_536;
 let scalarIndexReady = false;
 let ftsIndexReady = false;
 const MAX_LANCE_SOURCE_FILTER_IDS = 250;
@@ -880,6 +932,23 @@ function getVectorIndexPartitions(rowCount: number): number | null {
     Math.floor(Math.sqrt(rowCount)),
     Math.floor(rowCount / 256),
   ));
+}
+
+function getVectorIndexConfig(rowCount: number): any | null {
+  const numPartitions = getVectorIndexPartitions(rowCount);
+  if (numPartitions === null) return null;
+
+  if (rowCount < MIN_ROWS_FOR_PQ_VECTOR_INDEX) {
+    return Index.ivfFlat({
+      distanceType: "cosine",
+      numPartitions,
+    } as any);
+  }
+
+  return Index.ivfPq({
+    distanceType: "cosine",
+    numPartitions,
+  } as any);
 }
 
 function getWorldBookVectorVersionCacheKey(userId: string): string {
@@ -908,23 +977,62 @@ function uniqueNonEmpty(values: string[]): string[] {
 }
 
 export function buildWorldBookEntrySearchText(entry: WorldBookEntry): string {
+  const content = sanitizeForVectorization(entry.content || "");
+  if (!content) return "";
+  return normalizeVectorSearchText([
+    ...buildWorldBookChunkLead(entry),
+    `Content:\n${content}`,
+  ].join("\n\n"));
+}
+
+function buildWorldBookChunkLead(entry: WorldBookEntry): string[] {
   const primaryKeys = uniqueNonEmpty(entry.key || []);
   const secondaryKeys = uniqueNonEmpty(entry.keysecondary || []);
   const comment = (entry.comment || "").trim();
-  const content = sanitizeForVectorization(entry.content || "");
   const sections: string[] = [];
 
   if (comment) sections.push(`Entry title: ${comment}`);
   if (primaryKeys.length > 0) sections.push(`Primary keys: ${primaryKeys.join(", ")}`);
   if (secondaryKeys.length > 0) sections.push(`Secondary keys: ${secondaryKeys.join(", ")}`);
-  if (content) sections.push(`Content:\n${content}`);
+  return sections;
+}
 
-  return normalizeVectorSearchText(sections.join("\n\n")) || content;
+function buildWorldBookEntryEmbeddingChunks(
+  entry: WorldBookEntry,
+  settings: WorldBookVectorSettings,
+): Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }> {
+  const content = sanitizeForVectorization(entry.content || "");
+  if (!content) return [];
+
+  const chunked = chunkDocument(content, {
+    targetTokens: settings.chunkTargetTokens,
+    maxTokens: settings.chunkMaxTokens,
+    overlapTokens: settings.chunkOverlapTokens,
+  });
+  const limited = (chunked.length > 0 ? chunked : [{ index: 0, content, tokenCount: 0, metadata: { startOffset: 0, endOffset: content.length } }])
+    .slice(0, settings.maxChunksPerEntry)
+    .filter((chunk) => chunk.content.trim().length > 0);
+  const leadSections = buildWorldBookChunkLead(entry);
+  const chunkCount = limited.length;
+
+  return limited.map((chunk, index) => {
+    const sections = [...leadSections];
+    if (chunkCount > 1) sections.push(`Chunk ${index + 1} of ${chunkCount}`);
+    sections.push(`Content:\n${chunk.content.trim()}`);
+    return {
+      chunkIndex: index,
+      content: chunk.content.trim(),
+      searchText: normalizeVectorSearchText(sections.join("\n\n")),
+      chunkCount,
+    };
+  });
 }
 
 function buildWorldBookEmbeddingMetadata(
   entry: WorldBookEntry,
   searchText: string,
+  chunkIndex: number,
+  chunkCount: number,
 ): WorldBookEmbeddingMetadata {
   return {
     comment: entry.comment,
@@ -933,6 +1041,8 @@ function buildWorldBookEmbeddingMetadata(
     world_book_id: entry.world_book_id,
     search_text: searchText,
     vector_version: WORLD_BOOK_VECTOR_VERSION,
+    chunk_index: chunkIndex,
+    chunk_count: chunkCount,
   };
 }
 
@@ -994,20 +1104,15 @@ async function ensureVectorIndex(table: Table): Promise<void> {
   if (vectorIndexReady) return;
   try {
     const rowCount = await table.countRows();
-    const numPartitions = getVectorIndexPartitions(rowCount);
-    if (numPartitions === null) {
+    const indexConfig = getVectorIndexConfig(rowCount);
+    if (indexConfig === null) {
       // Brute-force search is fast enough for small tables and avoids
       // KMeans warnings about empty clusters when rows < num_partitions * 256.
       vectorIndexReady = true;
       return;
     }
-    // IVF_PQ handles metadata-filtered workloads (every query uses .where())
-    // much better than HNSW_PQ, which suffers latency fluctuation with filters.
     await table.createIndex("vector", {
-      config: Index.ivfPq({
-        distanceType: "cosine",
-        numPartitions,
-      }),
+      config: indexConfig,
     } as any);
   } catch {
     // Index may already exist - that's fine
@@ -1161,23 +1266,20 @@ async function checkAndRebuildIndexes(table: Table): Promise<void> {
         const t = await getTableIfExists(true);
         if (!t) return;
         const rowCount = await t.countRows();
-        const numPartitions = getVectorIndexPartitions(rowCount);
-        if (numPartitions === null) {
+        const indexConfig = getVectorIndexConfig(rowCount);
+        if (indexConfig === null) {
           vectorIndexReady = true;
           unindexedRowEstimate = 0;
           lastIndexRebuildAt = Date.now();
           return;
         }
         await t.createIndex("vector", {
-          config: Index.ivfPq({
-            distanceType: "cosine",
-            numPartitions,
-          }),
+          config: indexConfig,
           replace: true,
         } as any);
         lastIndexRebuildAt = Date.now();
         unindexedRowEstimate = 0;
-        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows, ${numPartitions} partitions)`);
+        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows)`);
       });
     }
   } catch (err) {
@@ -1229,20 +1331,17 @@ export async function runStartupVectorMaintenance(): Promise<void> {
 
     if (needsMigration) {
       const rowCount = await table.countRows();
-      const numPartitions = getVectorIndexPartitions(rowCount);
-      if (numPartitions !== null) {
-        console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
+      const indexConfig = getVectorIndexConfig(rowCount);
+      if (indexConfig !== null) {
+        console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF (${rowCount} rows)...`);
         try {
           await table.createIndex("vector", {
-            config: Index.ivfPq({
-              distanceType: "cosine",
-              numPartitions,
-            }),
+            config: indexConfig,
             replace: true,
           } as any);
           vectorIndexReady = true;
           lastIndexRebuildAt = Date.now();
-          console.info(`[embeddings] Vector index migrated successfully (${numPartitions} partitions)`);
+          console.info("[embeddings] Vector index migrated successfully");
         } catch (err) {
           console.warn("[embeddings] Vector index migration failed (will retry on next query):", err);
         }
@@ -2259,11 +2358,28 @@ export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: st
   await withWriteLock(async () => {
     const table = await getTableIfExists(true);
     if (!table) return;
-    await table.delete(
-      `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
-    );
+    await deleteWorldBookEntryRowsFromTable(table, userId, [entryId]);
   });
   scheduleOptimize();
+}
+
+async function deleteWorldBookEntryRowsFromTable(table: Table, userId: string, entryIds: string[]): Promise<void> {
+  if (entryIds.length === 0) return;
+  const sourceFilter = entryIds
+    .map((entryId) => `source_id = ${sqlValue(entryId)}`)
+    .join(" OR ");
+  await table.delete(
+    `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND (${sourceFilter})`
+  );
+}
+
+async function deleteWorldBookEntryEmbeddingsBatch(userId: string, entryIds: string[]): Promise<void> {
+  if (entryIds.length === 0) return;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists(true);
+    if (!table) return;
+    await deleteWorldBookEntryRowsFromTable(table, userId, entryIds);
+  });
 }
 
 function getDesiredWorldBookVectorStatus(entry: WorldBookEntry): WorldBookVectorIndexStatus {
@@ -2302,35 +2418,25 @@ function isEligibleWorldBookEntry(entry: WorldBookEntry): boolean {
   return entry.vectorized && !entry.disabled && (entry.content || "").trim().length > 0;
 }
 
-async function getExistingWorldBookVectorPayload(
+function buildWorldBookEmbeddingRows(
   userId: string,
-  entryId: string,
-): Promise<{ content: string; searchText: string; vectorVersion: number | null } | null> {
-  try {
-    const table = await getTableIfExists();
-    if (!table) return null;
-    const rows = await table
-      .query()
-      .where(
-        `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
-      )
-      .select(["content", "metadata_json"])
-      .limit(1)
-      .toArray();
-    if (rows.length === 0) return null;
-
-    const row = rows[0] as any;
-    if (typeof row.content !== "string") return null;
-    const metadata = parseWorldBookEmbeddingMetadata(row.metadata_json);
-    return {
-      content: row.content,
-      searchText: typeof metadata.search_text === "string" ? metadata.search_text : "",
-      vectorVersion: typeof metadata.vector_version === "number" ? metadata.vector_version : null,
-    };
-  } catch {
-    // Table may not exist yet
-  }
-  return null;
+  entry: WorldBookEntry,
+  chunks: Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }>,
+  vectors: number[][],
+  now: number,
+): EmbeddingRow[] {
+  return chunks.map((chunk, idx) => ({
+    id: rowId(userId, "world_book_entry", entry.id, chunk.chunkIndex),
+    user_id: userId,
+    source_type: "world_book_entry",
+    source_id: entry.id,
+    owner_id: entry.world_book_id,
+    chunk_index: chunk.chunkIndex,
+    content: chunk.content,
+    vector: vectors[idx],
+    metadata_json: JSON.stringify(buildWorldBookEmbeddingMetadata(entry, chunk.searchText, chunk.chunkIndex, chunk.chunkCount)),
+    updated_at: now,
+  }));
 }
 
 export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBookEntry): Promise<void> {
@@ -2343,52 +2449,34 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
   }
 
   const cfg = await getEmbeddingConfig(userId);
-  const content = (entry.content || "").trim();
-  const searchText = buildWorldBookEntrySearchText(entry);
-  if (!cfg.enabled || !cfg.vectorize_world_books || entry.disabled || !content) {
+  const worldBookSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: cfg.retrieval_top_k,
+  });
+  const chunks = buildWorldBookEntryEmbeddingChunks(entry, worldBookSettings);
+  if (!cfg.enabled || !cfg.vectorize_world_books || entry.disabled || chunks.length === 0) {
     await deleteWorldBookEntryEmbeddings(userId, entry.id);
     updateWorldBookEntryVectorState(entry.id, "not_enabled", null, null);
     return;
   }
 
   try {
-    const existing = await getExistingWorldBookVectorPayload(userId, entry.id);
     const now = Math.floor(Date.now() / 1000);
+    const vectors = await cachedEmbedTexts(userId, chunks.map((chunk) => chunk.searchText));
+    const rows = buildWorldBookEmbeddingRows(userId, entry, chunks, vectors, now);
 
-    if (
-      existing &&
-      existing.content === content &&
-      existing.searchText === searchText &&
-      existing.vectorVersion === WORLD_BOOK_VECTOR_VERSION
-    ) {
-      updateWorldBookEntryVectorState(entry.id, "indexed", now, null);
-      return;
-    }
-
-    const [vector] = await cachedEmbedTexts(userId, [searchText]);
-    const row: EmbeddingRow = {
-      id: rowId(userId, "world_book_entry", entry.id, 0),
-      user_id: userId,
-      source_type: "world_book_entry",
-      source_id: entry.id,
-      owner_id: entry.world_book_id,
-      chunk_index: 0,
-      content,
-      vector,
-      metadata_json: JSON.stringify(buildWorldBookEmbeddingMetadata(entry, searchText)),
-      updated_at: now,
-    };
-
-    await withWriteLock(async () => {
-      const table = await getOrCreateTable([row], true);
-      await ensureVectorIndex(table);
-      await ensureScalarIndexes(table);
-      await ensureFtsIndex(table);
-      await table
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows([row]));
+    await retryAfterSchemaDriftReset("world-book entry sync", async () => {
+      await withWriteLock(async () => {
+        const table = await getOrCreateTable(rows, true);
+        await ensureVectorIndex(table);
+        await ensureScalarIndexes(table);
+        await ensureFtsIndex(table);
+        await deleteWorldBookEntryRowsFromTable(table, userId, [entry.id]);
+        await table
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
     });
 
     updateWorldBookEntryVectorState(entry.id, "indexed", now, null);
@@ -2473,53 +2561,95 @@ export async function reindexWorldBookEntries(
   }
 
   await ensureWorldBookVectorVersion(userId);
+  const worldBookSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: cfg.retrieval_top_k,
+  });
+  const allEntryGroups = toIndex.map((entry) => ({
+    entry,
+    chunks: buildWorldBookEntryEmbeddingChunks(entry, worldBookSettings),
+  }));
+  const entryGroups = allEntryGroups.filter((group) => group.chunks.length > 0);
+  const emptiedEntries = allEntryGroups.filter((group) => group.chunks.length === 0);
+  progress.eligible = entryGroups.length;
 
-  await embedWithAdaptiveBatching(
-    userId,
-    toIndex,
-    batchSize,
-    (entry) => buildWorldBookEntrySearchText(entry),
-    async (batch, searchTexts, vectors) => {
+  for (const group of emptiedEntries) {
+    await deleteWorldBookEntryEmbeddings(userId, group.entry.id);
+    updateWorldBookEntryVectorState(group.entry.id, "not_enabled", null, null);
+    progress.removed += 1;
+    progress.current += 1;
+    emitProgress();
+  }
+
+  const processGroupBatch = async (
+    groups: Array<{ entry: WorldBookEntry; chunks: Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }> }>,
+    currentSize: number,
+  ): Promise<void> => {
+    if (groups.length === 0) return;
+      const payloads = groups.flatMap((group) => group.chunks.map((chunk) => ({ entry: group.entry, chunk })));
+    try {
+      const vectors = await cachedEmbedTexts(userId, payloads.map((payload) => payload.chunk.searchText));
       const now = Math.floor(Date.now() / 1000);
-      const rows: EmbeddingRow[] = batch.map((entry, idx) => ({
-        id: rowId(userId, "world_book_entry", entry.id, 0),
-        user_id: userId,
-        source_type: "world_book_entry",
-        source_id: entry.id,
-        owner_id: entry.world_book_id,
-        chunk_index: 0,
-        content: (entry.content || "").trim(),
-        vector: vectors[idx],
-        metadata_json: JSON.stringify(buildWorldBookEmbeddingMetadata(entry, searchTexts[idx])),
-        updated_at: now,
-      }));
+      const rows: EmbeddingRow[] = [];
+      const vectorSlices = new Map<string, number[][]>();
+      let offset = 0;
+      for (const group of groups) {
+        const slice = vectors.slice(offset, offset + group.chunks.length);
+        vectorSlices.set(group.entry.id, slice);
+        offset += group.chunks.length;
+      }
+      for (const group of groups) {
+        rows.push(...buildWorldBookEmbeddingRows(
+          userId,
+          group.entry,
+          group.chunks,
+          vectorSlices.get(group.entry.id) ?? [],
+          now,
+        ));
+      }
 
-      await withWriteLock(async () => {
-        const table = await getOrCreateTable(rows, true);
-        await ensureVectorIndex(table);
-        await ensureScalarIndexes(table);
-        await ensureFtsIndex(table);
-        await table
-          .mergeInsert("id")
-          .whenMatchedUpdateAll()
-          .whenNotMatchedInsertAll()
-          .execute(asLanceRows(rows));
+      await retryAfterSchemaDriftReset("world-book reindex batch", async () => {
+        await withWriteLock(async () => {
+          const table = await getOrCreateTable(rows, true);
+          await ensureVectorIndex(table);
+          await ensureScalarIndexes(table);
+          await ensureFtsIndex(table);
+          await deleteWorldBookEntryRowsFromTable(table, userId, groups.map((group) => group.entry.id));
+          await table
+            .mergeInsert("id")
+            .whenMatchedUpdateAll()
+            .whenNotMatchedInsertAll()
+            .execute(asLanceRows(rows));
+        });
       });
 
-      updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "indexed", now, null);
-      progress.indexed += batch.length;
-      progress.current += batch.length;
+      updateWorldBookEntriesVectorState(groups.map((group) => group.entry.id), "indexed", now, null);
+      progress.indexed += groups.length;
+      progress.current += groups.length;
       emitProgress();
-    },
-    (batch, err) => {
-      console.warn("[embeddings] Batch embedding failed:", err);
-      updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "error", null, err.message);
-      progress.failed += batch.length;
-      progress.current += batch.length;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (isRetryableBatchError(error) && currentSize > 1) {
+        const half = Math.max(1, Math.floor(currentSize / 2));
+        console.warn(
+          `[embeddings] WB reindex: batch of ${groups.length} failed (${error.message}); retrying in sub-batches of ${half}`,
+        );
+        for (let i = 0; i < groups.length; i += half) {
+          await processGroupBatch(groups.slice(i, i + half), half);
+        }
+        return;
+      }
+      console.warn("[embeddings] Batch embedding failed:", error);
+      await deleteWorldBookEntryEmbeddingsBatch(userId, groups.map((group) => group.entry.id));
+      updateWorldBookEntriesVectorState(groups.map((group) => group.entry.id), "error", null, error.message);
+      progress.failed += groups.length;
+      progress.current += groups.length;
       emitProgress();
-    },
-    { label: "WB reindex" },
-  );
+    }
+  };
+
+  for (let i = 0; i < entryGroups.length; i += batchSize) {
+    await processGroupBatch(entryGroups.slice(i, i + batchSize), batchSize);
+  }
 
   // Compact all fragments into fewer files, prune old versions, and
   // rebuild vector index so freshly-upserted rows are fully indexed.
@@ -2583,13 +2713,14 @@ export async function searchWorldBookEntriesHybridWithVector(
   const trimmedQuery = queryText.trim();
   const filter = `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND owner_id = ${sqlValue(worldBookId)}`;
   const effectiveLimit = Math.max(1, Math.min(limit, 100));
+  const rawLimit = Math.min(200, Math.max(effectiveLimit * 3, effectiveLimit));
 
   const query = table
     .query()
     .nearestTo(vector)
     .where(filter)
     .select(["source_id", "content", "_distance", "metadata_json"])
-    .limit(effectiveLimit) as any;
+    .limit(rawLimit) as any;
   // Refine with full vectors after PQ approximate search for better accuracy
   if (vectorIndexReady) query.refineFactor(5);
   const vectorRows = await raceWithSignal(query.toArray() as Promise<any[]>, signal);
@@ -2602,14 +2733,19 @@ export async function searchWorldBookEntriesHybridWithVector(
 
   for (const row of vectorRows) {
     const metadata = parseWorldBookEmbeddingMetadata(row.metadata_json);
-    merged.set(String(row.source_id), {
-      entry_id: String(row.source_id),
-      distance: typeof row._distance === "number" ? row._distance : 0,
-      lexical_score: null,
-      content: String(row.content || ""),
-      searchTextPreview: typeof metadata.search_text === "string" ? metadata.search_text : "",
-      metadata,
-    });
+    const entryId = String(row.source_id);
+    const distance = typeof row._distance === "number" ? row._distance : 0;
+    const existing = merged.get(entryId);
+    if (!existing || distance < existing.distance) {
+      merged.set(entryId, {
+        entry_id: entryId,
+        distance,
+        lexical_score: existing?.lexical_score ?? null,
+        content: String(row.content || ""),
+        searchTextPreview: typeof metadata.search_text === "string" ? metadata.search_text : existing?.searchTextPreview || "",
+        metadata: { ...(existing?.metadata ?? {}), ...metadata },
+      });
+    }
   }
 
   if (trimmedQuery && !signal?.aborted) {
@@ -2620,7 +2756,7 @@ export async function searchWorldBookEntriesHybridWithVector(
           .fullTextSearch(trimmedQuery)
           .where(filter)
           .select(["source_id", "content", "_score", "metadata_json"])
-          .limit(effectiveLimit)
+          .limit(rawLimit)
           .toArray() as Promise<any[]>,
         signal,
       );
@@ -2632,7 +2768,9 @@ export async function searchWorldBookEntriesHybridWithVector(
         const existing = merged.get(entryId);
 
         if (existing) {
-          existing.lexical_score = lexicalScore;
+          if (lexicalScore !== null && (existing.lexical_score === null || lexicalScore > existing.lexical_score)) {
+            existing.lexical_score = lexicalScore;
+          }
           if (!existing.searchTextPreview && typeof metadata.search_text === "string") {
             existing.searchTextPreview = metadata.search_text;
           }
@@ -2658,7 +2796,12 @@ export async function searchWorldBookEntriesHybridWithVector(
     }
   }
 
-  return Array.from(merged.values());
+  return Array.from(merged.values())
+    .sort((a, b) => {
+      if (a.distance !== b.distance) return a.distance - b.distance;
+      return (b.lexical_score ?? Number.NEGATIVE_INFINITY) - (a.lexical_score ?? Number.NEGATIVE_INFINITY);
+    })
+    .slice(0, effectiveLimit);
 }
 
 /**
@@ -2801,17 +2944,7 @@ export async function syncChatChunkEmbedding(
     updated_at: now,
   };
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable([row], true);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows([row]));
-  });
+  await upsertEmbeddingRows([row], "chat chunk sync");
 
   console.info(`[embeddings] Vectorized chat chunk ${chunkId} for chat ${chatId}`);
 
@@ -2843,17 +2976,7 @@ export async function batchUpsertChunkVectors(
     updated_at: now,
   }));
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable(rows, true);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows(rows));
-  });
+  await upsertEmbeddingRows(rows, "chat chunk batch upsert");
 
   console.info(`[embeddings] Batch-vectorized ${rows.length} chat chunk(s)`);
   scheduleOptimize();
@@ -2936,17 +3059,7 @@ export async function reindexChatMessages(
         updated_at: now,
       }));
 
-      await withWriteLock(async () => {
-        const table = await getOrCreateTable(rows, true);
-        await ensureVectorIndex(table);
-        await ensureScalarIndexes(table);
-        await ensureFtsIndex(table);
-        await table
-          .mergeInsert("id")
-          .whenMatchedUpdateAll()
-          .whenNotMatchedInsertAll()
-          .execute(asLanceRows(rows));
-      });
+      await upsertEmbeddingRows(rows, "chat memory reindex batch");
     },
     (_batch, err) => {
       console.warn("[embeddings] Batch chat embedding failed:", err);
@@ -3214,17 +3327,7 @@ export async function upsertChunkVector(
     updated_at: now,
   };
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable([row], true);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows([row]));
-  });
+  await upsertEmbeddingRows([row], "chat chunk incremental upsert");
 
   scheduleOptimize();
 }
@@ -3312,17 +3415,7 @@ export async function copyChunksToVault(
 
     if (outRows.length === 0) continue;
 
-    await withWriteLock(async () => {
-      const t = await getOrCreateTable(outRows, true);
-      await ensureVectorIndex(t);
-      await ensureScalarIndexes(t);
-      await ensureFtsIndex(t);
-      await t
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows(outRows));
-    });
+    await upsertEmbeddingRows(outRows, "vault chunk copy");
     copied += outRows.length;
   }
 
@@ -3371,17 +3464,7 @@ export async function rebuildVaultEmbeddings(
         updated_at: now,
       }));
 
-      await withWriteLock(async () => {
-        const t = await getOrCreateTable(rows, true);
-        await ensureVectorIndex(t);
-        await ensureScalarIndexes(t);
-        await ensureFtsIndex(t);
-        await t
-          .mergeInsert("id")
-          .whenMatchedUpdateAll()
-          .whenNotMatchedInsertAll()
-          .execute(asLanceRows(rows));
-      });
+      await upsertEmbeddingRows(rows, "vault rebuild batch");
       embedded += rows.length;
     },
     (_batch, err) => {
@@ -3480,17 +3563,7 @@ export async function batchUpsertDatabankVectors(
     updated_at: now,
   }));
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable(rows, true);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows(rows));
-  });
+  await upsertEmbeddingRows(rows, "databank batch upsert");
 
   console.info(`[embeddings] Batch-vectorized ${rows.length} databank chunk(s)`);
   scheduleOptimize();

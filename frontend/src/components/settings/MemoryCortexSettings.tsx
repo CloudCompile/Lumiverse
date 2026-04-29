@@ -24,6 +24,7 @@ import { useStore } from "@/store";
 import { memoryCortexApi, type CortexConfig, type CortexUsageStats } from "@/api/memory-cortex";
 import { connectionsApi } from "@/api/connections";
 import ModelCombobox from "@/components/panels/connection-manager/ModelCombobox";
+import { getReasoningBindingSummary } from "@/lib/reasoning-binding";
 import { wsClient } from "@/ws/client";
 import { EventType } from "@/ws/events";
 import styles from "./MemoryCortexSettings.module.css";
@@ -97,6 +98,8 @@ export default function MemoryCortexSettings() {
   const activeThoughtPreset = THOUGHT_MARKER_PRESETS.find(
     (preset) => preset.prefix === config?.thoughtMarkers.prefix && preset.suffix === config?.thoughtMarkers.suffix,
   );
+  const selectedSidecarProfile = profiles.find((p) => p.id === config?.sidecar?.connectionProfileId) || null;
+  const sidecarReasoningBinding = selectedSidecarProfile?.metadata?.reasoningBindings?.settings;
 
   const handleOpenDiagnostics = useCallback(() => {
     openModal("memoryCortexDiagnostics", { chatId: activeChatId || null });
@@ -420,6 +423,13 @@ export default function MemoryCortexSettings() {
               Use a secondary LLM for deeper entity extraction, importance scoring, and memory consolidation.
               Without a connection, these features use fast heuristics (free, no API calls).
             </div>
+            {config.sidecar.connectionProfileId && (
+              <div className={styles.hintText}>
+                {sidecarReasoningBinding
+                  ? `This sidecar connection uses bound reasoning settings: ${getReasoningBindingSummary(sidecarReasoningBinding)}.`
+                  : "This sidecar connection uses the global Reasoning settings unless the connection profile has bound reasoning settings. Bind reasoning on that connection to force thinking on or off for Cortex extraction and summaries."}
+              </div>
+            )}
             <div className={styles.infoRow}>
               <span className={styles.infoLabel}>Connection</span>
               <select

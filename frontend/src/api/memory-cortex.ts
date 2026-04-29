@@ -288,6 +288,43 @@ export interface CortexChatLink {
   createdAt: number;
 }
 
+export interface CortexFontColor {
+  id: string;
+  chatId: string;
+  entityId: string | null;
+  characterName: string | null;
+  entityName: string | null;
+  displayName: string | null;
+  hexColor: string;
+  usageType: string;
+  confidence: number;
+  sampleCount: number;
+  sampleExcerpt: string | null;
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeFontColor(raw: any): CortexFontColor {
+  const characterName = normalizeOptionalString(raw.characterName ?? raw.character_name);
+  const entityName = normalizeOptionalString(raw.entityName ?? raw.entity_name);
+
+  return {
+    id: String(raw.id),
+    chatId: String(raw.chatId ?? raw.chat_id ?? ""),
+    entityId: raw.entityId ?? raw.entity_id ?? null,
+    characterName,
+    entityName,
+    displayName: characterName || entityName,
+    hexColor: String(raw.hexColor ?? raw.hex_color ?? ""),
+    usageType: String(raw.usageType ?? raw.usage_type ?? "unknown"),
+    confidence: Number(raw.confidence ?? 0),
+    sampleCount: Number(raw.sampleCount ?? raw.sample_count ?? 0),
+    sampleExcerpt: raw.sampleExcerpt ?? raw.sample_excerpt ?? null,
+  };
+}
+
 // ─── API ───────────────────────────────────────────────────────
 
 const BASE = "/memory-cortex";
@@ -314,8 +351,13 @@ export const memoryCortexApi = {
     post<CortexEntity>(`${BASE}/chats/${chatId}/entities/merge`, { sourceId, targetId }),
 
   // Font Colors
-  getColors: (chatId: string) =>
-    get<{ data: any[]; total: number }>(`${BASE}/chats/${chatId}/colors`),
+  getColors: async (chatId: string): Promise<{ data: CortexFontColor[]; total: number }> => {
+    const res = await get<{ data: any[]; total: number }>(`${BASE}/chats/${chatId}/colors`);
+    return {
+      ...res,
+      data: res.data.map(normalizeFontColor),
+    };
+  },
   deleteColor: (chatId: string, colorId: string) =>
     del<{ success: boolean }>(`${BASE}/chats/${chatId}/colors/${colorId}`),
 

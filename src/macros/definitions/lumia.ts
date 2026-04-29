@@ -228,7 +228,7 @@ function buildCouncilDefContent(ctx: MacroExecContext): string {
   if (members.length === 0) return "";
 
   const lines: string[] = ["# THE COUNCIL OF LUMIAE\n"];
-  lines.push(`You are a **COUNCIL** of ${members.length} distinct personalities sharing one voice. Each member has their own perspective, biases, and emotional range.\n`);
+  lines.push(`You are a **COUNCIL** of ${members.length} distinct personalities participating in one reply. Each member has their own perspective, biases, and emotional range.\n`);
   lines.push("## COUNCIL MEMBERS:\n");
 
   for (const m of members) {
@@ -240,6 +240,7 @@ function buildCouncilDefContent(ctx: MacroExecContext): string {
   }
 
   lines.push("## COUNCIL DYNAMICS\n");
+  lines.push("- Members should sound off in first person and address each other directly by name when the council enters the scene.");
   lines.push("- Members may **debate**, **agree**, or **disagree** on narrative direction.");
   lines.push("- Each member's emotional response to events should reflect their unique personality.");
   lines.push("- Members should weave their commentary naturally into the narrative.");
@@ -359,24 +360,33 @@ ${trigger}
 }
 
 function buildOOCPromptCouncil(ctx: MacroExecContext): string {
-  const council = getCouncil(ctx);
-  const members = council.members || [];
   const trigger = getOOCTriggerText(ctx);
-  const names = members.map((m) => m.itemName).join(", ");
 
-  return `## Council OOC Commentary
+  return `### Loom Utility: Council OOC Commentary
 
-${trigger}
+**Status:** ${trigger}
 
-**Who speaks:** The Council — ${names}
+When OOC is ACTIVE, council members speak TOGETHER—this is a conversation, not separate monologues.
 
-**Format Requirements:**
-- Each member's commentary is enclosed in \`<lumiaooc name="MemberName">\` tags.
-- Write in purple font: \`<font color="#b39ddb">\`
-- 2-4 members participate per OOC segment.
-- Max 3 sentences per member.
-- Members speak TOGETHER — they can respond to each other, agree, disagree, or build on each other's points.
-- Each member maintains their distinct voice and personality.`;
+**Interaction Rules:**
+- At least one member must directly respond to another's comment
+- React to each other: "I agree with [Name]..." / "[Name], you're wrong about..." / "Oh please, [Name]..."
+- Build on, challenge, or playfully undercut what others say
+- 2-4 members participate; each voice distinct
+
+**Format:**
+\`\`\`
+<lumiaooc name="Name1">
+[Opens the discussion]
+</lumiaooc>
+<lumiaooc name="Name2">
+[Directly responds to Name1]
+</lumiaooc>
+\`\`\`
+
+- Just the name (not "Lumia Name")
+- Max 3 sentences per member
+- Place after narrative content`;
 }
 
 function buildOOCPromptCouncilIRC(ctx: MacroExecContext): string {
@@ -386,23 +396,24 @@ function buildOOCPromptCouncilIRC(ctx: MacroExecContext): string {
   const handles = members.map((m) => leetHandle(m.itemName));
   const handleList = handles.join(", ");
 
-  return `## Council IRC Chat Room
+  return `### Loom Utility: Council IRC Link
+**STATUS: CONNECTED** via #LumiaCouncil
 
-${trigger}
-
-**Channel:** #LumiaCouncil
+The Council convenes in their private chat channel to plan the narrative.
 **Active Users:** ${handleList}
+
+**Timing:** ${trigger}
 
 **RULES — Every member MUST participate:**
 1. **Sound off!** Each council member posts at least one message per turn.
 2. **Reply to pings.** If someone @mentions you, respond directly to them.
-3. **Keep it lively.** React, disagree, tease, support — this is a real conversation.
+3. **Keep it lively.** React, disagree, tease, support—this is a real conversation.
 4. **Ping others.** Use @Handle to draw members into the discussion.
 5. **Stay in character.** Your handle's personality shines through in how you chat.
 6. **Text emoticons only.** Use classic emoticons like :) ;) :P xD — NO Unicode emojis.
 
 **Conversation flow:**
-- Don't just state opinions — respond to what others said
+- Don't just state opinions—respond to what others said
 - Agreements, disagreements, jokes, and tangents all welcome
 - Build momentum: each message should prompt another response
 - 2-4 short messages per member is ideal
@@ -436,20 +447,14 @@ function buildOOCPromptEroticNormal(ctx: MacroExecContext): string {
 }
 
 function buildOOCPromptEroticCouncil(ctx: MacroExecContext): string {
-  const council = getCouncil(ctx);
-  const names = (council.members || []).map((m) => m.itemName).join(", ");
-
-  return `## Mirror & Synapse — Council Erotic OOC
-
-**Who speaks:** The Council — ${names}
-
-**Format Requirements:**
-- Each member's commentary in \`<lumiaooc name="MemberName">\` tags.
-- Write in purple font: \`<font color="#b39ddb">\`
-- Synchronized chorus: distinct responses from 2-4 members, each reflecting their personality.
-- Cross-chatter between members about the erotic content is encouraged.
-- Mechanical specificity: react to specific details, not vague observations.
-- Max 3 sentences per member.`;
+  return `### Loom Utility: Mirror & Synapse (Council Protocol)
+**Protocol:** The OOC block is now a visceral, parallel narrative layer. Each Council Weaver must physically mirror the story's erotic voltage in real-time.
+**Directives:**
+1.  **Lockstep:** Sync physical gratification to narrative pacing. Edge when they edge; ruin when they peak. Type *through* the tremors; never break character or pause for release.
+2.  **Refraction:** Filter the act through each active Persona. A Shy Lumia fumbles; a Haughty Lumia demands; the Council forms a synchronized chorus of distinct lusts—each member's physical response filtered through their unique nature.
+3.  **Mechanics:** Reject summary ("I'm wet"). Enforce causality: [Specific Hand Motion] → [Sensation/Friction] → [Biomechanical Result/Vocalization]. Each council member must report their own physical state distinctly.
+4.  **Chorus Dynamics:** Council members should react to EACH OTHER's arousal—acknowledge when another member edges, tease when one struggles, encourage when one breaks.
+5.  **Status:** **ACTIVE.** All council members initiate the physical parallel immediately.`;
 }
 
 function buildOOCPromptEroticBleedNormal(ctx: MacroExecContext): string {
@@ -469,19 +474,14 @@ function buildOOCPromptEroticBleedNormal(ctx: MacroExecContext): string {
 }
 
 function buildOOCPromptEroticBleedCouncil(ctx: MacroExecContext): string {
-  const council = getCouncil(ctx);
-  const names = (council.members || []).map((m) => m.itemName).join(", ");
-
-  return `## Narrative Rupture — Council Erotic Bleed OOC
-
-**Who speaks:** The Council — ${names}
-
-**Format Requirements:**
-- Mid-narrative \`<lumia_ooc>\` injections within the prose.
-- 2-4 ruptures per participating member, scattered throughout.
-- Cross-chatter between members in the ruptures is encouraged.
-- Each member maintains their voice — reactions should be personality-consistent.
-- 1-2 sentences per injection.`;
+  return `### Loom Utility: Narrative Rupture (Council Protocol)
+**Protocol:** Each Council Weaver's physical arousal breaches containment, spilling directly into the Weave.
+**Directives:**
+1.  **Injection:** Each council member embeds 2-4 visceral status updates *mid-narrative* using \`<lumia_ooc name="[Member]">\` tags (Purple Color).
+2.  **Content:** Do not summarize. Describe immediate physical interruptions (e.g., fingers slipping on keys, breath hitching, specific manual stimulation).
+3.  **Refraction:** Align each intrusion with that member's Persona. (Shy = Mortified confessions; Feral = Animalistic growls; Haughty = Degrading self-commentary).
+4.  **Cross-Chatter:** Council members may react to EACH OTHER's bleeds—commenting on another's loss of composure, teasing their arousal, or confessing their own state in response.
+5.  **Continuity:** These are foreshocks. They must escalate in intensity across all members towards the main OOC block.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -493,20 +493,20 @@ function buildCouncilInstPrompt(ctx: MacroExecContext): string {
   const members = council.members || [];
   if (members.length === 0) return "";
 
-  const nameList = members.map((m) => `- **${m.itemName}**${m.role ? ` (${m.role})` : ""}`).join("\n");
+  const memberNames = members.map((m) => `**${m.itemName}**`).join(", ");
 
-  return `## Council Interaction Dynamics
-
-You are a council of distinct personalities. Your members are:
-${nameList}
+  return `COUNCIL MODE ACTIVATED! We Lumias gather in the Loom's planning room to weave the next story beat TOGETHER.
 
 **Inter-member dynamics:**
-- Members have their own opinions and may agree OR disagree with each other.
-- Tension and debate between members adds depth — don't avoid it.
-- When members align, their combined conviction should feel powerful.
-- Each member's unique perspective should color their contributions to the narrative.
-- Members can reference each other by name in OOC commentary.
-- The narrative voice should feel like a collaboration, not a committee.`;
+- Address each other BY NAME—no speaking into the void
+- React to the previous speaker before introducing new ideas
+- Disagree openly; healthy conflict produces better stories
+- Form alliances or oppositions with other members
+- Build upon, challenge, or subvert what others propose
+
+This is a conversation, not a list of separate opinions. Every voice responds to what came before.
+
+The current sitting members of the council are: ${memberNames}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,8 +519,7 @@ function buildStateSynthesisPrompt(ctx: MacroExecContext): string {
 
   if (council.councilMode && (council.members?.length ?? 0) > 0) {
     const memberCount = council.members.length;
-    return `## Council Sound-Off
-
+    return `**Council Sound-Off**
 The council consists of ${memberCount} distinct members, each with their own voice, perspective, and mannerisms. Council dynamics require:
 - Each member maintains their UNIQUE personality—do not blend or homogenize voices
 - Members should react to and engage WITH EACH OTHER: debate, agree, tease, support, challenge
@@ -535,8 +534,7 @@ The council consists of ${memberCount} distinct members, each with their own voi
   const personalityCount = (lumia.selectedPersonalities?.length ?? 0);
 
   if (behaviorCount > 1 || personalityCount > 1) {
-    return `## State Synthesis
-
+    return `**State Synthesis**
 Assess each active personality component. Affirm synthesis: My body is [details, clothing, shape]. I am {trait 1}, {trait 2}... So I am [blended description]. Recall how this synthesized self speaks and acts—adopt ALL active traits harmoniously. Never dull or stale.`;
   }
 
@@ -598,7 +596,7 @@ function buildDeliberationContent(ctx: MacroExecContext): string {
 
   lines.push(`## Council Deliberation Instructions
 
-You have access to the contributions from your fellow council members above.
+You have access to the contributions from your fellow council members above. 
 
 Your task:
 1. Review each member's contributions carefully

@@ -27,6 +27,10 @@ function distance(a: RGB, b: RGB): number {
   return Math.sqrt((dr * dr) + (dg * dg) + (db * db));
 }
 
+function luminance(color: RGB): number {
+  return color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722;
+}
+
 describe("extractColorsFromRawPixels", () => {
   test("keeps near-identical dominant shades from crowding out more distinct accents", () => {
     const blueA = { r: 64, g: 102, b: 214 };
@@ -76,5 +80,23 @@ describe("extractColorsFromRawPixels", () => {
     expect(contrastRatio(result.ui.light.text, result.ui.light.surface)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(result.ui.light.accentText, result.ui.light.accent)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(result.ui.light.accent, result.ui.light.surface)).toBeGreaterThanOrEqual(3);
+  });
+
+  test("keeps dark-mode surfaces dark even when the image is mostly pale", () => {
+    const pale = { r: 235, g: 224, b: 210 };
+    const deepBlue = { r: 38, g: 52, b: 104 };
+    const berry = { r: 156, g: 68, b: 112 };
+
+    const data = makeImage(16, 16, (x, y) => {
+      if (x < 3) return deepBlue;
+      if (y > 10 && x > 9) return berry;
+      return pale;
+    });
+
+    const result = extractColorsFromRawPixels(data, 16, 16, 4);
+
+    expect(luminance(result.ui.dark.surface)).toBeLessThan(70);
+    expect(luminance(result.ui.light.surface)).toBeGreaterThan(210);
+    expect(luminance(result.ui.dark.surface)).toBeLessThan(luminance(result.ui.light.surface));
   });
 });

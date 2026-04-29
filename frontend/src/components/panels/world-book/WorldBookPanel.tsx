@@ -13,6 +13,7 @@ import PostImportWorldBookModal from '@/components/shared/PostImportWorldBookMod
 import NumericInput from '@/components/shared/NumericInput'
 import WorldBookDiagnosticsModal from '@/components/panels/world-book/WorldBookDiagnosticsModal'
 import { formatWorldBookReindexStatus } from '@/lib/worldBookVectorization'
+import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import { Button } from '@/components/shared/FormComponents'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import Pagination from '@/components/shared/Pagination'
@@ -370,8 +371,22 @@ export default function WorldBookPanel() {
   }, [openModal, selectedBookId])
 
   const setGlobalBooks = useCallback(
-    (ids: string[]) => setSetting('globalWorldBooks', ids),
-    [setSetting],
+    async (ids: string[]) => {
+      const currentIds = globalWorldBooks ?? []
+      if (!activeChatId) {
+        setSetting('globalWorldBooks', ids)
+        return
+      }
+
+      const allowedAddedIds = await filterWorldBooksForChatContextAttachment(
+        books.filter((book) => ids.includes(book.id) && !currentIds.includes(book.id)),
+      )
+      setSetting(
+        'globalWorldBooks',
+        ids.filter((id) => currentIds.includes(id) || allowedAddedIds.includes(id)),
+      )
+    },
+    [activeChatId, books, globalWorldBooks, setSetting],
   )
 
   const removeGlobalBook = (id: string) => {
@@ -407,6 +422,16 @@ export default function WorldBookPanel() {
       if (activeChatId) chatsApi.patchMetadata(activeChatId, { chat_world_book_ids: next }).catch(() => {})
     },
     [activeChatId],
+  )
+
+  const handleChatBooksChange = useCallback(
+    async (next: string[]) => {
+      const allowedAddedIds = await filterWorldBooksForChatContextAttachment(
+        books.filter((book) => next.includes(book.id) && !chatWorldBookIds.includes(book.id)),
+      )
+      setChatBooks(next.filter((id) => chatWorldBookIds.includes(id) || allowedAddedIds.includes(id)))
+    },
+    [books, chatWorldBookIds, setChatBooks],
   )
 
   const removeChatBook = (id: string) => {
@@ -474,7 +499,7 @@ export default function WorldBookPanel() {
           <SearchableSelect
             multi
             value={globalWorldBooks ?? []}
-            onChange={setGlobalBooks}
+            onChange={(ids) => { void setGlobalBooks(ids) }}
             options={books.map((b) => ({ value: b.id, label: b.name }))}
             triggerLabel="Add"
             triggerIcon={<Plus size={11} />}
@@ -516,7 +541,7 @@ export default function WorldBookPanel() {
             <SearchableSelect
               multi
               value={chatWorldBookIds}
-              onChange={setChatBooks}
+              onChange={(ids) => { void handleChatBooksChange(ids) }}
               options={books.map((b) => ({ value: b.id, label: b.name }))}
               triggerLabel="Add"
               triggerIcon={<Plus size={11} />}

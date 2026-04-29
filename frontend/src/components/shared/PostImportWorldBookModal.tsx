@@ -7,6 +7,7 @@ import { useStore } from '@/store'
 import { charactersApi } from '@/api/characters'
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from '@/utils/character-world-books'
 import { personasApi } from '@/api/personas'
+import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import type { WorldBook } from '@/types/api'
 import styles from './PostImportWorldBookModal.module.css'
 
@@ -18,6 +19,7 @@ interface Props {
 export default function PostImportWorldBookModal({ book, onClose }: Props) {
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activePersonaId = useStore((s) => s.activePersonaId)
+  const activeChatId = useStore((s) => s.activeChatId)
   const characters = useStore((s) => s.characters)
   const personas = useStore((s) => s.personas)
   const globalWorldBooks = useStore((s) => s.globalWorldBooks)
@@ -43,6 +45,10 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
     setBusy('character')
     setError(null)
     try {
+      if (activeChatId) {
+        const approvedIds = await filterWorldBooksForChatContextAttachment([book])
+        if (approvedIds.length === 0) return
+      }
       const currentIds = getCharacterWorldBookIds(activeCharacter.extensions)
       const nextIds = Array.from(new Set([...currentIds, book.id]))
       const updated = await charactersApi.update(activeCharacterId, {
@@ -65,6 +71,10 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
     setBusy('persona')
     setError(null)
     try {
+      if (activeChatId) {
+        const approvedIds = await filterWorldBooksForChatContextAttachment([book])
+        if (approvedIds.length === 0) return
+      }
       const updated = await personasApi.update(activePersonaId, {
         attached_world_book_id: book.id,
       })
@@ -77,15 +87,20 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
     }
   }
 
-  const addToGlobalBooks = () => {
+  const addToGlobalBooks = async () => {
     setBusy('global')
     setError(null)
     try {
+      if (activeChatId) {
+        const approvedIds = await filterWorldBooksForChatContextAttachment([book])
+        if (approvedIds.length === 0) return
+      }
       const next = Array.from(new Set([...(globalWorldBooks ?? []), book.id]))
       setSetting('globalWorldBooks', next)
       finish(`Added "${book.name}" to global world books.`)
     } catch (err: any) {
       setError(err?.message || 'Failed to add book to global world books')
+    } finally {
       setBusy(null)
     }
   }

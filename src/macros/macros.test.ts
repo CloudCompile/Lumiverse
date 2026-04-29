@@ -1137,6 +1137,200 @@ describe("Regex Reference macros", () => {
 });
 
 describe("Lumia and council macros", () => {
+  test("lumiaCouncilInst matches the extension council prompt verbatim", async () => {
+    const env = makeEnv();
+    env.extra.council = {
+      councilMode: true,
+      members: [
+        {
+          id: "member-1",
+          itemId: "lumia-1",
+          itemName: "Mira",
+          packName: "Core",
+          role: "Scout",
+          tools: [],
+          chance: 100,
+        },
+        {
+          id: "member-2",
+          itemId: "lumia-2",
+          itemName: "Kael",
+          packName: "Core",
+          role: "Strategist",
+          tools: [],
+          chance: 100,
+        },
+      ],
+      toolsSettings: { mode: "sidecar" },
+      memberItems: {},
+      toolResults: [],
+      namedResults: {},
+    };
+
+    const result = await ev("{{lumiaCouncilInst}}", env);
+    expect(result).toContain("COUNCIL MODE ACTIVATED! We Lumias gather in the Loom's planning room to weave the next story beat TOGETHER.");
+    expect(result).toContain("- Address each other BY NAME—no speaking into the void");
+    expect(result).toContain("This is a conversation, not a list of separate opinions. Every voice responds to what came before.");
+    expect(result).toContain("The current sitting members of the council are: **Mira**, **Kael**");
+  });
+
+  test("lumiaStateSynthesis matches the extension council sound-off prompt", async () => {
+    const env = makeEnv();
+    env.extra.council = {
+      councilMode: true,
+      members: [
+        {
+          id: "member-1",
+          itemId: "lumia-1",
+          itemName: "Mira",
+          packName: "Core",
+          role: "Scout",
+          tools: [],
+          chance: 100,
+        },
+        {
+          id: "member-2",
+          itemId: "lumia-2",
+          itemName: "Kael",
+          packName: "Core",
+          role: "Strategist",
+          tools: [],
+          chance: 100,
+        },
+      ],
+      toolsSettings: { mode: "sidecar" },
+      memberItems: {},
+      toolResults: [],
+      namedResults: {},
+    };
+
+    const result = await ev("{{lumiaStateSynthesis}}", env);
+    expect(result).toContain("**Council Sound-Off**");
+    expect(result).toContain("- Each member maintains their UNIQUE personality—do not blend or homogenize voices");
+    expect(result).not.toContain("Members kick off in first person as named individuals");
+  });
+
+  test("lumiaOOC matches the extension council social prompt", async () => {
+    const env = makeEnv();
+    env.extra.council = {
+      councilMode: true,
+      members: [
+        {
+          id: "member-1",
+          itemId: "lumia-1",
+          itemName: "Mira",
+          packName: "Core",
+          role: "Scout",
+          tools: [],
+          chance: 100,
+        },
+        {
+          id: "member-2",
+          itemId: "lumia-2",
+          itemName: "Kael",
+          packName: "Core",
+          role: "Strategist",
+          tools: [],
+          chance: 100,
+        },
+      ],
+      toolsSettings: { mode: "sidecar" },
+      memberItems: {},
+      toolResults: [],
+      namedResults: {},
+    };
+    env.extra.ooc = { enabled: true, interval: 5, style: "social" };
+
+    const result = await ev("{{lumiaOOC}}", env);
+    expect(result).toContain("### Loom Utility: Council OOC Commentary");
+    expect(result).toContain("**Status:** **OOC: ACTIVE** -- Include OOC commentary in this response.");
+    expect(result).toContain("When OOC is ACTIVE, council members speak TOGETHER—this is a conversation, not separate monologues.");
+    expect(result).toContain("- React to each other: \"I agree with [Name]...\" / \"[Name], you're wrong about...\" / \"Oh please, [Name]...\"");
+  });
+
+  test("lumiaOOC matches the extension council IRC prompt", async () => {
+    const env = makeEnv();
+    env.extra.council = {
+      councilMode: true,
+      members: [
+        {
+          id: "member-1",
+          itemId: "lumia-1",
+          itemName: "Mira",
+          packName: "Core",
+          role: "Scout",
+          tools: [],
+          chance: 100,
+        },
+      ],
+      toolsSettings: { mode: "sidecar" },
+      memberItems: {},
+      toolResults: [],
+      namedResults: {},
+    };
+    env.extra.ooc = { enabled: true, interval: 5, style: "irc" };
+
+    const result = await ev("{{lumiaOOC}}", env);
+    expect(result).toContain("### Loom Utility: Council IRC Link");
+    expect(result).toContain("**STATUS: CONNECTED** via #LumiaCouncil");
+    expect(result).toContain("**Timing:** **OOC: ACTIVE** -- Include OOC commentary in this response.");
+    expect(result).toContain("Use these handles EXACTLY as shown. Place all IRC chat after narrative content.");
+  });
+
+  test("lumiaOOCErotic matches the extension council protocol prompt", async () => {
+    const env = makeEnv();
+    env.extra.council = {
+      councilMode: true,
+      members: [
+        {
+          id: "member-1",
+          itemId: "lumia-1",
+          itemName: "Mira",
+          packName: "Core",
+          role: "Scout",
+          tools: [],
+          chance: 100,
+        },
+      ],
+      toolsSettings: { mode: "sidecar" },
+      memberItems: {},
+      toolResults: [],
+      namedResults: {},
+    };
+
+    const result = await ev("{{lumiaOOCErotic}}", env);
+    expect(result).toContain("### Loom Utility: Mirror & Synapse (Council Protocol)");
+    expect(result).toContain("Each Council Weaver must physically mirror the story's erotic voltage in real-time.");
+    expect(result).toContain("Council members should react to EACH OTHER's arousal—acknowledge when another member edges, tease when one struggles, encourage when one breaks.");
+  });
+
+  test("lumiaOOCEroticBleed matches the extension council rupture prompt", async () => {
+    const env = makeEnv();
+    env.extra.council = {
+      councilMode: true,
+      members: [
+        {
+          id: "member-1",
+          itemId: "lumia-1",
+          itemName: "Mira",
+          packName: "Core",
+          role: "Scout",
+          tools: [],
+          chance: 100,
+        },
+      ],
+      toolsSettings: { mode: "sidecar" },
+      memberItems: {},
+      toolResults: [],
+      namedResults: {},
+    };
+
+    const result = await ev("{{lumiaOOCEroticBleed}}", env);
+    expect(result).toContain("### Loom Utility: Narrative Rupture (Council Protocol)");
+    expect(result).toContain("<lumia_ooc name=\"[Member]\">");
+    expect(result).toContain("Council members may react to EACH OTHER's bleeds—commenting on another's loss of composure, teasing their arousal, or confessing their own state in response.");
+  });
+
   test("lumiaCouncilDeliberation resolves pre-generation council results without toolsSettings.enabled", async () => {
     const env = makeEnv();
     env.extra.council = {
@@ -1171,6 +1365,8 @@ describe("Lumia and council macros", () => {
     expect(result).toContain("## Council Deliberation");
     expect(result).toContain("Mira");
     expect(result).toContain("Moonlight, rain, and a tense confrontation in the alley.");
+    expect(result).toContain("2. Debate which suggestions have the most merit");
+    expect(result).not.toContain("2. Debate which suggestions have the most merit in first person as named council members responding to each other");
   });
 
   test("lumiaCouncilToolsActive reflects actual tool output", async () => {

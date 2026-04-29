@@ -642,15 +642,50 @@ function resolveConnection(userId: string, connectionId?: string) {
   return connection;
 }
 
-function applyApiReasoningOffSwitch(
+type ReasoningSettingsSnapshot = {
+  apiReasoning?: boolean;
+  reasoningEffort?: string;
+  thinkingDisplay?: string;
+} | null;
+
+function getEffectiveReasoningSettings(
   userId: string,
+  connection?: { metadata?: Record<string, any> | null } | null,
+): ReasoningSettingsSnapshot {
+  const boundSettings = connection?.metadata?.reasoningBindings?.settings;
+  if (boundSettings && typeof boundSettings === "object") {
+    return boundSettings as ReasoningSettingsSnapshot;
+  }
+
+  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
+  return (reasoningSetting?.value as ReasoningSettingsSnapshot | undefined) ?? null;
+}
+
+function applyEffectiveReasoningSettings(
+  userId: string,
+  connection: { metadata?: Record<string, any> | null },
   providerName: string,
   modelName: string | undefined,
   params: GenerationParameters,
 ): void {
-  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
-  if (!reasoningSetting?.value || reasoningSetting.value.apiReasoning !== false)
+  const reasoningSettings = getEffectiveReasoningSettings(userId, connection);
+
+  if (reasoningSettings?.apiReasoning) {
+    const effort = reasoningSettings.reasoningEffort || "auto";
+    const isToggleOnly = providerName === "moonshot" || providerName === "zai";
+    if (effort !== "auto" || isToggleOnly) {
+      injectReasoningParams(
+        params,
+        providerName,
+        effort,
+        modelName,
+        reasoningSettings.thinkingDisplay,
+      );
+    }
     return;
+  }
+
+  if (reasoningSettings?.apiReasoning !== false) return;
 
   applyProviderReasoningOffSwitch(params as any, providerName, modelName);
 }
@@ -976,10 +1011,11 @@ async function runPromptPipeline(opts: {
     opts.userId,
     spindleContext.connectionId || opts.connectionId,
   );
-  applyApiReasoningOffSwitch(
+  applyEffectiveReasoningSettings(
     opts.userId,
+    effectiveConnection,
     effectiveConnection.provider,
-    effectiveConnection.model,
+    effectiveConnection.model || undefined,
     parameters,
   );
 
@@ -3181,7 +3217,16 @@ async function prepareRawCall(
     input,
   );
   const parameters: GenerationParameters = { ...(input.parameters || {}) };
-  applyApiReasoningOffSwitch(userId, provider.name, input.model, parameters);
+  const reasoningConnection = input.connection_id
+    ? connectionsSvc.getConnection(userId, input.connection_id)
+    : null;
+  applyEffectiveReasoningSettings(
+    userId,
+    reasoningConnection || {},
+    provider.name,
+    input.model,
+    parameters,
+  );
   const request: GenerationRequest = {
     messages: input.messages,
     model: input.model,
@@ -3211,32 +3256,13 @@ async function prepareQuietCall(
     }
   }
 
-  // Inject API-level reasoning params from user settings
-  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
-  if (reasoningSetting?.value?.apiReasoning) {
-    const effort = reasoningSetting.value.reasoningEffort || "auto";
-    if (effort !== "auto") {
-      injectReasoningParams(
-        mergedParams,
-        provider.name,
-        effort,
-        connection.model || undefined,
-        reasoningSetting.value.thinkingDisplay,
-      );
-    }
-  } else if (
-    reasoningSetting?.value &&
-    reasoningSetting.value.apiReasoning === false
-  ) {
-    // Authoritative off-switch: strip any reasoning fields that may have been
-    // spread in from preset.parameters so native thinking is never requested.
-    applyApiReasoningOffSwitch(
-      userId,
-      provider.name,
-      connection.model,
-      mergedParams,
-    );
-  }
+  applyEffectiveReasoningSettings(
+    userId,
+    connection,
+    provider.name,
+    connection.model || undefined,
+    mergedParams,
+  );
 
   // Inject connection-level metadata flags into parameters (e.g. use_responses_api)
   if (connection.metadata?.use_responses_api) {
@@ -3422,10 +3448,11 @@ export async function summarizeGenerate(
       mergedParams._openrouter = connection.metadata.openrouter;
     }
 
-    applyApiReasoningOffSwitch(
+    applyEffectiveReasoningSettings(
       userId,
+      connection,
       provider.name,
-      sidecarModel || connection.model,
+      sidecarModel || connection.model || undefined,
       mergedParams,
     );
 

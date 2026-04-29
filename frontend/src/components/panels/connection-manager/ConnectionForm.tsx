@@ -50,6 +50,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   const [isDefault, setIsDefault] = useState(profile?.is_default || false)
   const [useResponsesApi, setUseResponsesApi] = useState(profile?.metadata?.use_responses_api || false)
   const [useSubscriptionApi, setUseSubscriptionApi] = useState(profile?.metadata?.use_subscription_api || false)
+  const [useZaiCodingPlanEndpoint, setUseZaiCodingPlanEndpoint] = useState(profile?.metadata?.use_coding_plan_endpoint || false)
   const [bindReasoning, setBindReasoning] = useState(!!profile?.metadata?.reasoningBindings)
   const reasoningSettings = useStore((s) => s.reasoningSettings)
   const [boundReasoningSettings, setBoundReasoningSettings] = useState<ReasoningSettings>(
@@ -89,6 +90,11 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       } else {
         delete metadata.use_subscription_api
       }
+      if (provider === 'zai') {
+        metadata.use_coding_plan_endpoint = useZaiCodingPlanEndpoint
+      } else {
+        delete metadata.use_coding_plan_endpoint
+      }
       if (isVertexAI) {
         metadata.vertex_region = vertexRegion
       }
@@ -108,7 +114,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } finally {
       setModelsLoading(false)
     }
-  }, [apiKey, apiUrl, isVertexAI, profile?.id, profile?.metadata, provider, useSubscriptionApi, vertexRegion])
+  }, [apiKey, apiUrl, isVertexAI, profile?.id, profile?.metadata, provider, useSubscriptionApi, useZaiCodingPlanEndpoint, vertexRegion])
 
   useEffect(() => {
     if (profile?.id) fetchModels()
@@ -200,6 +206,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
 
   const showResponsesApiToggle = provider === 'openai'
   const showSubscriptionApiToggle = provider === 'nanogpt'
+  const showZaiCodingPlanToggle = provider === 'zai'
   const isOpenRouter = provider === 'openrouter'
   // Vertex AI derives its host from `metadata.vertex_region`, so the API URL
   // field has no purpose and we don't display it.
@@ -275,6 +282,11 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } else {
       delete metadata.use_subscription_api
     }
+    if (showZaiCodingPlanToggle) {
+      metadata.use_coding_plan_endpoint = useZaiCodingPlanEndpoint
+    } else {
+      delete metadata.use_coding_plan_endpoint
+    }
     if (bindReasoning) {
       metadata.reasoningBindings = { settings: normalizedBoundReasoningSettings }
     } else {
@@ -312,7 +324,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       is_default: isDefault,
       metadata,
     })
-  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, bindReasoning, boundReasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
+  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, useZaiCodingPlanEndpoint, showZaiCodingPlanToggle, bindReasoning, boundReasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
 
   return (
     <div className={styles.form}>
@@ -414,6 +426,11 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       {showSubscriptionApiToggle && (
         <FormField label="">
           <Toggle.Checkbox checked={useSubscriptionApi} onChange={setUseSubscriptionApi} label="Use Subscription API" hint="Use /api/subscription/v1 to only use models from your NanoGPT subscription" />
+        </FormField>
+      )}
+      {showZaiCodingPlanToggle && (
+        <FormField label="">
+          <Toggle.Checkbox checked={useZaiCodingPlanEndpoint} onChange={setUseZaiCodingPlanEndpoint} label="Use Coding Plan Endpoint" hint="Use /api/coding/paas/v4 for Z.AI Coding Plan access instead of the general /api/paas/v4 endpoint" />
         </FormField>
       )}
       {isOpenRouter && (

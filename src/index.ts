@@ -19,10 +19,27 @@ import { initIdentity } from "./crypto/init";
 import { initVapidKeys } from "./crypto/vapid";
 import { eventBus } from "./ws/bus";
 
+function isTermuxLikeEnvironment(): boolean {
+  return Boolean(process.env.TERMUX_VERSION)
+    || process.env.LUMIVERSE_IS_TERMUX === "true"
+    || process.env.LUMIVERSE_IS_PROOT === "true"
+    || process.env.PREFIX?.startsWith("/data/data/com.termux/") === true;
+}
+
 // Validate data directory is accessible and writable before any file operations.
 // This catches permission issues early (common on Termux/Android) instead of
 // letting them surface as cryptic failures in identity/credential file creation.
 mkdirSync(env.dataDir, { recursive: true });
+if (isTermuxLikeEnvironment()) {
+  // Keep library temp files on the same filesystem as DATA_DIR so LanceDB's
+  // temp/index staging does not hit EXDEV across /tmp, proot, or bind mounts.
+  const tempDir = join(env.dataDir, "tmp");
+  mkdirSync(tempDir, { recursive: true });
+  process.env.TMPDIR = tempDir;
+  process.env.TMP = tempDir;
+  process.env.TEMP = tempDir;
+  console.log(`[startup] Temp directory: ${tempDir}`);
+}
 try {
   const probe = join(env.dataDir, ".write-probe");
   await Bun.write(probe, "ok");

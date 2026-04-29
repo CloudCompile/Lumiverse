@@ -13,6 +13,28 @@ import { paginatedQuery } from "./pagination";
 import { describeProviderError } from "../utils/provider-errors";
 
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 15_000;
+const ZAI_GENERAL_API_URL = "https://api.z.ai/api/paas/v4";
+const ZAI_CODING_PLAN_API_URL = "https://api.z.ai/api/coding/paas/v4";
+
+function resolveZaiApiUrl(rawUrl: string, useCodingPlanEndpoint: boolean): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return useCodingPlanEndpoint ? ZAI_CODING_PLAN_API_URL : ZAI_GENERAL_API_URL;
+
+  try {
+    const url = new URL(trimmed);
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    if (pathname === "/v1" || pathname === "/api/paas/v4" || pathname === "/api/coding/paas/v4") {
+      url.pathname = useCodingPlanEndpoint ? "/api/coding/paas/v4" : "/api/paas/v4";
+      url.search = "";
+      url.hash = "";
+      return url.toString();
+    }
+  } catch {
+    // Preserve custom raw URLs we can't safely normalize.
+  }
+
+  return trimmed;
+}
 
 export interface ConnectionTestResult {
   success: boolean;
@@ -92,10 +114,13 @@ export function connectionSecretKey(id: string): string {
 
 /** Resolve effective API URL, accounting for provider-specific metadata flags. */
 export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: string | null; metadata?: Record<string, any> | null }): string {
-  const url = profile.api_url || "";
+  const url = (profile.api_url || "").trim();
   if (profile.provider === "nanogpt" && profile.metadata?.use_subscription_api) {
     if (!url) return "https://nano-gpt.com/api/subscription/v1";
     return url.replace("/api/v1", "/api/subscription/v1");
+  }
+  if (profile.provider === "zai") {
+    return resolveZaiApiUrl(url, profile.metadata?.use_coding_plan_endpoint === true);
   }
   if (profile.provider === "google_vertex") {
     const region = profile.metadata?.vertex_region;

@@ -17,6 +17,7 @@ import FolderDropdown from '@/components/shared/FolderDropdown'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { useFolders } from '@/hooks/useFolders'
+import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import {
   characterMatchesPersonaTagBinding,
   getMatchingPersonaTagBindingIds,
@@ -232,10 +233,19 @@ export default function PersonaEditor({
   )
 
   const handleLorebookChange = useCallback(
-    (value: string) => {
-      onSetLorebook(persona.id, value || null)
+    async (value: string) => {
+      const nextId = value || null
+      if (!nextId || !activeChatId || !isActive) {
+        await onSetLorebook(persona.id, nextId)
+        return
+      }
+
+      const approvedIds = await filterWorldBooksForChatContextAttachment(
+        worldBooks.filter((book) => book.id === nextId),
+      )
+      await onSetLorebook(persona.id, approvedIds[0] || null)
     },
-    [persona.id, onSetLorebook]
+    [activeChatId, isActive, onSetLorebook, persona.id, worldBooks]
   )
 
   // Avatar crop flow — upload both cropped (for avatar display) and original (for full viewing)
@@ -561,7 +571,7 @@ export default function PersonaEditor({
         <div className={styles.lorebookRow}>
           <SearchableSelect
             value={persona.attached_world_book_id || ''}
-            onChange={handleLorebookChange}
+            onChange={(value) => { void handleLorebookChange(value) }}
             options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name }))}
             placeholder="No lorebook"
             searchPlaceholder="Search world books…"

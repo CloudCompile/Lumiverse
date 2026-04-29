@@ -434,21 +434,24 @@ function inferTitle(chunks: any[]): string | null {
 
 // ─── Generative Consolidation (Sidecar) ────────────────────────
 
-const CONSOLIDATION_PROMPT = `Compress these roleplay passages into a dense narrative summary for a memory system. This summary replaces the original text for long-term recall.
+const CONSOLIDATION_PROMPT = `Compress these roleplay passages into a factual long-term memory summary.
 
-RULES:
-- Past tense, third person
-- Preserve: character names, key actions, decisions, emotional shifts, locations visited, items gained/lost, promises made, status changes
-- Omit: atmospheric filler, redundant descriptions, routine greetings, scenery that doesn't matter later
-- Every sentence must carry a plot fact, character action, or relationship change
-- Do NOT add interpretation, meta-commentary, or analysis
+RULES
+- Use past tense and third person.
+- Use names instead of vague pronouns whenever possible.
+- Preserve only durable information: actions taken, decisions made, discoveries, promises, relationship changes, status changes, location moves, and important gains/losses.
+- Omit atmospheric filler, repeated banter, scenic description, and details that do not matter later.
+- Every sentence must contain a concrete event, state change, or decision supported by the source text.
+- Do NOT add interpretation, motives, symbolism, theme analysis, or likely implications.
+- Do NOT invent links between events that are not stated.
+- Keep chronology clear.
 
 <passages>
 {{CONTENT}}
 </passages>
 
-Respond in JSON only:
-{"title": "<3-6 word title capturing the key event or scene>", "summary": "<factual narrative summary>"}`;
+Return exactly one JSON object with this shape and no extra text:
+{"title":"<3-6 word concrete scene title>","summary":"<dense factual summary>"}`;
 
 async function generateConsolidationSummary(
   chunks: any[],
@@ -465,10 +468,10 @@ async function generateConsolidationSummary(
     const response = await generateRawFn({
       connectionId,
       messages: [
-        { role: "system", content: "You are a narrative summarizer. Output valid JSON only." },
+        { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the source passages." },
         { role: "user", content: prompt },
       ],
-      parameters: { temperature: 0.3, max_tokens: maxTokens + 100 },
+      parameters: { temperature: 0.1, max_tokens: maxTokens + 100 },
     });
 
     const json = extractJson(response.content);
@@ -485,21 +488,22 @@ async function generateConsolidationSummary(
   return { summary: extractiveConsolidation(chunks), title: inferTitle(chunks) };
 }
 
-const ARC_PROMPT = `These are sequential scene summaries from a long roleplay. Compress them into ONE arc-level summary that tracks what changed across the entire sequence.
+const ARC_PROMPT = `These are sequential scene summaries from a long roleplay. Compress them into ONE arc-level summary that tracks what changed across the sequence.
 
-RULES:
-- Past tense, third person
-- Track: who did what, how relationships shifted, what was gained/lost/discovered, where the story moved
-- Focus on CHANGE: what was different at the end vs the beginning of this arc
-- Omit details that don't affect anything later
-- Dense and factual — this single summary replaces all the individual scene summaries
+RULES
+- Use past tense and third person.
+- Focus on durable change across the arc: decisions, discoveries, relationship shifts, status changes, movement, gains/losses, and turning points.
+- Preserve chronology and causal clarity when the source supports it.
+- Omit scenic filler and details that do not matter later.
+- Do NOT add interpretation, motives, themes, or unsupported links.
+- Dense and factual: this summary replaces the individual scene summaries.
 
 <summaries>
 {{CONTENT}}
 </summaries>
 
-Respond in JSON only:
-{"title": "<3-8 word arc title>", "summary": "<arc-level summary tracking key changes>"}`;
+Return exactly one JSON object with this shape and no extra text:
+{"title":"<3-8 word concrete arc title>","summary":"<arc-level factual summary>"}`;
 
 async function generateArcSummary(
   combinedSummaries: string,
@@ -515,10 +519,10 @@ async function generateArcSummary(
     const response = await generateRawFn({
       connectionId,
       messages: [
-        { role: "system", content: "You are a narrative summarizer. Output valid JSON only." },
+        { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the supplied summaries." },
         { role: "user", content: prompt },
       ],
-      parameters: { temperature: 0.3, max_tokens: maxTokens + 100 },
+      parameters: { temperature: 0.1, max_tokens: maxTokens + 100 },
     });
 
     const json = extractJson(response.content);

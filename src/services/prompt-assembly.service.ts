@@ -73,6 +73,7 @@ import * as worldBooksSvc from "./world-books.service";
 import * as settingsSvc from "./settings.service";
 import * as packsSvc from "./packs.service";
 import * as embeddingsSvc from "./embeddings.service";
+import { loadWorldBookVectorSettings } from "./world-book-vector-settings.service";
 import * as imagesSvc from "./images.service";
 import * as presetProfilesSvc from "./preset-profiles.service";
 import * as councilProfilesSvc from "./council/council-profiles.service";
@@ -4375,8 +4376,11 @@ export async function collectVectorActivatedWorldInfoDetailed(
   }
 
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
+  const worldBookVectorSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: cfg.retrieval_top_k,
+  });
   const blockerMessages: string[] = [];
-  const topK = Math.max(1, cfg.retrieval_top_k || 4);
+  const topK = Math.max(1, worldBookVectorSettings.retrievalTopK || cfg.retrieval_top_k || 4);
   const queryText = buildWorldInfoVectorQueryPreview(
     messages,
     cfg.preferred_context_size || 3,
@@ -4388,7 +4392,7 @@ export async function collectVectorActivatedWorldInfoDetailed(
     .map((e) => `${e.id}:${e.content?.length ?? 0}`)
     .join(
       ",",
-    )}:${queryText}:${cfg.enabled ? 1 : 0}:${cfg.vectorize_world_books ? 1 : 0}:${cfg.dimensions ?? 0}`;
+    )}:${queryText}:${cfg.enabled ? 1 : 0}:${cfg.vectorize_world_books ? 1 : 0}:${cfg.dimensions ?? 0}:${topK}`;
   const cached = getCachedVectorWiResult(cacheKey);
   if (cached) {
     console.debug("[prompt-assembly] Vector WI cache hit for chat %s", chatId);

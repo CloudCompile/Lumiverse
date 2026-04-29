@@ -16,6 +16,7 @@ import { settingsApi } from '@/api/settings'
 import { webSearchApi, type WebSearchSettingsInput, type WebSearchTestResponse } from '@/api/web-search'
 import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
+import type { WorldBookVectorPresetMode, WorldBookVectorSettings } from '@/types/world-book-vector-settings'
 import AccountSettings from '@/components/settings/AccountSettings'
 import UserManagement from '@/components/settings/UserManagement'
 import MigrationSettings from '@/components/settings/MigrationSettings'
@@ -1373,6 +1374,59 @@ function ExtensionPoolSettings() {
 }
 
 function EmbeddingsSettings() {
+  const WORLD_BOOK_VECTOR_PRESETS: Record<Exclude<WorldBookVectorPresetMode, 'custom'>, Omit<WorldBookVectorSettings, 'presetMode'>> = {
+    lean: {
+      chunkTargetTokens: 220,
+      chunkMaxTokens: 360,
+      chunkOverlapTokens: 40,
+      retrievalTopK: 4,
+      maxChunksPerEntry: 4,
+    },
+    balanced: {
+      chunkTargetTokens: 420,
+      chunkMaxTokens: 700,
+      chunkOverlapTokens: 80,
+      retrievalTopK: 6,
+      maxChunksPerEntry: 8,
+    },
+    deep: {
+      chunkTargetTokens: 720,
+      chunkMaxTokens: 1200,
+      chunkOverlapTokens: 120,
+      retrievalTopK: 8,
+      maxChunksPerEntry: 12,
+    },
+  }
+  const DEFAULT_WORLD_BOOK_VECTOR_SETTINGS: WorldBookVectorSettings = {
+    presetMode: 'balanced',
+    ...WORLD_BOOK_VECTOR_PRESETS.balanced,
+  }
+
+  const normalizeWorldBookVectorSettings = (
+    value: unknown,
+    retrievalFallback: number,
+  ): WorldBookVectorSettings => {
+    const raw = (value && typeof value === 'object') ? value as Partial<WorldBookVectorSettings> : {}
+    const base = {
+      ...DEFAULT_WORLD_BOOK_VECTOR_SETTINGS,
+      retrievalTopK: retrievalFallback,
+    }
+    const presetMode: WorldBookVectorPresetMode = raw.presetMode === 'lean' || raw.presetMode === 'balanced' || raw.presetMode === 'deep' || raw.presetMode === 'custom'
+      ? raw.presetMode
+      : base.presetMode
+    const preset = presetMode === 'custom' ? null : WORLD_BOOK_VECTOR_PRESETS[presetMode]
+    const target = Math.min(2000, Math.max(120, Math.floor((preset?.chunkTargetTokens ?? raw.chunkTargetTokens ?? base.chunkTargetTokens))))
+    const max = Math.min(4000, Math.max(target, Math.floor((preset?.chunkMaxTokens ?? raw.chunkMaxTokens ?? base.chunkMaxTokens))))
+    return {
+      presetMode,
+      chunkTargetTokens: target,
+      chunkMaxTokens: max,
+      chunkOverlapTokens: Math.min(500, Math.max(0, Math.floor((preset?.chunkOverlapTokens ?? raw.chunkOverlapTokens ?? base.chunkOverlapTokens)))),
+      retrievalTopK: Math.min(20, Math.max(1, Math.floor((preset?.retrievalTopK ?? raw.retrievalTopK ?? base.retrievalTopK)))),
+      maxChunksPerEntry: Math.min(24, Math.max(1, Math.floor((preset?.maxChunksPerEntry ?? raw.maxChunksPerEntry ?? base.maxChunksPerEntry)))),
+    }
+  }
+
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -1380,9 +1434,15 @@ function EmbeddingsSettings() {
   const [success, setSuccess] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [cfg, setCfg] = useState<EmbeddingConfig | null>(null)
+  const [worldBookSettings, setWorldBookSettings] = useState<WorldBookVectorSettings>(DEFAULT_WORLD_BOOK_VECTOR_SETTINGS)
+  const [worldBookSettingsLoading, setWorldBookSettingsLoading] = useState(true)
+  const [worldBookSettingsStatus, setWorldBookSettingsStatus] = useState<string | null>(null)
   const [models, setModels] = useState<string[]>([])
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
   const [modelsLoading, setModelsLoading] = useState(false)
+  const worldBookSettingsLoadedRef = useRef(false)
+  const worldBookSettingsDirtyRef = useRef(false)
+  const worldBookSettingsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -1401,6 +1461,48 @@ function EmbeddingsSettings() {
   useEffect(() => {
     load()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    setWorldBookSettingsLoading(true)
+    settingsApi.get('worldBookVectorSettings')
+      .then((row) => {
+        if (cancelled) return
+        setWorldBookSettings(normalizeWorldBookVectorSettings(row.value, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+        worldBookSettingsLoadedRef.current = true
+      })
+      .catch(() => {
+        if (cancelled) return
+        setWorldBookSettings(normalizeWorldBookVectorSettings(null, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+        worldBookSettingsLoadedRef.current = true
+      })
+      .finally(() => {
+        if (!cancelled) setWorldBookSettingsLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [cfg?.retrieval_top_k])
+
+  useEffect(() => () => {
+    if (worldBookSettingsSaveTimerRef.current) clearTimeout(worldBookSettingsSaveTimerRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (!worldBookSettingsLoadedRef.current || !worldBookSettingsDirtyRef.current) return
+    if (worldBookSettingsSaveTimerRef.current) clearTimeout(worldBookSettingsSaveTimerRef.current)
+    setWorldBookSettingsStatus('Saving world-book settings...')
+    worldBookSettingsSaveTimerRef.current = setTimeout(async () => {
+      try {
+        await settingsApi.put('worldBookVectorSettings', worldBookSettings)
+        worldBookSettingsDirtyRef.current = false
+        setWorldBookSettingsStatus('World-book settings saved')
+      } catch (err: any) {
+        setWorldBookSettingsStatus(err?.body?.error || err?.message || 'Failed to save world-book settings')
+      }
+    }, 400)
+    return () => {
+      if (worldBookSettingsSaveTimerRef.current) clearTimeout(worldBookSettingsSaveTimerRef.current)
+    }
+  }, [worldBookSettings])
 
   useEffect(() => {
     setModels([])
@@ -1432,6 +1534,16 @@ function EmbeddingsSettings() {
     setCfg({ ...cfg, ...patch })
   }
 
+  const updateWorldBookSettings = (patch: Partial<WorldBookVectorSettings>) => {
+    worldBookSettingsDirtyRef.current = true
+    setWorldBookSettings((current) => normalizeWorldBookVectorSettings({ ...current, ...patch }, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+  }
+
+  const applyWorldBookPreset = (presetMode: WorldBookVectorPresetMode) => {
+    worldBookSettingsDirtyRef.current = true
+    setWorldBookSettings((current) => normalizeWorldBookVectorSettings({ ...current, presetMode }, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+  }
+
   const save = async () => {
     if (!cfg) return
     setSaving(true)
@@ -1444,7 +1556,7 @@ function EmbeddingsSettings() {
         api_url: cfg.api_url,
         model: cfg.model,
         dimensions: cfg.dimensions,
-        retrieval_top_k: cfg.retrieval_top_k,
+        retrieval_top_k: worldBookSettings.retrievalTopK,
         hybrid_weight_mode: cfg.hybrid_weight_mode,
         preferred_context_size: cfg.preferred_context_size,
         batch_size: cfg.batch_size,
@@ -1539,6 +1651,12 @@ function EmbeddingsSettings() {
   const inherited = !!cfg.inherited
   const canEditApiUrl = providerAllowsCustomApiUrl(cfg.provider)
   const defaultApiUrl = PROVIDER_DEFAULTS[cfg.provider]?.api_url || cfg.api_url
+  const worldBookPresetDescriptions: Record<WorldBookVectorPresetMode, string> = {
+    lean: 'Smaller chunks and lighter storage for compact lorebooks.',
+    balanced: 'Recommended. Better coverage without blowing up index size.',
+    deep: 'More chunks and broader recall for dense reference books.',
+    custom: 'Tune chunking, recall, and storage manually.',
+  }
 
   return (
     <div className={styles.settingsSection}>
@@ -1608,226 +1726,324 @@ function EmbeddingsSettings() {
         </div>
       </div>
 
-      <Toggle.Checkbox
-        checked={cfg.enabled}
-        onChange={(checked) => update({ enabled: checked })}
-        label="Enable embeddings"
-      />
+      <div className={styles.settingsCard}>
+        <div className={styles.settingsCardHeader}>
+          <div>
+            <div className={styles.subsectionTitle}>Connection</div>
+            <div className={styles.settingsCardTitle}>Provider and model</div>
+          </div>
+        </div>
+        <div className={styles.settingsCardBody}>
+          <Toggle.Checkbox
+            checked={cfg.enabled}
+            onChange={(checked) => update({ enabled: checked })}
+            label="Enable embeddings"
+          />
 
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Provider</label>
-        <select className={styles.select} value={cfg.provider} onChange={(e) => update({ provider: e.target.value as EmbeddingConfig['provider'] })} disabled={inherited}>
-          <option value="openai-compatible">OpenAI Compatible</option>
-          <option value="openai">OpenAI</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="electronhub">ElectronHub</option>
-          <option value="bananabread">BananaBread</option>
-          <option value="nanogpt">Nano-GPT</option>
-        </select>
-      </div>
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Provider</label>
+              <select className={styles.select} value={cfg.provider} onChange={(e) => update({ provider: e.target.value as EmbeddingConfig['provider'] })} disabled={inherited}>
+                <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="electronhub">ElectronHub</option>
+                <option value="bananabread">BananaBread</option>
+                <option value="nanogpt">Nano-GPT</option>
+              </select>
+            </div>
 
-      {canEditApiUrl ? (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>API URL</label>
-          <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} disabled={inherited} />
-          <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-            Auto-appends /v1/embeddings to base domains and /embeddings to partial paths (e.g. /v1). Full paths ending in /embeddings are used as-is.
-          </span>
-          {cfg.provider === 'bananabread' && (
-            <span className={styles.placeholder} style={{ marginTop: '4px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-              BananaBread defaults to `http://localhost:8008/v1/embeddings` and uses its loaded model list from `/v1/models`.
-            </span>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Embedding Model</label>
+              <ModelCombobox
+                value={cfg.model}
+                onChange={(value) => update({ model: value })}
+                models={models}
+                modelLabels={modelLabels}
+                loading={modelsLoading}
+                onRefresh={fetchModels}
+                autoRefreshOnFocus
+                refreshKey={`${cfg.provider}:${cfg.api_url}`}
+                placeholder={PROVIDER_DEFAULTS[cfg.provider]?.model || 'text-embedding-3-small'}
+                emptyMessage="No models returned for this provider. Enter one manually."
+                browseHint="Click into the field to browse embedding-capable models for this provider, or type one manually."
+                disabled={inherited}
+              />
+            </div>
+          </div>
+
+          {canEditApiUrl ? (
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>API URL</label>
+              <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} disabled={inherited} />
+              <span className={styles.helperText}>
+                Auto-appends /v1/embeddings to base domains and /embeddings to partial paths. Full paths ending in /embeddings are used as-is.
+              </span>
+              {cfg.provider === 'bananabread' && (
+                <span className={styles.helperText}>
+                  BananaBread defaults to `http://localhost:8008/v1/embeddings` and uses its loaded model list from `/v1/models`.
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>API Endpoint</label>
+              <span className={styles.helperText}>Uses the provider default: `{defaultApiUrl}`</span>
+            </div>
           )}
-        </div>
-      ) : (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>API Endpoint</label>
-          <span className={styles.placeholder} style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>
-            Uses the provider default: `{defaultApiUrl}`
-          </span>
-        </div>
-      )}
 
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Embedding Model</label>
-        <ModelCombobox
-          value={cfg.model}
-          onChange={(value) => update({ model: value })}
-          models={models}
-          modelLabels={modelLabels}
-          loading={modelsLoading}
-          onRefresh={fetchModels}
-          autoRefreshOnFocus
-          refreshKey={`${cfg.provider}:${cfg.api_url}`}
-          placeholder={PROVIDER_DEFAULTS[cfg.provider]?.model || 'text-embedding-3-small'}
-          emptyMessage="No models returned for this provider. Enter one manually."
-          browseHint="Click into the field to browse embedding-capable models for this provider, or type one manually."
-          disabled={inherited}
-        />
-      </div>
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Dimensions (optional)</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                value={cfg.dimensions ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => update({ dimensions: value })}
+              />
+            </div>
 
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Dimensions (optional)</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={1}
-          value={cfg.dimensions ?? null}
-          integer
-          allowEmpty
-          onChange={(value) => update({ dimensions: value })}
-        />
-      </div>
+            {!inherited && (
+              <div className={styles.field}>
+                <label className={styles.fieldLabel}>API Key {cfg.has_api_key ? '(configured)' : '(not configured)'}</label>
+                <input
+                  className={styles.select}
+                  type="password"
+                  value={apiKey}
+                  placeholder="Paste a new key to replace"
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </div>
+            )}
+          </div>
 
-      <Toggle.Checkbox
-        checked={cfg.send_dimensions ?? false}
-        onChange={(checked) => update({ send_dimensions: checked })}
-        label="Send dimensions to provider"
-        hint="When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value."
-      />
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Vector Recall Size (top-k)</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={1}
-          value={cfg.retrieval_top_k}
-          integer
-          onChange={(value) => update({ retrieval_top_k: value ?? 1 })}
-        />
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Hybrid Weight Mode</label>
-        <select
-          className={styles.select}
-          value={cfg.hybrid_weight_mode}
-          onChange={(e) => update({ hybrid_weight_mode: e.target.value as EmbeddingConfig['hybrid_weight_mode'] })}
-        >
-          <option value="keyword_first">Keyword First</option>
-          <option value="balanced">Balanced</option>
-          <option value="vector_first">Vector First</option>
-        </select>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Preferred Context Size (messages)</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={1}
-          max={64}
-          value={cfg.preferred_context_size}
-          integer
-          onChange={(value) => update({ preferred_context_size: value ?? 1 })}
-        />
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Embedding Batch Size</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={1}
-          max={200}
-          value={cfg.batch_size}
-          integer
-          onChange={(value) => update({ batch_size: Math.max(1, Math.min(200, value ?? 50)) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-          Number of entries to embed per API request during reindexing (1-200)
-        </span>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Similarity Threshold</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={0}
-          max={2}
-          step={0.05}
-          value={cfg.similarity_threshold}
-          onChange={(value) => update({ similarity_threshold: Math.max(0, Math.min(2, value ?? 0)) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-          Maximum cosine distance for vector matches (0 = no filtering, lower = stricter). LanceDB cosine distance starts at 0 for identical text and can go above 1.
-        </span>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>World Book Rerank Cutoff</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={0}
-          max={2}
-          step={0.01}
-          value={cfg.rerank_cutoff}
-          onChange={(value) => update({ rerank_cutoff: Math.max(0, Math.min(2, value ?? 0)) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-          Minimum rerank score required after boosts and penalties are applied to world-book vector hits. 0 = no post-rerank filtering.
-        </span>
-      </div>
-      {cfg.vectorize_chat_messages && (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>Memory Retrieval Mode</label>
-          <select
-            className={styles.select}
-            value={cfg.chat_memory_mode}
-            onChange={(e) => update({ chat_memory_mode: e.target.value as EmbeddingConfig['chat_memory_mode'] })}
-          >
-            <option value="conservative">Conservative - Fewer, high-quality memories</option>
-            <option value="balanced">Balanced - Standard retrieval (recommended)</option>
-            <option value="aggressive">Aggressive - More memories, lower threshold</option>
-          </select>
-          <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-            Controls how many memories are retrieved and quality threshold. All chunking parameters are automatically optimized based on this mode.
-          </span>
-        </div>
-      )}
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Request Timeout (seconds)</label>
-        <NumericInput
-          className={styles.numberInput}
-          min={0}
-          max={300}
-          step={5}
-          value={cfg.request_timeout ?? 60}
-          integer
-          onChange={(value) => update({ request_timeout: Math.max(0, Math.min(300, value ?? 60)) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
-          Max seconds to wait for an embedding API response. Increase for slow providers or large batches. 0 = no timeout.
-        </span>
-      </div>
-
-      {!inherited && (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>API Key {cfg.has_api_key ? '(configured)' : '(not configured)'}</label>
-          <input
-            className={styles.select}
-            type="password"
-            value={apiKey}
-            placeholder="Paste a new key to replace"
-            onChange={(e) => setApiKey(e.target.value)}
+          <Toggle.Checkbox
+            checked={cfg.send_dimensions ?? false}
+            onChange={(checked) => update({ send_dimensions: checked })}
+            label="Send dimensions to provider"
+            hint="When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value."
           />
         </div>
-      )}
+      </div>
 
-      <Toggle.Checkbox
-        checked={cfg.vectorize_world_books}
-        onChange={(checked) => update({ vectorize_world_books: checked })}
-        label="Vectorize world book entries"
-      />
+      <div className={styles.settingsCard}>
+        <div className={styles.settingsCardHeader}>
+          <div>
+            <div className={styles.subsectionTitle}>World Books</div>
+            <div className={styles.settingsCardTitle}>Lorebook indexing and retrieval</div>
+            <div className={styles.settingsCardMeta}>Chunking and storage save automatically for your account.</div>
+          </div>
+          <span className={styles.settingsCardStatus}>
+            {worldBookSettingsLoading ? 'Loading...' : worldBookSettingsStatus ?? 'Ready'}
+          </span>
+        </div>
+        <div className={styles.settingsCardBody}>
+          <Toggle.Checkbox
+            checked={cfg.vectorize_world_books}
+            onChange={(checked) => update({ vectorize_world_books: checked })}
+            label="Vectorize world book entries"
+          />
 
-      <Toggle.Checkbox
-        checked={cfg.vectorize_chat_documents}
-        onChange={(checked) => update({ vectorize_chat_documents: checked })}
-        label="Vectorize attached chat documents (scaffold)"
-      />
+          <div className={styles.presetRow}>
+            {(['lean', 'balanced', 'deep', 'custom'] as WorldBookVectorPresetMode[]).map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                className={clsx(styles.presetBtn, worldBookSettings.presetMode === preset && styles.presetBtnActive)}
+                onClick={() => applyWorldBookPreset(preset)}
+              >
+                {preset === 'lean' ? 'Lean' : preset === 'balanced' ? 'Balanced' : preset === 'deep' ? 'Deep' : 'Custom'}
+              </button>
+            ))}
+          </div>
+          <span className={styles.helperText}>{worldBookPresetDescriptions[worldBookSettings.presetMode]}</span>
 
-      <Toggle.Checkbox
-        checked={cfg.vectorize_chat_messages}
-        onChange={(checked) => update({ vectorize_chat_messages: checked })}
-        label="Vectorize chat messages (long-term memory)"
-      />
+          <div className={styles.settingsGridCompact}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Retrieved Entries</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                max={20}
+                value={worldBookSettings.retrievalTopK}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ retrievalTopK: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Chunk Target Tokens</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={120}
+                max={2000}
+                value={worldBookSettings.chunkTargetTokens}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ chunkTargetTokens: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.chunkTargetTokens })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Chunk Max Tokens</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={120}
+                max={4000}
+                value={worldBookSettings.chunkMaxTokens}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ chunkMaxTokens: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.chunkMaxTokens })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Chunk Overlap Tokens</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={0}
+                max={500}
+                value={worldBookSettings.chunkOverlapTokens}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ chunkOverlapTokens: value ?? 0 })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Stored Chunks Per Entry</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                max={24}
+                value={worldBookSettings.maxChunksPerEntry}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ maxChunksPerEntry: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.maxChunksPerEntry })}
+              />
+            </div>
+          </div>
+
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Hybrid Weight Mode</label>
+              <select
+                className={styles.select}
+                value={cfg.hybrid_weight_mode}
+                onChange={(e) => update({ hybrid_weight_mode: e.target.value as EmbeddingConfig['hybrid_weight_mode'] })}
+              >
+                <option value="keyword_first">Keyword First</option>
+                <option value="balanced">Balanced</option>
+                <option value="vector_first">Vector First</option>
+              </select>
+            </div>
+
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Similarity Threshold</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={0}
+                max={2}
+                step={0.05}
+                value={cfg.similarity_threshold}
+                onChange={(value) => update({ similarity_threshold: Math.max(0, Math.min(2, value ?? 0)) })}
+              />
+              <span className={styles.helperText}>0 disables raw-distance filtering.</span>
+            </div>
+          </div>
+
+          <div className={styles.field}>
+            <label className={styles.fieldLabel}>World Book Rerank Cutoff</label>
+            <NumericInput
+              className={styles.numberInput}
+              min={0}
+              max={2}
+              step={0.01}
+              value={cfg.rerank_cutoff}
+              onChange={(value) => update({ rerank_cutoff: Math.max(0, Math.min(2, value ?? 0)) })}
+            />
+            <span className={styles.helperText}>0 disables post-rerank filtering after boosts and penalties are applied.</span>
+          </div>
+        </div>
+      </div>
+
+      <div className={styles.settingsCard}>
+        <div className={styles.settingsCardHeader}>
+          <div>
+            <div className={styles.subsectionTitle}>Runtime</div>
+            <div className={styles.settingsCardTitle}>Embedding request behavior</div>
+          </div>
+        </div>
+        <div className={styles.settingsCardBody}>
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Embedding Batch Size</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                max={200}
+                value={cfg.batch_size}
+                integer
+                onChange={(value) => update({ batch_size: Math.max(1, Math.min(200, value ?? 50)) })}
+              />
+              <span className={styles.helperText}>Entries or chunks embedded per request during indexing.</span>
+            </div>
+
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Request Timeout (seconds)</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={0}
+                max={300}
+                step={5}
+                value={cfg.request_timeout ?? 60}
+                integer
+                onChange={(value) => update({ request_timeout: Math.max(0, Math.min(300, value ?? 60)) })}
+              />
+              <span className={styles.helperText}>0 disables the timeout.</span>
+            </div>
+          </div>
+
+          <Toggle.Checkbox
+            checked={cfg.vectorize_chat_documents}
+            onChange={(checked) => update({ vectorize_chat_documents: checked })}
+            label="Vectorize attached chat documents (scaffold)"
+          />
+
+          <Toggle.Checkbox
+            checked={cfg.vectorize_chat_messages}
+            onChange={(checked) => update({ vectorize_chat_messages: checked })}
+            label="Vectorize chat messages (long-term memory)"
+          />
+
+          {cfg.vectorize_chat_messages && (
+            <div className={styles.settingsGridTwo}>
+              <div className={styles.field}>
+                <label className={styles.fieldLabel}>Preferred Context Size (messages)</label>
+                <NumericInput
+                  className={styles.numberInput}
+                  min={1}
+                  max={64}
+                  value={cfg.preferred_context_size}
+                  integer
+                  onChange={(value) => update({ preferred_context_size: value ?? 1 })}
+                />
+              </div>
+              <div className={styles.field}>
+                <label className={styles.fieldLabel}>Memory Retrieval Mode</label>
+                <select
+                  className={styles.select}
+                  value={cfg.chat_memory_mode}
+                  onChange={(e) => update({ chat_memory_mode: e.target.value as EmbeddingConfig['chat_memory_mode'] })}
+                >
+                  <option value="conservative">Conservative - Fewer, high-quality memories</option>
+                  <option value="balanced">Balanced - Standard retrieval (recommended)</option>
+                  <option value="aggressive">Aggressive - More memories, lower threshold</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       <div className={styles.drawerRow}>
         <Button size="sm" onClick={save} disabled={saving || inherited} loading={saving}>
@@ -1839,8 +2055,8 @@ function EmbeddingsSettings() {
       </div>
       <p className={styles.placeholder}>
         {inherited
-          ? 'Testing verifies the inherited embedding connection without changing any settings.'
-          : 'Testing auto-detects native model dimensions and applies them to this configuration.'}
+          ? 'Testing verifies the inherited embedding connection without changing shared provider settings. World-book chunking and retrieval tuning still save automatically.'
+          : 'Testing auto-detects native model dimensions and applies them to this configuration. World-book chunking and retrieval tuning save automatically.'}
       </p>
     </div>
   )
