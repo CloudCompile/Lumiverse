@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { auth, allowCreation } from "../auth";
+import { auth, allowCreation, CREATION_NONCE_HEADER } from "../auth";
 import { getDb } from "../db/connection";
 import { getUserBaseDir } from "../auth/provision";
 import { hashPassword, verifyPassword } from "../crypto/password";
@@ -93,10 +93,13 @@ admin.post("/", async (c) => {
     return c.json({ error: `Invalid role. Allowed: ${[...VALID_ROLES].join(", ")}` }, 400);
   }
 
-  allowCreation();
+  const creationNonce = allowCreation();
 
   try {
     const newUser = await auth.api.signUpEmail({
+      headers: new Headers({
+        [CREATION_NONCE_HEADER]: creationNonce,
+      }),
       body: {
         email: `${body.username}@lumiverse.local`,
         password: body.password,

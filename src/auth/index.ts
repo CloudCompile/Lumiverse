@@ -11,18 +11,21 @@ import { provisionUserDirectories } from "./provision";
 let creationNonce: string | null = null;
 let creationNonceExpiry = 0;
 
+export const CREATION_NONCE_HEADER = "x-lumiverse-creation-nonce";
+
 export function allowCreation(): string {
   creationNonce = crypto.randomUUID();
   creationNonceExpiry = Date.now() + 10_000;
   return creationNonce;
 }
 
-function consumeNonce(): boolean {
+function consumeNonce(expectedNonce: string | null): boolean {
   if (!creationNonce) return false;
   if (Date.now() > creationNonceExpiry) {
     creationNonce = null;
     return false;
   }
+  if (creationNonce !== expectedNonce) return false;
   creationNonce = null; // single use
   return true;
 }
@@ -63,8 +66,9 @@ export const auth = betterAuth({
   databaseHooks: {
     user: {
       create: {
-        before: async () => {
-          if (!consumeNonce()) {
+        before: async (_user, ctx) => {
+          const expectedNonce = ctx?.headers?.get(CREATION_NONCE_HEADER) ?? null;
+          if (!consumeNonce(expectedNonce)) {
             return false;
           }
         },
