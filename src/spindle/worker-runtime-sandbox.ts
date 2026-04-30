@@ -182,10 +182,26 @@ export function initializeSandbox(): void {
 
   // ── Block Function constructor ──
   try {
+    const originalFunctionPrototype = Function.prototype;
+    const blockedFunction = function () {
+      throw new Error("Function constructor is disabled in extension context");
+    };
+    const blockedFunctionPrototype = Object.create(
+      Object.getPrototypeOf(originalFunctionPrototype)
+    );
+    Object.defineProperties(
+      blockedFunctionPrototype,
+      Object.getOwnPropertyDescriptors(originalFunctionPrototype)
+    );
+    Object.defineProperty(blockedFunctionPrototype, "constructor", {
+      value: blockedFunction,
+      writable: true,
+      configurable: true,
+    });
+    blockedFunction.prototype = blockedFunctionPrototype;
+
     Object.defineProperty(globalThis, "Function", {
-      value: function () {
-        throw new Error("Function constructor is disabled in extension context");
-      },
+      value: blockedFunction,
       writable: false,
       configurable: false,
     });
