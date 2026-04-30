@@ -4507,6 +4507,7 @@ export async function collectVectorActivatedWorldInfoDetailed(
 
     for (const result of searchResults) {
       if (result.status === "rejected") {
+        if (signal?.aborted || (result.reason as any)?.name === "AbortError") continue;
         console.warn("[WI] Vector search failed:", result.reason);
         continue;
       }

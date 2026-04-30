@@ -2801,7 +2801,9 @@ export async function searchWorldBookEntriesHybridWithVector(
         }
       }
     } catch (err) {
-      console.warn("[embeddings] World-book FTS candidate fetch failed:", err);
+      if (!signal?.aborted && (err as any)?.name !== "AbortError") {
+        console.warn("[embeddings] World-book FTS candidate fetch failed:", err);
+      }
     }
   }
 

@@ -83,8 +83,10 @@ type FrontendProcessWirePayload =
     }
 
 const loadedExtensions = new Map<string, LoadedExtension>()
-const loadInFlight = new Map<string, Promise<void>>()
+const loadInFlight = new Map<string, { promise: Promise<void>; force: boolean; manifestSignature: string }>()
 const loadGeneration = new Map<string, number>()
+const recentForceLoads = new Map<string, { manifestSignature: string; completedAt: number }>()
+const FORCE_LOAD_DEDUPE_MS = 2000
 
 function getManifestSignature(manifest: SpindleManifest): string {
   return `${manifest.identifier}:${manifest.version}:${manifest.entry_frontend || 'dist/frontend.js'}`
@@ -559,18 +561,35 @@ export async function loadFrontendExtension(
   manifest: SpindleManifest,
   force = false
 ): Promise<void> {
+  const manifestSignature = getManifestSignature(manifest)
   const pending = loadInFlight.get(extensionId)
-  const next = (pending || Promise.resolve())
+
+  if (force) {
+    const recent = recentForceLoads.get(extensionId)
+    if (recent?.manifestSignature === manifestSignature && Date.now() - recent.completedAt < FORCE_LOAD_DEDUPE_MS) {
+      return
+    }
+  }
+
+  if (pending && (!force || (pending.force && pending.manifestSignature === manifestSignature))) {
+    await pending.promise
+    return
+  }
+
+  const next = (pending?.promise || Promise.resolve())
     .catch(() => {
       // continue queue even after previous failure
     })
     .then(() => doLoadFrontendExtension(extensionId, manifest, force))
 
-  loadInFlight.set(extensionId, next)
+  loadInFlight.set(extensionId, { promise: next, force, manifestSignature })
   try {
     await next
+    if (force) {
+      recentForceLoads.set(extensionId, { manifestSignature, completedAt: Date.now() })
+    }
   } finally {
-    if (loadInFlight.get(extensionId) === next) {
+    if (loadInFlight.get(extensionId)?.promise === next) {
       loadInFlight.delete(extensionId)
     }
   }

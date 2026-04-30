@@ -46,6 +46,13 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
       queueMicrotask(() => {
         void Promise.allSettled(
           extensions.map(async (ext) => {
+            const status = get().extensionOperationStatus
+            const updateReloadPending =
+              status?.extensionId === ext.id &&
+              (status.operation === 'updating' || status.operation === 'updated')
+
+            if (updateReloadPending) return
+
             if (ext.enabled && ext.has_frontend) {
               const manifest = await spindleApi.getManifest(ext.id)
               await loadFrontendExtension(ext.id, manifest)

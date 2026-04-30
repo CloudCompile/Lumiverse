@@ -42,6 +42,8 @@ import type {
 } from "lumiverse-spindle-types";
 import { initializeSandbox } from "./worker-runtime-sandbox";
 
+const nativeProcessExit = process.exit.bind(process);
+
 type TokenModelSource = "main" | "sidecar" | "explicit";
 
 type TokenCountResult = {
@@ -2876,7 +2878,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
         // If posting fails, the host's 5s fallback terminates us anyway.
       }
       // Allow extension to clean up
-      process.exit(0);
+      nativeProcessExit(0);
       break;
     }
   }
