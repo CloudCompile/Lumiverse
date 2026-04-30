@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import type { LlmMessage } from "../llm/types";
-import { resolveChatHistoryInsertionIndex } from "./prompt-assembly.service";
+import {
+  insertBlocksIntoTaggedHistory,
+  resolveChatHistoryInsertionIndex,
+} from "./prompt-assembly.service";
 
 function makeMessage(role: LlmMessage["role"], content: string, chatHistory = false): LlmMessage {
   const msg = { role, content } as LlmMessage;
@@ -46,5 +49,32 @@ describe("resolveChatHistoryInsertionIndex", () => {
     ];
 
     expect(resolveChatHistoryInsertionIndex(messages, 4)).toBe(messages.length);
+  });
+});
+
+describe("insertBlocksIntoTaggedHistory", () => {
+  test("keeps prompt order for equal depths and stays inside chat history", () => {
+    const messages: LlmMessage[] = [
+      makeMessage("system", "before"),
+      makeMessage("user", "u1", true),
+      makeMessage("assistant", "a1", true),
+      makeMessage("system", "post-history utility"),
+    ];
+
+    insertBlocksIntoTaggedHistory(messages, [
+      { role: "system", content: "depth-one", depth: 1 },
+      { role: "system", content: "depth-zero-a", depth: 0 },
+      { role: "system", content: "depth-zero-b", depth: 0 },
+    ]);
+
+    expect(messages.map((msg) => msg.content)).toEqual([
+      "before",
+      "u1",
+      "depth-one",
+      "a1",
+      "depth-zero-a",
+      "depth-zero-b",
+      "post-history utility",
+    ]);
   });
 });

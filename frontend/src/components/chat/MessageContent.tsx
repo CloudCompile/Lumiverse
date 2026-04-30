@@ -314,6 +314,24 @@ function hasBalancedStyleTags(html: string): boolean {
   return opens === closes
 }
 
+function renderIslandMarkdownText(markdown: string): string {
+  const leadingWhitespace = markdown.match(/^\s*/)?.[0] ?? ''
+  const trailingWhitespace = markdown.match(/\s*$/)?.[0] ?? ''
+  const core = markdown.trim()
+
+  if (!core) return markdown
+
+  let html = marked.parse(core, { async: false }) as string
+  html = normalizeQuotesInHTML(html)
+
+  const singleParagraphMatch = html.match(/^<p>([\s\S]*)<\/p>\s*$/)
+  if (singleParagraphMatch && !/<\/p>\s*<p\b/i.test(html)) {
+    html = singleParagraphMatch[1]
+  }
+
+  return `${leadingWhitespace}${html}${trailingWhitespace}`
+}
+
 function extractHtmlIslands(
   raw: string,
   isStreaming: boolean,
@@ -458,9 +476,10 @@ function extractHtmlIslands(
 }
 
 /**
- * Convert markdown syntax within HTML island text content to rendered HTML.
- * Preserves <style> blocks and HTML tag structure while processing text nodes
- * through marked, so captured content ($1, $2 etc.) renders correctly in Shadow DOM.
+ * Convert markdown within HTML island text content to rendered HTML.
+ * Preserves <style> blocks and HTML tag structure while running text nodes
+ * through the full markdown parser, then unwraps single-paragraph results so
+ * inline content inside HTML tags stays inline in Shadow DOM.
  */
 function processMarkdownInIsland(html: string): string {
   // Protect <style> blocks — CSS selectors can contain '>' which breaks tag splitting
@@ -484,12 +503,11 @@ function processMarkdownInIsland(html: string): string {
       continue
     }
 
-    // Text content — skip if empty, inside skip element, a style placeholder, or plain text
+    // Text content — skip if empty, inside skip element, or a style placeholder
     if (!part.trim() || skipDepth > 0) continue
     if (/^<!--ISLAND_STYLE_\d+-->$/.test(part.trim())) continue
-    if (!/[*_`~\[#\-]/.test(part)) continue
 
-    parts[i] = marked.parseInline(part, { async: false }) as string
+    parts[i] = renderIslandMarkdownText(part)
   }
 
   let result = parts.join('')

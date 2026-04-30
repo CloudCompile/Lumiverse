@@ -140,6 +140,22 @@ export function resolveChatHistoryInsertionIndex(
   return historyIndices[offsetFromStart];
 }
 
+export function insertBlocksIntoTaggedHistory(
+  messages: LlmMessage[],
+  blocks: Array<Pick<LlmMessage, "role" | "content"> & { depth: number }>,
+): void {
+  // Insert in reverse so blocks that resolve to the same chat-history boundary
+  // keep their original prompt_order sequence after repeated splices.
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    const insertAt = resolveChatHistoryInsertionIndex(messages, block.depth);
+    messages.splice(insertAt, 0, {
+      role: block.role,
+      content: block.content,
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Cooperative cancellation helper
 // ---------------------------------------------------------------------------
@@ -1872,18 +1888,14 @@ export async function assemblePrompt(
       if (block.marker === "jailbreak") jailbreakBlockResolved = true;
 
       const role: LlmMessage["role"] =
-        block.position === "post_history"
-          ? block.role === "system" || !block.role
-            ? "assistant"
-            : (block.role as LlmMessage["role"])
-          : (block.role as LlmMessage["role"]) || "system";
+        (block.role as LlmMessage["role"]) || "system";
 
-      // Blocks with position "in_history" and depth > 0 are deferred for
-      // depth-based insertion after WI and Author's Note.
-      if (block.position === "in_history" && block.depth > 0) {
+      // Blocks with position "in_history" are always inserted relative to the
+      // tagged chat-history messages, including depth 0.
+      if (block.position === "in_history") {
         pendingDepthBlocks.push({
           role,
-          depth: block.depth,
+          depth: Math.max(0, block.depth || 0),
           content: resolved,
           blockName: block.name,
           blockId: block.id,
@@ -2084,12 +2096,9 @@ export async function assemblePrompt(
   // the actual tagged chat-history messages, not the tail of the full prompt.
   // This keeps them inside chat history even when post-history/system utility
   // blocks have already been appended around it.
+  insertBlocksIntoTaggedHistory(result, pendingDepthBlocks);
+
   for (const depthBlock of pendingDepthBlocks) {
-    const insertAt = resolveChatHistoryInsertionIndex(result, depthBlock.depth);
-    result.splice(insertAt, 0, {
-      role: depthBlock.role,
-      content: depthBlock.content,
-    });
     breakdown.push({
       type: "block",
       name: depthBlock.blockName,
