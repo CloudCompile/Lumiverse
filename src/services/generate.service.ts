@@ -2569,10 +2569,17 @@ async function runGeneration(
         break;
       }
 
+      // Reconstruct the full assistant output including any guided CoT
+      // reasoning block so the model sees its own <think>...</think> on
+      // continuation rounds and doesn't re-enter the planning phase.
+      const fullAssistantOutput = fullReasoning
+        ? `${cotDelimiters.prefix}${fullReasoning}${cotDelimiters.suffix}\n${fullContent}`
+        : fullContent;
+
       const inlineContextMessages = [
         ...generationMessages,
-        ...(fullContent
-          ? [{ role: "assistant", content: fullContent } satisfies LlmMessage]
+        ...(fullAssistantOutput
+          ? [{ role: "assistant", content: fullAssistantOutput } satisfies LlmMessage]
           : []),
       ];
 
@@ -2594,8 +2601,8 @@ async function runGeneration(
 
       generationMessages = [
         ...generationMessages,
-        ...(fullContent
-          ? [{ role: "assistant", content: fullContent } satisfies LlmMessage]
+        ...(fullAssistantOutput
+          ? [{ role: "assistant", content: fullAssistantOutput } satisfies LlmMessage]
           : []),
         {
           role: "system",
