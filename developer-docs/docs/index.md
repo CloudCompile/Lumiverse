@@ -13,7 +13,7 @@ Spindle is Lumiverse's extension framework. It lets you add custom functionality
 
 **Backend modules** run in isolated runtimes with access to the `spindle` global API — events, storage, LLM generation, macros, and more. Depending on server configuration, that runtime may be a Bun subprocess, a sandboxed subprocess, or a legacy worker thread.
 
-**Frontend modules** run in the browser with a sandboxed context for DOM injection, event handling, and backend communication. All HTML is sanitized through DOMPurify.
+**Frontend modules** run in the browser with APIs for direct host DOM rendering, event handling, backend communication, and isolated sandbox frames when needed. All injected HTML is sanitized through DOMPurify.
 
 ## Key Features
 
@@ -24,6 +24,7 @@ Spindle is Lumiverse's extension framework. It lets you add custom functionality
 - **Scoped storage** — private file storage per extension, per user, or ephemeral with TTL
 - **Secure enclave** — AES-256-GCM encrypted secret storage for API keys and tokens
 - **Safe DOM injection** — inject sanitized HTML and CSS via the frontend DOM helper
+- **Isolated iframe widgets** — opt into host-managed sandbox frames for scriptable child documents
 - **UI placements** — drawer tabs, floating widgets, dock panels, input bar actions
 - **CORS proxy** — make HTTP requests through the server, bypassing browser restrictions
 - **OAuth support** — full OAuth PKCE flow with callback handler registration

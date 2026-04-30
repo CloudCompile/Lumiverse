@@ -1,6 +1,6 @@
 # Frontend API
 
-Your frontend module must export a `setup(ctx)` function. It receives a `SpindleFrontendContext` with sandboxed access to the DOM, events, and backend communication.
+Your frontend module must export a `setup(ctx)` function. It receives a `SpindleFrontendContext` for host DOM rendering, events, backend communication, and opt-in sandbox frames.
 
 ```ts
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
@@ -29,9 +29,14 @@ export function teardown() {
 
 ## API Surface
 
+Frontend UI can follow two supported rendering paths:
+
+- direct host rendering through `ctx.dom.*` and `ctx.ui.*`
+- isolated iframe rendering through `ctx.dom.createSandboxFrame(...)` and `ctx.messages.renderWidget(...)`
+
 | Category | Permission | Description |
 |----------|-----------|-------------|
-| [DOM Helper](dom-helper.md) | Free | Inject sanitized HTML/CSS and create host-managed sandbox frames |
+| [DOM Helper](dom-helper.md) | Free | Inject sanitized HTML/CSS in the host DOM and create host-managed sandbox frames |
 | [HTML Islands](html-islands.md) | Free | Auto-isolation of styled HTML in messages, and how to opt out |
 | [Events](events.md) | Free | Subscribe to WebSocket events, emit custom events |
 | [UI Placement](ui-placement.md) | Varies | Drawer tabs, float widgets, dock panels, modals, context menus, input bar actions |

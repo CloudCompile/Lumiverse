@@ -1,37 +1,91 @@
 # DOM Helper
 
-Frontend modules run in an opaque-origin sandbox iframe. They do not receive direct access to the Lumiverse document, cookies, local storage, or IndexedDB.
+Frontend modules run in the browser and can render UI in two ways:
 
-The DOM helper operates inside the extension sandbox document. To show UI in Lumiverse, create a host surface with `ctx.ui.*` or render a message-scoped widget with `ctx.messages.renderWidget(...)`.
+- direct host DOM rendering through `ctx.dom.*` and `ctx.ui.*` roots
+- isolated iframe rendering through `ctx.dom.createSandboxFrame(...)` or `ctx.messages.renderWidget(...)`
+
+Use the direct host DOM path for ordinary extension UI. Use sandbox frames when you need scriptable HTML that should run in its own isolated document.
+
+## `ctx.dom.inject(target, html, position?)`
+
+Inject sanitized HTML into the host document.
+
+```ts
+const card = ctx.dom.inject(
+  '[data-spindle-mount="sidebar"]',
+  `
+    <section class="demo-card">
+      <h2>My Panel</h2>
+      <p>Rendered directly into the host DOM.</p>
+    </section>
+  `,
+)
+```
+
+Injected HTML is sanitized with DOMPurify before insertion.
 
 ## `ctx.dom.addStyle(css)`
 
-Add a `<style>` element inside the extension sandbox document. Returns a removal function.
+Add a `<style>` element to the host document. Returns a removal function.
 
 ```ts
 const removeStyle = ctx.dom.addStyle(`
-  body {
+  .demo-card {
     color: var(--lumiverse-text);
+    padding: 12px;
   }
 `)
 
 removeStyle()
 ```
 
-For visible placement or message widgets, include required styles in the HTML assigned to that host surface. Host surfaces are rendered in separate sandboxed iframes.
+For direct host DOM rendering, this is usually the simplest way to style your injected UI.
 
 ## `ctx.dom.createElement(tag, attrs?)`
 
-Create an element inside the extension sandbox document.
+Create an element in the host document.
 
 ```ts
 const button = ctx.dom.createElement('button', { type: 'button' })
 button.textContent = 'Click me'
 ```
 
+Raw `iframe`, `frame`, `object`, and `embed` tags are blocked. Use `ctx.dom.createSandboxFrame(...)` when you need an isolated child document.
+
+## `ctx.dom.createSandboxFrame(options)`
+
+Create a host-managed sandboxed iframe for isolated scriptable content.
+
+```ts
+const frame = ctx.dom.createSandboxFrame({
+  html: `
+    <style>
+      body { margin: 0; padding: 12px; color: white; background: #111; }
+      button { padding: 8px 12px; }
+    </style>
+    <button id="ping">Ping host</button>
+    <script>
+      document.getElementById('ping').addEventListener('click', () => {
+        window.spindleSandbox.postMessage({ type: 'ping' })
+      })
+    </script>
+  `,
+  minHeight: 48,
+})
+
+frame.onMessage((payload) => {
+  console.log('frame message', payload)
+})
+
+someRoot.appendChild(frame.element)
+```
+
+Use this when the child content needs its own document, inline scripts, or stricter isolation than the normal host DOM path.
+
 ## `ctx.dom.query(selector)` / `ctx.dom.queryAll(selector)`
 
-Query inside the extension sandbox document.
+Query inside the extension-owned host DOM.
 
 ```ts
 const button = ctx.dom.query('button')
@@ -40,7 +94,7 @@ const items = ctx.dom.queryAll('[data-item]')
 
 ## `ctx.dom.cleanup()`
 
-Remove DOM created inside the extension sandbox document.
+Remove DOM created by the helper.
 
 ```ts
 ctx.dom.cleanup()
@@ -48,7 +102,7 @@ ctx.dom.cleanup()
 
 ## Message Widgets
 
-Use `ctx.messages.renderWidget(...)` to render interactive card UI inside a message without accessing the parent document.
+Use `ctx.messages.renderWidget(...)` to render interactive card UI inside a message-scoped sandbox frame.
 
 ```ts
 const cleanup = ctx.messages.renderWidget(
@@ -73,7 +127,7 @@ const cleanup = ctx.messages.renderWidget(
 cleanup()
 ```
 
-Message widgets are host-created iframes with:
+Message widgets use the isolated iframe path. They are host-created iframes with:
 
 - `sandbox="allow-scripts"` only
 - no `allow-same-origin`

@@ -1,4 +1,4 @@
-import type { SpindleManifest, SpindleFrontendContext, PermissionRequestOptions } from 'lumiverse-spindle-types'
+import type { SpindleManifest, SpindleFrontendContext, SpindleFrontendModule, PermissionRequestOptions } from 'lumiverse-spindle-types'
 import { createDOMHelper } from './dom-helper'
 import { registerTagInterceptor, unregisterTagInterceptorsByExtension } from './message-interceptors'
 import { removeMessageWidgetsByExtension, upsertMessageWidget, removeMessageWidget } from './message-widgets'
@@ -12,7 +12,6 @@ import {
 } from './placement-helper'
 import { generateUUID } from '@/lib/uuid'
 import { installSpindleNavigationGuards } from './navigation-guards'
-import { SandboxedFrontendRuntime } from './sandboxed-frontend-runtime'
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { charactersApi } from '@/api/characters'
@@ -23,8 +22,8 @@ interface LoadedExtension {
   id: string
   identifier: string
   manifestSignature: string
+  module: SpindleFrontendModule
   context: SpindleFrontendContext
-  runtime: SandboxedFrontendRuntime
   teardown?: () => void
   eventUnsubs: (() => void)[]
   backendHandlers: Set<(payload: unknown) => void>
@@ -66,7 +65,7 @@ interface ActiveFrontendProcess {
   stopHandlers: Set<(detail: { reason?: string }) => void>
 }
 
-type FrontendRuntimeContext = SpindleFrontendContext & {
+type FrontendExtensionContext = SpindleFrontendContext & {
   processes: {
     register(kind: string, handler: FrontendProcessHandler): () => void
   }
@@ -147,12 +146,20 @@ async function doLoadFrontendExtension(
     const response = await responsePromise
     if (!response.ok) return // No frontend bundle
 
-    const frontendCode = await response.text()
+    const blob = await response.blob()
+    const blobUrl = URL.createObjectURL(blob)
 
-    // SECURITY: frontend extension modules execute in an opaque-origin sandbox
-    // iframe, not in the Lumiverse document. Host capabilities are exposed only
-    // through the RPC bridge below; extension-owned visible UI is rendered into
-    // host-created nested sandbox frames.
+    const mod: SpindleFrontendModule = await import(/* @vite-ignore */ blobUrl)
+    URL.revokeObjectURL(blobUrl)
+
+    // Frontend extensions still execute in the Lumiverse document context so
+    // existing UI roots remain fully interactive. Scriptable iframe content must
+    // opt into ctx.dom.createSandboxFrame() instead of replacing the base UI path.
+
+    if (typeof mod.setup !== 'function') {
+      console.warn(`[Spindle:${manifest.identifier}] Frontend module missing setup()`)
+      return
+    }
 
     const dom = createDOMHelper(extensionId)
     const eventUnsubs: (() => void)[] = []
@@ -194,7 +201,7 @@ async function doLoadFrontendExtension(
       mountRoots.clear()
       mountedPoints.clear()
     }
-    const context: FrontendRuntimeContext = {
+    const context: FrontendExtensionContext = {
       dom,
       events: {
         on(event: string, handler: (payload: unknown) => void): () => void {
@@ -480,7 +487,7 @@ async function doLoadFrontendExtension(
           })
         },
       },
-      async getActiveChat() {
+      getActiveChat() {
         const state = useStore.getState()
         return {
           chatId: state.activeChatId ?? null,
@@ -548,11 +555,10 @@ async function doLoadFrontendExtension(
       manifest,
     }
 
-    const runtime = new SandboxedFrontendRuntime(extensionId, manifest, frontendCode, context)
+    let teardownFn: void | (() => void)
     try {
-      await runtime.start()
+      teardownFn = mod.setup(context)
     } catch (err) {
-      runtime.destroy()
       dom.cleanup()
       cleanupMountInfra()
       throw err
@@ -560,7 +566,8 @@ async function doLoadFrontendExtension(
 
     if (!currentGeneration()) {
       try {
-        runtime.destroy()
+        if (typeof teardownFn === 'function') teardownFn()
+        else mod.teardown?.()
       } catch {
         // no-op
       }
@@ -573,9 +580,9 @@ async function doLoadFrontendExtension(
       id: extensionId,
       identifier: manifest.identifier,
       manifestSignature,
+      module: mod,
       context,
-      runtime,
-      teardown: () => runtime.destroy(),
+      teardown: typeof teardownFn === 'function' ? teardownFn : mod.teardown,
       eventUnsubs,
       backendHandlers,
       processHandlers,
