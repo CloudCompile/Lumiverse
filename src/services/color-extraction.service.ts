@@ -56,6 +56,15 @@ const SAMPLE_SIZE = 48;
 const DEFAULT_FALLBACK_HUE = 263;
 const MIN_UI_CONTRAST = 3;
 const MIN_TEXT_CONTRAST = 4.5;
+const DARK_SURFACE_MIN_LUM = 24;
+const DARK_SURFACE_MAX_LUM = 68;
+const LIGHT_SURFACE_MIN_LUM = 218;
+const LIGHT_SURFACE_MAX_LUM = 246;
+const DARK_ACCENT_MIN_LUM = 118;
+const DARK_ACCENT_MAX_LUM = 210;
+const LIGHT_ACCENT_MIN_LUM = 54;
+const LIGHT_ACCENT_MAX_LUM = 154;
+const LUMINANCE_SKEW_RATIO = 0.64;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -212,6 +221,12 @@ interface PixelAnalysis {
   average: RGB;
   diversityScore: number;
   candidates: CandidateColor[];
+  luminanceProfile: LuminanceProfile;
+}
+
+interface LuminanceProfile {
+  mostlyTooDark: boolean;
+  mostlyTooLight: boolean;
 }
 
 function chooseQuantizationStep(avgDeviation: number): number {
@@ -241,13 +256,21 @@ function analyzePixels(data: ArrayLike<number>, channels: number, pixelCount: nu
   let gSum = 0;
   let bSum = 0;
   let opaqueCount = 0;
+  let tooDarkCount = 0;
+  let tooLightCount = 0;
 
   for (let i = 0; i < pixelCount; i++) {
     const offset = i * channels;
     if (channels === 4 && data[offset + 3] < 48) continue;
-    rSum += data[offset];
-    gSum += data[offset + 1];
-    bSum += data[offset + 2];
+    const r = data[offset];
+    const g = data[offset + 1];
+    const b = data[offset + 2];
+    const lum = luminance(r, g, b);
+    if (lum < DARK_SURFACE_MIN_LUM) tooDarkCount++;
+    if (lum > LIGHT_SURFACE_MAX_LUM) tooLightCount++;
+    rSum += r;
+    gSum += g;
+    bSum += b;
     opaqueCount++;
   }
 
@@ -258,8 +281,14 @@ function analyzePixels(data: ArrayLike<number>, channels: number, pixelCount: nu
       average: grey,
       diversityScore: 0,
       candidates: [{ color: grey, score: 1 }],
+      luminanceProfile: { mostlyTooDark: false, mostlyTooLight: false },
     };
   }
+
+  const luminanceProfile = {
+    mostlyTooDark: tooDarkCount / opaqueCount >= LUMINANCE_SKEW_RATIO,
+    mostlyTooLight: tooLightCount / opaqueCount >= LUMINANCE_SKEW_RATIO,
+  };
 
   const average = {
     r: Math.round(rSum / opaqueCount),
@@ -313,6 +342,7 @@ function analyzePixels(data: ArrayLike<number>, channels: number, pixelCount: nu
       average,
       diversityScore: 0,
       candidates: [{ color: grey, score: 1 }],
+      luminanceProfile,
     };
   }
 
@@ -342,7 +372,7 @@ function analyzePixels(data: ArrayLike<number>, channels: number, pixelCount: nu
   const bucketSpread = clamp(buckets.size / 24, 0, 1);
   const diversityScore = clamp((avgDeviation / 52) * 0.72 + bucketSpread * 0.28, 0, 1);
 
-  return { dominant, average, diversityScore, candidates };
+  return { dominant, average, diversityScore, candidates, luminanceProfile };
 }
 
 function dominantFromPixels(data: ArrayLike<number>, channels: number, pixelCount: number): DominantResult {
@@ -413,12 +443,20 @@ function pickReadableTextColor(surface: RGB, tint: RGB, minRatio: number): RGB {
 
 function tuneAccentForSurface(accentBase: RGB, surface: RGB, mode: "dark" | "light"): RGB {
   const accentHsl = rgbToHsl(accentBase.r, accentBase.g, accentBase.b);
-  const tuned = hslToRgb(
+  let tuned = hslToRgb(
     accentHsl.h,
     clamp(accentHsl.s, 44, 80),
     mode === "dark" ? clamp(accentHsl.l, 56, 70) : clamp(accentHsl.l, 34, 48),
   );
-  return ensureContrast(tuned, surface, MIN_UI_CONTRAST);
+
+  tuned = mode === "dark"
+    ? constrainLuminance(tuned, DARK_ACCENT_MIN_LUM, DARK_ACCENT_MAX_LUM)
+    : constrainLuminance(tuned, LIGHT_ACCENT_MIN_LUM, LIGHT_ACCENT_MAX_LUM);
+
+  const contrasted = ensureContrast(tuned, surface, MIN_UI_CONTRAST);
+  return mode === "dark"
+    ? constrainLuminance(contrasted, DARK_ACCENT_MIN_LUM, DARK_ACCENT_MAX_LUM)
+    : constrainLuminance(contrasted, LIGHT_ACCENT_MIN_LUM, LIGHT_ACCENT_MAX_LUM);
 }
 
 function dedupeColors(colors: RGB[]): RGB[] {
@@ -481,14 +519,21 @@ function pickAccentBase(colors: RGB[], surface: RGB): RGB {
   return best;
 }
 
-function deriveReadableScheme(surfaceBase: RGB, accentBase: RGB, mode: "dark" | "light"): ReadableColorScheme {
+function deriveReadableScheme(
+  surfaceBase: RGB,
+  accentBase: RGB,
+  mode: "dark" | "light",
+  luminanceProfile: LuminanceProfile,
+): ReadableColorScheme {
+  const darkMixWeight = luminanceProfile.mostlyTooDark ? 0.9 : 0.84;
+  const lightMixWeight = luminanceProfile.mostlyTooLight ? 0.94 : 0.9;
   let surface = mode === "dark"
-    ? mixColors(surfaceBase, { r: 12, g: 15, b: 22 }, 0.84)
-    : mixColors(surfaceBase, { r: 248, g: 250, b: 252 }, 0.9);
+    ? mixColors(surfaceBase, { r: 18, g: 22, b: 30 }, darkMixWeight)
+    : mixColors(surfaceBase, { r: 248, g: 250, b: 252 }, lightMixWeight);
 
   surface = mode === "dark"
-    ? constrainLuminance(surface, undefined, 62)
-    : constrainLuminance(surface, 225, undefined);
+    ? constrainLuminance(surface, DARK_SURFACE_MIN_LUM, DARK_SURFACE_MAX_LUM)
+    : constrainLuminance(surface, LIGHT_SURFACE_MIN_LUM, LIGHT_SURFACE_MAX_LUM);
 
   const accent = tuneAccentForSurface(accentBase, surface, mode);
   const accentText = pickReadableTextColor(accent, surface, MIN_TEXT_CONTRAST);
@@ -499,15 +544,20 @@ function deriveReadableScheme(surfaceBase: RGB, accentBase: RGB, mode: "dark" | 
   return { surface, text, mutedText, accent, accentText };
 }
 
-function deriveUiSchemes(palette: RGB[], dominant: RGB, average: RGB): { dark: ReadableColorScheme; light: ReadableColorScheme } {
+function deriveUiSchemes(
+  palette: RGB[],
+  dominant: RGB,
+  average: RGB,
+  luminanceProfile: LuminanceProfile = { mostlyTooDark: false, mostlyTooLight: false },
+): { dark: ReadableColorScheme; light: ReadableColorScheme } {
   const colors = dedupeColors([dominant, average, ...palette]);
   const darkSurfaceBase = pickSurfaceBase(colors, average, "dark");
   const lightSurfaceBase = pickSurfaceBase(colors, average, "light");
   const darkAccentBase = pickAccentBase(colors, darkSurfaceBase);
   const lightAccentBase = pickAccentBase(colors, lightSurfaceBase);
   return {
-    dark: deriveReadableScheme(darkSurfaceBase, darkAccentBase, "dark"),
-    light: deriveReadableScheme(lightSurfaceBase, lightAccentBase, "light"),
+    dark: deriveReadableScheme(darkSurfaceBase, darkAccentBase, "dark", luminanceProfile),
+    light: deriveReadableScheme(lightSurfaceBase, lightAccentBase, "light", luminanceProfile),
   };
 }
 
@@ -578,7 +628,7 @@ export function extractColorsFromRawPixels(
   const palette = usedFallback
     ? buildFallbackPalette(fullAnalysis.dominant.color, fullAnalysis.average)
     : diversePalette;
-  const ui = deriveUiSchemes(palette, fullAnalysis.dominant.color, fullAnalysis.average);
+  const ui = deriveUiSchemes(palette, fullAnalysis.dominant.color, fullAnalysis.average, fullAnalysis.luminanceProfile);
   const dominantHsl = rgbToHsl(fullAnalysis.dominant.color.r, fullAnalysis.dominant.color.g, fullAnalysis.dominant.color.b);
   const isLight = luminance(fullAnalysis.dominant.color.r, fullAnalysis.dominant.color.g, fullAnalysis.dominant.color.b) > 152;
 

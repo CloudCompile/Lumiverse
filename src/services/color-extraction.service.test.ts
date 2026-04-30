@@ -96,7 +96,49 @@ describe("extractColorsFromRawPixels", () => {
     const result = extractColorsFromRawPixels(data, 16, 16, 4);
 
     expect(luminance(result.ui.dark.surface)).toBeLessThan(70);
+    expect(luminance(result.ui.dark.surface)).toBeGreaterThanOrEqual(24);
     expect(luminance(result.ui.light.surface)).toBeGreaterThan(210);
     expect(luminance(result.ui.dark.surface)).toBeLessThan(luminance(result.ui.light.surface));
+  });
+
+  test("lifts mostly black images into readable dark-mode theme ranges", () => {
+    const black = { r: 2, g: 3, b: 6 };
+    const indigo = { r: 24, g: 30, b: 92 };
+    const violet = { r: 92, g: 54, b: 160 };
+
+    const data = makeImage(16, 16, (x, y) => {
+      if (x > 12 && y < 4) return violet;
+      if (x > 10) return indigo;
+      return black;
+    });
+
+    const result = extractColorsFromRawPixels(data, 16, 16, 4);
+
+    expect(luminance(result.ui.dark.surface)).toBeGreaterThanOrEqual(24);
+    expect(luminance(result.ui.dark.surface)).toBeLessThanOrEqual(68);
+    expect(luminance(result.ui.dark.accent)).toBeGreaterThanOrEqual(118);
+    expect(contrastRatio(result.ui.dark.accent, result.ui.dark.surface)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(result.ui.dark.text, result.ui.dark.surface)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test("keeps mostly white images below glare range for light-mode themes", () => {
+    const white = { r: 253, g: 253, b: 250 };
+    const gold = { r: 238, g: 178, b: 72 };
+    const rose = { r: 204, g: 92, b: 126 };
+
+    const data = makeImage(16, 16, (x, y) => {
+      if (x < 3 && y > 10) return rose;
+      if (y < 3) return gold;
+      return white;
+    });
+
+    const result = extractColorsFromRawPixels(data, 16, 16, 4);
+
+    expect(luminance(result.ui.light.surface)).toBeGreaterThanOrEqual(218);
+    expect(luminance(result.ui.light.surface)).toBeLessThanOrEqual(246);
+    expect(luminance(result.ui.light.accent)).toBeGreaterThanOrEqual(54);
+    expect(luminance(result.ui.light.accent)).toBeLessThanOrEqual(154);
+    expect(contrastRatio(result.ui.light.accent, result.ui.light.surface)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(result.ui.light.text, result.ui.light.surface)).toBeGreaterThanOrEqual(4.5);
   });
 });
