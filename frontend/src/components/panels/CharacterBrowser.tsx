@@ -19,6 +19,7 @@ import ExpressionsImportModal from '@/components/modals/ExpressionsImportModal'
 import AlternateFieldsSummaryModal from '@/components/modals/AlternateFieldsSummaryModal'
 import Pagination from '@/components/shared/Pagination'
 import type { CharacterViewMode } from '@/types/store'
+import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
 import styles from './CharacterBrowser.module.css'
 
 function CharacterSkeletons({ viewMode }: { viewMode: CharacterViewMode }) {
@@ -296,7 +297,7 @@ export default function CharacterBrowser() {
         title="Import Embedded Lorebook"
         message={
           browser.pendingLorebookImport
-            ? `"${browser.pendingLorebookImport.name}" contains an embedded lorebook with ${browser.pendingLorebookImport.extensions?.character_book?.entries?.length} entries. Import it as a World Book?`
+            ? `"${browser.pendingLorebookImport.name}" contains an embedded lorebook with ${getEmbeddedCharacterBookEntryCount(browser.pendingLorebookImport.extensions)} entries. Import it as a World Book?`
             : ''
         }
         confirmText="Import"

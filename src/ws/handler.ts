@@ -112,7 +112,18 @@ export const wsHandler = upgradeWebSocket((c) => {
     },
     async onMessage(event, ws) {
       try {
-        const data = JSON.parse(event.data as string);
+        // Refresh activity timestamp for sweep — any inbound message counts
+        const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
+        if (raw) eventBus.touchClient(raw);
+
+        // Guard against oversized payloads — legitimate client messages are
+        // small control frames (ping, visibility, spindle results). 64 KB is
+        // generous; anything larger is either a bug or an attack attempting to
+        // burn GC time via a deeply nested JSON parse.
+        const raw_data = event.data as string;
+        if (raw_data.length > 65_536) return;
+
+        const data = JSON.parse(raw_data);
         if (data.type === "ping") {
           ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
           return;
@@ -121,6 +132,14 @@ export const wsHandler = upgradeWebSocket((c) => {
         if (data.type === "visibility") {
           if (userId && sessionId) {
             eventBus.setUserVisibility(userId, sessionId, !!data.visible);
+          }
+          return;
+        }
+
+        if (data.type === "stream_focus") {
+          if (raw && userId) {
+            const chatId = typeof data.chatId === "string" ? data.chatId : null;
+            eventBus.setClientStreamFocus(raw, userId, chatId);
           }
           return;
         }
@@ -193,6 +212,52 @@ export const wsHandler = upgradeWebSocket((c) => {
           }
 
           host.sendFrontendMessage(data.payload, userId!);
+        }
+
+        if (data.type === "SPINDLE_FRONTEND_PROCESS_EVENT") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const processId = typeof data.processId === "string" ? data.processId : null;
+          const processEvent = typeof data.event === "string" ? data.event : null;
+          if (!extensionId || !processId || !processEvent || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          if (
+            processEvent !== "ready" &&
+            processEvent !== "heartbeat" &&
+            processEvent !== "complete" &&
+            processEvent !== "fail" &&
+            processEvent !== "frontend_unloaded"
+          ) {
+            return;
+          }
+
+          host.handleFrontendProcessEvent(
+            processId,
+            userId,
+            processEvent,
+            typeof data.error === "string" ? data.error : undefined,
+          );
+          return;
+        }
+
+        if (data.type === "SPINDLE_FRONTEND_PROCESS_MSG") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const processId = typeof data.processId === "string" ? data.processId : null;
+          if (!extensionId || !processId || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          host.handleFrontendProcessMessage(processId, userId, data.payload);
+          return;
         }
 
         if (data.type === "SPINDLE_COMMAND_INVOKE") {

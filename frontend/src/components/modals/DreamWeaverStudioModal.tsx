@@ -20,6 +20,8 @@ import { CloseButton } from '@/components/shared/CloseButton'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { Button } from '@/components/shared/FormComponents'
 import { ModalShell } from '@/components/shared/ModalShell'
+import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
+import { generateUUID } from '@/lib/uuid'
 import { toast } from '@/lib/toast'
 import { useStore } from '@/store'
 import type { ConnectionProfile, Persona } from '@/types/api'
@@ -82,7 +84,7 @@ function normalizeAltFields(value: unknown): DreamWeaverAlternateField[] {
   return value.map((entry, index) => {
     const next = entry as Partial<DreamWeaverAlternateField> | null
     return {
-      id: next?.id || crypto.randomUUID(),
+      id: next?.id || generateUUID(),
       label: next?.label?.trim() || `Variant ${index + 1}`,
       content: next?.content || '',
     }
@@ -94,7 +96,7 @@ function normalizeGreetings(value: unknown): DreamWeaverGreeting[] {
   return value.map((entry, index) => {
     const next = entry as Partial<DreamWeaverGreeting> | null
     return {
-      id: next?.id || crypto.randomUUID(),
+      id: next?.id || generateUUID(),
       label: next?.label?.trim() || `Greeting ${index + 1}`,
       content: next?.content || '',
     }
@@ -230,6 +232,7 @@ function buildSessionPayload(
     dislikes: session.dislikes,
     persona_id: session.persona_id ?? fallbackPersonaId,
     connection_id: session.connection_id ?? fallbackConnectionId,
+    model: session.model,
     draft,
   }
 }
@@ -331,7 +334,7 @@ function VariantListEditor({
     onChange([
       ...items,
       {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         label: addLabel,
         content: '',
       },
@@ -413,6 +416,9 @@ export default function DreamWeaverStudioModal() {
   const [draft, setDraft] = useState<DreamWeaverDraft | null>(null)
   const [personas, setPersonas] = useState<Persona[]>(storedPersonas)
   const [connections, setConnections] = useState<ConnectionProfile[]>(storedProfiles)
+  const [connectionModels, setConnectionModels] = useState<string[]>([])
+  const [connectionModelLabels, setConnectionModelLabels] = useState<Record<string, string>>({})
+  const [connectionModelsLoading, setConnectionModelsLoading] = useState(false)
   const [activeSection, setActiveSection] = useState<SectionId>('dream')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -491,15 +497,41 @@ export default function DreamWeaverStudioModal() {
   const effectivePersonaId = session?.persona_id ?? activePersonaId ?? null
   const effectiveConnectionId = session?.connection_id ?? activeProfileId ?? null
 
+  const fetchConnectionModels = useCallback(async () => {
+    if (!effectiveConnectionId) {
+      setConnectionModels([])
+      setConnectionModelLabels({})
+      return
+    }
+
+    setConnectionModelsLoading(true)
+    try {
+      const result = await connectionsApi.models(effectiveConnectionId)
+      setConnectionModels(result.models || [])
+      setConnectionModelLabels(result.model_labels || {})
+    } catch {
+      setConnectionModels([])
+      setConnectionModelLabels({})
+    } finally {
+      setConnectionModelsLoading(false)
+    }
+  }, [effectiveConnectionId])
+
+  useEffect(() => {
+    void fetchConnectionModels()
+  }, [fetchConnectionModels])
+
   const sessionDetail = useMemo(() => {
     if (!session) return ''
 
     const parts = [new Date(session.updated_at * 1000).toLocaleString()]
     const personaName = personas.find((persona) => persona.id === effectivePersonaId)?.name
     const connectionName = connections.find((connection) => connection.id === effectiveConnectionId)?.name
+    const modelName = session.model?.trim()
 
     if (personaName) parts.push(personaName)
     if (connectionName) parts.push(connectionName)
+    if (modelName) parts.push(modelName)
 
     return parts.join('  •  ')
   }, [connections, effectiveConnectionId, effectivePersonaId, personas, session])
@@ -896,7 +928,10 @@ export default function DreamWeaverStudioModal() {
                       <select
                         className={styles.select}
                         value={effectiveConnectionId || ''}
-                        onChange={(event) => updateSessionField('connection_id', event.target.value || null)}
+                        onChange={(event) => {
+                          updateSessionField('connection_id', event.target.value || null)
+                          updateSessionField('model', null)
+                        }}
                       >
                         <option value="">Default connection</option>
                         {connections.map((connection) => (
@@ -905,6 +940,23 @@ export default function DreamWeaverStudioModal() {
                           </option>
                         ))}
                       </select>
+                    </Field>
+
+                    <Field label="Model" hint="Leave blank to use the selected connection profile's default model.">
+                      <ModelCombobox
+                        value={session.model || ''}
+                        onChange={(value) => updateSessionField('model', value.trim() || null)}
+                        models={connectionModels}
+                        modelLabels={connectionModelLabels}
+                        loading={connectionModelsLoading}
+                        onRefresh={fetchConnectionModels}
+                        autoRefreshOnFocus
+                        refreshKey={effectiveConnectionId || ''}
+                        appearance="editor"
+                        placeholder="Leave empty to use connection default"
+                        emptyMessage={effectiveConnectionId ? 'No models returned for this connection. Enter one manually or leave it blank to use the connection default.' : 'No connection available.'}
+                        disabled={!effectiveConnectionId}
+                      />
                     </Field>
                   </div>
 

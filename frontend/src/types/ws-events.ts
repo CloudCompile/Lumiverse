@@ -1,6 +1,7 @@
 export enum EventType {
   CONNECTED = 'CONNECTED',
   SETTINGS_UPDATED = 'SETTINGS_UPDATED',
+  CHARACTER_CREATED = 'CHARACTER_CREATED',
   CHARACTER_EDITED = 'CHARACTER_EDITED',
   CHARACTER_DELETED = 'CHARACTER_DELETED',
   PERSONA_CHANGED = 'PERSONA_CHANGED',
@@ -8,10 +9,14 @@ export enum EventType {
   MESSAGE_EDITED = 'MESSAGE_EDITED',
   MESSAGE_DELETED = 'MESSAGE_DELETED',
   MESSAGE_SWIPED = 'MESSAGE_SWIPED',
+  CHAT_CHANGED = 'CHAT_CHANGED',
+  CHAT_SWITCHED = 'CHAT_SWITCHED',
   GENERATION_STARTED = 'GENERATION_STARTED',
+  GENERATION_IN_PROGRESS = 'GENERATION_IN_PROGRESS',
   STREAM_TOKEN_RECEIVED = 'STREAM_TOKEN_RECEIVED',
   GENERATION_ENDED = 'GENERATION_ENDED',
   GENERATION_STOPPED = 'GENERATION_STOPPED',
+  GENERATION_ACKNOWLEDGED = 'GENERATION_ACKNOWLEDGED',
   GENERATION_ERROR = 'GENERATION_ERROR',
   CHAT_CREATED = 'CHAT_CREATED',
   CHAT_DELETED = 'CHAT_DELETED',
@@ -40,9 +45,11 @@ export enum EventType {
   SPINDLE_EXTENSION_UNLOADED = 'SPINDLE_EXTENSION_UNLOADED',
   SPINDLE_EXTENSION_ERROR = 'SPINDLE_EXTENSION_ERROR',
   SPINDLE_EXTENSION_STATUS = 'SPINDLE_EXTENSION_STATUS',
+  SPINDLE_RUNTIME_STATS = 'SPINDLE_RUNTIME_STATS',
   SPINDLE_BULK_UPDATE_PROGRESS = 'SPINDLE_BULK_UPDATE_PROGRESS',
   SPINDLE_BULK_UPDATE_COMPLETE = 'SPINDLE_BULK_UPDATE_COMPLETE',
   SPINDLE_FRONTEND_MSG = 'SPINDLE_FRONTEND_MSG',
+  SPINDLE_FRONTEND_PROCESS = 'SPINDLE_FRONTEND_PROCESS',
   SPINDLE_TOAST = 'SPINDLE_TOAST',
   MESSAGE_TAG_INTERCEPTED = 'MESSAGE_TAG_INTERCEPTED',
 
@@ -116,12 +123,35 @@ export enum EventType {
 
   // Memory Cortex
   CORTEX_REBUILD_PROGRESS = 'CORTEX_REBUILD_PROGRESS',
+  CORTEX_INGESTION_PROGRESS = 'CORTEX_INGESTION_PROGRESS',
 
   // MCP Servers
   MCP_SERVER_CONNECTED = 'MCP_SERVER_CONNECTED',
   MCP_SERVER_DISCONNECTED = 'MCP_SERVER_DISCONNECTED',
   MCP_SERVER_ERROR = 'MCP_SERVER_ERROR',
   MCP_SERVER_CHANGED = 'MCP_SERVER_CHANGED',
+
+  // Loom summary auto-summarization
+  SUMMARIZATION_STARTED = 'SUMMARIZATION_STARTED',
+  SUMMARIZATION_COMPLETED = 'SUMMARIZATION_COMPLETED',
+  SUMMARIZATION_FAILED = 'SUMMARIZATION_FAILED',
+}
+
+export interface SummarizationStartedPayload {
+  chatId: string
+  generationId: string
+  startedAt: number
+}
+
+export interface SummarizationCompletedPayload {
+  chatId: string
+  generationId: string
+}
+
+export interface SummarizationFailedPayload {
+  chatId: string
+  generationId: string
+  error: string
 }
 
 // ---- Operator ----
@@ -144,6 +174,7 @@ export interface OperatorStatusPayload {
   commit: string
   remoteMode: boolean
   ipcAvailable: boolean
+  ipcReason: 'connected' | 'not_started_with_runner' | 'runner_env_without_process_send'
   updateAvailable: boolean
   commitsBehind: number
   latestUpdateMessage: string
@@ -162,8 +193,27 @@ export interface WSEvent<T = any> {
 
 export interface StreamTokenPayload {
   generationId: string
+  chatId: string
   token: string
   type?: 'text' | 'reasoning'
+  seq?: number
+}
+
+export interface ContextClipStats {
+  enabled: boolean
+  maxContext: number
+  maxResponseTokens: number
+  safetyMargin: number
+  inputBudget: number
+  fixedTokens: number
+  remainingHistoryBudget: number
+  chatHistoryTokensBefore: number
+  chatHistoryTokensAfter: number
+  messagesDropped: number
+  tokensDropped: number
+  tokenizerUsed: string
+  budgetInvalid?: boolean
+  fixedOverBudget?: boolean
 }
 
 export interface GenerationStartedPayload {
@@ -172,6 +222,20 @@ export interface GenerationStartedPayload {
   targetMessageId?: string
   characterId?: string
   characterName?: string
+  contextClipStats?: ContextClipStats
+  breakdown?: Array<{
+    name: string
+    type: string
+    role?: string
+    content?: string
+    blockId?: string
+    extensionId?: string
+    extensionName?: string
+  }>
+}
+
+export interface GenerationInProgressPayload extends GenerationStartedPayload {
+  model?: string
 }
 
 export interface GenerationMetrics {
@@ -179,6 +243,8 @@ export interface GenerationMetrics {
   tps?: number
   durationMs: number
   wasStreaming: boolean
+  model?: string
+  provider?: string
 }
 
 export interface GenerationEndedPayload {
@@ -189,6 +255,11 @@ export interface GenerationEndedPayload {
   error?: string
   tokenCount?: number
   generationMetrics?: GenerationMetrics
+}
+
+export interface GenerationAcknowledgedPayload {
+  chatId: string
+  generationIds: string[]
 }
 
 export interface MessageSentPayload {
@@ -204,6 +275,17 @@ export interface MessageEditedPayload {
 export interface MessageDeletedPayload {
   chatId: string
   messageId: string
+}
+
+export interface ChatChangedPayload {
+  chat?: import('./api').Chat
+  chatId?: string
+  reattributedUserMessages?: number
+}
+
+export interface ChatSwitchedPayload {
+  /** The chat the user switched to, or `null` when returning to the home screen. */
+  chatId: string | null
 }
 
 export type MessageSwipeAction = 'added' | 'updated' | 'deleted' | 'navigated'
@@ -286,7 +368,7 @@ export interface SpindleToastPayload {
 // ---- Migration ----
 export interface MigrationProgressPayload {
   migrationId: string
-  phase: 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats'
+  phase: 'starting' | 'scanning' | 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats' | 'completed' | 'failed'
   label: string
   current: number
   total: number

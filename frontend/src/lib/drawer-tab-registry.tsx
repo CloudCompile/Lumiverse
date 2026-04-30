@@ -57,6 +57,27 @@ export interface DrawerTabEntry {
   component: () => ReactNode
 }
 
+export const CORE_DRAWER_TAB_IDS = new Set([
+  'profile',
+  'presets',
+  'loom',
+  'characters',
+  'personas',
+  'branches',
+  'spindle',
+  'theme',
+  'lorebook',
+])
+
+export function isDrawerTabCore(tabId: string): boolean {
+  return CORE_DRAWER_TAB_IDS.has(tabId)
+}
+
+export function sanitizeHiddenDrawerTabIds(hiddenTabIds?: string[] | null): string[] {
+  if (!Array.isArray(hiddenTabIds)) return []
+  return [...new Set(hiddenTabIds.filter((tabId): tabId is string => typeof tabId === 'string' && !isDrawerTabCore(tabId)))]
+}
+
 export const DRAWER_TABS: DrawerTabEntry[] = [
   {
     id: 'profile',
@@ -69,12 +90,12 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
   },
   {
     id: 'presets',
-    shortName: 'Presets',
+    shortName: 'Reason',
     tabName: 'Reasoning',
-    tabDescription: 'Manage generation presets and parameters',
+    tabDescription: 'Configure reasoning, chain-of-thought, and prompt behavior',
     tabIcon: Wand2,
     tabHeaderTitle: 'Reasoning',
-    keywords: ['presets', 'parameters', 'temperature', 'sampler', 'generation', 'reasoning', 'top_p', 'settings', 'max tokens', 'penalty', 'frequency', 'prompt order'],
+    keywords: ['reasoning', 'cot', 'chain of thought', 'thinking', 'reasoning effort', 'api reasoning', 'prompt bias', 'start reply with', 'prefix', 'suffix'],
     component: () => <PresetManager />,
   },
   {
@@ -197,12 +218,12 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
   },
   {
     id: 'prompt',
-    shortName: 'Prompt',
-    tabName: 'Prompt Inspector',
-    tabDescription: 'View the assembled prompt and token breakdown',
+    shortName: 'Compose',
+    tabName: 'Composition',
+    tabDescription: 'Pick Lumia and Loom content, Sovereign Hand, and context filters',
     tabIcon: FileText,
-    tabHeaderTitle: 'Prompt',
-    keywords: ['prompt', 'context', 'tokens', 'breakdown', 'inspect', 'debug', 'assembly', 'dry run', 'preview', 'system', 'blocks'],
+    tabHeaderTitle: 'Composition',
+    keywords: ['composition', 'compose', 'lumia', 'loom', 'sovereign hand', 'context filters', 'narrative', 'selection', 'modes'],
     component: () => <PromptPanel />,
   },
   {

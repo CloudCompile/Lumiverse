@@ -336,6 +336,8 @@ app.get("/status", (c) => {
       migrationId: active.migrationId,
       phase: active.phase,
       startedAt: active.startedAt,
+      progress: active.progress,
+      recentLogs: active.recentLogs,
     });
   }
 
@@ -346,6 +348,8 @@ app.get("/status", (c) => {
       migrationId: last.migrationId,
       phase: last.phase,
       startedAt: last.startedAt,
+      progress: last.progress,
+      recentLogs: last.recentLogs,
       results: last.results,
       error: last.error,
     });

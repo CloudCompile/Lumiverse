@@ -19,10 +19,27 @@ import { initIdentity } from "./crypto/init";
 import { initVapidKeys } from "./crypto/vapid";
 import { eventBus } from "./ws/bus";
 
+function isTermuxLikeEnvironment(): boolean {
+  return Boolean(process.env.TERMUX_VERSION)
+    || process.env.LUMIVERSE_IS_TERMUX === "true"
+    || process.env.LUMIVERSE_IS_PROOT === "true"
+    || process.env.PREFIX?.startsWith("/data/data/com.termux/") === true;
+}
+
 // Validate data directory is accessible and writable before any file operations.
 // This catches permission issues early (common on Termux/Android) instead of
 // letting them surface as cryptic failures in identity/credential file creation.
 mkdirSync(env.dataDir, { recursive: true });
+if (isTermuxLikeEnvironment()) {
+  // Keep library temp files on the same filesystem as DATA_DIR so LanceDB's
+  // temp/index staging does not hit EXDEV across /tmp, proot, or bind mounts.
+  const tempDir = join(env.dataDir, "tmp");
+  mkdirSync(tempDir, { recursive: true });
+  process.env.TMPDIR = tempDir;
+  process.env.TMP = tempDir;
+  process.env.TEMP = tempDir;
+  console.log(`[startup] Temp directory: ${tempDir}`);
+}
 try {
   const probe = join(env.dataDir, ".write-probe");
   await Bun.write(probe, "ok");
@@ -45,11 +62,31 @@ await initVapidKeys();
 const db = initDatabase();
 await runMigrations(db);
 
+// Chat-head generation state is intentionally ephemeral. Clear any retained
+// in-memory pool state during startup so clients never resurrect stale heads
+// after a restart or hot-reload.
+const { clearAllPoolEntries } = await import("./services/generation-pool.service");
+clearAllPoolEntries();
+
 // Dynamic import: auth modules call getDb() at module level, so must load after initDatabase()
 const { seedOwner, backfillUserIds, getFirstUserId } = await import("./auth/seed");
 const { operatorService } = await import("./services/operator.service");
 await seedOwner();
 backfillUserIds();
+
+console.log(
+  `[startup] Runner IPC: ${operatorService.ipcAvailable ? "connected" : `unavailable (${operatorService.ipcReason})`}`
+);
+
+// Load the operator-configured trusted host allowlist now that the owner is
+// known — the Host-header middleware in app.ts reads from this cache.
+const {
+  load: loadTrustedHosts,
+  getSnapshot: getTrustedHostsSnapshot,
+  detectHostnameSuggestions,
+} = await import("./services/trusted-hosts.service");
+loadTrustedHosts();
+
 runStartupDatabaseMaintenance(db, getDatabasePath(), getFirstUserId());
 startDatabaseMonitor(() => db, getDatabasePath());
 startAutomaticDatabaseMaintenance(
@@ -69,6 +106,14 @@ if (env.stMigrate) {
 // Seed built-in tokenizers after migrations are applied
 const { seedTokenizers } = await import("./services/tokenizer-seed");
 seedTokenizers();
+
+// Apply operator-configured sharp runtime settings before image work starts.
+const { initSharpSettings } = await import("./services/sharp-settings.service");
+initSharpSettings();
+
+// Start background vectorization maintenance only after the database is ready.
+const { startVectorizationQueueMaintenance } = await import("./services/vectorization-queue.service");
+startVectorizationQueueMaintenance();
 
 // Pre-warm tokenizers for configured connection models (fire-and-forget)
 import("./services/tokenizer.service").then(({ prewarm }) => prewarm()).catch(() => {});
@@ -94,16 +139,18 @@ await startAllExtensions().catch((err) => {
 console.log(`Lumiverse Backend starting on port ${env.port}...`);
 
 // Use explicit Bun.serve() so we get the Server reference for native pub/sub.
-// idleTimeout: 0 disables Bun's default 30-second idle connection cutoff so that
-// long-running generation requests (image gen, heavy LLM calls) are not terminated
-// prematurely. Application-level AbortSignal timeouts guard against hung providers.
+// idleTimeout: 255 (Bun's maximum) guards against slowloris-style attacks where
+// a malicious client holds a TCP connection open indefinitely without exchanging
+// data. Active streaming responses (LLM token streaming, image gen) continuously
+// send data and reset the idle timer, so they are unaffected. The previous value
+// of 0 (disabled) left the server exposed to connection exhaustion.
 const server = Bun.serve({
   port: env.port,
   hostname: "::",
   fetch: app.fetch,
   websocket,
   maxRequestBodySize: 1000 * 1024 * 1024, // 1000 MB — matches MAX_CHARX_SIZE in character-card.service.ts
-  idleTimeout: 0,
+  idleTimeout: 255,
 });
 
 // Give the EventBus access to the server for native topic-based publish().
@@ -136,11 +183,23 @@ setTimeout(() => {
   });
 }, 0);
 
+// Pre-warm trusted-host suggestions after the server starts listening so the
+// Operator tab usually hits a warm cache without slowing down boot.
+setTimeout(() => {
+  const snapshot = getTrustedHostsSnapshot();
+  detectHostnameSuggestions({ forceRefresh: true, baseline: snapshot.baseline }).catch((err) => {
+    console.warn("[trusted-hosts] Startup warm failed:", err instanceof Error ? err.message : err);
+  });
+}, 0);
+
 // Log trusted origins so it's visible in the runner and easy to verify that LAN IPs were detected and applied automatically.
 if (env.trustAnyOrigin) {
   console.log("[Auth] Trusted origins: ALL (TRUST_ANY_ORIGIN enabled)");
 } else {
-  console.log(`[Auth] Trusted origins:\n${env.trustedOrigins.map((o) => `  • ${o}`).join("\n")}`);
+  const snapshot = getTrustedHostsSnapshot();
+  const baselineLines = snapshot.baseline.map((e) => `  • ${e.host} (${e.source})`);
+  const configuredLines = snapshot.configured.map((h) => `  • ${h} (configured)`);
+  console.log(`[Auth] Trusted origins:\n${[...baselineLines, ...configuredLines].join("\n")}`);
 }
 
 // --- Graceful shutdown ---
@@ -181,12 +240,13 @@ async function gracefulShutdown(signal: string) {
   const { stopTicketSweep } = await import("./ws/tickets");
   const { stopOAuthStateSweep } = await import("./spindle/oauth-state");
   const { stopPkceSweep } = await import("./routes/lumihub.routes");
-  const { stopQueryCacheCleanup } = await import("./services/vectorization-queue.service");
+  const { stopQueryCacheCleanup, stopWorldBookVectorizationSweep } = await import("./services/vectorization-queue.service");
   const { stopVersionCheckCleanup } = await import("./services/embeddings.service");
   stopTicketSweep();
   stopOAuthStateSweep();
   stopPkceSweep();
   stopQueryCacheCleanup();
+  stopWorldBookVectorizationSweep();
   stopVersionCheckCleanup();
 
   // 5b. Tear down the regex sandbox worker pool so we don't leak the worker
@@ -198,7 +258,10 @@ async function gracefulShutdown(signal: string) {
   const { stopRateLimitSweep } = await import("./middleware/rate-limit");
   stopRateLimitSweep();
 
-  // 5d. Stop the Vertex AI token cache sweep.
+  // 5d. Stop the WS stale-client sweep timer.
+  eventBus.stopSweep();
+
+  // 5e. Stop the Vertex AI token cache sweep.
   const { stopVertexTokenSweep } = await import("./llm/providers/google-vertex");
   stopVertexTokenSweep();
 

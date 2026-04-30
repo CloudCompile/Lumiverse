@@ -1,12 +1,16 @@
-import { useMemo, useRef, useLayoutEffect, useState, useEffect, useCallback, useSyncExternalStore } from 'react'
+import { useMemo, useRef, useLayoutEffect, useState, useEffect, useCallback, useSyncExternalStore, useDeferredValue } from 'react'
 import { marked } from 'marked'
 import { highlightCode } from '@/lib/codeHighlight'
 import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
+import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
+import { healFormattingArtifacts } from '@/lib/formatHealing'
 import { resolveDisplayMacros } from '@/lib/resolveDisplayMacros'
 import { copyTextToClipboard } from '@/lib/clipboard'
+import { sanitizeHtmlIsland, sanitizeRichHtml } from '@/lib/richHtmlSanitizer'
 import {
-  stripAndDispatchMessageTags,
+  dispatchMessageTagIntercepts,
+  stripMessageTags,
   subscribeTagInterceptorRegistry,
   getTagInterceptorRegistryVersion,
 } from '@/lib/spindle/message-interceptors'
@@ -166,6 +170,39 @@ function addLazyLoadingToImages(html: string): string {
   return html.replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy"')
 }
 
+function normalizeLegacyFontTags(html: string): string {
+  return html
+    .replace(/<font\b([^>]*)>/gi, (_match, attrs: string) => {
+      const color = attrs.match(/\bcolor\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i)?.slice(1).find(Boolean)
+      const safeColor = color && /^[#\w\s(),.%+-]+$/.test(color) ? color : null
+
+      return safeColor ? `<span style="color:${escapeHtml(safeColor)}">` : '<span>'
+    })
+    .replace(/<\/font\s*>/gi, '</span>')
+}
+
+interface MarkdownFence {
+  marker: '`' | '~'
+  length: number
+}
+
+function getMarkdownFence(line: string): MarkdownFence | null {
+  const match = line.match(/^\s*(`{3,}|~{3,})/)
+  if (!match) return null
+  return {
+    marker: match[1][0] as MarkdownFence['marker'],
+    length: match[1].length,
+  }
+}
+
+function isMarkdownFenceClose(line: string, fence: MarkdownFence): boolean {
+  const trimmed = line.trimStart()
+  const run = trimmed.match(/^(`+|~+)/)?.[0]
+  if (!run) return false
+  if (run[0] !== fence.marker || run.length < fence.length) return false
+  return trimmed.slice(run.length).trim().length === 0
+}
+
 /**
  * Escape ordered-list patterns that don't form intentional multi-item lists.
  * Prevents lines like "25. She felt old" from rendering as <ol start="25">.
@@ -229,10 +266,12 @@ function escapeIsolatedOrderedListItems(text: string): string {
 
 function formatContent(raw: string): string {
   if (!raw) return ''
-  const normalized = normalizeQuotes(raw)
+  const healed = healFormattingArtifacts(raw)
+  const normalized = normalizeQuotes(healed)
   const listSafe = escapeIsolatedOrderedListItems(normalized)
   let html = marked.parse(listSafe, { async: false }) as string
   html = normalizeQuotesInHTML(html)
+  html = normalizeLegacyFontTags(html)
   html = colorizeDialogue(html)
   html = addLazyLoadingToImages(html)
   return html
@@ -244,6 +283,7 @@ marked.setOptions({
   gfm: true,
   silent: true,
   renderer,
+  tokenizer: createStrictTildeTokenizer(),
 })
 
 // ── HTML Island Isolation ──
@@ -256,6 +296,7 @@ const HTML_ISLAND_TOKEN = 'LUMIVERSE_HTML_ISLAND'
 const ISLAND_RE = new RegExp(`<!--${HTML_ISLAND_TOKEN}_(\\d+)-->`, 'g')
 const BLOCK_ELEMENT_RE = /^<(div|section|article|aside|nav|main|header|footer|form|fieldset|figure|details)\b/i
 const INLINE_STYLE_ATTR_RE = /\bstyle\s*=/gi
+const NO_ISLAND_ATTR_RE = /\bdata-no-island\b/i
 
 /** Detect HTML blocks with enough inline styling to warrant island extraction. */
 function hasSignificantInlineStyles(html: string): boolean {
@@ -267,19 +308,18 @@ function hasSignificantInlineStyles(html: string): boolean {
   return false
 }
 
+function hasBalancedStyleTags(html: string): boolean {
+  const opens = (html.match(/<style[\s>]/gi) || []).length
+  const closes = (html.match(/<\/style\s*>/gi) || []).length
+  return opens === closes
+}
+
 function extractHtmlIslands(
   raw: string,
   isStreaming: boolean,
 ): { content: string; islands: string[] } {
   const hasStyleTag = /<style[\s>]/i.test(raw)
   if (!hasStyleTag && !/\bstyle\s*=/i.test(raw)) return { content: raw, islands: [] }
-
-  // Don't extract <style>-based islands during streaming if a <style> tag is still unclosed
-  if (isStreaming && hasStyleTag) {
-    const opens = (raw.match(/<style[\s>]/gi) || []).length
-    const closes = (raw.match(/<\/style\s*>/gi) || []).length
-    if (opens > closes) return { content: raw, islands: [] }
-  }
 
   const islands: string[] = []
   const lines = raw.split('\n')
@@ -288,6 +328,24 @@ function extractHtmlIslands(
 
   while (i < lines.length) {
     const trimmed = lines[i].trim()
+
+    // Fenced markdown code blocks are literal content and must not be scanned
+    // for extractable HTML islands.
+    const fence = getMarkdownFence(lines[i])
+    if (fence) {
+      output.push(lines[i])
+      i++
+
+      while (i < lines.length) {
+        output.push(lines[i])
+        if (isMarkdownFenceClose(lines[i], fence)) {
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
 
     // Strategy 1: Block-level element that might wrap a <style> block or
     // contain significant inline styling (e.g. phone screens, UI mockups).
@@ -310,8 +368,21 @@ function extractHtmlIslands(
 
       const blockContent = blockLines.join('\n')
 
-      // Isolate if balanced and contains <style> or significant inline styling
-      if (depth <= 0 && (/<style[\s>]/i.test(blockContent) || hasSignificantInlineStyles(blockContent))) {
+      const openingTagEnd = blockContent.indexOf('>')
+      const openingTag = openingTagEnd >= 0 ? blockContent.slice(0, openingTagEnd) : blockContent
+      if (NO_ISLAND_ATTR_RE.test(openingTag)) {
+        output.push(...blockLines)
+        continue
+      }
+
+      const isIslandCandidate = /<style[\s>]/i.test(blockContent) || hasSignificantInlineStyles(blockContent)
+      const canRenderStreamingPreview = isStreaming && hasBalancedStyleTags(blockContent)
+
+      // While a styled HTML wrapper is still streaming, keep it inside a Shadow DOM
+      // island as soon as its internal <style> tags are balanced. That preserves the
+      // authored presentation instead of falling back to prose sanitization until the
+      // outer wrapper finally closes.
+      if (isIslandCandidate && (depth <= 0 || canRenderStreamingPreview)) {
         const idx = islands.length
         islands.push(blockContent)
         output.push('', `<!--${HTML_ISLAND_TOKEN}_${idx}-->`, '')
@@ -331,6 +402,14 @@ function extractHtmlIslands(
         buf.push(lines[i])
         if (/<\/style\s*>/i.test(lines[i])) { i++; break }
         i++
+      }
+
+      // During streaming, don't extract an incomplete <style> block as an island.
+      // Let it fall through to prose sanitization until the closing tag arrives.
+      const styleBlock = buf.join('\n')
+      if (isStreaming && !hasBalancedStyleTags(styleBlock)) {
+        output.push(...buf)
+        continue
       }
 
       let depth = 0
@@ -356,7 +435,7 @@ function extractHtmlIslands(
           if (depth <= 0) {
             let p = i
             while (p < lines.length && !lines[p].trim()) p++
-            if (p >= lines.length || !/^<[a-zA-Z\/]/.test(lines[p].trim())) break
+            if (p >= lines.length || !/^[a-zA-Z\/]/.test(lines[p].trim())) break
           }
         } else {
           break
@@ -420,7 +499,7 @@ function processMarkdownInIsland(html: string): string {
     result = result.replace(`<!--ISLAND_STYLE_${i}-->`, styleBlocks[i])
   }
 
-  return result
+  return normalizeLegacyFontTags(result)
 }
 
 interface ContentPiece {
@@ -434,7 +513,7 @@ function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] 
   const { content, islands } = extractHtmlIslands(raw, isStreaming)
 
   if (islands.length === 0) {
-    return [{ type: 'markup', content: formatContent(raw) }]
+    return [{ type: 'markup', content: sanitizeRichHtml(formatContent(raw)) }]
   }
 
   const html = formatContent(content)
@@ -443,16 +522,50 @@ function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] 
 
   for (const m of html.matchAll(ISLAND_RE)) {
     const before = html.slice(lastIdx, m.index!)
-    if (before.trim()) pieces.push({ type: 'markup', content: before })
+    if (before.trim()) pieces.push({ type: 'markup', content: sanitizeRichHtml(before) })
     const idx = parseInt(m[1], 10)
-    if (islands[idx] != null) pieces.push({ type: 'island', content: processMarkdownInIsland(islands[idx]) })
+    if (islands[idx] != null) {
+      pieces.push({ type: 'island', content: sanitizeHtmlIsland(processMarkdownInIsland(islands[idx])) })
+    }
     lastIdx = m.index! + m[0].length
   }
 
   const after = html.slice(lastIdx)
-  if (after.trim()) pieces.push({ type: 'markup', content: after })
+  if (after.trim()) pieces.push({ type: 'markup', content: sanitizeRichHtml(after) })
 
   return pieces
+}
+
+function attachCodeCopyHandler(root: HTMLElement | ShadowRoot): () => void {
+  const handleClick = (e: MouseEvent) => {
+    const target = e.target
+    if (!(target instanceof Element)) return
+
+    const btn = target.closest('[data-code-copy]') as HTMLButtonElement | null
+    if (!btn) return
+
+    const codeBlock = btn.closest(`.${styles.codeBlock}`)
+    const codeEl = codeBlock?.querySelector('code')
+    if (!codeEl) return
+
+    const text = codeEl.textContent || ''
+    copyTextToClipboard(text).then(() => {
+      const label = btn.querySelector('span')
+      if (label) {
+        label.textContent = 'Copied!'
+        btn.classList.add(styles.codeCopied)
+        setTimeout(() => {
+          label.textContent = 'Copy'
+          btn.classList.remove(styles.codeCopied)
+        }, 2000)
+      }
+    }).catch((err) => {
+      console.error('[MessageContent] Copy failed:', err)
+    })
+  }
+
+  root.addEventListener('click', handleClick)
+  return () => root.removeEventListener('click', handleClick)
 }
 
 function IsolatedHtml({ html }: { html: string }) {
@@ -463,9 +576,50 @@ function IsolatedHtml({ html }: { html: string }) {
     if (!el) return
     const shadow = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
     shadow.innerHTML = html
+    return attachCodeCopyHandler(shadow)
   }, [html])
 
   return <div ref={ref} className={styles.htmlIsland} />
+}
+
+/**
+ * dangerouslySetInnerHTML wrapper that preserves IMG element identity by
+ * src across innerHTML replacements, so images don't redo the cache lookup,
+ * decode, paint cycle on every chat re-render.
+ */
+function ProseHtml({ html, className }: { html: string; className?: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const lastHtmlRef = useRef<string | null>(null)
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    if (lastHtmlRef.current === html) return
+
+    const stableImgs = new Map<string, HTMLImageElement>()
+    if (lastHtmlRef.current !== null) {
+      for (const img of el.querySelectorAll<HTMLImageElement>('img[src]')) {
+        const src = img.getAttribute('src')
+        if (src && !stableImgs.has(src)) stableImgs.set(src, img)
+      }
+    }
+
+    el.innerHTML = html
+    lastHtmlRef.current = html
+
+    if (stableImgs.size === 0) return
+    for (const newImg of el.querySelectorAll<HTMLImageElement>('img[src]')) {
+      const src = newImg.getAttribute('src')
+      if (!src) continue
+      const preserved = stableImgs.get(src)
+      if (preserved && newImg.parentNode) {
+        newImg.replaceWith(preserved)
+        stableImgs.delete(src)
+      }
+    }
+  }, [html])
+
+  return <div ref={ref} className={className} />
 }
 
 // Risu <img="AssetName"> tag pattern — resolved at display time using character's asset map
@@ -473,6 +627,9 @@ const RISU_IMG_TAG_RE = /<img="([^"]+)">/gi
 
 // Standard <img src="AssetName"> where src is a relative asset reference (not a URL)
 const IMG_SRC_ASSET_RE = /<img\b([^>]*)\bsrc=["']([^"']+)["']([^>]*)>/gi
+
+// Markdown ![alt](src) where src is a relative asset reference (not a URL)
+const MARKDOWN_IMG_RE = /!\[([^\]]*)\]\(([^)]+)\)/g
 
 /** Strip path prefix and file extension to get the asset stem. */
 function assetStem(name: string): string {
@@ -517,6 +674,24 @@ function resolveImgSrcAssetTags(text: string, assetMap: Record<string, string>):
   })
 }
 
+/** Resolve markdown ![alt](src) images where src is an unresolved asset reference.
+ *  Handles the common AI-generated pattern of referencing Risu assets by relative
+ *  filename (including extensions like .webp/.png/.jpg). Already-resolved URLs are
+ *  left as-is. Strips a trailing markdown title ("...") before lookup. */
+function resolveMarkdownImgTags(text: string, assetMap: Record<string, string>): string {
+  if (!text.includes('![')) return text
+  MARKDOWN_IMG_RE.lastIndex = 0
+  return text.replace(MARKDOWN_IMG_RE, (match, alt: string, rawSrc: string) => {
+    // Strip trailing markdown title: ![alt](src "title") → src
+    const src = rawSrc.trim().replace(/\s+["'][^"']*["']\s*$/, '').trim()
+    if (!src) return match
+    if (/^(?:https?:\/\/|\/|data:)/i.test(src)) return match
+    const imageId = resolveAssetId(src, assetMap)
+    if (imageId) return `![${alt}](/api/v1/images/${imageId})`
+    return match
+  })
+}
+
 export default function MessageContent({
   content,
   isUser,
@@ -557,41 +732,48 @@ export default function MessageContent({
     getTagInterceptorRegistryVersion,
     getTagInterceptorRegistryVersion,
   )
-  const interceptorCleanedContent = useMemo(
-    () => stripAndDispatchMessageTags(content, { messageId, chatId, isUser, isStreaming }),
+  const interceptedMessageTags = useMemo(
+    () => stripMessageTags(content, { messageId, chatId, isUser, isStreaming }),
     [content, messageId, chatId, isUser, isStreaming, interceptorRegistryVersion],
   )
+
+  useLayoutEffect(() => {
+    dispatchMessageTagIntercepts(interceptedMessageTags.intercepts)
+  }, [interceptedMessageTags.intercepts])
+
+  const interceptorCleanedContent = interceptedMessageTags.content
 
   // Resolve Risu asset tags before regex/macro processing:
   // 1. <img="AssetName"> (Risu custom syntax) → markdown image
   // 2. <img src="AssetName"> (standard HTML with relative asset ref) → resolved src URL
+  // 3. ![alt](AssetName.ext) (markdown image with relative asset ref) → resolved src URL
   const risuResolvedContent = useMemo(
     () => {
       if (!risuAssetMap) return interceptorCleanedContent
       let resolved = resolveRisuAssetTags(interceptorCleanedContent, risuAssetMap)
       resolved = resolveImgSrcAssetTags(resolved, risuAssetMap)
+      resolved = resolveMarkdownImgTags(resolved, risuAssetMap)
       return resolved
     },
     [interceptorCleanedContent, risuAssetMap],
   )
 
-  const applyRegex = useDisplayRegex()
   const macroCtx = useMemo(() => ({ charName, userName }), [charName, userName])
-  const regexAppliedContent = useMemo(
-    () => applyRegex(risuResolvedContent, isUser, depth, macroCtx),
-    [applyRegex, risuResolvedContent, isUser, depth, macroCtx],
-  )
+  const regexAppliedContent = useDisplayRegex(risuResolvedContent, isUser, depth, macroCtx)
   const resolvedContent = useMemo(
     () => resolveDisplayMacros(regexAppliedContent, { charName, userName }),
     [regexAppliedContent, charName, userName],
   )
-
-  const blocks = useMemo(() => parseOOC(resolvedContent), [resolvedContent])
+  const deferredResolvedContent = useDeferredValue(resolvedContent)
+  const renderContent = isStreaming ? deferredResolvedContent : resolvedContent
+  const blocks = useMemo(() => parseOOC(renderContent), [renderContent])
   const oocEnabled = useStore((s) => s.oocEnabled)
   const lumiaOOCStyle = useStore((s) => s.lumiaOOCStyle)
   const containerRef = useRef<HTMLDivElement>(null)
   const prevTextLenRef = useRef(0)
+  const maxStreamingHeightRef = useRef(0)
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+  const [streamingMinHeight, setStreamingMinHeight] = useState<number | null>(null)
 
   const handleLightboxClose = useCallback(() => setLightboxSrc(null), [])
 
@@ -611,30 +793,35 @@ export default function MessageContent({
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const handleClick = (e: MouseEvent) => {
-      const btn = (e.target as HTMLElement).closest('[data-code-copy]') as HTMLButtonElement | null
-      if (!btn) return
-      const codeBlock = btn.closest(`.${styles.codeBlock}`)
-      const codeEl = codeBlock?.querySelector('code')
-      if (!codeEl) return
-      const text = codeEl.textContent || ''
-      copyTextToClipboard(text).then(() => {
-        const label = btn.querySelector('span')
-        if (label) {
-          label.textContent = 'Copied!'
-          btn.classList.add(styles.codeCopied)
-          setTimeout(() => {
-            label.textContent = 'Copy'
-            btn.classList.remove(styles.codeCopied)
-          }, 2000)
-        }
-      }).catch((err) => {
-        console.error('[MessageContent] Copy failed:', err)
-      })
-    }
-    container.addEventListener('click', handleClick)
-    return () => container.removeEventListener('click', handleClick)
+    return attachCodeCopyHandler(container)
   }, [])
+
+  useLayoutEffect(() => {
+    if (!isStreaming) {
+      maxStreamingHeightRef.current = 0
+      setStreamingMinHeight(null)
+      return
+    }
+
+    const container = containerRef.current
+    if (!container) return
+
+    const updateMinHeight = () => {
+      const nextHeight = Math.ceil(container.getBoundingClientRect().height)
+      if (nextHeight <= maxStreamingHeightRef.current) return
+      maxStreamingHeightRef.current = nextHeight
+      setStreamingMinHeight(nextHeight)
+    }
+
+    updateMinHeight()
+
+    const observer = new ResizeObserver(() => {
+      updateMinHeight()
+    })
+
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [isStreaming])
 
   const renderedBlocks = useMemo(() => {
     const elements: React.ReactNode[] = []
@@ -672,7 +859,7 @@ export default function MessageContent({
             elements.push(
               piece.type === 'island'
                 ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} />
-                : <div key={`${i}-${p}`} className={styles.prose} dangerouslySetInnerHTML={{ __html: piece.content }} />
+                : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} />
             )
           }
         }
@@ -693,7 +880,7 @@ export default function MessageContent({
             elements.push(
               piece.type === 'island'
                 ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} />
-                : <div key={`${i}-${p}`} className={styles.prose} dangerouslySetInnerHTML={{ __html: piece.content }} />
+                : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} />
             )
           }
         }
@@ -764,6 +951,7 @@ export default function MessageContent({
         data-component="MessageContent"
         ref={containerRef}
         className={clsx(styles.content, isUser ? styles.contentUser : styles.contentChar)}
+        style={streamingMinHeight ? { minHeight: `${streamingMinHeight}px` } : undefined}
       >
         {renderedBlocks}
       </div>

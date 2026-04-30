@@ -1,5 +1,6 @@
 import * as apiClient from './client'
 import type { ComfyUICapabilities } from './image-gen'
+import { generateUUID } from '@/lib/uuid'
 
 export interface DreamWeaverAlternateField {
   id: string
@@ -182,6 +183,7 @@ export interface DreamWeaverSession {
   dislikes: string | null
   persona_id: string | null
   connection_id: string | null
+  model: string | null
   draft: string | null
   status: 'draft' | 'generating' | 'complete' | 'error'
   soul_state: 'empty' | 'generating' | 'ready' | 'error'
@@ -202,6 +204,11 @@ export interface DreamWeaverFinalizeResult {
   characterId: string
   chatId: string | null
   alreadyFinalized: boolean
+}
+
+export interface DreamWeaverRepairCharacterResult {
+  characterId: string | null
+  repaired: boolean
 }
 
 export type ExtendTarget =
@@ -234,6 +241,7 @@ export interface CreateSessionInput {
   dislikes?: string
   persona_id?: string
   connection_id?: string
+  model?: string
 }
 
 export interface UpdateSessionInput {
@@ -243,6 +251,7 @@ export interface UpdateSessionInput {
   dislikes?: string | null
   persona_id?: string | null
   connection_id?: string | null
+  model?: string | null
   draft?: DreamWeaverDraft | null
 }
 
@@ -267,18 +276,46 @@ export function createDefaultVisualAssets(): DreamWeaverVisualAsset[] {
   ]
 }
 
+function coerceString(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value == null) return ''
+  if (Array.isArray(value)) {
+    return value.map((entry) => coerceString(entry)).filter(Boolean).join('\n')
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return ''
+    }
+  }
+  return String(value)
+}
+
+function normalizeStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined
+
+  const normalized: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    const nextValue = coerceString(entry).trim()
+    if (nextValue) normalized[key] = nextValue
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
 function normalizeAltFields(value: unknown): DreamWeaverAlternateField[] {
   if (!Array.isArray(value)) return []
 
   return value.map((entry, index) => {
     const next = isRecord(entry) ? entry : null
     return {
-      id: typeof next?.id === 'string' && next.id.trim() ? next.id : crypto.randomUUID(),
+      id: typeof next?.id === 'string' && next.id.trim() ? next.id : generateUUID(),
       label:
-        typeof next?.label === 'string' && next.label.trim()
-          ? next.label.trim()
+        coerceString(next?.label).trim()
+          ? coerceString(next?.label).trim()
           : `Variant ${index + 1}`,
-      content: typeof next?.content === 'string' ? next.content : '',
+      content: coerceString(next?.content),
     }
   })
 }
@@ -289,19 +326,19 @@ function normalizeGreetings(value: unknown): DreamWeaverGreeting[] {
   return value.map((entry, index) => {
     const next = isRecord(entry) ? entry : null
     return {
-      id: typeof next?.id === 'string' && next.id.trim() ? next.id : crypto.randomUUID(),
+      id: typeof next?.id === 'string' && next.id.trim() ? next.id : generateUUID(),
       label:
-        typeof next?.label === 'string' && next.label.trim()
-          ? next.label.trim()
+        coerceString(next?.label).trim()
+          ? coerceString(next?.label).trim()
           : `Greeting ${index + 1}`,
-      content: typeof next?.content === 'string' ? next.content : '',
+      content: coerceString(next?.content),
     }
   })
 }
 
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
-  return value.map((item) => String(item ?? '').trim()).filter(Boolean)
+  return value.map((item) => coerceString(item).trim()).filter(Boolean)
 }
 
 export function normalizeDreamWeaverDraft(
@@ -313,32 +350,32 @@ export function normalizeDreamWeaverDraft(
   const voice: Record<string, any> = isRecord(next.voice_guidance) ? next.voice_guidance : {}
   const rules: Record<string, any> = isRecord(voice.rules) ? voice.rules : {}
   const alternateFields: Record<string, any> = isRecord(next.alternate_fields) ? next.alternate_fields : {}
-  const appearanceData = isRecord(card.appearance_data) ? card.appearance_data : undefined
+  const appearanceData = normalizeStringRecord(card.appearance_data)
 
   const normalizedDraft: DreamWeaverDraft = {
     format: 'DW_DRAFT_V1',
     version: 1,
     kind: next.kind === 'scenario' ? 'scenario' : 'character',
     meta: {
-      title: typeof meta.title === 'string' ? meta.title : '',
-      summary: typeof meta.summary === 'string' ? meta.summary : '',
+      title: coerceString(meta.title),
+      summary: coerceString(meta.summary),
       tags: normalizeStringArray(meta.tags),
       content_rating: meta.content_rating === 'nsfw' ? 'nsfw' : 'sfw',
     },
     card: {
-      name: typeof card.name === 'string' ? card.name : '',
-      appearance: typeof card.appearance === 'string' ? card.appearance : '',
+      name: coerceString(card.name),
+      appearance: coerceString(card.appearance),
       appearance_data: appearanceData,
-      description: typeof card.description === 'string' ? card.description : '',
-      personality: typeof card.personality === 'string' ? card.personality : '',
-      scenario: typeof card.scenario === 'string' ? card.scenario : '',
-      first_mes: typeof card.first_mes === 'string' ? card.first_mes : '',
-      system_prompt: typeof card.system_prompt === 'string' ? card.system_prompt : '',
+      description: coerceString(card.description),
+      personality: coerceString(card.personality),
+      scenario: coerceString(card.scenario),
+      first_mes: coerceString(card.first_mes),
+      system_prompt: coerceString(card.system_prompt),
       post_history_instructions:
-        typeof card.post_history_instructions === 'string' ? card.post_history_instructions : '',
+        coerceString(card.post_history_instructions),
     },
     voice_guidance: {
-      compiled: typeof voice.compiled === 'string' ? voice.compiled : '',
+      compiled: coerceString(voice.compiled),
       rules: {
         baseline: normalizeStringArray(rules.baseline),
         rhythm: normalizeStringArray(rules.rhythm),
@@ -562,6 +599,9 @@ export const dreamWeaverApi = {
 
   finalize: (id: string) =>
     apiClient.post<DreamWeaverFinalizeResult>(`/dream-weaver/sessions/${id}/finalize`, {}),
+
+  repairCharacter: (id: string) =>
+    apiClient.post<DreamWeaverRepairCharacterResult>(`/dream-weaver/sessions/${id}/repair-character`, {}),
 
   extend: (
     id: string,

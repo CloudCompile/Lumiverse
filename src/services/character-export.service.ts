@@ -1,4 +1,4 @@
-import sharp from "sharp";
+import sharp from "../utils/sharp-config";
 import { extname } from "path";
 import { zipSync } from "fflate";
 import { getCharacter } from "./characters.service";
@@ -33,6 +33,60 @@ function crc32(buf: Uint8Array): number {
 // ── PNG text chunk embedding ────────────────────────────────────────────────
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+/** PNG text-chunk keywords used to carry character card data. */
+const CARD_TEXT_KEYWORDS = new Set(["ccv3", "chara"]);
+
+/**
+ * Removes all tEXt/zTXt/iTXt chunks whose keyword is in the given set. Needed
+ * because avatar PNGs frequently arrive with embedded card data from their
+ * original upload; leaving those stale chunks in place would cause readers
+ * that pick the first matching chunk to return pre-edit data after export.
+ */
+function stripPngTextChunks(pngBuffer: Buffer, keywords: Set<string>): Buffer {
+  if (pngBuffer.length < 8 || !pngBuffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    return pngBuffer;
+  }
+
+  const parts: Buffer[] = [pngBuffer.subarray(0, 8)];
+  let offset = 8;
+  let stripped = false;
+
+  while (offset + 12 <= pngBuffer.length) {
+    const length = pngBuffer.readUInt32BE(offset);
+    const type = pngBuffer.toString("ascii", offset + 4, offset + 8);
+    const chunkEnd = offset + 8 + length + 4;
+    if (chunkEnd > pngBuffer.length) break;
+
+    let skip = false;
+    if (type === "tEXt" || type === "zTXt" || type === "iTXt") {
+      const data = pngBuffer.subarray(offset + 8, offset + 8 + length);
+      const nullIdx = data.indexOf(0);
+      if (nullIdx !== -1) {
+        const key = data.toString("ascii", 0, nullIdx);
+        if (keywords.has(key)) skip = true;
+      }
+    }
+
+    if (!skip) parts.push(pngBuffer.subarray(offset, chunkEnd));
+    else stripped = true;
+
+    offset = chunkEnd;
+    if (type === "IEND") break;
+  }
+
+  return stripped ? Buffer.concat(parts) : pngBuffer;
+}
+
+/**
+ * Strips card-related tEXt/zTXt/iTXt chunks (ccv3, chara) from a PNG so that
+ * stale embedded card data doesn't survive into a fresh export. Safe to call
+ * on non-PNG buffers — returns the input unchanged.
+ */
+export function stripCardTextChunks(buffer: Buffer | Uint8Array): Buffer {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  return stripPngTextChunks(buf, CARD_TEXT_KEYWORDS);
+}
 
 /**
  * Embeds a tEXt chunk into a PNG buffer, inserted before the first IDAT chunk.
@@ -271,6 +325,11 @@ export async function exportAsPng(userId: string, characterId: string): Promise<
     avatarBuffer = await sharp(avatarBuffer).png().toBuffer();
   }
 
+  // The on-disk avatar is often the original card upload, which still carries
+  // its pre-edit `ccv3`/`chara` tEXt chunks. Those must be removed before we
+  // append a fresh chunk — otherwise first-match readers return stale data.
+  avatarBuffer = stripCardTextChunks(avatarBuffer);
+
   // Build CCSv3 JSON and base64-encode it
   const ccsv3 = buildCCSv3Json(userId, character);
   const jsonStr = JSON.stringify(ccsv3);
@@ -316,11 +375,14 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
   // card.json at root
   entries["card.json"] = new TextEncoder().encode(JSON.stringify(ccsv3, null, 2));
 
-  // Primary avatar — CHARX spec: assets/{category}/{type}/{filename}
+  // Primary avatar — CHARX spec: assets/{category}/{type}/{filename}.
+  // Strip any stale card tEXt chunks so the archive's avatar can't shadow
+  // card.json for readers that peek at PNG text chunks.
   if (character.image_id) {
     const img = await readImageBytes(userId, character.image_id);
     if (img) {
-      entries[`assets/icon/image/main${img.ext}`] = img.bytes;
+      const cleaned = stripCardTextChunks(img.bytes);
+      entries[`assets/icon/image/main${img.ext}`] = new Uint8Array(cleaned);
     }
   }
 
@@ -411,7 +473,8 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
       const img = await readImageBytes(userId, entry.image_id);
       if (img) {
         const archivePath = `assets/icon/image/${entry.id}${img.ext}`;
-        entries[archivePath] = img.bytes;
+        const cleaned = stripCardTextChunks(img.bytes);
+        entries[archivePath] = new Uint8Array(cleaned);
         altAvatars.push({ id: entry.id, label: entry.label, path: archivePath });
       }
     }

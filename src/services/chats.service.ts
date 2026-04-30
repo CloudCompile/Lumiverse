@@ -12,7 +12,8 @@ import * as embeddingsSvc from "./embeddings.service";
 import * as memoryCortex from "./memory-cortex";
 import { removePoolEntriesForChat } from "./generation-pool.service";
 import { invalidateChatMemoryCache, scheduleChatMemoryRefresh } from "./chat-memory-cache.service";
-import { sanitizeForVectorization } from "../utils/content-sanitizer";
+import { sanitizeForVectorization, type SanitizeOptions } from "../utils/content-sanitizer";
+import { getReasoningStripOptions } from "../utils/reasoning-strip";
 
 // --- Chat helpers ---
 
@@ -187,6 +188,51 @@ export function listChatSummaries(userId: string, characterId: string): ChatSumm
   }));
 }
 
+export function listGroupChatSummaries(userId: string, characterIds?: string[]): ChatSummary[] {
+  const db = getDb();
+  const normalizedIds = Array.isArray(characterIds)
+    ? Array.from(new Set(characterIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)))
+    : [];
+
+  const selectClause = `
+    SELECT
+      c.id,
+      c.name,
+      c.created_at,
+      c.updated_at,
+      (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) as message_count
+    FROM chats c
+  `;
+
+  const rows = normalizedIds.length > 0
+    ? db.query(`
+        ${selectClause}
+        WHERE c.user_id = ?
+          AND json_extract(c.metadata, '$.group') = 1
+          AND json_array_length(c.metadata, '$.character_ids') = ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM json_each(c.metadata, '$.character_ids') AS member
+            WHERE member.value NOT IN (${normalizedIds.map(() => "?").join(", ")})
+          )
+        ORDER BY c.updated_at DESC
+      `).all(userId, normalizedIds.length, ...normalizedIds) as any[]
+    : db.query(`
+        ${selectClause}
+        WHERE c.user_id = ?
+          AND json_extract(c.metadata, '$.group') = 1
+        ORDER BY c.updated_at DESC
+      `).all(userId) as any[];
+
+  return rows.map((row: any) => ({
+    id: row.id,
+    name: row.name || '',
+    message_count: row.message_count || 0,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+}
+
 // Prepared statement for hot-path chat fetch. We re-bind whenever the DB
 // generation token changes (e.g. test teardown or migration reopens the
 // database) — a statement bound to a closed Database silently fails.
@@ -234,7 +280,12 @@ export function createChat(userId: string, input: CreateChatInput): Chat {
         is_user: false,
         name: getEffectiveCharacterName(character),
         content: greeting,
-      });
+        extra: {
+          greeting: true,
+          greeting_character_id: character.id,
+          greeting_index: input.greeting_index ?? 0,
+        },
+      }, userId);
     }
   }
 
@@ -260,6 +311,18 @@ export function deleteChat(userId: string, id: string): boolean {
   if (result.changes > 0) {
     invalidateChatMemoryCache(id);
     removePoolEntriesForChat(userId, id);
+
+    // Clean up long-term chat memory (LanceDB vectors)
+    embeddingsSvc.deleteChatChunkEmbeddings(userId, id).catch(err => {
+      console.warn(`[chats] Failed to delete LanceDB chat_chunk vectors for chat ${id}:`, err);
+    });
+
+    try {
+      memoryCortex.invalidateCortexCache(id);
+      memoryCortex.invalidateLinkedCortexCache(id);
+      memoryCortex.clearIngestionState(id);
+    } catch { /* ignore if not loaded */ }
+
     // Drop any debounced vectorization timers tied to this chat — without
     // this the gc.dirtyChunks Map would hold timers for a chat that no longer
     // exists until they fire and quietly fail.
@@ -289,8 +352,9 @@ export function updateChat(userId: string, id: string, input: UpdateChatInput): 
   fields.push("updated_at = ?");
   values.push(now);
   values.push(id);
+  values.push(userId);
 
-  getDb().query(`UPDATE chats SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  getDb().query(`UPDATE chats SET ${fields.join(", ")} WHERE id = ? AND user_id = ?`).run(...values);
   const updated = getChat(userId, id)!;
   eventBus.emit(EventType.CHAT_CHANGED, { chat: updated }, userId);
 
@@ -400,6 +464,11 @@ export function addGroupMember(
         is_user: false,
         name: getEffectiveCharacterName(character),
         content: greeting,
+        extra: {
+          greeting: true,
+          greeting_character_id: character.id,
+          greeting_index: options?.greeting_index ?? 0,
+        },
       }, userId);
     }
   }
@@ -458,7 +527,7 @@ export function reattributeUserMessages(userId: string, chatId: string, personaI
     .query("SELECT id, extra FROM messages WHERE chat_id = ? AND is_user = 1")
     .all(chatId) as Array<{ id: string; extra: string }>;
 
-  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
+  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ? AND chat_id = ?");
   // Wrap the per-message updates in a single transaction so a crash partway
   // through can never leave the chat in a half-renamed state.
   db.transaction(() => {
@@ -470,7 +539,7 @@ export function reattributeUserMessages(userId: string, chatId: string, personaI
         extra = {};
       }
       extra.persona_id = personaId;
-      update.run(personaName, JSON.stringify(extra), row.id);
+      update.run(personaName, JSON.stringify(extra), row.id, chatId);
     }
   })();
 
@@ -494,7 +563,7 @@ export function bulkReattributeByPersonaName(userId: string, personaMap: Map<str
     )
     .all(userId) as Array<{ id: string; chat_id: string; name: string; extra: string }>;
 
-  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ?");
+  const update = db.query("UPDATE messages SET name = ?, extra = ? WHERE id = ? AND chat_id = ?");
   let messagesUpdated = 0;
   const updatedChatIds = new Set<string>();
 
@@ -514,7 +583,7 @@ export function bulkReattributeByPersonaName(userId: string, personaMap: Map<str
       if (!match) continue;
 
       extra.persona_id = match.id;
-      update.run(match.name, JSON.stringify(extra), row.id);
+      update.run(match.name, JSON.stringify(extra), row.id, row.chat_id);
       messagesUpdated++;
       updatedChatIds.add(row.chat_id);
     }
@@ -596,7 +665,7 @@ export function getMessage(userId: string, id: string): Message | null {
   return rowToMessage(row);
 }
 
-export function createMessage(chatId: string, input: CreateMessageInput, userId?: string): Message {
+export function createMessage(chatId: string, input: CreateMessageInput, userId: string): Message {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
@@ -619,7 +688,7 @@ export function createMessage(chatId: string, input: CreateMessageInput, userId?
       input.parent_message_id || null, input.branch_id || null, now
     );
 
-  getDb().query("UPDATE chats SET updated_at = ? WHERE id = ?").run(now, chatId);
+  getDb().query("UPDATE chats SET updated_at = ? WHERE id = ? AND user_id = ?").run(now, chatId, userId);
 
   // getMessage without userId — internal use after validated chat
   const row = getDb().query("SELECT * FROM messages WHERE id = ?").get(id) as any;
@@ -643,43 +712,110 @@ export function createMessage(chatId: string, input: CreateMessageInput, userId?
 export function patchMessageExtra(userId: string, id: string, extra: Record<string, any>): void {
   const existing = getMessage(userId, id);
   if (!existing) return;
-  getDb().query("UPDATE messages SET extra = ? WHERE id = ?").run(JSON.stringify(extra), id);
+  getDb().query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?").run(JSON.stringify(extra), id, existing.chat_id);
 }
 
 export function updateMessage(userId: string, id: string, input: UpdateMessageInput): Message | null {
   const existing = getMessage(userId, id);
   if (!existing) return null;
 
+  const patchedContent = input.content !== undefined;
+  const patchedSwipes = input.swipes !== undefined;
+  const patchedSwipeId = input.swipe_id !== undefined;
+  const patchedDates = input.swipe_dates !== undefined;
+  const swipeShapeTouched = patchedSwipes || patchedSwipeId || patchedDates;
+
+  let newSwipes = patchedSwipes ? [...input.swipes!] : [...existing.swipes];
+  let newSwipeId = patchedSwipeId ? input.swipe_id! : existing.swipe_id;
+  let newDates = patchedDates ? [...input.swipe_dates!] : [...existing.swipe_dates];
+
+  // If the swipes array was rewritten without an accompanying swipe_dates
+  // rewrite, auto-align dates: pad new slots with the current timestamp,
+  // truncate trailing dates if the array shrank. Keeps the REST-route
+  // contract (lengths always match) without forcing every caller to
+  // recompute dates themselves.
+  if (patchedSwipes && !patchedDates) {
+    const now = Math.floor(Date.now() / 1000);
+    if (newSwipes.length > newDates.length) {
+      while (newDates.length < newSwipes.length) newDates.push(now);
+    } else if (newSwipes.length < newDates.length) {
+      newDates = newDates.slice(0, newSwipes.length);
+    }
+  }
+
+  if (patchedContent) {
+    if (!Number.isFinite(newSwipeId) || newSwipeId < 0 || newSwipeId >= newSwipes.length) {
+      throw new Error("updateMessage: swipe_id out of range");
+    }
+    newSwipes[newSwipeId] = input.content!;
+  }
+
+  if (newSwipes.length === 0) throw new Error("updateMessage: swipes must be non-empty");
+  if (!Number.isFinite(newSwipeId) || newSwipeId < 0 || newSwipeId >= newSwipes.length) {
+    throw new Error("updateMessage: swipe_id out of range");
+  }
+  if (newSwipes.length !== newDates.length) {
+    throw new Error("updateMessage: swipes and swipe_dates length mismatch");
+  }
+
+  const newContent = patchedContent
+    ? input.content!
+    : swipeShapeTouched
+      ? newSwipes[newSwipeId]
+      : undefined;
+
   const fields: string[] = [];
   const values: any[] = [];
 
-  if (input.content !== undefined) {
+  if (newContent !== undefined) {
     fields.push("content = ?");
-    values.push(input.content);
-
-    // Update current swipe content too
-    const swipes = [...existing.swipes];
-    swipes[existing.swipe_id] = input.content;
+    values.push(newContent);
+  }
+  if (patchedContent || swipeShapeTouched) {
     fields.push("swipes = ?");
-    values.push(JSON.stringify(swipes));
+    values.push(JSON.stringify(newSwipes));
+    fields.push("swipe_dates = ?");
+    values.push(JSON.stringify(newDates));
+    fields.push("swipe_id = ?");
+    values.push(newSwipeId);
   }
   if (input.name !== undefined) { fields.push("name = ?"); values.push(input.name); }
   if (input.extra !== undefined) { fields.push("extra = ?"); values.push(JSON.stringify(input.extra)); }
 
   if (fields.length === 0) return existing;
   values.push(id);
+  values.push(existing.chat_id);
 
-  getDb().query(`UPDATE messages SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  getDb().query(`UPDATE messages SET ${fields.join(", ")} WHERE id = ? AND chat_id = ?`).run(...values);
   const updated = getMessage(userId, id)!;
   eventBus.emit(EventType.MESSAGE_EDITED, { chatId: updated.chat_id, message: updated }, userId);
+  if (swipeShapeTouched) {
+    eventBus.emit(
+      EventType.SWIPE_EDITED,
+      {
+        chatId: updated.chat_id,
+        message: updated,
+        previousSwipeId: existing.swipe_id,
+      },
+      userId,
+    );
+  }
   invalidateChatMemoryCache(updated.chat_id);
 
-  // Only rebuild chunks when content changes — chunks are built from message
-  // content, so extra-only or name-only updates don't affect chunk data.
-  // Skipping unnecessary rebuilds prevents a cascade of DELETE + INSERT + vectorize
-  // operations that can stall the server (especially after generation, which
-  // persists reasoning/usage/metrics as extra-only writes).
-  if (input.content !== undefined) {
+  // Rebuild chunks when the active swipe's content changed. Chunks are built
+  // from message content, so extra-only or name-only updates don't affect
+  // chunk data. A swipes[] rewrite can also change the active slot's text,
+  // even without a `content` patch — check the resolved active content
+  // against the prior active content to catch that case.
+  const activeContentChanged =
+    patchedContent ||
+    (swipeShapeTouched && newSwipes[newSwipeId] !== existing.swipes[existing.swipe_id]);
+  if (activeContentChanged) {
+    try {
+      memoryCortex.invalidateCortexCache(updated.chat_id);
+      memoryCortex.invalidateLinkedCortexCache(updated.chat_id);
+    } catch { /* ignore if not loaded */ }
+
     rebuildChatChunks(userId, updated.chat_id).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message edit:", err);
     });
@@ -696,7 +832,7 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
 
   const db = getDb();
   const getStmt = db.query("SELECT * FROM messages WHERE id = ? AND chat_id = ?");
-  const updateStmt = db.query("UPDATE messages SET extra = ? WHERE id = ?");
+  const updateStmt = db.query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?");
 
   const updated: Message[] = [];
 
@@ -712,7 +848,7 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
         delete extra.hidden;
       }
 
-      updateStmt.run(JSON.stringify(extra), msgId);
+      updateStmt.run(JSON.stringify(extra), msgId, chatId);
       const updatedRow = { ...row, extra: JSON.stringify(extra) };
       updated.push(rowToMessage(updatedRow));
     }
@@ -726,6 +862,11 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
   }
 
   invalidateChatMemoryCache(chatId);
+
+  try {
+    memoryCortex.invalidateCortexCache(chatId);
+    memoryCortex.invalidateLinkedCortexCache(chatId);
+  } catch { /* ignore if not loaded */ }
 
   // Rebuild chunks once after all updates
   rebuildChatChunks(userId, chatId).catch(err => {
@@ -743,7 +884,7 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
 
   const db = getDb();
   const getStmt = db.query("SELECT id FROM messages WHERE id = ? AND chat_id = ?");
-  const deleteStmt = db.query("DELETE FROM messages WHERE id = ?");
+  const deleteStmt = db.query("DELETE FROM messages WHERE id = ? AND chat_id = ?");
 
   let deleted = 0;
   const deletedIds: string[] = [];
@@ -753,7 +894,7 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
       const row = getStmt.get(msgId, chatId) as any;
       if (!row) continue;
 
-      deleteStmt.run(msgId);
+      deleteStmt.run(msgId, chatId);
       deleted++;
       deletedIds.push(msgId);
     }
@@ -768,6 +909,11 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
   if (deleted > 0) {
     invalidateChatMemoryCache(chatId);
 
+    try {
+      memoryCortex.invalidateCortexCache(chatId);
+      memoryCortex.invalidateLinkedCortexCache(chatId);
+    } catch { /* ignore if not loaded */ }
+
     rebuildChatChunks(userId, chatId).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after bulk delete:", err);
     });
@@ -779,10 +925,15 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
 export function deleteMessage(userId: string, id: string): boolean {
   const msg = getMessage(userId, id);
   if (!msg) return false;
-  const result = getDb().query("DELETE FROM messages WHERE id = ?").run(id);
+  const result = getDb().query("DELETE FROM messages WHERE id = ? AND chat_id = ?").run(id, msg.chat_id);
   if (result.changes > 0) {
     eventBus.emit(EventType.MESSAGE_DELETED, { chatId: msg.chat_id, messageId: id }, userId);
     invalidateChatMemoryCache(msg.chat_id);
+
+    try {
+      memoryCortex.invalidateCortexCache(msg.chat_id);
+      memoryCortex.invalidateLinkedCortexCache(msg.chat_id);
+    } catch { /* ignore if not loaded */ }
 
     rebuildChatChunks(userId, msg.chat_id).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message delete:", err);
@@ -803,8 +954,8 @@ export function addSwipe(userId: string, messageId: string, content: string): Me
   const newSwipeId = swipes.length - 1;
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ?")
-    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, content, messageId);
+    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ? AND chat_id = ?")
+    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, content, messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
@@ -831,10 +982,10 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
     ? "swipes = ?, content = ?"
     : "swipes = ?";
   const values = swipeIdx === msg.swipe_id
-    ? [JSON.stringify(swipes), content, messageId]
-    : [JSON.stringify(swipes), messageId];
+    ? [JSON.stringify(swipes), content, messageId, msg.chat_id]
+    : [JSON.stringify(swipes), messageId, msg.chat_id];
 
-  getDb().query(`UPDATE messages SET ${updates} WHERE id = ?`).run(...values);
+  getDb().query(`UPDATE messages SET ${updates} WHERE id = ? AND chat_id = ?`).run(...values);
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
     EventType.MESSAGE_SWIPED,
@@ -874,8 +1025,8 @@ export function deleteSwipe(userId: string, messageId: string, swipeIdx: number)
   const newContent = swipes[newSwipeId] ?? swipes[0];
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ?")
-    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, newContent, messageId);
+    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ? WHERE id = ? AND chat_id = ?")
+    .run(JSON.stringify(swipes), JSON.stringify(swipeDates), newSwipeId, newContent, messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
@@ -903,8 +1054,8 @@ export function cycleSwipe(userId: string, messageId: string, direction: "left" 
   const nextContent = msg.swipes[nextIdx] ?? msg.content;
 
   getDb()
-    .query("UPDATE messages SET swipe_id = ?, content = ? WHERE id = ?")
-    .run(nextIdx, nextContent, messageId);
+    .query("UPDATE messages SET swipe_id = ?, content = ? WHERE id = ? AND chat_id = ?")
+    .run(nextIdx, nextContent, messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
@@ -1124,7 +1275,7 @@ export function createChatRaw(userId: string, input: { character_id: string; nam
   return getChat(userId, id)!;
 }
 
-export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[]): number {
+export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[], userId: string): number {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
 
@@ -1168,7 +1319,7 @@ export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[])
   // Update chat's updated_at to last message timestamp
   if (messages.length > 0) {
     const lastDate = messages[messages.length - 1].send_date ?? now;
-    db.query("UPDATE chats SET updated_at = ? WHERE id = ?").run(lastDate, chatId);
+    db.query("UPDATE chats SET updated_at = ? WHERE id = ? AND user_id = ?").run(lastDate, chatId, userId);
   }
 
   return messages.length;
@@ -1317,11 +1468,11 @@ async function shouldStartNewChunk(lastChunk: ChatChunk, newMessage: Message, us
 /**
  * Create a new chunk from a set of messages.
  */
-function createChatChunk(chatId: string, messages: Message[]): ChatChunk {
+function createChatChunk(chatId: string, messages: Message[], reasoningStrip?: SanitizeOptions): ChatChunk {
   const now = Math.floor(Date.now() / 1000);
   const id = crypto.randomUUID();
   const content = messages.map(m =>
-    `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitizeForVectorization(m.content)}`
+    `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitizeForVectorization(m.content, reasoningStrip)}`
   ).join("\n");
   const tokenCount = estimateTokens(content);
   const messageIds = messages.map(m => m.id);
@@ -1352,14 +1503,14 @@ function createChatChunk(chatId: string, messages: Message[]): ChatChunk {
 /**
  * Append a message to an existing chunk.
  */
-function appendToChunk(chunkId: string, message: Message): void {
+function appendToChunk(chunkId: string, message: Message, reasoningStrip?: SanitizeOptions): void {
   const chunk = getDb().query("SELECT * FROM chat_chunks WHERE id = ?").get(chunkId) as any;
   if (!chunk) return;
 
   const messageIds = JSON.parse(chunk.message_ids);
   messageIds.push(message.id);
 
-  const newContent = chunk.content + `\n[${message.is_user ? "USER" : "CHARACTER"} | ${message.name}]: ${sanitizeForVectorization(message.content)}`;
+  const newContent = chunk.content + `\n[${message.is_user ? "USER" : "CHARACTER"} | ${message.name}]: ${sanitizeForVectorization(message.content, reasoningStrip)}`;
   const newTokenCount = estimateTokens(newContent);
   const now = Math.floor(Date.now() / 1000);
 
@@ -1387,15 +1538,16 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
   if (!cfg.enabled || !cfg.vectorize_chat_messages) return;
 
+  const reasoningStrip = getReasoningStripOptions(userId);
   const lastChunk = getLastChatChunk(chatId);
   let chunkId: string;
 
   if (!lastChunk || (await shouldStartNewChunk(lastChunk, newMessage, userId))) {
-    const newChunk = createChatChunk(chatId, [newMessage]);
+    const newChunk = createChatChunk(chatId, [newMessage], reasoningStrip);
     chunkId = newChunk.id;
     vectorizationQueue.queueChunkVectorization(userId, chatId, newChunk.id, 5);
   } else {
-    appendToChunk(lastChunk.id, newMessage);
+    appendToChunk(lastChunk.id, newMessage, reasoningStrip);
     chunkId = lastChunk.id;
     vectorizationQueue.queueChunkVectorization(userId, chatId, lastChunk.id, 5);
   }
@@ -1497,24 +1649,30 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
           }
         : undefined;
 
-      memoryCortex.processChunk(
-        {
-          chunkId: chunk.id,
-          chatId,
-          userId,
-          content: chunk.content,
-          messageIds: JSON.parse(chunk.message_ids || "[]"),
-          startMessageIndex: 0,
-          endMessageIndex: 0,
-          createdAt: chunk.created_at,
-        },
-        characterNames,
-        generateRawFn,
-        sidecarConnectionId,
-        descriptionAliases.size > 0 ? descriptionAliases : undefined,
-      ).catch(err => {
-        console.warn("[chats] Memory cortex processing failed:", err);
-      });
+      const chunkPayload = {
+        chunkId: chunk.id,
+        chatId,
+        userId,
+        content: chunk.content,
+        messageIds: JSON.parse(chunk.message_ids || "[]"),
+        startMessageIndex: 0,
+        endMessageIndex: 0,
+        createdAt: chunk.created_at,
+      };
+
+      // Kick the cortex pass onto the next macrotask so chat creation and
+      // MESSAGE_SENT delivery complete before CPU-bound heuristics begin.
+      setTimeout(() => {
+        memoryCortex.processChunk(
+          chunkPayload,
+          characterNames,
+          generateRawFn,
+          sidecarConnectionId,
+          descriptionAliases.size > 0 ? descriptionAliases : undefined,
+        ).catch(err => {
+          console.warn("[chats] Memory cortex processing failed:", err);
+        });
+      }, 0);
     }
   } catch (err) {
     // Non-fatal: cortex processing should never break chunk creation
@@ -1569,7 +1727,7 @@ async function stampChatMemoryHash(userId: string, chatId: string): Promise<void
     const chat = getChat(userId, chatId);
     if (!chat) return;
     const metadata = { ...chat.metadata, ltcm_config_hash: hash };
-    getDb().query("UPDATE chats SET metadata = ? WHERE id = ?").run(JSON.stringify(metadata), chatId);
+    getDb().query("UPDATE chats SET metadata = ? WHERE id = ? AND user_id = ?").run(JSON.stringify(metadata), chatId, userId);
   } catch { /* non-fatal */ }
 }
 
@@ -1615,6 +1773,10 @@ export async function ensureChatMemoryFresh(userId: string, chatId: string): Pro
 const _rebuildInflight = new Map<string, Promise<void>>();
 const _rebuildPending = new Set<string>();
 
+export function isChatChunkRebuildInProgress(chatId: string): boolean {
+  return _rebuildInflight.has(chatId);
+}
+
 /**
  * Rebuild all chunks for a chat from scratch.
  * Used for migration or when chunk structure needs to be reset.
@@ -1649,11 +1811,25 @@ export async function rebuildChatChunks(userId: string, chatId: string): Promise
 async function _rebuildChatChunksImpl(userId: string, chatId: string): Promise<void> {
   invalidateChatMemoryCache(chatId);
 
+  // Clean up old vectors from LanceDB before wiping chat_chunks so they don't leak
+  // and aren't retrieved by future LanceDB searches.
+  try {
+    await embeddingsSvc.deleteChatChunkEmbeddings(userId, chatId);
+  } catch (err) {
+    console.warn(`[chats] Failed to delete LanceDB chat_chunk vectors for chat ${chatId}:`, err);
+  }
+
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
-  if (!cfg.enabled || !cfg.vectorize_chat_messages) return;
+  if (!cfg.enabled || !cfg.vectorize_chat_messages) {
+    getDb().query("DELETE FROM chat_chunks WHERE chat_id = ?").run(chatId);
+    return;
+  }
 
   const messages = getMessages(userId, chatId).filter(m => m.extra?.hidden !== true);
-  if (messages.length === 0) return;
+  if (messages.length === 0) {
+    getDb().query("DELETE FROM chat_chunks WHERE chat_id = ?").run(chatId);
+    return;
+  }
 
   getDb().query("DELETE FROM chat_chunks WHERE chat_id = ?").run(chatId);
 
@@ -1662,12 +1838,13 @@ async function _rebuildChatChunksImpl(userId: string, chatId: string): Promise<v
     cfg,
   );
   const targetTokens = chatMemSettings.chunkTargetTokens;
+  const reasoningStrip = getReasoningStripOptions(userId);
 
   let currentChunk: Message[] = [];
   let currentTokens = 0;
 
   for (const msg of messages) {
-    const sanitizedContent = sanitizeForVectorization(msg.content);
+    const sanitizedContent = sanitizeForVectorization(msg.content, reasoningStrip);
     const msgTokens = estimateTokens(`[${msg.is_user ? "USER" : "CHARACTER"} | ${msg.name}]: ${sanitizedContent}`);
     const wouldExceedTarget = currentTokens + msgTokens > targetTokens;
 
@@ -1708,7 +1885,7 @@ async function _rebuildChatChunksImpl(userId: string, chatId: string): Promise<v
     }
 
     if (forceNewChunk) {
-      const chunk = createChatChunk(chatId, currentChunk);
+      const chunk = createChatChunk(chatId, currentChunk, reasoningStrip);
       vectorizationQueue.queueChunkVectorization(userId, chatId, chunk.id, 3);
       currentChunk = [];
       currentTokens = 0;
@@ -1719,7 +1896,7 @@ async function _rebuildChatChunksImpl(userId: string, chatId: string): Promise<v
   }
 
   if (currentChunk.length > 0) {
-    const chunk = createChatChunk(chatId, currentChunk);
+    const chunk = createChatChunk(chatId, currentChunk, reasoningStrip);
     vectorizationQueue.queueChunkVectorization(userId, chatId, chunk.id, 3);
   }
 

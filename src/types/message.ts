@@ -37,4 +37,10 @@ export interface UpdateMessageInput {
   content?: string;
   name?: string;
   extra?: Record<string, any>;
+  /** Replace the entire swipes array. Must be non-empty. */
+  swipes?: string[];
+  /** Navigate to a specific swipe slot. Must satisfy `0 <= swipe_id < swipes.length`. */
+  swipe_id?: number;
+  /** Replace the per-swipe date array. Must have the same length as `swipes`. */
+  swipe_dates?: number[];
 }

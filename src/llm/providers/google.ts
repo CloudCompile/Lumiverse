@@ -1,6 +1,8 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 export class GoogleProvider implements LlmProvider {
   readonly name = "google";
@@ -89,11 +91,11 @@ export class GoogleProvider implements LlmProvider {
     const url = `${this.baseUrl(apiUrl)}/v1beta/models/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
     const body = this.buildBody(request);
 
+    // NOTE: signal intentionally NOT passed to fetch — see src/llm/stream-utils.ts.
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -104,10 +106,11 @@ export class GoogleProvider implements LlmProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithAbort(reader, request.signal);
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -115,6 +118,7 @@ export class GoogleProvider implements LlmProvider {
       buffer = lines.pop() || "";
 
       for (const line of lines) {
+        await maybeYield();
         const trimmed = line.trim();
         if (!trimmed || !trimmed.startsWith("data: ")) continue;
 
@@ -175,26 +179,25 @@ export class GoogleProvider implements LlmProvider {
       const res = await fetch(
         `${this.baseUrl(apiUrl)}/v1beta/models?key=${apiKey}`
       );
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({
+        provider: this.displayName,
+        operation: "authentication",
+        detail: err instanceof Error ? err.message : "network request failed",
+        retryable: true,
+      });
     }
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<string[]> {
-    try {
-      const res = await fetch(
-        `${this.baseUrl(apiUrl)}/v1beta/models?key=${apiKey}`
-      );
-      if (!res.ok) return [];
-      const data = await res.json() as any;
-      return (data.models || [])
-        .map((m: any) => m.name?.replace("models/", "") || m.name)
-        .filter((n: string) => n.includes("gemini"))
-        .sort();
-    } catch {
-      return [];
-    }
+    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${this.baseUrl(apiUrl)}/v1beta/models?key=${apiKey}`);
+    return (data.models || [])
+      .map((m: any) => m.name?.replace("models/", "") || m.name)
+      .filter((n: string) => n.includes("gemini"))
+      .sort();
   }
 
   /** Format message content into Google Gemini parts array, handling multipart (vision/audio) content. */

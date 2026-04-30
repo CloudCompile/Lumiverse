@@ -15,6 +15,7 @@ import type {
   PermissionDeniedDetail,
   PermissionChangedDetail,
   CharacterDTO,
+  CharacterAvatarUploadDTO,
   CharacterCreateDTO,
   CharacterUpdateDTO,
   ChatDTO,
@@ -25,10 +26,409 @@ import type {
   WorldBookEntryDTO,
   WorldBookEntryCreateDTO,
   WorldBookEntryUpdateDTO,
+  DatabankDTO,
+  DatabankCreateDTO,
+  DatabankUpdateDTO,
+  DatabankDocumentDTO,
+  DatabankDocumentCreateDTO,
+  DatabankDocumentUpdateDTO,
   PersonaDTO,
   PersonaCreateDTO,
   PersonaUpdateDTO,
+  CouncilSettings,
+  CouncilMemberContext,
+  LumiaItemDTO,
+  StreamChunkDTO,
 } from "lumiverse-spindle-types";
+import { initializeSandbox } from "./worker-runtime-sandbox";
+
+type TokenModelSource = "main" | "sidecar" | "explicit";
+
+type TokenCountResult = {
+  total_tokens: number;
+  model: string;
+  modelSource: TokenModelSource;
+  tokenizer_id: string | null;
+  tokenizer_name: string;
+  approximate: boolean;
+};
+
+type FrontendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type FrontendProcessExitReason =
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "timed_out"
+  | "frontend_unloaded"
+  | "backend_unloaded"
+  | "replaced";
+
+type FrontendProcessInfo = {
+  processId: string;
+  kind: string;
+  key?: string;
+  state: FrontendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: FrontendProcessExitReason;
+  error?: string;
+};
+
+type FrontendProcessLifecycleEvent = {
+  processId: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: FrontendProcessState;
+  previousState?: FrontendProcessState;
+  at: string;
+  exitReason?: FrontendProcessExitReason;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type BackendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type BackendProcessExitReason =
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "timed_out"
+  | "backend_unloaded"
+  | "replaced";
+
+type BackendProcessInfo = {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  state: BackendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: BackendProcessExitReason;
+  error?: string;
+};
+
+type BackendProcessLifecycleEvent = {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: BackendProcessState;
+  previousState?: BackendProcessState;
+  at: string;
+  exitReason?: BackendProcessExitReason;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type MacroInvocationState = {
+  commit: boolean;
+};
+
+type RuntimeWorkerToHost =
+  | WorkerToHost
+  | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
+  | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
+  | {
+      type: "user_storage_write_binary";
+      requestId: string;
+      path: string;
+      data: Uint8Array;
+      userId?: string;
+    }
+  | { type: "user_storage_move"; requestId: string; from: string; to: string; userId?: string }
+  | { type: "user_storage_stat"; requestId: string; path: string; userId?: string }
+  | {
+      type: "tokens_count_text";
+      requestId: string;
+      text: string;
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_messages";
+      requestId: string;
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_chat";
+      requestId: string;
+      chatId: string;
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "databanks_list";
+      requestId: string;
+      limit?: number;
+      offset?: number;
+      scope?: "global" | "character" | "chat";
+      scopeId?: string | null;
+      userId?: string;
+    }
+  | { type: "databanks_get"; requestId: string; databankId: string; userId?: string }
+  | { type: "databanks_create"; requestId: string; input: DatabankCreateDTO; userId?: string }
+  | { type: "databanks_update"; requestId: string; databankId: string; input: DatabankUpdateDTO; userId?: string }
+  | { type: "databanks_delete"; requestId: string; databankId: string; userId?: string }
+  | {
+      type: "databank_documents_list";
+      requestId: string;
+      databankId: string;
+      limit?: number;
+      offset?: number;
+      userId?: string;
+    }
+  | { type: "databank_documents_get"; requestId: string; documentId: string; userId?: string }
+  | {
+      type: "databank_documents_create";
+      requestId: string;
+      databankId: string;
+      input: DatabankDocumentCreateDTO;
+      userId?: string;
+    }
+  | {
+      type: "databank_documents_update";
+      requestId: string;
+      documentId: string;
+      input: DatabankDocumentUpdateDTO;
+      userId?: string;
+    }
+  | { type: "databank_documents_delete"; requestId: string; documentId: string; userId?: string }
+  | { type: "databank_documents_get_content"; requestId: string; documentId: string; userId?: string }
+  | { type: "databank_documents_reprocess"; requestId: string; documentId: string; userId?: string }
+  | { type: "register_message_content_processor"; priority?: number }
+  | {
+      type: "message_content_processor_result";
+      requestId: string;
+      result: unknown;
+    }
+  | { type: "register_macro_interceptor"; priority?: number }
+  | {
+      type: "macro_interceptor_result";
+      requestId: string;
+      result: unknown;
+    }
+  | {
+      type: "frontend_process_spawn";
+      requestId: string;
+      options: {
+        kind: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "frontend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: FrontendProcessState;
+      };
+    }
+  | { type: "frontend_process_get"; requestId: string; processId: string }
+  | {
+      type: "frontend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "frontend_process_send"; processId: string; payload: unknown; userId?: string }
+  | {
+      type: "backend_process_spawn";
+      requestId: string;
+      options: {
+        entry: string;
+        kind?: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "backend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: BackendProcessState;
+      };
+    }
+  | { type: "backend_process_get"; requestId: string; processId: string }
+  | {
+      type: "backend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string };
+
+type RuntimeHostToWorker =
+  | HostToWorker
+  | {
+      type: "message_content_processor_request";
+      requestId: string;
+      ctx: unknown;
+    }
+  | {
+      type: "macro_interceptor_request";
+      requestId: string;
+      ctx: unknown;
+    }
+  | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
+  | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
+  | { type: "backend_process_lifecycle"; event: BackendProcessLifecycleEvent }
+  | { type: "backend_process_message"; processId: string; payload: unknown; userId: string };
+
+type RuntimeSpindleAPI = SpindleAPI & {
+  registerMessageContentProcessor(
+    handler: (ctx: {
+      chatId: string;
+      messageId?: string;
+      content: string;
+      extra?: Record<string, unknown>;
+      origin: "create" | "update" | "swipe_add" | "swipe_update";
+      swipeIndex?: number;
+    }) => Promise<{ content?: string; extra?: Record<string, unknown> } | void>,
+    priority?: number
+  ): void;
+  registerMacroInterceptor(
+    handler: (ctx: {
+      template: string;
+      env: {
+        commit: boolean;
+        names: Record<string, string>;
+        character: Record<string, unknown>;
+        chat: Record<string, unknown>;
+        system: Record<string, unknown>;
+        variables: {
+          local: Record<string, string>;
+          global: Record<string, string>;
+          chat: Record<string, string>;
+        };
+        extra: Record<string, unknown>;
+      };
+      commit: boolean;
+      phase: "prompt" | "display" | "response" | "other";
+      sourceHint?: string;
+      userId?: string;
+    }) => Promise<string | void>,
+    priority?: number
+  ): void;
+  tokens: {
+    countText(text: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
+    countMessages(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options?: { model?: string; modelSource?: TokenModelSource; userId?: string }
+    ): Promise<TokenCountResult>;
+    countChat(chatId: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
+  };
+  userStorage: SpindleAPI["userStorage"] & {
+    readBinary(path: string, userId?: string): Promise<Uint8Array>;
+    writeBinary(path: string, data: Uint8Array, userId?: string): Promise<void>;
+    move(from: string, to: string, userId?: string): Promise<void>;
+    stat(path: string, userId?: string): Promise<{
+      exists: boolean;
+      isFile: boolean;
+      isDirectory: boolean;
+      sizeBytes: number;
+      modifiedAt: string;
+    }>;
+  };
+  frontendProcesses: {
+    spawn(options: {
+      kind: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }): Promise<{
+      processId: string;
+      kind: string;
+      key?: string;
+      info: FrontendProcessInfo;
+      send(payload: unknown): void;
+      stop(options?: { userId?: string; reason?: string }): Promise<void>;
+      refresh(): Promise<FrontendProcessInfo | null>;
+    }>;
+    list(filter?: { userId?: string; kind?: string; key?: string; state?: FrontendProcessState }): Promise<FrontendProcessInfo[]>;
+    get(processId: string): Promise<FrontendProcessInfo | null>;
+    stop(processId: string, options?: { userId?: string; reason?: string }): Promise<void>;
+    onLifecycle(handler: (event: FrontendProcessLifecycleEvent) => void): () => void;
+    onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void): () => void;
+  };
+  backendProcesses: {
+    spawn(options: {
+      entry: string;
+      kind?: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }): Promise<{
+      processId: string;
+      entry: string;
+      kind: string;
+      key?: string;
+      info: BackendProcessInfo;
+      send(payload: unknown): void;
+      stop(options?: { userId?: string; reason?: string }): Promise<void>;
+      refresh(): Promise<BackendProcessInfo | null>;
+    }>;
+    list(filter?: { userId?: string; kind?: string; key?: string; state?: BackendProcessState }): Promise<BackendProcessInfo[]>;
+    get(processId: string): Promise<BackendProcessInfo | null>;
+    stop(processId: string, options?: { userId?: string; reason?: string }): Promise<void>;
+    onLifecycle(handler: (event: BackendProcessLifecycleEvent) => void): () => void;
+    onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void): () => void;
+  };
+};
 
 // ─── State ───────────────────────────────────────────────────────────────
 
@@ -40,6 +440,10 @@ const pendingResponses = new Map<
   string,
   { resolve: (value: unknown) => void; reject: (reason: unknown) => void }
 >();
+const streamingGenerations = new Map<
+  string,
+  { push: (chunk: StreamChunkDTO) => void; fail: (reason: unknown) => void }
+>();
 let interceptHandler:
   | ((
       messages: LlmMessageDTO[],
@@ -47,6 +451,12 @@ let interceptHandler:
     ) => Promise<LlmMessageDTO[] | InterceptorResultDTO>)
   | null = null;
 let contextHandlerFn: ((context: unknown) => Promise<unknown>) | null = null;
+let messageContentProcessorFn:
+  | ((ctx: unknown) => Promise<unknown>)
+  | null = null;
+let macroInterceptorFn:
+  | ((ctx: unknown) => Promise<unknown>)
+  | null = null;
 let oauthCallbackHandler:
   | ((params: Record<string, string>) => Promise<{ html?: string } | void>)
   | null = null;
@@ -54,25 +464,264 @@ const frontendMessageHandlers = new Set<(payload: unknown, userId: string) => vo
 const commandInvokedHandlers = new Set<(commandId: string, context: any) => void | Promise<void>>();
 const permissionDeniedHandlers = new Set<(detail: PermissionDeniedDetail) => void>();
 const permissionChangedHandlers = new Set<(detail: PermissionChangedDetail) => void>();
+const frontendProcessLifecycleHandlers = new Set<(event: FrontendProcessLifecycleEvent) => void>();
+const frontendProcessMessageHandlers = new Set<(event: { processId: string; payload: unknown; userId: string }) => void>();
+const backendProcessLifecycleHandlers = new Set<(event: BackendProcessLifecycleEvent) => void>();
+const backendProcessMessageHandlers = new Set<(event: { processId: string; payload: unknown; userId: string }) => void>();
 const grantedPermissions = new Set<string>();
 const extensionMacroHandlers = new Map<string, (ctx: unknown) => unknown | Promise<unknown>>();
+const macroInvocationStack: MacroInvocationState[] = [];
 
 // ─── Messaging ───────────────────────────────────────────────────────────
 
-function post(msg: WorkerToHost): void {
+function post(msg: RuntimeWorkerToHost): void {
+  if (typeof process.send === "function") {
+    process.send(msg);
+    return;
+  }
   self.postMessage(msg);
 }
 
-function request(msg: WorkerToHost & { requestId: string }): Promise<unknown> {
+function request(msg: RuntimeWorkerToHost & { requestId: string }): Promise<unknown> {
   return new Promise((resolve, reject) => {
     pendingResponses.set(msg.requestId, { resolve, reject });
     post(msg);
   });
 }
 
+function createFrontendProcessHandle(info: FrontendProcessInfo): {
+  processId: string;
+  kind: string;
+  key?: string;
+  info: FrontendProcessInfo;
+  send(payload: unknown): void;
+  stop(options?: { userId?: string; reason?: string }): Promise<void>;
+  refresh(): Promise<FrontendProcessInfo | null>;
+} {
+  return {
+    processId: info.processId,
+    kind: info.kind,
+    ...(info.key ? { key: info.key } : {}),
+    info,
+    send(payload: unknown) {
+      post({ type: "frontend_process_send", processId: info.processId, payload });
+    },
+    async stop(options?: { userId?: string; reason?: string }) {
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "frontend_process_stop",
+        requestId,
+        processId: info.processId,
+        options,
+      });
+    },
+    async refresh() {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "frontend_process_get", requestId, processId: info.processId });
+      return result as FrontendProcessInfo | null;
+    },
+  };
+}
+
+function createBackendProcessHandle(info: BackendProcessInfo): {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  info: BackendProcessInfo;
+  send(payload: unknown): void;
+  stop(options?: { userId?: string; reason?: string }): Promise<void>;
+  refresh(): Promise<BackendProcessInfo | null>;
+} {
+  return {
+    processId: info.processId,
+    entry: info.entry,
+    kind: info.kind,
+    ...(info.key ? { key: info.key } : {}),
+    info,
+    send(payload: unknown) {
+      post({ type: "backend_process_send", processId: info.processId, payload });
+    },
+    async stop(options?: { userId?: string; reason?: string }) {
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "backend_process_stop",
+        requestId,
+        processId: info.processId,
+        options,
+      });
+    },
+    async refresh() {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "backend_process_get", requestId, processId: info.processId });
+      return result as BackendProcessInfo | null;
+    },
+  };
+}
+
+function getActiveMacroInvocation(): MacroInvocationState | null {
+  return macroInvocationStack.length > 0 ? macroInvocationStack[macroInvocationStack.length - 1]! : null;
+}
+
+function assertMutationAllowed(operation: string): void {
+  if (getActiveMacroInvocation()?.commit === false) {
+    throw new Error(`${operation} is not allowed during non-committing macro resolution`);
+  }
+}
+
+/** Build a real AbortError-shaped DOMException so `err.name === "AbortError"` works. */
+function makeAbortError(reason?: unknown): Error {
+  // DOMException is available in Bun workers; fall back to a plain Error-shape.
+  const message = typeof reason === "string" ? reason : "Generation aborted";
+  if (typeof DOMException === "function") {
+    return new DOMException(message, "AbortError");
+  }
+  const err = new Error(message);
+  err.name = "AbortError";
+  return err;
+}
+
+/**
+ * Issue a `request_generation` RPC with optional AbortSignal support.
+ *
+ * `AbortSignal` can't cross the worker→host boundary (it's not
+ * structured-cloneable), so the signal is stripped from `input` before
+ * posting and instead we post a `cancel_generation` message when it fires.
+ * If the signal is already aborted, we reject synchronously without
+ * bothering the host.
+ */
+function requestGeneration(input: any): Promise<unknown> {
+  const signal: AbortSignal | undefined = input?.signal;
+  const { signal: _omit, ...payload } = input ?? {};
+  void _omit;
+
+  if (signal?.aborted) {
+    return Promise.reject(makeAbortError((signal.reason as any)?.message));
+  }
+
+  const requestId = crypto.randomUUID();
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      // Tell the host to tear down the upstream LLM request. The host will
+      // still respond with an `AbortError`-prefixed error which the
+      // `response` handler converts into a DOMException when rejecting.
+      post({ type: "cancel_generation", requestId });
+    };
+
+    pendingResponses.set(requestId, {
+      resolve: (value) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      reject: (reason) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(reason);
+      },
+    });
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    post({ type: "request_generation", requestId, input: payload });
+  });
+}
+
+/**
+ * Issue a `request_generation_stream` RPC and return an `AsyncGenerator`
+ * that yields `StreamChunkDTO` values as the host forwards them. The
+ * generator throws on `generation_stream_error` (with `AbortError` shape
+ * preserved) and returns after the terminal `done` chunk.
+ *
+ * If the consumer breaks out of the `for await` loop early, the generator's
+ * `finally` posts a `cancel_generation` message so the host can tear down
+ * the upstream LLM request — this mirrors the explicit `AbortSignal` path.
+ */
+function requestGenerationStream(input: any): AsyncGenerator<StreamChunkDTO, void, void> {
+  const signal: AbortSignal | undefined = input?.signal;
+  const { signal: _omit, ...payload } = input ?? {};
+  void _omit;
+
+  if (signal?.aborted) {
+    const err = makeAbortError((signal.reason as any)?.message);
+    return (async function* (): AsyncGenerator<StreamChunkDTO, void, void> {
+      throw err;
+    })();
+  }
+
+  const requestId = crypto.randomUUID();
+
+  type QueueItem =
+    | { kind: "chunk"; chunk: StreamChunkDTO }
+    | { kind: "error"; error: unknown };
+
+  const queue: QueueItem[] = [];
+  let waiter: ((item: QueueItem) => void) | null = null;
+  let terminated = false;
+
+  const push = (chunk: StreamChunkDTO) => {
+    if (terminated) return;
+    if (chunk.type === "done") terminated = true;
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w({ kind: "chunk", chunk });
+    } else {
+      queue.push({ kind: "chunk", chunk });
+    }
+  };
+
+  const fail = (err: unknown) => {
+    if (terminated) return;
+    terminated = true;
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w({ kind: "error", error: err });
+    } else {
+      queue.push({ kind: "error", error: err });
+    }
+  };
+
+  streamingGenerations.set(requestId, { push, fail });
+
+  const onAbort = () => {
+    post({ type: "cancel_generation", requestId });
+  };
+  if (signal) {
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
+
+  post({ type: "request_generation_stream", requestId, input: payload });
+
+  return (async function* (): AsyncGenerator<StreamChunkDTO, void, void> {
+    try {
+      while (true) {
+        const item = queue.length > 0
+          ? queue.shift()!
+          : await new Promise<QueueItem>((resolve) => { waiter = resolve; });
+
+        if (item.kind === "error") throw item.error;
+
+        yield item.chunk;
+        if (item.chunk.type === "done") return;
+      }
+    } finally {
+      streamingGenerations.delete(requestId);
+      signal?.removeEventListener("abort", onAbort);
+      // If the consumer broke out before the terminal `done`/error chunk,
+      // tell the host to abort the upstream LLM request.
+      if (!terminated) {
+        post({ type: "cancel_generation", requestId });
+      }
+    }
+  })();
+}
+
 // ─── Spindle API (exposed to extensions as globalThis.spindle) ───────────
 
-const spindleApi: SpindleAPI = {
+const spindleApi: RuntimeSpindleAPI = {
   on(event: string, handler: (payload: any) => void): () => void {
     if (!eventHandlers.has(event)) {
       eventHandlers.set(event, new Set());
@@ -90,6 +739,7 @@ const spindleApi: SpindleAPI = {
   },
 
   registerMacro(def): void {
+    assertMutationAllowed("spindle.registerMacro()");
     if (typeof def.handler === "function") {
       // Function handler — store directly, strip before posting (not serializable)
       extensionMacroHandlers.set(def.name.toLowerCase(), def.handler as (ctx: unknown) => unknown | Promise<unknown>);
@@ -124,51 +774,47 @@ const spindleApi: SpindleAPI = {
   },
 
   unregisterMacro(name: string): void {
+    assertMutationAllowed("spindle.unregisterMacro()");
     extensionMacroHandlers.delete(name.toLowerCase());
     post({ type: "unregister_macro", name });
   },
 
   updateMacroValue(name: string, value: string): void {
+    assertMutationAllowed("spindle.updateMacroValue()");
     post({ type: "update_macro_value", name, value: String(value ?? "") });
   },
 
   registerInterceptor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerInterceptor()");
     interceptHandler = handler;
     post({ type: "register_interceptor", priority });
   },
 
   registerTool(tool): void {
+    assertMutationAllowed("spindle.registerTool()");
     post({ type: "register_tool", tool });
   },
 
   unregisterTool(name: string): void {
+    assertMutationAllowed("spindle.unregisterTool()");
     post({ type: "unregister_tool", name });
   },
 
   generate: {
     async raw(input) {
-      const requestId = crypto.randomUUID();
-      return request({
-        type: "request_generation",
-        requestId,
-        input: { ...input, type: "raw" },
-      });
+      return requestGeneration({ ...input, type: "raw" });
     },
     async quiet(input) {
-      const requestId = crypto.randomUUID();
-      return request({
-        type: "request_generation",
-        requestId,
-        input: { ...input, type: "quiet" },
-      });
+      return requestGeneration({ ...input, type: "quiet" });
     },
     async batch(input) {
-      const requestId = crypto.randomUUID();
-      return request({
-        type: "request_generation",
-        requestId,
-        input: { ...input, type: "batch" },
-      });
+      return requestGeneration({ ...input, type: "batch" });
+    },
+    rawStream(input) {
+      return requestGenerationStream({ ...input, type: "raw" });
+    },
+    quietStream(input) {
+      return requestGenerationStream({ ...input, type: "quiet" });
     },
     async dryRun(input, userId?: string) {
       const requestId = crypto.randomUUID();
@@ -263,6 +909,7 @@ const spindleApi: SpindleAPI = {
       return result as string;
     },
     async write(path: string, data: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.write()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_write", requestId, path, data });
     },
@@ -276,10 +923,12 @@ const spindleApi: SpindleAPI = {
       return result as Uint8Array;
     },
     async writeBinary(path: string, data: Uint8Array): Promise<void> {
+      assertMutationAllowed("spindle.storage.writeBinary()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_write_binary", requestId, path, data });
     },
     async delete(path: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.delete()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_delete", requestId, path });
     },
@@ -298,10 +947,12 @@ const spindleApi: SpindleAPI = {
       return result as boolean;
     },
     async mkdir(path: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.mkdir()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_mkdir", requestId, path });
     },
     async move(from: string, to: string): Promise<void> {
+      assertMutationAllowed("spindle.storage.move()");
       const requestId = crypto.randomUUID();
       await request({ type: "storage_move", requestId, from, to });
     },
@@ -341,6 +992,7 @@ const spindleApi: SpindleAPI = {
       value: unknown,
       options?: { indent?: number }
     ): Promise<void> {
+      assertMutationAllowed("spindle.storage.setJson()");
       const indent = options?.indent ?? 2;
       await spindleApi.storage.write(path, JSON.stringify(value, null, indent));
     },
@@ -358,10 +1010,27 @@ const spindleApi: SpindleAPI = {
       return result as string;
     },
     async write(path: string, data: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.write()");
       const requestId = crypto.randomUUID();
       await request({ type: "user_storage_write", requestId, path, data, userId });
     },
+    async readBinary(path: string, userId?: string): Promise<Uint8Array> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "user_storage_read_binary",
+        requestId,
+        path,
+        userId,
+      });
+      return result as Uint8Array;
+    },
+    async writeBinary(path: string, data: Uint8Array, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.writeBinary()");
+      const requestId = crypto.randomUUID();
+      await request({ type: "user_storage_write_binary", requestId, path, data, userId });
+    },
     async delete(path: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.delete()");
       const requestId = crypto.randomUUID();
       await request({ type: "user_storage_delete", requestId, path, userId });
     },
@@ -381,8 +1050,31 @@ const spindleApi: SpindleAPI = {
       return result as boolean;
     },
     async mkdir(path: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.mkdir()");
       const requestId = crypto.randomUUID();
       await request({ type: "user_storage_mkdir", requestId, path, userId });
+    },
+    async move(from: string, to: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.move()");
+      const requestId = crypto.randomUUID();
+      await request({ type: "user_storage_move", requestId, from, to, userId });
+    },
+    async stat(path: string, userId?: string): Promise<{
+      exists: boolean;
+      isFile: boolean;
+      isDirectory: boolean;
+      sizeBytes: number;
+      modifiedAt: string;
+    }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "user_storage_stat", requestId, path, userId });
+      return result as {
+        exists: boolean;
+        isFile: boolean;
+        isDirectory: boolean;
+        sizeBytes: number;
+        modifiedAt: string;
+      };
     },
     async getJson<T>(
       path: string,
@@ -403,6 +1095,7 @@ const spindleApi: SpindleAPI = {
       value: unknown,
       options?: { indent?: number; userId?: string }
     ): Promise<void> {
+      assertMutationAllowed("spindle.userStorage.setJson()");
       const indent = options?.indent ?? 2;
       await spindleApi.userStorage.write(
         path,
@@ -414,6 +1107,7 @@ const spindleApi: SpindleAPI = {
 
   enclave: {
     async put(key: string, value: string, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.enclave.put()");
       const requestId = crypto.randomUUID();
       await request({ type: "enclave_put", requestId, key, value, userId });
     },
@@ -423,6 +1117,7 @@ const spindleApi: SpindleAPI = {
       return result as string | null;
     },
     async delete(key: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.enclave.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "enclave_delete", requestId, key, userId });
       return result as boolean;
@@ -450,6 +1145,7 @@ const spindleApi: SpindleAPI = {
       data: string,
       options?: { ttlMs?: number; reservationId?: string }
     ): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.write()");
       const requestId = crypto.randomUUID();
       await request({
         type: "ephemeral_write",
@@ -474,6 +1170,7 @@ const spindleApi: SpindleAPI = {
       data: Uint8Array,
       options?: { ttlMs?: number; reservationId?: string }
     ): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.writeBinary()");
       const requestId = crypto.randomUUID();
       await request({
         type: "ephemeral_write_binary",
@@ -485,6 +1182,7 @@ const spindleApi: SpindleAPI = {
       });
     },
     async delete(path: string): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.delete()");
       const requestId = crypto.randomUUID();
       await request({ type: "ephemeral_delete", requestId, path });
     },
@@ -507,6 +1205,7 @@ const spindleApi: SpindleAPI = {
       return result as { sizeBytes: number; createdAt: string; expiresAt?: string };
     },
     async clearExpired(): Promise<number> {
+      assertMutationAllowed("spindle.ephemeral.clearExpired()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "ephemeral_clear_expired", requestId });
       return result as number;
@@ -546,6 +1245,7 @@ const spindleApi: SpindleAPI = {
       sizeBytes: number;
       expiresAt: string;
     }> {
+      assertMutationAllowed("spindle.ephemeral.requestBlock()");
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "ephemeral_request_block",
@@ -561,6 +1261,7 @@ const spindleApi: SpindleAPI = {
       };
     },
     async releaseBlock(reservationId: string): Promise<void> {
+      assertMutationAllowed("spindle.ephemeral.releaseBlock()");
       const requestId = crypto.randomUUID();
       await request({
         type: "ephemeral_release_block",
@@ -578,12 +1279,15 @@ const spindleApi: SpindleAPI = {
         id: string;
         role: "system" | "user" | "assistant";
         content: string;
+        extra: Record<string, unknown>;
         metadata?: Record<string, unknown>;
         swipe_id: number;
         swipes: string[];
+        swipe_dates: number[];
       }>;
     },
     async appendMessage(chatId: string, message) {
+      assertMutationAllowed("spindle.chat.appendMessage()");
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "chat_append_message",
@@ -594,6 +1298,7 @@ const spindleApi: SpindleAPI = {
       return result as { id: string };
     },
     async updateMessage(chatId: string, messageId: string, patch): Promise<void> {
+      assertMutationAllowed("spindle.chat.updateMessage()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_update_message",
@@ -604,6 +1309,7 @@ const spindleApi: SpindleAPI = {
       });
     },
     async deleteMessage(chatId: string, messageId: string): Promise<void> {
+      assertMutationAllowed("spindle.chat.deleteMessage()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_delete_message",
@@ -613,6 +1319,7 @@ const spindleApi: SpindleAPI = {
       });
     },
     async setMessageHidden(chatId: string, messageId: string, hidden: boolean): Promise<void> {
+      assertMutationAllowed("spindle.chat.setMessageHidden()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_set_message_hidden",
@@ -623,6 +1330,7 @@ const spindleApi: SpindleAPI = {
       });
     },
     async setMessagesHidden(chatId: string, messageIds: string[], hidden: boolean): Promise<void> {
+      assertMutationAllowed("spindle.chat.setMessagesHidden()");
       const requestId = crypto.randomUUID();
       await request({
         type: "chat_set_messages_hidden",
@@ -646,6 +1354,7 @@ const spindleApi: SpindleAPI = {
 
   events: {
     async track(eventName, payload, options): Promise<void> {
+      assertMutationAllowed("spindle.events.track()");
       const requestId = crypto.randomUUID();
       await request({
         type: "events_track",
@@ -703,6 +1412,48 @@ const spindleApi: SpindleAPI = {
     },
   },
 
+  tokens: {
+    async countText(text: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_text",
+        requestId,
+        text,
+        model: options?.model,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountResult;
+    },
+    async countMessages(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options?: { model?: string; modelSource?: TokenModelSource; userId?: string }
+    ): Promise<TokenCountResult> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_messages",
+        requestId,
+        messages,
+        model: options?.model,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountResult;
+    },
+    async countChat(chatId: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_chat",
+        requestId,
+        chatId,
+        model: options?.model,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountResult;
+    },
+  },
+
   imageGen: {
     async generate(input: any): Promise<any> {
       const requestId = crypto.randomUUID();
@@ -731,16 +1482,19 @@ const spindleApi: SpindleAPI = {
 
   theme: {
     async apply(overrides: { variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } }): Promise<void> {
+      assertMutationAllowed("spindle.theme.apply()");
       const requestId = crypto.randomUUID();
       await request({ type: "theme_apply", requestId, overrides });
     },
     async applyPalette(palette, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.theme.applyPalette()");
       const requestId = crypto.randomUUID();
       await request({ type: "theme_apply_palette", requestId, palette, userId });
     },
-    async clear(): Promise<void> {
+    async clear(userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.theme.clear()");
       const requestId = crypto.randomUUID();
-      await request({ type: "theme_clear", requestId });
+      await request({ type: "theme_clear", requestId, userId });
     },
     async getCurrent(userId?: string): Promise<{
       id: string; name: string; mode: "light" | "dark";
@@ -794,10 +1548,12 @@ const spindleApi: SpindleAPI = {
         return result as string;
       },
       async set(chatId: string, key: string, value: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.local.set()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_set_local", requestId, chatId, key, value });
       },
       async delete(chatId: string, key: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.local.delete()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_delete_local", requestId, chatId, key });
       },
@@ -819,10 +1575,12 @@ const spindleApi: SpindleAPI = {
         return result as string;
       },
       async set(key: string, value: string, userId?: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.global.set()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_set_global", requestId, key, value, userId });
       },
       async delete(key: string, userId?: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.global.delete()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_delete_global", requestId, key, userId });
       },
@@ -844,10 +1602,12 @@ const spindleApi: SpindleAPI = {
         return result as string;
       },
       async set(chatId: string, key: string, value: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.chat.set()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_set_chat", requestId, chatId, key, value });
       },
       async delete(chatId: string, key: string): Promise<void> {
+        assertMutationAllowed("spindle.variables.chat.delete()");
         const requestId = crypto.randomUUID();
         await request({ type: "vars_delete_chat", requestId, chatId, key });
       },
@@ -882,16 +1642,25 @@ const spindleApi: SpindleAPI = {
       return result as CharacterDTO | null;
     },
     async create(input: CharacterCreateDTO, userId?: string): Promise<CharacterDTO> {
+      assertMutationAllowed("spindle.characters.create()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_create", requestId, input, userId });
       return result as CharacterDTO;
     },
+    async setAvatar(characterId: string, avatar: CharacterAvatarUploadDTO, userId?: string): Promise<CharacterDTO> {
+      assertMutationAllowed("spindle.characters.setAvatar()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "characters_set_avatar", requestId, characterId, avatar, userId });
+      return result as CharacterDTO;
+    },
     async update(characterId: string, input: CharacterUpdateDTO, userId?: string): Promise<CharacterDTO> {
+      assertMutationAllowed("spindle.characters.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_update", requestId, characterId, input, userId });
       return result as CharacterDTO;
     },
     async delete(characterId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.characters.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_delete", requestId, characterId, userId });
       return result as boolean;
@@ -922,11 +1691,13 @@ const spindleApi: SpindleAPI = {
       return result as ChatDTO | null;
     },
     async update(chatId: string, input: ChatUpdateDTO, userId?: string): Promise<ChatDTO> {
+      assertMutationAllowed("spindle.chats.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "chats_update", requestId, chatId, input, userId });
       return result as ChatDTO;
     },
     async delete(chatId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.chats.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "chats_delete", requestId, chatId, userId });
       return result as boolean;
@@ -962,16 +1733,19 @@ const spindleApi: SpindleAPI = {
       return result as WorldBookDTO | null;
     },
     async create(input: WorldBookCreateDTO, userId?: string): Promise<WorldBookDTO> {
+      assertMutationAllowed("spindle.world_books.create()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_create", requestId, input, userId });
       return result as WorldBookDTO;
     },
     async update(worldBookId: string, input: WorldBookUpdateDTO, userId?: string): Promise<WorldBookDTO> {
+      assertMutationAllowed("spindle.world_books.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_update", requestId, worldBookId, input, userId });
       return result as WorldBookDTO;
     },
     async delete(worldBookId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.world_books.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_delete", requestId, worldBookId, userId });
       return result as boolean;
@@ -995,16 +1769,19 @@ const spindleApi: SpindleAPI = {
         return result as WorldBookEntryDTO | null;
       },
       async create(worldBookId: string, input: WorldBookEntryCreateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+        assertMutationAllowed("spindle.world_books.entries.create()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_create", requestId, worldBookId, input, userId });
         return result as WorldBookEntryDTO;
       },
       async update(entryId: string, input: WorldBookEntryUpdateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+        assertMutationAllowed("spindle.world_books.entries.update()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_update", requestId, entryId, input, userId });
         return result as WorldBookEntryDTO;
       },
       async delete(entryId: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.world_books.entries.delete()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_delete", requestId, entryId, userId });
         return result as boolean;
@@ -1019,6 +1796,99 @@ const spindleApi: SpindleAPI = {
         userId,
       });
       return result as import("lumiverse-spindle-types").ActivatedWorldInfoEntryDTO[];
+    },
+  },
+
+  databanks: {
+    async list(options?: {
+      limit?: number;
+      offset?: number;
+      scope?: "global" | "character" | "chat";
+      scopeId?: string | null;
+      userId?: string;
+    }): Promise<{ data: DatabankDTO[]; total: number }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "databanks_list",
+        requestId,
+        limit: options?.limit,
+        offset: options?.offset,
+        scope: options?.scope,
+        scopeId: options?.scopeId,
+        userId: options?.userId,
+      });
+      return result as { data: DatabankDTO[]; total: number };
+    },
+    async get(databankId: string, userId?: string): Promise<DatabankDTO | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "databanks_get", requestId, databankId, userId });
+      return result as DatabankDTO | null;
+    },
+    async create(input: DatabankCreateDTO, userId?: string): Promise<DatabankDTO> {
+      assertMutationAllowed("spindle.databanks.create()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "databanks_create", requestId, input, userId });
+      return result as DatabankDTO;
+    },
+    async update(databankId: string, input: DatabankUpdateDTO, userId?: string): Promise<DatabankDTO> {
+      assertMutationAllowed("spindle.databanks.update()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "databanks_update", requestId, databankId, input, userId });
+      return result as DatabankDTO;
+    },
+    async delete(databankId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.databanks.delete()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "databanks_delete", requestId, databankId, userId });
+      return result as boolean;
+    },
+    documents: {
+      async list(databankId: string, options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: DatabankDocumentDTO[]; total: number }> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "databank_documents_list",
+          requestId,
+          databankId,
+          limit: options?.limit,
+          offset: options?.offset,
+          userId: options?.userId,
+        });
+        return result as { data: DatabankDocumentDTO[]; total: number };
+      },
+      async get(documentId: string, userId?: string): Promise<DatabankDocumentDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "databank_documents_get", requestId, documentId, userId });
+        return result as DatabankDocumentDTO | null;
+      },
+      async create(databankId: string, input: DatabankDocumentCreateDTO, userId?: string): Promise<DatabankDocumentDTO> {
+        assertMutationAllowed("spindle.databanks.documents.create()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "databank_documents_create", requestId, databankId, input, userId });
+        return result as DatabankDocumentDTO;
+      },
+      async update(documentId: string, input: DatabankDocumentUpdateDTO, userId?: string): Promise<DatabankDocumentDTO> {
+        assertMutationAllowed("spindle.databanks.documents.update()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "databank_documents_update", requestId, documentId, input, userId });
+        return result as DatabankDocumentDTO;
+      },
+      async delete(documentId: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.databanks.documents.delete()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "databank_documents_delete", requestId, documentId, userId });
+        return result as boolean;
+      },
+      async getContent(documentId: string, userId?: string): Promise<{ content: string } | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "databank_documents_get_content", requestId, documentId, userId });
+        return result as { content: string } | null;
+      },
+      async reprocess(documentId: string, userId?: string): Promise<{ success: true; status: "processing" }> {
+        assertMutationAllowed("spindle.databanks.documents.reprocess()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "databank_documents_reprocess", requestId, documentId, userId });
+        return result as { success: true; status: "processing" };
+      },
     },
   },
 
@@ -1050,21 +1920,25 @@ const spindleApi: SpindleAPI = {
       return result as PersonaDTO | null;
     },
     async create(input: PersonaCreateDTO, userId?: string): Promise<PersonaDTO> {
+      assertMutationAllowed("spindle.personas.create()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_create", requestId, input, userId });
       return result as PersonaDTO;
     },
     async update(personaId: string, input: PersonaUpdateDTO, userId?: string): Promise<PersonaDTO> {
+      assertMutationAllowed("spindle.personas.update()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_update", requestId, personaId, input, userId });
       return result as PersonaDTO;
     },
     async delete(personaId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.personas.delete()");
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_delete", requestId, personaId, userId });
       return result as boolean;
     },
     async switchActive(personaId: string | null, userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.personas.switchActive()");
       const requestId = crypto.randomUUID();
       await request({ type: "personas_switch", requestId, personaId, userId });
     },
@@ -1072,6 +1946,24 @@ const spindleApi: SpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "personas_get_world_book", requestId, personaId, userId });
       return result as WorldBookDTO | null;
+    },
+  },
+
+  council: {
+    async getSettings(options?: { userId?: string }): Promise<CouncilSettings> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "council_get_settings", requestId, userId: options?.userId });
+      return result as CouncilSettings;
+    },
+    async getMembers(options?: { userId?: string }): Promise<CouncilMemberContext[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "council_get_members", requestId, userId: options?.userId });
+      return result as CouncilMemberContext[];
+    },
+    async getAvailableLumiaItems(options?: { userId?: string }): Promise<LumiaItemDTO[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "council_get_available_lumia_items", requestId, userId: options?.userId });
+      return result as LumiaItemDTO[];
     },
   },
 
@@ -1107,6 +1999,7 @@ const spindleApi: SpindleAPI = {
       input: { title: string; body: string; tag?: string; url?: string; icon?: string; rawTitle?: boolean; image?: string },
       userId?: string,
     ): Promise<{ sent: number }> {
+      assertMutationAllowed("spindle.push.send()");
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "push_send",
@@ -1159,9 +2052,10 @@ const spindleApi: SpindleAPI = {
   macros: {
     async resolve(
       template: string,
-      options?: { chatId?: string; characterId?: string; userId?: string },
+      options?: { chatId?: string; characterId?: string; userId?: string; commit?: boolean },
     ): Promise<{ text: string; diagnostics: Array<{ message: string; offset: number; length: number }> }> {
       const requestId = crypto.randomUUID();
+      const commit = options?.commit ?? getActiveMacroInvocation()?.commit ?? true;
       const result = await request({
         type: "macros_resolve",
         requestId,
@@ -1169,6 +2063,7 @@ const spindleApi: SpindleAPI = {
         chatId: options?.chatId,
         characterId: options?.characterId,
         userId: options?.userId,
+        commit,
       } as any);
       return result as { text: string; diagnostics: Array<{ message: string; offset: number; length: number }> };
     },
@@ -1218,8 +2113,21 @@ const spindleApi: SpindleAPI = {
   },
 
   registerContextHandler(handler, priority?): void {
+    assertMutationAllowed("spindle.registerContextHandler()");
     contextHandlerFn = handler;
     post({ type: "register_context_handler", priority });
+  },
+
+  registerMessageContentProcessor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerMessageContentProcessor()");
+    messageContentProcessorFn = handler as (ctx: unknown) => Promise<unknown>;
+    post({ type: "register_message_content_processor", priority });
+  },
+
+  registerMacroInterceptor(handler, priority?): void {
+    assertMutationAllowed("spindle.registerMacroInterceptor()");
+    macroInterceptorFn = handler as (ctx: unknown) => Promise<unknown>;
+    post({ type: "register_macro_interceptor", priority });
   },
 
   sendToFrontend(payload: unknown, userId?: string): void {
@@ -1231,6 +2139,119 @@ const spindleApi: SpindleAPI = {
     return () => {
       frontendMessageHandlers.delete(handler);
     };
+  },
+
+  frontendProcesses: {
+    async spawn(options: {
+      kind: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "frontend_process_spawn",
+        requestId,
+        options,
+      });
+      return createFrontendProcessHandle(result as FrontendProcessInfo);
+    },
+    async list(filter?: { userId?: string; kind?: string; key?: string; state?: FrontendProcessState }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "frontend_process_list",
+        requestId,
+        filter,
+      });
+      return result as FrontendProcessInfo[];
+    },
+    async get(processId: string) {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "frontend_process_get", requestId, processId });
+      return result as FrontendProcessInfo | null;
+    },
+    async stop(processId: string, options?: { userId?: string; reason?: string }) {
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "frontend_process_stop",
+        requestId,
+        processId,
+        options,
+      });
+    },
+    onLifecycle(handler: (event: FrontendProcessLifecycleEvent) => void) {
+      frontendProcessLifecycleHandlers.add(handler);
+      return () => {
+        frontendProcessLifecycleHandlers.delete(handler);
+      };
+    },
+    onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void) {
+      frontendProcessMessageHandlers.add(handler);
+      return () => {
+        frontendProcessMessageHandlers.delete(handler);
+      };
+    },
+  },
+
+  backendProcesses: {
+    async spawn(options: {
+      entry: string;
+      kind?: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "backend_process_spawn",
+        requestId,
+        options,
+      });
+      return createBackendProcessHandle(result as BackendProcessInfo);
+    },
+    async list(filter?: { userId?: string; kind?: string; key?: string; state?: BackendProcessState }) {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "backend_process_list",
+        requestId,
+        filter,
+      });
+      return result as BackendProcessInfo[];
+    },
+    async get(processId: string) {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "backend_process_get", requestId, processId });
+      return result as BackendProcessInfo | null;
+    },
+    async stop(processId: string, options?: { userId?: string; reason?: string }) {
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "backend_process_stop",
+        requestId,
+        processId,
+        options,
+      });
+    },
+    onLifecycle(handler: (event: BackendProcessLifecycleEvent) => void) {
+      backendProcessLifecycleHandlers.add(handler);
+      return () => {
+        backendProcessLifecycleHandlers.delete(handler);
+      };
+    },
+    onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void) {
+      backendProcessMessageHandlers.add(handler);
+      return () => {
+        backendProcessMessageHandlers.delete(handler);
+      };
+    },
   },
 
   log: {
@@ -1246,17 +2267,17 @@ const spindleApi: SpindleAPI = {
   },
 
   toast: {
-    success(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "success", message, title: options?.title, duration: options?.duration });
+    success(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "success", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
-    warning(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "warning", message, title: options?.title, duration: options?.duration });
+    warning(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "warning", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
-    error(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "error", message, title: options?.title, duration: options?.duration });
+    error(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "error", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
-    info(message: string, options?: { title?: string; duration?: number }) {
-      post({ type: "toast_show", toastType: "info", message, title: options?.title, duration: options?.duration });
+    info(message: string, options?: { title?: string; duration?: number; userId?: string }) {
+      post({ type: "toast_show", toastType: "info", message, title: options?.title, duration: options?.duration, userId: options?.userId });
     },
   },
 
@@ -1347,9 +2368,11 @@ const spindleApi: SpindleAPI = {
 
   commands: {
     register(commands: any[]) {
+      assertMutationAllowed("spindle.commands.register()");
       post({ type: "commands_register", commands } as any);
     },
     unregister(commandIds?: string[]) {
+      assertMutationAllowed("spindle.commands.unregister()");
       post({ type: "commands_unregister", commandIds: commandIds ?? [] } as any);
     },
     onInvoked(handler: (commandId: string, context: any) => void | Promise<void>) {
@@ -1380,8 +2403,7 @@ const spindleApi: SpindleAPI = {
 
 // ─── Message handler (host → worker) ─────────────────────────────────────
 
-self.onmessage = async (event: MessageEvent<HostToWorker>) => {
-  const msg = event.data;
+async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
 
   switch (msg.type) {
     case "init": {
@@ -1399,6 +2421,12 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       } catch {
         // Non-fatal — cache starts empty, host still enforces
       }
+
+      // Initialize runtime sandbox before loading untrusted extension code.
+      // This patches import(), eval, Function, and sensitive Bun/process APIs
+      // so that static-analysis bypasses (dynamic imports, indirect access)
+      // are caught at runtime.
+      initializeSandbox();
 
       // Dynamically import the extension's backend entry
       try {
@@ -1422,7 +2450,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
         const payload = (msg.payload ?? {}) as {
           requestId?: string;
           name?: string;
-          context?: unknown;
+          context?: { commit?: boolean } & Record<string, unknown>;
         };
         const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
         const name = typeof payload.name === "string" ? payload.name.toLowerCase() : "";
@@ -1439,6 +2467,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
         }
 
         try {
+          macroInvocationStack.push({ commit: payload.context?.commit !== false });
           const value = await Promise.resolve(handler(payload.context ?? {}));
           post({
             type: "macro_result",
@@ -1451,6 +2480,8 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
             requestId,
             error: err?.message || "Macro execution failed",
           });
+        } finally {
+          macroInvocationStack.pop();
         }
         break;
       }
@@ -1485,6 +2516,7 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
             requestId: msg.requestId,
             messages: normalized.messages,
             ...(normalized.parameters ? { parameters: normalized.parameters } : {}),
+            ...(normalized.breakdown ? { breakdown: normalized.breakdown } : {}),
           });
         } catch (err: any) {
           post({
@@ -1515,11 +2547,16 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       }
 
       try {
+        const payload = {
+          toolName: msg.toolName,
+          args: msg.args,
+          requestId: msg.requestId,
+          ...(msg.councilMember ? { councilMember: msg.councilMember } : {}),
+          ...(msg.contextMessages ? { contextMessages: msg.contextMessages } : {}),
+        };
         let result: string | undefined;
         for (const handler of handlers) {
-          const val = await Promise.resolve(
-            handler({ toolName: msg.toolName, args: msg.args, requestId: msg.requestId })
-          );
+          const val = await Promise.resolve(handler(payload));
           if (val !== undefined && val !== null && result === undefined) {
             result = String(val);
           }
@@ -1564,12 +2601,86 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       break;
     }
 
+    case "message_content_processor_request": {
+      if (messageContentProcessorFn) {
+        try {
+          const result = await messageContentProcessorFn(msg.ctx);
+          post({
+            type: "message_content_processor_result",
+            requestId: msg.requestId,
+            result,
+          });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Message content processor error: ${err.message}`,
+          });
+          post({
+            type: "message_content_processor_result",
+            requestId: msg.requestId,
+            result: undefined,
+          });
+        }
+      }
+      break;
+    }
+
+    case "macro_interceptor_request": {
+      if (macroInterceptorFn) {
+        try {
+          const result = await macroInterceptorFn(msg.ctx);
+          post({
+            type: "macro_interceptor_result",
+            requestId: msg.requestId,
+            result,
+          });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Macro interceptor error: ${err.message}`,
+          });
+          post({
+            type: "macro_interceptor_result",
+            requestId: msg.requestId,
+            result: undefined,
+          });
+        }
+      }
+      break;
+    }
+
+    case "generation_stream_chunk": {
+      const stream = streamingGenerations.get(msg.requestId);
+      if (stream) stream.push(msg.chunk);
+      break;
+    }
+
+    case "generation_stream_error": {
+      const stream = streamingGenerations.get(msg.requestId);
+      if (stream) {
+        if (msg.error.startsWith("AbortError:")) {
+          stream.fail(makeAbortError(msg.error.slice("AbortError:".length).trim()));
+        } else {
+          stream.fail(new Error(msg.error));
+        }
+      }
+      break;
+    }
+
     case "response": {
       const pending = pendingResponses.get(msg.requestId);
       if (pending) {
         pendingResponses.delete(msg.requestId);
         if (msg.error) {
-          pending.reject(new Error(msg.error));
+          // Convert host-side abort errors back into a real DOMException so
+          // extensions can do `err.name === "AbortError"` the usual way.
+          if (msg.error.startsWith("AbortError:")) {
+            pending.reject(makeAbortError(msg.error.slice("AbortError:".length).trim()));
+          } else {
+            pending.reject(new Error(msg.error));
+          }
         } else {
           pending.resolve(msg.result);
         }
@@ -1653,6 +2764,66 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       break;
     }
 
+    case "frontend_process_lifecycle": {
+      for (const handler of frontendProcessLifecycleHandlers) {
+        try {
+          handler(msg.event);
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Frontend process lifecycle handler error: ${err.message}`,
+          });
+        }
+      }
+      break;
+    }
+
+    case "frontend_process_message": {
+      for (const handler of frontendProcessMessageHandlers) {
+        try {
+          handler({ processId: msg.processId, payload: msg.payload, userId: msg.userId });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Frontend process message handler error: ${err.message}`,
+          });
+        }
+      }
+      break;
+    }
+
+    case "backend_process_lifecycle": {
+      for (const handler of backendProcessLifecycleHandlers) {
+        try {
+          handler(msg.event);
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Backend process lifecycle handler error: ${err.message}`,
+          });
+        }
+      }
+      break;
+    }
+
+    case "backend_process_message": {
+      for (const handler of backendProcessMessageHandlers) {
+        try {
+          handler({ processId: msg.processId, payload: msg.payload, userId: msg.userId });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Backend process message handler error: ${err.message}`,
+          });
+        }
+      }
+      break;
+    }
+
     case "oauth_callback": {
       if (oauthCallbackHandler) {
         try {
@@ -1709,4 +2880,14 @@ self.onmessage = async (event: MessageEvent<HostToWorker>) => {
       break;
     }
   }
-};
+}
+
+if (typeof process.send === "function") {
+  process.on("message", (message) => {
+    void handleHostMessage(message as RuntimeHostToWorker);
+  });
+} else {
+  self.onmessage = (event: MessageEvent<RuntimeHostToWorker>) => {
+    void handleHostMessage(event.data);
+  };
+}

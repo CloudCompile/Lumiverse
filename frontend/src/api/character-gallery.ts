@@ -13,6 +13,12 @@ export const characterGalleryApi = {
     return upload<CharacterGalleryItem>(`/characters/${characterId}/gallery`, form)
   },
 
+  uploadMany(characterId: string, files: File[]) {
+    const form = new FormData()
+    for (const file of files) form.append('images', file)
+    return upload<CharacterGalleryItem[]>(`/characters/${characterId}/gallery/bulk`, form, { timeout: 0 })
+  },
+
   link(characterId: string, imageId: string, caption?: string) {
     return post<CharacterGalleryItem>(`/characters/${characterId}/gallery/link`, {
       image_id: imageId,

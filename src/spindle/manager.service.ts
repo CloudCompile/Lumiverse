@@ -19,8 +19,71 @@ import {
 import { join, resolve, dirname, sep } from "path";
 import { getUserExtensionPath } from "../auth/provision";
 import { spawnAsync } from "./spawn-async";
+import { normalizeSpindleHttpsUrl } from "./url-safety";
 
 export type InstallScope = "operator" | "user";
+type ManagedSpindlePermission = SpindlePermission | "databanks";
+
+function isManagedPermission(permission: string): permission is ManagedSpindlePermission {
+  return permission === "databanks" || isValidPermission(permission);
+}
+
+type BackendSafetyCheck = {
+  label: string;
+  regex: RegExp;
+};
+
+const DANGEROUS_BACKEND_CHECKS: BackendSafetyCheck[] = [
+  {
+    label: "filesystem module access",
+    regex: /(?:from\s*["'`](?:node:)?fs(?:\/promises)?["'`]|require\s*\(\s*["'`](?:node:)?fs(?:\/promises)?["'`]\s*\)|import\s*\(\s*["'`](?:node:)?fs(?:\/promises)?["'`]\s*\))/,
+  },
+  {
+    label: "subprocess module access",
+    regex: /(?:from\s*["'`](?:node:)?child_process["'`]|require\s*\(\s*["'`](?:node:)?child_process["'`]\s*\)|import\s*\(\s*["'`](?:node:)?child_process["'`]\s*\))/,
+  },
+  {
+    label: "direct socket module access",
+    regex: /(?:from\s*["'`](?:node:)?(?:net|tls|dgram|http|https)["'`]|require\s*\(\s*["'`](?:node:)?(?:net|tls|dgram|http|https)["'`]\s*\)|import\s*\(\s*["'`](?:node:)?(?:net|tls|dgram|http|https)["'`]\s*\))/,
+  },
+  {
+    label: "worker or cluster module access",
+    regex: /(?:from\s*["'`](?:node:)?(?:worker_threads|cluster)["'`]|require\s*\(\s*["'`](?:node:)?(?:worker_threads|cluster)["'`]\s*\)|import\s*\(\s*["'`](?:node:)?(?:worker_threads|cluster)["'`]\s*\))/,
+  },
+  {
+    label: "direct SQLite module access",
+    regex: /(?:from\s*["'`](?:bun:sqlite|node:sqlite)["'`]|require\s*\(\s*["'`](?:bun:sqlite|node:sqlite)["'`]\s*\)|import\s*\(\s*["'`](?:bun:sqlite|node:sqlite)["'`]\s*\))/,
+  },
+  {
+    label: "dangerous Bun system API usage",
+    regex: /\bBun\.(?:file|write|spawn|spawnSync|serve|connect|listen)\b/,
+  },
+  {
+    label: "dangerous process API usage",
+    regex: /\bprocess\.(?:env|exit|kill|chdir|dlopen)\b/,
+  },
+];
+
+export function detectDangerousBackendCapabilities(content: string): string[] {
+  const hits = new Set<string>();
+  for (const check of DANGEROUS_BACKEND_CHECKS) {
+    if (check.regex.test(content)) {
+      hits.add(check.label);
+    }
+  }
+  return [...hits];
+}
+
+async function assertSafeBackendBundle(identifier: string, backendPath: string): Promise<void> {
+  if (!(await Bun.file(backendPath).exists())) return;
+
+  const blocked = detectDangerousBackendCapabilities(await Bun.file(backendPath).text());
+  if (blocked.length === 0) return;
+
+  throw new Error(
+    `Extension "${identifier}" uses blocked backend capabilities: ${blocked.join(", ")}`
+  );
+}
 
 /**
  * Parse a stored JSON array column safely. A corrupted `permissions` row used
@@ -98,9 +161,8 @@ async function readManifest(identifier: string): Promise<SpindleManifest> {
   if (!manifest.version) throw new Error("Missing version in spindle.json");
   if (!manifest.name) throw new Error("Missing name in spindle.json");
   if (!manifest.author) throw new Error("Missing author in spindle.json");
-  if (!manifest.github) {
-    (manifest as any).github = `local://${manifest.identifier}`;
-  }
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github, "github");
+  manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
 
   return manifest;
 }
@@ -124,13 +186,10 @@ async function readManifestFromPath(
   if (!manifest.version) throw new Error("Missing version in spindle.json");
   if (!manifest.name) throw new Error("Missing name in spindle.json");
   if (!manifest.author) throw new Error("Missing author in spindle.json");
-  if (!manifest.github) {
-    if (options?.allowMissingGithub) {
-      (manifest as any).github = `local://${manifest.identifier}`;
-    } else {
-      throw new Error("Missing github in spindle.json");
-    }
-  }
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github, "github", {
+    required: !options?.allowMissingGithub,
+  });
+  manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
 
   return manifest;
 }
@@ -204,13 +263,16 @@ function insertExtensionFromManifest(manifest: SpindleManifest): void {
 
 // Permissions that require explicit admin approval before granting
 export const PRIVILEGED_PERMISSIONS = new Set([
+  "app_manipulation",
   "cors_proxy",
   "generation",
   "interceptor",
   "context_handler",
+  "macro_interceptor",
   "characters",
   "chats",
   "world_books",
+  "databanks",
   "personas",
   "push_notification",
   "image_gen",
@@ -398,7 +460,7 @@ function applyStorageSeeds(identifier: string, manifest: SpindleManifest): void 
  * Build a command array for running `bun <args>`.
  * Mirrors start.sh's `_bun()` wrapper.
  */
-function bunCmd(...args: string[]): string[] {
+export function bunCmd(...args: string[]): string[] {
   const method = process.env.LUMIVERSE_BUN_METHOD;
   const bunPath = process.env.LUMIVERSE_BUN_PATH;
 
@@ -467,6 +529,8 @@ export async function buildExtension(identifier: string): Promise<void> {
 
   const backendEntry = manifest.entry_backend || "dist/backend.js";
   const frontendEntry = manifest.entry_frontend || "dist/frontend.js";
+  const backendOut = resolveWithin(repo, backendEntry, "entry_backend");
+  const frontendOut = resolveWithin(repo, frontendEntry, "entry_frontend");
 
   // Always install dependencies first if package.json exists
   const pkgJson = join(repo, "package.json");
@@ -482,6 +546,7 @@ export async function buildExtension(identifier: string): Promise<void> {
   if (existsSync(distDir)) {
     const lsFiles = await spawnAsync(["git", "ls-files", "dist"], { cwd: repo });
     if (lsFiles.exitCode === 0 && lsFiles.stdout.trim().length > 0) {
+      await assertSafeBackendBundle(identifier, backendOut);
       return;
     }
   }
@@ -491,8 +556,6 @@ export async function buildExtension(identifier: string): Promise<void> {
   if (!existsSync(srcDir)) return;
 
   const buildDistDir = join(repo, "dist");
-  const backendOut = resolveWithin(repo, backendEntry, "entry_backend");
-  const frontendOut = resolveWithin(repo, frontendEntry, "entry_frontend");
 
   mkdirSync(buildDistDir, { recursive: true });
 
@@ -523,6 +586,8 @@ export async function buildExtension(identifier: string): Promise<void> {
       throw new Error(`Frontend build failed: ${proc.stderr}`);
     }
   }
+
+  await assertSafeBackendBundle(identifier, backendOut);
 }
 
 // ─── Install ─────────────────────────────────────────────────────────────
@@ -603,6 +668,10 @@ export async function install(
       `Invalid identifier "${manifest.identifier}". Must match /^[a-z][a-z0-9_]*$/`
     );
   }
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github || githubUrl, "github", {
+    required: true,
+  });
+  manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
 
   // Check if already installed
   const db = getDb();
@@ -793,7 +862,7 @@ export function grantPermission(
   identifier: string,
   permission: string
 ): void {
-  if (!isValidPermission(permission)) {
+  if (!isManagedPermission(permission)) {
     throw new Error(`Invalid permission: ${permission}`);
   }
 
@@ -825,7 +894,7 @@ export function revokePermission(
   );
 }
 
-export function getGrantedPermissions(identifier: string): SpindlePermission[] {
+export function getGrantedPermissions(identifier: string): ManagedSpindlePermission[] {
   const db = getDb();
   const ext = db
     .query("SELECT id FROM extensions WHERE identifier = ?")
@@ -836,12 +905,12 @@ export function getGrantedPermissions(identifier: string): SpindlePermission[] {
     .query("SELECT permission FROM extension_grants WHERE extension_id = ?")
     .all(ext.id) as { permission: string }[];
 
-  return rows.map((r) => r.permission as SpindlePermission);
+  return rows.map((r) => r.permission as ManagedSpindlePermission);
 }
 
 export function hasPermission(
   identifier: string,
-  permission: SpindlePermission
+  permission: ManagedSpindlePermission
 ): boolean {
   return getGrantedPermissions(identifier).includes(permission);
 }
@@ -946,13 +1015,19 @@ export async function getBackendEntryPath(identifier: string): Promise<string | 
   const entry = manifest.entry_backend || "dist/backend.js";
   const repo = repoDir(identifier);
   const entryPath = resolveWithin(repo, entry, "entry_backend");
-  return (await Bun.file(entryPath).exists()) ? entryPath : null;
+  if (!(await Bun.file(entryPath).exists())) return null;
+  await assertSafeBackendBundle(identifier, entryPath);
+  return entryPath;
 }
 
 export function getStoragePath(identifier: string): string {
   const dir = storageDir(identifier);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export function getRepoPath(identifier: string): string {
+  return repoDir(identifier);
 }
 
 export function getStoragePathForExtension(extension: ExtensionInfo): string {
@@ -1225,7 +1300,7 @@ export async function switchBranch(
 
 async function rowToExtensionInfo(row: any): Promise<ExtensionInfo> {
   const identifier = row.identifier;
-  const permissions: SpindlePermission[] = parsePermissionsSafe<SpindlePermission>(row.permissions);
+  const permissions: ManagedSpindlePermission[] = parsePermissionsSafe<ManagedSpindlePermission>(row.permissions);
   const granted = getGrantedPermissions(identifier);
 
   let hasFrontend = false;

@@ -4,14 +4,20 @@ import { motion } from 'motion/react'
 import { RefreshCw } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
+import NumericInput from '@/components/shared/NumericInput'
 import { Toggle } from '@/components/shared/Toggle'
 import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
+import { connectionsApi } from '@/api/connections'
 import { embeddingsApi } from '@/api/embeddings'
 import { imagesApi } from '@/api/images'
+import { settingsApi } from '@/api/settings'
+import { webSearchApi, type WebSearchSettingsInput, type WebSearchTestResponse } from '@/api/web-search'
 import type { DrawerSettings, GuidedGeneration, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings } from '@/types/api'
+import type { WorldBookVectorPresetMode, WorldBookVectorSettings } from '@/types/world-book-vector-settings'
+import AccountSettings from '@/components/settings/AccountSettings'
 import UserManagement from '@/components/settings/UserManagement'
 import MigrationSettings from '@/components/settings/MigrationSettings'
 import TokenizerManager from '@/components/settings/TokenizerManager'
@@ -22,6 +28,7 @@ import OperatorPanel from '@/components/settings/OperatorPanel'
 import VoiceSettings from '@/components/settings/VoiceSettings'
 import McpServerSettings from '@/components/settings/mcp-servers/McpServerSettings'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
+import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import { getVisibleSettingsTabs } from '@/lib/settings-tab-registry'
 import styles from './SettingsModal.module.css'
 import clsx from 'clsx'
@@ -36,6 +43,12 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [activeView, setActiveView] = useState(settingsActiveView || 'display')
 
   const VIEWS = useMemo(() => getVisibleSettingsTabs(user?.role), [user?.role])
+
+  useEffect(() => {
+    if (!VIEWS.some((tab) => tab.id === activeView) && VIEWS.length > 0) {
+      setActiveView(VIEWS[0].id)
+    }
+  }, [VIEWS, activeView])
 
   return createPortal(
     <div className={styles.overlay} onClick={onClose}>
@@ -90,6 +103,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
 function SettingsView({ view }: { view: string }) {
   switch (view) {
+    case 'account':
+      return <AccountSettings />
     case 'display':
       return <DisplaySettings />
     case 'chat':
@@ -106,6 +121,8 @@ function SettingsView({ view }: { view: string }) {
       return <AdvancedSettings />
     case 'embeddings':
       return <EmbeddingsSettings />
+    case 'webSearch':
+      return <WebSearchSettings />
     case 'lumihub':
       return <LumiHubSettings />
     case 'tokenizers':
@@ -140,6 +157,7 @@ function DisplaySettings() {
   const modalWidthMode = useStore((s) => s.modalWidthMode)
   const modalMaxWidth = useStore((s) => s.modalMaxWidth)
   const landingPageChatsDisplayed = useStore((s) => s.landingPageChatsDisplayed)
+  const landingPageLayoutMode = useStore((s) => s.landingPageLayoutMode)
   const toastPosition = useStore((s) => s.toastPosition)
   const chatHeadsEnabled = useStore((s) => s.chatHeadsEnabled)
   const chatHeadsSize = useStore((s) => s.chatHeadsSize)
@@ -288,13 +306,13 @@ function DisplaySettings() {
       {drawerSettings.panelWidthMode === 'custom' && (
         <div className={styles.field}>
           <label className={styles.fieldLabel}>CUSTOM WIDTH (vw)</label>
-          <input
+          <NumericInput
             className={styles.numberInput}
-            type="number"
             min={20}
             max={80}
             value={drawerSettings.customPanelWidth}
-            onChange={(e) => updateDrawer({ customPanelWidth: parseInt(e.target.value, 10) || 35 })}
+            integer
+            onChange={(value) => updateDrawer({ customPanelWidth: value ?? 35 })}
           />
         </div>
       )}
@@ -386,14 +404,37 @@ function DisplaySettings() {
       <h3 className={styles.sectionTitle} style={{ marginTop: 8 }}>Pagination</h3>
 
       <div className={styles.field}>
+        <label className={styles.fieldLabel}>LANDING PAGE LAYOUT</label>
+        <div className={styles.segmented}>
+          <button
+            type="button"
+            className={clsx(styles.segmentedBtn, landingPageLayoutMode === 'cards' && styles.segmentedBtnActive)}
+            onClick={() => setSetting('landingPageLayoutMode', 'cards')}
+          >
+            Cards
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.segmentedBtn, landingPageLayoutMode === 'compact' && styles.segmentedBtnActive)}
+            onClick={() => setSetting('landingPageLayoutMode', 'compact')}
+          >
+            Compact List
+          </button>
+        </div>
+        <p className={styles.helperText} style={{ marginTop: 8 }}>
+          Switch the landing page between the current card gallery and a denser adaptive list of recent chats.
+        </p>
+      </div>
+
+      <div className={styles.field}>
         <label className={styles.fieldLabel}>LANDING PAGE CHATS PER BATCH</label>
-        <input
+        <NumericInput
           className={styles.numberInput}
-          type="number"
           min={4}
           max={100}
           value={landingPageChatsDisplayed}
-          onChange={(e) => setSetting('landingPageChatsDisplayed', parseInt(e.target.value, 10) || 12)}
+          integer
+          onChange={(value) => setSetting('landingPageChatsDisplayed', value ?? 12)}
         />
       </div>
 
@@ -1333,6 +1374,59 @@ function ExtensionPoolSettings() {
 }
 
 function EmbeddingsSettings() {
+  const WORLD_BOOK_VECTOR_PRESETS: Record<Exclude<WorldBookVectorPresetMode, 'custom'>, Omit<WorldBookVectorSettings, 'presetMode'>> = {
+    lean: {
+      chunkTargetTokens: 220,
+      chunkMaxTokens: 360,
+      chunkOverlapTokens: 40,
+      retrievalTopK: 4,
+      maxChunksPerEntry: 4,
+    },
+    balanced: {
+      chunkTargetTokens: 420,
+      chunkMaxTokens: 700,
+      chunkOverlapTokens: 80,
+      retrievalTopK: 6,
+      maxChunksPerEntry: 8,
+    },
+    deep: {
+      chunkTargetTokens: 720,
+      chunkMaxTokens: 1200,
+      chunkOverlapTokens: 120,
+      retrievalTopK: 8,
+      maxChunksPerEntry: 12,
+    },
+  }
+  const DEFAULT_WORLD_BOOK_VECTOR_SETTINGS: WorldBookVectorSettings = {
+    presetMode: 'balanced',
+    ...WORLD_BOOK_VECTOR_PRESETS.balanced,
+  }
+
+  const normalizeWorldBookVectorSettings = (
+    value: unknown,
+    retrievalFallback: number,
+  ): WorldBookVectorSettings => {
+    const raw = (value && typeof value === 'object') ? value as Partial<WorldBookVectorSettings> : {}
+    const base = {
+      ...DEFAULT_WORLD_BOOK_VECTOR_SETTINGS,
+      retrievalTopK: retrievalFallback,
+    }
+    const presetMode: WorldBookVectorPresetMode = raw.presetMode === 'lean' || raw.presetMode === 'balanced' || raw.presetMode === 'deep' || raw.presetMode === 'custom'
+      ? raw.presetMode
+      : base.presetMode
+    const preset = presetMode === 'custom' ? null : WORLD_BOOK_VECTOR_PRESETS[presetMode]
+    const target = Math.min(2000, Math.max(120, Math.floor((preset?.chunkTargetTokens ?? raw.chunkTargetTokens ?? base.chunkTargetTokens))))
+    const max = Math.min(4000, Math.max(target, Math.floor((preset?.chunkMaxTokens ?? raw.chunkMaxTokens ?? base.chunkMaxTokens))))
+    return {
+      presetMode,
+      chunkTargetTokens: target,
+      chunkMaxTokens: max,
+      chunkOverlapTokens: Math.min(500, Math.max(0, Math.floor((preset?.chunkOverlapTokens ?? raw.chunkOverlapTokens ?? base.chunkOverlapTokens)))),
+      retrievalTopK: Math.min(20, Math.max(1, Math.floor((preset?.retrievalTopK ?? raw.retrievalTopK ?? base.retrievalTopK)))),
+      maxChunksPerEntry: Math.min(24, Math.max(1, Math.floor((preset?.maxChunksPerEntry ?? raw.maxChunksPerEntry ?? base.maxChunksPerEntry)))),
+    }
+  }
+
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -1340,6 +1434,15 @@ function EmbeddingsSettings() {
   const [success, setSuccess] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [cfg, setCfg] = useState<EmbeddingConfig | null>(null)
+  const [worldBookSettings, setWorldBookSettings] = useState<WorldBookVectorSettings>(DEFAULT_WORLD_BOOK_VECTOR_SETTINGS)
+  const [worldBookSettingsLoading, setWorldBookSettingsLoading] = useState(true)
+  const [worldBookSettingsStatus, setWorldBookSettingsStatus] = useState<string | null>(null)
+  const [models, setModels] = useState<string[]>([])
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const worldBookSettingsLoadedRef = useRef(false)
+  const worldBookSettingsDirtyRef = useRef(false)
+  const worldBookSettingsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -1347,6 +1450,7 @@ function EmbeddingsSettings() {
     try {
       const next = await embeddingsApi.getConfig()
       setCfg(next)
+      setApiKey('')
     } catch (err: any) {
       setError(err?.body?.error || err?.message || 'Failed to load embedding settings')
     } finally {
@@ -1358,24 +1462,86 @@ function EmbeddingsSettings() {
     load()
   }, [])
 
-  const PROVIDER_DEFAULTS: Record<string, { api_url: string; model: string }> = {
-    'openai-compatible': { api_url: 'https://api.openai.com/v1/embeddings', model: 'text-embedding-3-small' },
-    openai: { api_url: 'https://api.openai.com/v1/embeddings', model: 'text-embedding-3-small' },
-    openrouter: { api_url: 'https://openrouter.ai/api/v1/embeddings', model: 'text-embedding-3-small' },
-    electronhub: { api_url: 'https://api.electronhub.top/v1/embeddings', model: 'text-embedding-3-small' },
-    nanogpt: { api_url: 'https://nano-gpt.com/api/v1/embeddings', model: 'text-embedding-3-small' },
+  useEffect(() => {
+    let cancelled = false
+    setWorldBookSettingsLoading(true)
+    settingsApi.get('worldBookVectorSettings')
+      .then((row) => {
+        if (cancelled) return
+        setWorldBookSettings(normalizeWorldBookVectorSettings(row.value, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+        worldBookSettingsLoadedRef.current = true
+      })
+      .catch(() => {
+        if (cancelled) return
+        setWorldBookSettings(normalizeWorldBookVectorSettings(null, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+        worldBookSettingsLoadedRef.current = true
+      })
+      .finally(() => {
+        if (!cancelled) setWorldBookSettingsLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [cfg?.retrieval_top_k])
+
+  useEffect(() => () => {
+    if (worldBookSettingsSaveTimerRef.current) clearTimeout(worldBookSettingsSaveTimerRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (!worldBookSettingsLoadedRef.current || !worldBookSettingsDirtyRef.current) return
+    if (worldBookSettingsSaveTimerRef.current) clearTimeout(worldBookSettingsSaveTimerRef.current)
+    setWorldBookSettingsStatus('Saving world-book settings...')
+    worldBookSettingsSaveTimerRef.current = setTimeout(async () => {
+      try {
+        await settingsApi.put('worldBookVectorSettings', worldBookSettings)
+        worldBookSettingsDirtyRef.current = false
+        setWorldBookSettingsStatus('World-book settings saved')
+      } catch (err: any) {
+        setWorldBookSettingsStatus(err?.body?.error || err?.message || 'Failed to save world-book settings')
+      }
+    }, 400)
+    return () => {
+      if (worldBookSettingsSaveTimerRef.current) clearTimeout(worldBookSettingsSaveTimerRef.current)
+    }
+  }, [worldBookSettings])
+
+  useEffect(() => {
+    setModels([])
+    setModelLabels({})
+  }, [cfg?.provider, cfg?.api_url])
+
+  const PROVIDER_DEFAULTS: Record<string, { api_url: string }> = {
+    'openai-compatible': { api_url: 'https://api.openai.com/v1/embeddings' },
+    openai: { api_url: 'https://api.openai.com/v1/embeddings' },
+    openrouter: { api_url: 'https://openrouter.ai/api/v1/embeddings' },
+    electronhub: { api_url: 'https://api.electronhub.top/v1/embeddings' },
+    bananabread: { api_url: 'http://localhost:8008/v1/embeddings' },
+    nanogpt: { api_url: 'https://nano-gpt.com/api/v1/embeddings' },
+  }
+
+  const providerAllowsCustomApiUrl = (provider: EmbeddingConfig['provider']) => {
+    return provider === 'openai-compatible' || provider === 'bananabread'
   }
 
   const update = (patch: Partial<EmbeddingConfig>) => {
     if (!cfg) return
-    // When provider changes, auto-fill URL and model with provider defaults
+    // When provider changes, auto-fill URL with provider default
     if (patch.provider && patch.provider !== cfg.provider) {
       const defaults = PROVIDER_DEFAULTS[patch.provider]
       if (defaults) {
-        patch = { ...patch, api_url: defaults.api_url, model: defaults.model }
+        patch = { ...patch, api_url: defaults.api_url }
       }
     }
     setCfg({ ...cfg, ...patch })
+  }
+
+  const updateWorldBookSettings = (patch: Partial<WorldBookVectorSettings>) => {
+    worldBookSettingsDirtyRef.current = true
+    setWorldBookSettings((current) => normalizeWorldBookVectorSettings({ ...current, ...patch }, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
+  }
+
+  const applyWorldBookPreset = (presetMode: WorldBookVectorPresetMode) => {
+    worldBookSettingsDirtyRef.current = true
+    setWorldBookSettings((current) => normalizeWorldBookVectorSettings({ ...current, presetMode }, cfg?.retrieval_top_k ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK))
   }
 
   const save = async () => {
@@ -1390,7 +1556,7 @@ function EmbeddingsSettings() {
         api_url: cfg.api_url,
         model: cfg.model,
         dimensions: cfg.dimensions,
-        retrieval_top_k: cfg.retrieval_top_k,
+        retrieval_top_k: worldBookSettings.retrievalTopK,
         hybrid_weight_mode: cfg.hybrid_weight_mode,
         preferred_context_size: cfg.preferred_context_size,
         batch_size: cfg.batch_size,
@@ -1425,6 +1591,25 @@ function EmbeddingsSettings() {
       setError(err?.body?.error || err?.message || 'Embedding test failed')
     } finally {
       setTesting(false)
+    }
+  }
+
+  const fetchModels = async () => {
+    if (!cfg) return
+    setModelsLoading(true)
+    try {
+      const result = await embeddingsApi.previewModels({
+        provider: cfg.provider,
+        api_url: cfg.api_url || undefined,
+        api_key: apiKey.trim() || undefined,
+      })
+      setModels(result.models || [])
+      setModelLabels(result.model_labels || {})
+    } catch {
+      setModels([])
+      setModelLabels({})
+    } finally {
+      setModelsLoading(false)
     }
   }
 
@@ -1464,6 +1649,14 @@ function EmbeddingsSettings() {
   const checklistReady = completedChecklistCount === setupChecklist.length
 
   const inherited = !!cfg.inherited
+  const canEditApiUrl = providerAllowsCustomApiUrl(cfg.provider)
+  const defaultApiUrl = PROVIDER_DEFAULTS[cfg.provider]?.api_url || cfg.api_url
+  const worldBookPresetDescriptions: Record<WorldBookVectorPresetMode, string> = {
+    lean: 'Smaller chunks and lighter storage for compact lorebooks.',
+    balanced: 'Recommended. Better coverage without blowing up index size.',
+    deep: 'More chunks and broader recall for dense reference books.',
+    custom: 'Tune chunking, recall, and storage manually.',
+  }
 
   return (
     <div className={styles.settingsSection}>
@@ -1533,199 +1726,324 @@ function EmbeddingsSettings() {
         </div>
       </div>
 
-      <Toggle.Checkbox
-        checked={cfg.enabled}
-        onChange={(checked) => update({ enabled: checked })}
-        label="Enable embeddings"
-      />
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Provider</label>
-        <select className={styles.select} value={cfg.provider} onChange={(e) => update({ provider: e.target.value as EmbeddingConfig['provider'] })}>
-          <option value="openai-compatible">OpenAI Compatible</option>
-          <option value="openai">OpenAI</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="electronhub">ElectronHub</option>
-          <option value="nanogpt">Nano-GPT</option>
-        </select>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>API URL</label>
-        <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-          Auto-appends /v1/embeddings to base domains and /embeddings to partial paths (e.g. /v1). Full paths ending in /embeddings are used as-is.
-        </span>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Embedding Model</label>
-        <input className={styles.select} value={cfg.model} onChange={(e) => update({ model: e.target.value })} />
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Dimensions (optional)</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={1}
-          value={cfg.dimensions ?? ''}
-          onChange={(e) => update({ dimensions: e.target.value ? Number(e.target.value) : null })}
-        />
-      </div>
-
-      <Toggle.Checkbox
-        checked={cfg.send_dimensions ?? false}
-        onChange={(checked) => update({ send_dimensions: checked })}
-        label="Send dimensions to provider"
-        hint="When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value."
-      />
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Vector Recall Size (top-k)</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={1}
-          value={cfg.retrieval_top_k}
-          onChange={(e) => update({ retrieval_top_k: Number(e.target.value || 1) })}
-        />
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Hybrid Weight Mode</label>
-        <select
-          className={styles.select}
-          value={cfg.hybrid_weight_mode}
-          onChange={(e) => update({ hybrid_weight_mode: e.target.value as EmbeddingConfig['hybrid_weight_mode'] })}
-        >
-          <option value="keyword_first">Keyword First</option>
-          <option value="balanced">Balanced</option>
-          <option value="vector_first">Vector First</option>
-        </select>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Preferred Context Size (messages)</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={1}
-          max={64}
-          value={cfg.preferred_context_size}
-          onChange={(e) => update({ preferred_context_size: Number(e.target.value || 1) })}
-        />
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Embedding Batch Size</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={1}
-          max={200}
-          value={cfg.batch_size}
-          onChange={(e) => update({ batch_size: Math.max(1, Math.min(200, Number(e.target.value || 50))) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-          Number of entries to embed per API request during reindexing (1-200)
-        </span>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Similarity Threshold</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={0}
-          max={2}
-          step={0.05}
-          value={cfg.similarity_threshold}
-          onChange={(e) => update({ similarity_threshold: Math.max(0, Math.min(2, Number(e.target.value || 0))) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-          Maximum cosine distance for vector matches (0 = no filtering, lower = stricter). LanceDB cosine distance starts at 0 for identical text and can go above 1.
-        </span>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>World Book Rerank Cutoff</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={0}
-          max={2}
-          step={0.01}
-          value={cfg.rerank_cutoff}
-          onChange={(e) => update({ rerank_cutoff: Math.max(0, Math.min(2, Number(e.target.value || 0))) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-          Minimum rerank score required after boosts and penalties are applied to world-book vector hits. 0 = no post-rerank filtering.
-        </span>
-      </div>
-      {cfg.vectorize_chat_messages && (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>Memory Retrieval Mode</label>
-          <select
-            className={styles.select}
-            value={cfg.chat_memory_mode}
-            onChange={(e) => update({ chat_memory_mode: e.target.value as EmbeddingConfig['chat_memory_mode'] })}
-          >
-            <option value="conservative">Conservative - Fewer, high-quality memories</option>
-            <option value="balanced">Balanced - Standard retrieval (recommended)</option>
-            <option value="aggressive">Aggressive - More memories, lower threshold</option>
-          </select>
-          <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-            Controls how many memories are retrieved and quality threshold. All chunking parameters are automatically optimized based on this mode.
-          </span>
+      <div className={styles.settingsCard}>
+        <div className={styles.settingsCardHeader}>
+          <div>
+            <div className={styles.subsectionTitle}>Connection</div>
+            <div className={styles.settingsCardTitle}>Provider and model</div>
+          </div>
         </div>
-      )}
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>Request Timeout (seconds)</label>
-        <input
-          className={styles.numberInput}
-          type="number"
-          min={0}
-          max={300}
-          step={5}
-          value={cfg.request_timeout ?? 60}
-          onChange={(e) => update({ request_timeout: Math.max(0, Math.min(300, Number(e.target.value || 60))) })}
-        />
-        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: '11px' }}>
-          Max seconds to wait for an embedding API response. Increase for slow providers or large batches. 0 = no timeout.
-        </span>
-      </div>
+        <div className={styles.settingsCardBody}>
+          <Toggle.Checkbox
+            checked={cfg.enabled}
+            onChange={(checked) => update({ enabled: checked })}
+            label="Enable embeddings"
+          />
 
-      {!inherited && (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>API Key {cfg.has_api_key ? '(configured)' : '(not configured)'}</label>
-          <input
-            className={styles.select}
-            type="password"
-            value={apiKey}
-            placeholder="Paste a new key to replace"
-            onChange={(e) => setApiKey(e.target.value)}
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Provider</label>
+              <select className={styles.select} value={cfg.provider} onChange={(e) => update({ provider: e.target.value as EmbeddingConfig['provider'] })} disabled={inherited}>
+                <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="electronhub">ElectronHub</option>
+                <option value="bananabread">BananaBread</option>
+                <option value="nanogpt">Nano-GPT</option>
+              </select>
+            </div>
+
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Embedding Model</label>
+              <ModelCombobox
+                value={cfg.model}
+                onChange={(value) => update({ model: value })}
+                models={models}
+                modelLabels={modelLabels}
+                loading={modelsLoading}
+                onRefresh={fetchModels}
+                autoRefreshOnFocus
+                refreshKey={`${cfg.provider}:${cfg.api_url}`}
+                placeholder='Search or enter a model'
+                emptyMessage="No models returned for this provider. Enter one manually."
+                browseHint="Click into the field to browse embedding-capable models for this provider, or type one manually."
+                disabled={inherited}
+              />
+            </div>
+          </div>
+
+          {canEditApiUrl ? (
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>API URL</label>
+              <input className={styles.select} value={cfg.api_url} onChange={(e) => update({ api_url: e.target.value })} disabled={inherited} />
+              <span className={styles.helperText}>
+                Auto-appends /v1/embeddings to base domains and /embeddings to partial paths. Full paths ending in /embeddings are used as-is.
+              </span>
+              {cfg.provider === 'bananabread' && (
+                <span className={styles.helperText}>
+                  BananaBread defaults to `http://localhost:8008/v1/embeddings` and uses its loaded model list from `/v1/models`.
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>API Endpoint</label>
+              <span className={styles.helperText}>Uses the provider default: `{defaultApiUrl}`</span>
+            </div>
+          )}
+
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Dimensions (optional)</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                value={cfg.dimensions ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => update({ dimensions: value })}
+              />
+            </div>
+
+            {!inherited && (
+              <div className={styles.field}>
+                <label className={styles.fieldLabel}>API Key {cfg.has_api_key ? '(configured)' : '(not configured)'}</label>
+                <input
+                  className={styles.select}
+                  type="password"
+                  value={apiKey}
+                  placeholder="Paste a new key to replace"
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </div>
+            )}
+          </div>
+
+          <Toggle.Checkbox
+            checked={cfg.send_dimensions ?? false}
+            onChange={(checked) => update({ send_dimensions: checked })}
+            label="Send dimensions to provider"
+            hint="When enabled, the dimensions value above is included in the embedding API request. Some providers set this automatically from the model and may reject an explicit value."
           />
         </div>
-      )}
+      </div>
 
-      <Toggle.Checkbox
-        checked={cfg.vectorize_world_books}
-        onChange={(checked) => update({ vectorize_world_books: checked })}
-        label="Vectorize world book entries"
-      />
+      <div className={styles.settingsCard}>
+        <div className={styles.settingsCardHeader}>
+          <div>
+            <div className={styles.subsectionTitle}>World Books</div>
+            <div className={styles.settingsCardTitle}>Lorebook indexing and retrieval</div>
+            <div className={styles.settingsCardMeta}>Chunking and storage save automatically for your account.</div>
+          </div>
+          <span className={styles.settingsCardStatus}>
+            {worldBookSettingsLoading ? 'Loading...' : worldBookSettingsStatus ?? 'Ready'}
+          </span>
+        </div>
+        <div className={styles.settingsCardBody}>
+          <Toggle.Checkbox
+            checked={cfg.vectorize_world_books}
+            onChange={(checked) => update({ vectorize_world_books: checked })}
+            label="Vectorize world book entries"
+          />
 
-      <Toggle.Checkbox
-        checked={cfg.vectorize_chat_documents}
-        onChange={(checked) => update({ vectorize_chat_documents: checked })}
-        label="Vectorize attached chat documents (scaffold)"
-      />
+          <div className={styles.presetRow}>
+            {(['lean', 'balanced', 'deep', 'custom'] as WorldBookVectorPresetMode[]).map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                className={clsx(styles.presetBtn, worldBookSettings.presetMode === preset && styles.presetBtnActive)}
+                onClick={() => applyWorldBookPreset(preset)}
+              >
+                {preset === 'lean' ? 'Lean' : preset === 'balanced' ? 'Balanced' : preset === 'deep' ? 'Deep' : 'Custom'}
+              </button>
+            ))}
+          </div>
+          <span className={styles.helperText}>{worldBookPresetDescriptions[worldBookSettings.presetMode]}</span>
 
-      <Toggle.Checkbox
-        checked={cfg.vectorize_chat_messages}
-        onChange={(checked) => update({ vectorize_chat_messages: checked })}
-        label="Vectorize chat messages (long-term memory)"
-      />
+          <div className={styles.settingsGridCompact}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Retrieved Entries</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                max={20}
+                value={worldBookSettings.retrievalTopK}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ retrievalTopK: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.retrievalTopK })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Chunk Target Tokens</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={120}
+                max={2000}
+                value={worldBookSettings.chunkTargetTokens}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ chunkTargetTokens: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.chunkTargetTokens })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Chunk Max Tokens</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={120}
+                max={4000}
+                value={worldBookSettings.chunkMaxTokens}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ chunkMaxTokens: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.chunkMaxTokens })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Chunk Overlap Tokens</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={0}
+                max={500}
+                value={worldBookSettings.chunkOverlapTokens}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ chunkOverlapTokens: value ?? 0 })}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Stored Chunks Per Entry</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                max={24}
+                value={worldBookSettings.maxChunksPerEntry}
+                disabled={worldBookSettingsLoading || worldBookSettings.presetMode !== 'custom'}
+                integer
+                onChange={(value) => updateWorldBookSettings({ maxChunksPerEntry: value ?? DEFAULT_WORLD_BOOK_VECTOR_SETTINGS.maxChunksPerEntry })}
+              />
+            </div>
+          </div>
+
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Hybrid Weight Mode</label>
+              <select
+                className={styles.select}
+                value={cfg.hybrid_weight_mode}
+                onChange={(e) => update({ hybrid_weight_mode: e.target.value as EmbeddingConfig['hybrid_weight_mode'] })}
+              >
+                <option value="keyword_first">Keyword First</option>
+                <option value="balanced">Balanced</option>
+                <option value="vector_first">Vector First</option>
+              </select>
+            </div>
+
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Similarity Threshold</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={0}
+                max={2}
+                step={0.05}
+                value={cfg.similarity_threshold}
+                onChange={(value) => update({ similarity_threshold: Math.max(0, Math.min(2, value ?? 0)) })}
+              />
+              <span className={styles.helperText}>0 disables raw-distance filtering.</span>
+            </div>
+          </div>
+
+          <div className={styles.field}>
+            <label className={styles.fieldLabel}>World Book Rerank Cutoff</label>
+            <NumericInput
+              className={styles.numberInput}
+              min={0}
+              max={2}
+              step={0.01}
+              value={cfg.rerank_cutoff}
+              onChange={(value) => update({ rerank_cutoff: Math.max(0, Math.min(2, value ?? 0)) })}
+            />
+            <span className={styles.helperText}>0 disables post-rerank filtering after boosts and penalties are applied.</span>
+          </div>
+        </div>
+      </div>
+
+      <div className={styles.settingsCard}>
+        <div className={styles.settingsCardHeader}>
+          <div>
+            <div className={styles.subsectionTitle}>Runtime</div>
+            <div className={styles.settingsCardTitle}>Embedding request behavior</div>
+          </div>
+        </div>
+        <div className={styles.settingsCardBody}>
+          <div className={styles.settingsGridTwo}>
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Embedding Batch Size</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={1}
+                max={200}
+                value={cfg.batch_size}
+                integer
+                onChange={(value) => update({ batch_size: Math.max(1, Math.min(200, value ?? 50)) })}
+              />
+              <span className={styles.helperText}>Entries or chunks embedded per request during indexing.</span>
+            </div>
+
+            <div className={styles.field}>
+              <label className={styles.fieldLabel}>Request Timeout (seconds)</label>
+              <NumericInput
+                className={styles.numberInput}
+                min={0}
+                max={300}
+                step={5}
+                value={cfg.request_timeout ?? 60}
+                integer
+                onChange={(value) => update({ request_timeout: Math.max(0, Math.min(300, value ?? 60)) })}
+              />
+              <span className={styles.helperText}>0 disables the timeout.</span>
+            </div>
+          </div>
+
+          <Toggle.Checkbox
+            checked={cfg.vectorize_chat_documents}
+            onChange={(checked) => update({ vectorize_chat_documents: checked })}
+            label="Vectorize attached chat documents (scaffold)"
+          />
+
+          <Toggle.Checkbox
+            checked={cfg.vectorize_chat_messages}
+            onChange={(checked) => update({ vectorize_chat_messages: checked })}
+            label="Vectorize chat messages (long-term memory)"
+          />
+
+          {cfg.vectorize_chat_messages && (
+            <div className={styles.settingsGridTwo}>
+              <div className={styles.field}>
+                <label className={styles.fieldLabel}>Preferred Context Size (messages)</label>
+                <NumericInput
+                  className={styles.numberInput}
+                  min={1}
+                  max={64}
+                  value={cfg.preferred_context_size}
+                  integer
+                  onChange={(value) => update({ preferred_context_size: value ?? 1 })}
+                />
+              </div>
+              <div className={styles.field}>
+                <label className={styles.fieldLabel}>Memory Retrieval Mode</label>
+                <select
+                  className={styles.select}
+                  value={cfg.chat_memory_mode}
+                  onChange={(e) => update({ chat_memory_mode: e.target.value as EmbeddingConfig['chat_memory_mode'] })}
+                >
+                  <option value="conservative">Conservative - Fewer, high-quality memories</option>
+                  <option value="balanced">Balanced - Standard retrieval (recommended)</option>
+                  <option value="aggressive">Aggressive - More memories, lower threshold</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       <div className={styles.drawerRow}>
         <Button size="sm" onClick={save} disabled={saving || inherited} loading={saving}>
@@ -1737,9 +2055,242 @@ function EmbeddingsSettings() {
       </div>
       <p className={styles.placeholder}>
         {inherited
-          ? 'Testing verifies the inherited embedding connection without changing any settings.'
-          : 'Testing auto-detects native model dimensions and applies them to this configuration.'}
+          ? 'Testing verifies the inherited embedding connection without changing shared provider settings. World-book chunking and retrieval tuning still save automatically.'
+          : 'Testing auto-detects native model dimensions and applies them to this configuration. World-book chunking and retrieval tuning save automatically.'}
       </p>
+    </div>
+  )
+}
+
+interface WebSearchSettingsState {
+  enabled: boolean
+  provider: 'searxng'
+  apiUrl: string
+  requestTimeoutMs: number
+  defaultResultCount: number
+  maxResultCount: number
+  maxPagesToScrape: number
+  maxCharsPerPage: number
+  language: string
+  safeSearch: 0 | 1 | 2
+  engines: string[]
+  hasApiKey: boolean
+}
+
+const WEB_SEARCH_DEFAULTS: WebSearchSettingsState = {
+  enabled: false,
+  provider: 'searxng',
+  apiUrl: '',
+  requestTimeoutMs: 15000,
+  defaultResultCount: 3,
+  maxResultCount: 5,
+  maxPagesToScrape: 3,
+  maxCharsPerPage: 3000,
+  language: 'all',
+  safeSearch: 1,
+  engines: [],
+  hasApiKey: false,
+}
+
+function WebSearchSettings() {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
+  const [cfg, setCfg] = useState<WebSearchSettingsState>(WEB_SEARCH_DEFAULTS)
+  const [apiKey, setApiKey] = useState('')
+  const [testQuery, setTestQuery] = useState('latest AI roleplay tools')
+  const [testResult, setTestResult] = useState<WebSearchTestResponse | null>(null)
+  const [enginesInput, setEnginesInput] = useState('')
+
+  useEffect(() => {
+    webSearchApi.getSettings()
+      .then((row) => {
+        const next = { ...WEB_SEARCH_DEFAULTS, ...(row || {}) }
+        setCfg(next)
+        setEnginesInput(Array.isArray(next.engines) ? next.engines.join(', ') : '')
+      })
+      .catch(() => {
+        setCfg(WEB_SEARCH_DEFAULTS)
+      })
+      .finally(() => setLoading(false))
+  }, [])
+
+  const update = (patch: Partial<WebSearchSettingsState>) => {
+    setCfg((prev) => ({ ...prev, ...patch }))
+  }
+
+  const buildPayload = (): WebSearchSettingsInput => ({
+    enabled: cfg.enabled,
+    provider: 'searxng',
+    apiUrl: cfg.apiUrl,
+    requestTimeoutMs: cfg.requestTimeoutMs,
+    defaultResultCount: cfg.defaultResultCount,
+    maxResultCount: cfg.maxResultCount,
+    maxPagesToScrape: cfg.maxPagesToScrape,
+    maxCharsPerPage: cfg.maxCharsPerPage,
+    language: cfg.language,
+    safeSearch: cfg.safeSearch,
+    engines: enginesInput.split(',').map((item) => item.trim()).filter(Boolean),
+  })
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    setSuccess(null)
+    try {
+      const payload = buildPayload()
+      const next = await webSearchApi.putSettings({
+        ...payload,
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+      })
+      setCfg(next)
+      setEnginesInput(next.engines.join(', '))
+      setApiKey('')
+      setSuccess('Web search settings saved')
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || 'Failed to save web search settings')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const test = async () => {
+    setTesting(true)
+    setError(null)
+    setSuccess(null)
+    setTestResult(null)
+    try {
+      const result = await webSearchApi.test(testQuery, buildPayload(), apiKey.trim() || undefined)
+      setTestResult(result)
+      setSuccess(`Web search test passed. Retrieved ${result.results.length} results and ${result.documents.length} extracted pages.`)
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || 'Web search test failed')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className={styles.settingsSection}>
+        <h3 className={styles.sectionTitle}>Web Search</h3>
+        <p className={styles.placeholder}>Loading web search settings...</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles.settingsSection}>
+      <h3 className={styles.sectionTitle}>Web Search</h3>
+      <p className={styles.placeholder}>Configure a SearXNG instance for the host-backed council web-search tool. The tool will appear in Council once search is enabled and an API URL is configured.</p>
+
+      {error && <p className={styles.errorText}>{error}</p>}
+      {success && <p className={styles.successText}>{success}</p>}
+
+      <Toggle.Checkbox
+        checked={cfg.enabled}
+        onChange={(checked) => update({ enabled: checked })}
+        label="Enable web search"
+      />
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>Provider</label>
+        <select className={styles.select} value={cfg.provider} onChange={() => update({ provider: 'searxng' })}>
+          <option value="searxng">SearXNG</option>
+        </select>
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>API URL</label>
+        <input className={styles.select} value={cfg.apiUrl} onChange={(e) => update({ apiUrl: e.target.value })} placeholder="https://your-searxng.example.com/search" />
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>API Key {cfg.hasApiKey ? '(configured)' : '(optional)'}</label>
+        <input
+          className={styles.select}
+          type="password"
+          value={apiKey}
+          placeholder="Paste a new key to replace"
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>Engines</label>
+        <input className={styles.select} value={enginesInput} onChange={(e) => setEnginesInput(e.target.value)} placeholder="google, brave, duckduckgo" />
+        <span className={styles.placeholder} style={{ marginTop: '2px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }}>
+          Optional comma-separated engine allowlist passed through to SearXNG.
+        </span>
+      </div>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Language</label>
+          <input className={styles.select} value={cfg.language} onChange={(e) => update({ language: e.target.value })} placeholder="all or en-US" />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Safe Search</label>
+          <select className={styles.select} value={cfg.safeSearch} onChange={(e) => update({ safeSearch: Number(e.target.value) as 0 | 1 | 2 })}>
+            <option value={0}>Off</option>
+            <option value={1}>Moderate</option>
+            <option value={2}>Strict</option>
+          </select>
+        </div>
+      </div>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Timeout (ms)</label>
+          <NumericInput className={styles.numberInput} min={5000} max={120000} step={1000} value={cfg.requestTimeoutMs} integer onChange={(value) => update({ requestTimeoutMs: Math.max(5000, Math.min(120000, value ?? 15000)) })} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Default Results</label>
+          <NumericInput className={styles.numberInput} min={1} max={10} value={cfg.defaultResultCount} integer onChange={(value) => update({ defaultResultCount: Math.max(1, Math.min(10, value ?? 3)) })} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Max Results</label>
+          <NumericInput className={styles.numberInput} min={1} max={20} value={cfg.maxResultCount} integer onChange={(value) => update({ maxResultCount: Math.max(1, Math.min(20, value ?? 5)) })} />
+        </div>
+      </div>
+
+      <div className={styles.drawerRow}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Pages to Scrape</label>
+          <NumericInput className={styles.numberInput} min={1} max={10} value={cfg.maxPagesToScrape} integer onChange={(value) => update({ maxPagesToScrape: Math.max(1, Math.min(10, value ?? 3)) })} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Chars per Page</label>
+          <NumericInput className={styles.numberInput} min={500} max={20000} step={250} value={cfg.maxCharsPerPage} integer onChange={(value) => update({ maxCharsPerPage: Math.max(500, Math.min(20000, value ?? 3000)) })} />
+        </div>
+      </div>
+
+      <div className={styles.field}>
+        <label className={styles.fieldLabel}>Test Query</label>
+        <input className={styles.select} value={testQuery} onChange={(e) => setTestQuery(e.target.value)} placeholder="Enter a query to validate this setup" />
+      </div>
+
+      <div className={styles.drawerRow}>
+        <Button size="sm" onClick={save} disabled={saving} loading={saving}>
+          {saving ? 'Saving...' : 'Save Web Search Settings'}
+        </Button>
+        <Button size="sm" onClick={test} disabled={testing || saving} loading={testing}>
+          {testing ? 'Testing...' : 'Test Web Search'}
+        </Button>
+      </div>
+
+      <p className={styles.placeholder}>Testing uses the current form values, including any unsaved API key override, so you can validate the instance before saving.</p>
+
+      {testResult && (
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>Preview</label>
+          <div className={styles.placeholder} style={{ whiteSpace: 'pre-wrap', padding: '10px 12px', border: '1px solid var(--lumiverse-border-subtle)', borderRadius: 8, background: 'var(--lumiverse-surface-raised)', maxHeight: 280, overflowY: 'auto' }}>
+            {testResult.context}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1970,56 +2521,56 @@ function AdvancedSettings() {
               <div className={styles.memoryGrid}>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Target Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={200} max={2000}
                     value={cfg.chunkTargetTokens}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ chunkTargetTokens: Number(e.target.value) || 800 })}
+                    integer
+                    onChange={(value) => update({ chunkTargetTokens: value ?? 800 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Max Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={400} max={4000}
                     value={cfg.chunkMaxTokens}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ chunkMaxTokens: Number(e.target.value) || 1600 })}
+                    integer
+                    onChange={(value) => update({ chunkMaxTokens: value ?? 1600 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Overlap Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={500}
                     value={cfg.chunkOverlapTokens}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ chunkOverlapTokens: Number(e.target.value) || 0 })}
+                    integer
+                    onChange={(value) => update({ chunkOverlapTokens: value ?? 0 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Max Messages / Chunk</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={100}
                     value={cfg.maxMessagesPerChunk}
-                    onChange={(e) => update({ maxMessagesPerChunk: Number(e.target.value) || 0 })}
+                    integer
+                    onChange={(value) => update({ maxMessagesPerChunk: value ?? 0 })}
                   />
                   <span className={styles.placeholder} style={{ fontSize: 11 }}>0 = unlimited</span>
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Time Gap Split (min)</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={1440}
                     value={cfg.splitOnTimeGapMinutes}
-                    onChange={(e) => update({ splitOnTimeGapMinutes: Number(e.target.value) || 0 })}
+                    integer
+                    onChange={(value) => update({ splitOnTimeGapMinutes: value ?? 0 })}
                   />
                   <span className={styles.placeholder} style={{ fontSize: 11 }}>0 = disabled</span>
                 </div>
@@ -2037,33 +2588,32 @@ function AdvancedSettings() {
               <div className={styles.memoryGrid}>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Top-K Results</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={1}
                     value={cfg.retrievalTopK}
-                    onChange={(e) => update({ retrievalTopK: Number(e.target.value) || 4 })}
+                    integer
+                    onChange={(value) => update({ retrievalTopK: value ?? 4 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Exclusion Window</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={5} max={100}
                     value={cfg.exclusionWindow}
                     disabled={cfg.quickMode !== null}
-                    onChange={(e) => update({ exclusionWindow: Number(e.target.value) || 20 })}
+                    integer
+                    onChange={(value) => update({ exclusionWindow: value ?? 20 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Similarity Threshold</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={0} max={2} step={0.05}
                     value={cfg.similarityThreshold}
-                    onChange={(e) => update({ similarityThreshold: Math.max(0, Math.min(2, Number(e.target.value) || 0)) })}
+                    onChange={(value) => update({ similarityThreshold: Math.max(0, Math.min(2, value ?? 0)) })}
                   />
                   <span className={styles.placeholder} style={{ fontSize: 11 }}>
                     0 = no filtering. Cosine distance can exceed 1, so useful cutoffs are not limited to 0–1.
@@ -2089,22 +2639,22 @@ function AdvancedSettings() {
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Query Context Size</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={1} max={64}
                     value={cfg.queryContextSize}
-                    onChange={(e) => update({ queryContextSize: Number(e.target.value) || 6 })}
+                    integer
+                    onChange={(value) => update({ queryContextSize: value ?? 6 })}
                   />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>Query Max Tokens</label>
-                  <input
+                  <NumericInput
                     className={styles.numberInput}
-                    type="number"
                     min={1000} max={32000}
                     value={cfg.queryMaxTokens}
-                    onChange={(e) => update({ queryMaxTokens: Number(e.target.value) || 8000 })}
+                    integer
+                    onChange={(value) => update({ queryMaxTokens: value ?? 8000 })}
                   />
                 </div>
               </div>
@@ -2344,4 +2894,3 @@ function LumiHubSettings() {
     </div>
   )
 }
-

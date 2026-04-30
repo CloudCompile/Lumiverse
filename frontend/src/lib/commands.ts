@@ -189,12 +189,14 @@ export const COMMANDS: Command[] = [
     group: 'Actions',
     scope: 'chat',
     run: () => {
-      const { activeCharacterId, characters, openModal } = useStore.getState()
+      const { activeCharacterId, characters, isGroupChat, groupCharacterIds, openModal } = useStore.getState()
       if (!activeCharacterId) return
       const char = characters.find((c) => c.id === activeCharacterId)
       openModal('manageChats', {
         characterId: activeCharacterId,
-        characterName: char?.name || 'Character',
+        characterName: isGroupChat ? 'Group Chat' : (char?.name || 'Character'),
+        isGroupChat,
+        groupCharacterIds,
       })
     },
   },
@@ -249,15 +251,15 @@ export const COMMANDS: Command[] = [
     group: 'Actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, messages, updateMessage, addToast } = useStore.getState()
+      const { activeChatId, messages, addToast } = useStore.getState()
       if (!activeChatId || messages.length === 0) return
       const last = messages[messages.length - 1]
       const newHidden = !last.extra?.hidden
       try {
-        await messagesApi.update(activeChatId, last.id, {
+        const updated = await messagesApi.update(activeChatId, last.id, {
           extra: { ...last.extra, hidden: newHidden },
         })
-        updateMessage(last.id, { extra: { ...last.extra, hidden: newHidden } })
+        useStore.getState().updateMessage(updated.id, updated)
         addToast({ type: 'success', message: newHidden ? 'Message hidden from context' : 'Message visible in context' })
       } catch {
         addToast({ type: 'error', message: 'Failed to update message' })

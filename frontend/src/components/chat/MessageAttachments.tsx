@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, type CSSProperties } from 'react'
 import type { MessageAttachment } from '@/types/api'
 import { imagesApi } from '@/api/images'
 import ImageLightbox from '@/components/shared/ImageLightbox'
@@ -9,6 +9,17 @@ import clsx from 'clsx'
 interface MessageAttachmentsProps {
   attachments: MessageAttachment[]
   isUser?: boolean
+}
+
+function getImageFrameStyle(att: MessageAttachment): CSSProperties | undefined {
+  if (!att.width || !att.height) return undefined
+  const scale = Math.min(1, 240 / att.width, 240 / att.height)
+
+  return {
+    aspectRatio: `${att.width} / ${att.height}`,
+    width: Math.max(1, Math.round(att.width * scale)),
+    maxWidth: '100%',
+  }
 }
 
 export default function MessageAttachments({ attachments, isUser }: MessageAttachmentsProps) {
@@ -30,6 +41,7 @@ export default function MessageAttachments({ attachments, isUser }: MessageAttac
               key={att.image_id}
               type="button"
               className={styles.imageThumbUser}
+              style={getImageFrameStyle(att)}
               onClick={() => setLightboxSrc(imagesApi.url(att.image_id))}
               title={att.original_filename}
             >
@@ -44,13 +56,17 @@ export default function MessageAttachments({ attachments, isUser }: MessageAttac
               key={att.image_id}
               type="button"
               className={styles.inlineImageBtn}
+              style={getImageFrameStyle(att)}
               onClick={() => setLightboxSrc(imagesApi.url(att.image_id))}
             >
               <LazyImage
                 src={imagesApi.smallUrl(att.image_id)}
                 alt={att.original_filename}
                 className={styles.inlineImage}
-                style={{ objectFit: 'contain', width: 'auto', height: 'auto', maxWidth: '100%', maxHeight: '240px' }}
+                style={att.width && att.height
+                  ? { objectFit: 'contain' }
+                  : { objectFit: 'contain', width: 'auto', height: 'auto', maxWidth: '100%', maxHeight: '240px' }
+                }
                 containerClassName={styles.inlineImageWrap}
                 spinnerSize={20}
               />

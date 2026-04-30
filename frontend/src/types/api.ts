@@ -221,6 +221,9 @@ export interface ProviderInfo {
   id: string
   name: string
   default_url: string
+  capabilities?: {
+    parameters?: Record<string, unknown>
+  }
 }
 
 export interface ConnectionTestResult {
@@ -234,6 +237,43 @@ export interface ConnectionModelsResult {
   model_labels?: Record<string, string>
   provider: string
   error?: string
+}
+
+export interface EmbeddingModelsPreviewInput {
+  provider?: EmbeddingConfig['provider']
+  api_url?: string
+  api_key?: string
+}
+
+export interface NanoGptUsageWindow {
+  used: number
+  remaining: number
+  percentUsed: number
+  resetAt: number | null
+}
+
+export interface NanoGptSubscriptionUsage {
+  active: boolean
+  limits: {
+    weeklyInputTokens: number | null
+    dailyImages: number | null
+  }
+  weeklyInputTokens: NanoGptUsageWindow | null
+  dailyImages: NanoGptUsageWindow | null
+  period: {
+    currentPeriodEnd: string | null
+  }
+  state: string | null
+  graceUntil: string | null
+}
+
+export interface ConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  metadata?: Record<string, any>;
+  api_key?: string;
+  output_modalities?: string;
 }
 
 export interface PollinationsAuthUrlRequest {
@@ -286,6 +326,13 @@ export interface ImageGenConnectionModelsResult {
   models: Array<{ id: string; label: string }>;
   provider: string;
   error?: string;
+}
+
+export interface ImageGenConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
 }
 
 export interface ImageGenParameterSchema {
@@ -370,6 +417,13 @@ export interface TtsConnectionVoicesResult {
   voices: TtsVoice[];
   provider: string;
   error?: string;
+}
+
+export interface TtsConnectionVoicesPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
 }
 
 export interface TtsParameterSchema {
@@ -465,6 +519,11 @@ export interface CreatePersonaInput {
 
 export type UpdatePersonaInput = Partial<CreatePersonaInput>;
 
+export interface RenamePersonaFolderResponse {
+  updated: Persona[];
+  count: number;
+}
+
 // ---- Preset ----
 export interface Preset {
   id: string;
@@ -521,6 +580,22 @@ export interface Image {
   created_at: number;
 }
 
+export interface ThemeAsset {
+  id: string;
+  bundle_id: string;
+  slug: string;
+  storage_type: 'image' | 'file';
+  image_id: string | null;
+  file_name: string | null;
+  original_filename: string;
+  mime_type: string;
+  byte_size: number;
+  tags: string[];
+  metadata: Record<string, any>;
+  created_at: number;
+  updated_at: number;
+}
+
 // ---- World Book ----
 export interface WorldBook {
   id: string;
@@ -537,6 +612,7 @@ export interface WorldBookEntry {
   id: string;
   world_book_id: string;
   uid: string;
+  outlet_name: string | null;
   key: string[];
   keysecondary: string[];
   content: string;
@@ -729,6 +805,7 @@ export interface CreateWorldBookInput {
 export type UpdateWorldBookInput = Partial<CreateWorldBookInput>;
 
 export interface CreateWorldBookEntryInput {
+  outlet_name?: string | null;
   key?: string[];
   keysecondary?: string[];
   content?: string;
@@ -762,9 +839,55 @@ export interface CreateWorldBookEntryInput {
   extensions?: Record<string, any>;
 }
 
+export interface DuplicateWorldBookEntryInput {
+  target_book_id?: string | null;
+}
+
+export interface ReorderWorldBookEntriesInput {
+  ordered_ids: string[];
+}
+
+export interface WorldBookEntryBulkDeleteInput {
+  action: 'delete';
+  entry_ids: string[];
+}
+
+export interface WorldBookEntryBulkMoveInput {
+  action: 'move';
+  entry_ids: string[];
+  target_book_id: string;
+}
+
+export interface WorldBookEntryBulkRenumberInput {
+  action: 'renumber';
+  entry_ids: string[];
+  start?: number | null;
+  step?: number;
+  direction?: 'asc' | 'desc';
+}
+
+export interface WorldBookEntryBulkAddKeywordInput {
+  action: 'add_keyword';
+  entry_ids: string[];
+  keyword: string;
+  target?: 'primary' | 'secondary';
+}
+
+export type WorldBookEntryBulkActionInput =
+  | WorldBookEntryBulkDeleteInput
+  | WorldBookEntryBulkMoveInput
+  | WorldBookEntryBulkRenumberInput
+  | WorldBookEntryBulkAddKeywordInput;
+
+export interface WorldBookEntryBulkActionResult {
+  action: WorldBookEntryBulkActionInput['action'];
+  affected: number;
+  target_book_id?: string;
+}
+
 export interface EmbeddingConfig {
   enabled: boolean;
-  provider: 'openai-compatible' | 'openai' | 'openrouter' | 'electronhub' | 'nanogpt';
+  provider: 'openai-compatible' | 'openai' | 'openrouter' | 'electronhub' | 'bananabread' | 'nanogpt';
   api_url: string;
   model: string;
   dimensions: number | null;
@@ -864,7 +987,7 @@ export interface LumiaItem {
   definition: string;
   personality: string;
   behavior: string;
-  gender_identity: 0 | 1 | 2;
+  gender_identity: 0 | 1 | 2 | 3;
   version: string;
   sort_order: number;
   created_at: number;
@@ -928,7 +1051,7 @@ export interface CreateLumiaItemInput {
   definition?: string;
   personality?: string;
   behavior?: string;
-  gender_identity?: 0 | 1 | 2;
+  gender_identity?: 0 | 1 | 2 | 3;
   version?: string;
   sort_order?: number;
 }

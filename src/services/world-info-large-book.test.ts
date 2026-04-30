@@ -24,7 +24,10 @@ import {
   mergeActivatedWorldInfoEntries,
   type VectorActivatedEntry,
 } from "./prompt-assembly.service";
-import type { WorldInfoSettings } from "./world-info-activation.service";
+import {
+  finalizeActivatedWorldInfoEntries,
+  type WorldInfoSettings,
+} from "./world-info-activation.service";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -43,6 +46,7 @@ function makeEntry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
     id: overrides.id ?? crypto.randomUUID(),
     world_book_id: "book-a",
     uid: overrides.uid ?? crypto.randomUUID(),
+    outlet_name: null,
     key: [],
     keysecondary: [],
     content: filler,
@@ -111,6 +115,18 @@ function asVectorCandidate(entry: WorldBookEntry, finalScore = 0.8): VectorActiv
     searchTextPreview: entry.content.slice(0, 120),
   };
 }
+
+describe("finalizeActivatedWorldInfoEntries", () => {
+  test("drops whitespace-only world info entries from activation and cache", () => {
+    const result = finalizeActivatedWorldInfoEntries([
+      makeEntry({ id: "blank", uid: "blank", content: "   \n\t  " }),
+      makeEntry({ id: "real", uid: "real", content: "Useful lore" }),
+    ]);
+
+    expect(result.activatedEntries.map((entry) => entry.id)).toEqual(["real"]);
+    expect(result.cache.before).toEqual([{ role: "system", content: "Useful lore", entryLabel: "(unnamed entry real)" }]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Scenario 1: the "as-imported" shape — keys=[], vectorized=true, no constants.

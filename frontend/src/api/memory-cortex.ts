@@ -7,6 +7,10 @@ export interface CortexConfig {
   presetMode: "simple" | "standard" | "advanced" | null;
   entityTracking: boolean;
   entityExtractionMode: "heuristic" | "sidecar" | "off";
+  thoughtMarkers: {
+    prefix: string;
+    suffix: string;
+  };
   salienceScoring: boolean;
   salienceScoringMode: "heuristic" | "sidecar";
   sidecar: {
@@ -52,6 +56,14 @@ export interface CortexConfig {
     minConfidence: number;
   };
   entityWhitelist: string[];
+  entityExtractionFilters: Record<
+    "character" | "location" | "item" | "faction" | "concept" | "event",
+    {
+      protectedTerms: string[];
+      rejectedTerms: string[];
+      cleanupPatterns: string[];
+    }
+  >;
 }
 
 export interface SalienceBreakdown {
@@ -121,6 +133,48 @@ export interface CortexUsageStats {
   mentionCount: number;
   relationCount: number;
   estimatedEmbeddingCalls: number;
+  ingestionTelemetry: CortexIngestionTelemetry;
+}
+
+export interface CortexIngestionTimings {
+  mode: "heuristic" | "sidecar" | "mixed";
+  fontMs: number;
+  heuristicMs: number;
+  heuristicSalienceMs: number;
+  heuristicEntityMs: number;
+  heuristicRelationshipMs: number;
+  heuristicAliasMs: number;
+  sidecarMs: number;
+  graphMs: number;
+  dbMs: number;
+  totalMs: number;
+  completedAt: number;
+  chunkId: string;
+}
+
+export interface CortexIngestionTelemetry {
+  samples: number;
+  last: CortexIngestionTimings | null;
+  averages: {
+    fontMs: number;
+    heuristicMs: number;
+    sidecarMs: number;
+    graphMs: number;
+    dbMs: number;
+    totalMs: number;
+  };
+}
+
+export interface CortexIngestionStatus {
+  chatId: string;
+  status: "idle" | "processing" | "complete" | "error";
+  phase: "queued" | "font" | "heuristics" | "sidecar" | "persisting" | "complete" | "error";
+  chunkId: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  pendingJobs: number;
+  error?: string;
+  timings?: CortexIngestionTimings | null;
 }
 
 export interface CortexHealthCheck {
@@ -234,6 +288,43 @@ export interface CortexChatLink {
   createdAt: number;
 }
 
+export interface CortexFontColor {
+  id: string;
+  chatId: string;
+  entityId: string | null;
+  characterName: string | null;
+  entityName: string | null;
+  displayName: string | null;
+  hexColor: string;
+  usageType: string;
+  confidence: number;
+  sampleCount: number;
+  sampleExcerpt: string | null;
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeFontColor(raw: any): CortexFontColor {
+  const characterName = normalizeOptionalString(raw.characterName ?? raw.character_name);
+  const entityName = normalizeOptionalString(raw.entityName ?? raw.entity_name);
+
+  return {
+    id: String(raw.id),
+    chatId: String(raw.chatId ?? raw.chat_id ?? ""),
+    entityId: raw.entityId ?? raw.entity_id ?? null,
+    characterName,
+    entityName,
+    displayName: characterName || entityName,
+    hexColor: String(raw.hexColor ?? raw.hex_color ?? ""),
+    usageType: String(raw.usageType ?? raw.usage_type ?? "unknown"),
+    confidence: Number(raw.confidence ?? 0),
+    sampleCount: Number(raw.sampleCount ?? raw.sample_count ?? 0),
+    sampleExcerpt: raw.sampleExcerpt ?? raw.sample_excerpt ?? null,
+  };
+}
+
 // ─── API ───────────────────────────────────────────────────────
 
 const BASE = "/memory-cortex";
@@ -260,8 +351,13 @@ export const memoryCortexApi = {
     post<CortexEntity>(`${BASE}/chats/${chatId}/entities/merge`, { sourceId, targetId }),
 
   // Font Colors
-  getColors: (chatId: string) =>
-    get<{ data: any[]; total: number }>(`${BASE}/chats/${chatId}/colors`),
+  getColors: async (chatId: string): Promise<{ data: CortexFontColor[]; total: number }> => {
+    const res = await get<{ data: any[]; total: number }>(`${BASE}/chats/${chatId}/colors`);
+    return {
+      ...res,
+      data: res.data.map(normalizeFontColor),
+    };
+  },
   deleteColor: (chatId: string, colorId: string) =>
     del<{ success: boolean }>(`${BASE}/chats/${chatId}/colors/${colorId}`),
 
@@ -297,6 +393,10 @@ export const memoryCortexApi = {
     post<{ status: string; chatId: string }>(`${BASE}/chats/${chatId}/rebuild`),
   getRebuildStatus: (chatId: string) =>
     get<{ status: string; current?: number; total?: number; percent?: number; result?: any; error?: string }>(`${BASE}/chats/${chatId}/rebuild-status`),
+  getIngestionStatus: (chatId: string) =>
+    get<CortexIngestionStatus>(`${BASE}/chats/${chatId}/ingestion-status`),
+  warm: (chatId: string) =>
+    post<{ status: string; reason?: string; chatId: string }>(`${BASE}/chats/${chatId}/warm`),
 
   // Vaults
   createVault: (chatId: string, name: string, description?: string) =>

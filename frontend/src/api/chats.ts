@@ -22,6 +22,12 @@ export const chatsApi = {
     return get<ChatSummary[]>('/chats/character-chats/' + characterId)
   },
 
+  listGroupChats(params?: { characterIds?: string[] }) {
+    return get<ChatSummary[]>('/chats/group-chats', params?.characterIds?.length
+      ? { character_ids: params.characterIds.join(',') }
+      : undefined)
+  },
+
   get(id: string, params?: { messages?: boolean }) {
     return get<Chat>(`/chats/${id}`, params)
   },
@@ -102,6 +108,14 @@ export const chatsApi = {
     fd.append('character_id', characterId)
     fd.append('file', file)
     return upload<{ chat_id: string; name: string; message_count: number }>('/chats/import-st', fd)
+  },
+
+  importGroupFromSt(characterIds: string[], file: File, greetingCharacterId?: string) {
+    const fd = new FormData()
+    for (const characterId of characterIds) fd.append('character_ids', characterId)
+    if (greetingCharacterId) fd.append('greeting_character_id', greetingCharacterId)
+    fd.append('file', file)
+    return upload<{ chat_id: string; name: string; message_count: number; speaker_name_fallback_count: number }>('/chats/import-st-group', fd)
   },
 }
 

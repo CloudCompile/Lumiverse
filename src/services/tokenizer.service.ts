@@ -3,6 +3,11 @@ import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCou
 import { getTextContent, type AssemblyBreakdownEntry, type LlmMessage } from "../llm/types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
 
+export interface TokenCountMessageLike {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
 /**
  * Validate a tokenizer resource URL before fetching. Owner-supplied, but still
  * should not reach private/internal hosts.
@@ -19,6 +24,9 @@ async function validateTokenizerUrl(url: string, label: string): Promise<void> {
   }
   await validateHost(parsed.hostname);
 }
+
+/** Display name reported when no real tokenizer could be resolved for a model. */
+export const APPROXIMATE_TOKENIZER_NAME = "approximate";
 
 /** A loaded tokenizer instance with a count(text) method. */
 interface TokenizerInstance {
@@ -182,6 +190,44 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
   throw new Error("HuggingFace tokenizer requires either 'package' or 'url' in config");
 }
 
+/**
+ * Detect the OpenAI-canonical tiktoken `.model` format: many lines of
+ * `<base64_token> <rank>`. js-tiktoken ships its own compressed format instead,
+ * so we probe the first non-empty line to decide whether to convert.
+ */
+function looksLikeStandardTiktokenFormat(bpe: string): boolean {
+  const firstLineEnd = bpe.indexOf("\n");
+  if (firstLineEnd < 0) return false; // single line — already compressed
+  const firstLine = bpe.slice(0, firstLineEnd).trim();
+  // Standard row: exactly two whitespace-separated fields, second is an integer.
+  const parts = firstLine.split(/\s+/);
+  return parts.length === 2 && /^\d+$/.test(parts[1]);
+}
+
+/**
+ * Convert the OpenAI standard `<base64> <rank>\n` format into the single-line
+ * compressed format js-tiktoken's `Tiktoken` constructor parses. Ranks must be
+ * contiguous starting at 0 (standard tiktoken files already satisfy this).
+ */
+function convertStandardToCompressedBpe(standard: string): string {
+  const lines = standard.split("\n");
+  const tokens: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    const sp = line.indexOf(" ");
+    if (sp < 0) continue;
+    const tok = line.slice(0, sp);
+    const rank = Number.parseInt(line.slice(sp + 1), 10);
+    if (!Number.isFinite(rank)) continue;
+    if (rank !== tokens.length) {
+      throw new Error(`tiktoken model ranks are non-contiguous at index ${tokens.length} (got rank ${rank})`);
+    }
+    tokens.push(tok);
+  }
+  // Leading `! 0` is the sentinel + starting offset js-tiktoken's parser expects.
+  return `! 0 ${tokens.join(" ")}`;
+}
+
 async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance> {
   const { Tiktoken } = await import("js-tiktoken/lite");
   const cfg = config.config;
@@ -190,7 +236,16 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   await validateTokenizerUrl(cfg.url, "tiktoken model url");
   const resp = await fetch(cfg.url);
   if (!resp.ok) throw new Error(`Failed to fetch tiktoken model from ${cfg.url}`);
-  const bpeData = await resp.text();
+  const rawBpe = await resp.text();
+
+  // js-tiktoken's constructor expects its own compressed rank format
+  // (`<sentinel> <offset> <tok0> <tok1> ...` on a single line — see
+  // `js-tiktoken/dist/ranks/o200k_base.js`). The standard OpenAI tiktoken
+  // format (one `<base64> <rank>` pair per line, shipped by e.g. Moonshot's
+  // Kimi-K2.5/tiktoken.model) is different, so we transparently convert it.
+  const bpeData = looksLikeStandardTiktokenFormat(rawBpe)
+    ? convertStandardToCompressedBpe(rawBpe)
+    : rawBpe;
 
   // Parse special tokens from tokenizer_config.json if provided
   let specialTokens: Record<string, number> = {};
@@ -257,33 +312,24 @@ export async function countWithTokenizer(tokenizerId: string, text: string): Pro
   return instance.count(text);
 }
 
+export function flattenMessagesForTokenCount(messages: TokenCountMessageLike[]): string {
+  return messages.map((msg) => `${msg.role}\n${msg.content || ""}`).join("\n");
+}
+
+export async function countMessagesForModel(
+  modelId: string,
+  messages: TokenCountMessageLike[]
+): Promise<number | null> {
+  return await countForModel(modelId, flattenMessagesForTokenCount(messages));
+}
+
 export async function countBreakdown(
   modelId: string,
   breakdown: AssemblyBreakdownEntry[],
   chatHistoryMessages?: LlmMessage[]
 ): Promise<TokenCountResult> {
-  const tokenizerId = getTokenizerIdForModel(modelId);
-  let tokenizerName: string | null = null;
-
-  // Resolve instance and name once, then count synchronously for each entry
-  let instance: TokenizerInstance | null = null;
-  if (tokenizerId) {
-    const config = getConfig(tokenizerId);
-    tokenizerName = config?.name || null;
-    try {
-      instance = await getInstance(tokenizerId);
-    } catch {
-      // fall through to approximate counting
-    }
-  }
-
-  const countText = (text: string): number => {
-    if (!text) return 0;
-    if (instance) {
-      try { return instance.count(text); } catch { /* fall through */ }
-    }
-    return Math.ceil(text.length / 4);
-  };
+  const tokenizerId = modelId ? getTokenizerIdForModel(modelId) : null;
+  const { count: countText, name: tokenizerName } = await resolveCounter(modelId);
 
   const entries: TokenCountBreakdownEntry[] = [];
   let totalTokens = 0;
@@ -297,9 +343,9 @@ export async function countBreakdown(
       // Concatenate all messages into a single string and tokenize once.
       // Per-message encode() calls have significant per-call overhead (regex
       // preprocessing, BPE merges, array alloc) that compounds on slower runtimes.
-      const bulk = chatHistoryMessages
-        .map(msg => `${msg.role}\n${getTextContent(msg)}`)
-        .join("\n");
+      const bulk = flattenMessagesForTokenCount(
+        chatHistoryMessages.map((msg) => ({ role: msg.role, content: getTextContent(msg) }))
+      );
       tokens = countText(bulk);
     } else {
       tokens = countText(entry.content || "");
@@ -314,6 +360,8 @@ export async function countBreakdown(
       tokens,
       role: entry.role,
       blockId: entry.blockId,
+      extensionId: entry.extensionId,
+      extensionName: entry.extensionName,
     });
   }
 
@@ -322,6 +370,41 @@ export async function countBreakdown(
     breakdown: entries,
     tokenizer_id: tokenizerId,
     tokenizer_name: tokenizerName,
+  };
+}
+
+/**
+ * Resolve a synchronous token counter for a model. Loads the tokenizer
+ * instance (cached after first use), returns a `count(text)` that runs
+ * in-process with zero per-call await overhead, and a display `name`.
+ *
+ * When no tokenizer can be resolved (unknown model, fetch failure, etc.),
+ * falls back to the `char/4` heuristic and reports the name as `"approximate"`.
+ *
+ * Intended for hot loops (e.g. context-budget clipping) that tokenize every
+ * message in the assembled prompt and need to avoid async overhead per call.
+ */
+export async function resolveCounter(modelId: string): Promise<{ count: (text: string) => number; name: string }> {
+  const tokenizerId = modelId ? getTokenizerIdForModel(modelId) : null;
+  if (tokenizerId) {
+    const config = getConfig(tokenizerId);
+    try {
+      const instance = await getInstance(tokenizerId);
+      const name = config?.name || tokenizerId;
+      return {
+        count: (text: string) => {
+          if (!text) return 0;
+          try { return instance.count(text); } catch { return Math.ceil(text.length / 4); }
+        },
+        name,
+      };
+    } catch {
+      // fall through to approximate
+    }
+  }
+  return {
+    count: (text: string) => (text ? Math.ceil(text.length / 4) : 0),
+    name: APPROXIMATE_TOKENIZER_NAME,
   };
 }
 

@@ -1,7 +1,8 @@
 import type { StateCreator } from 'zustand'
-import type { SettingsSlice, ThemeConfig, ReasoningSettings } from '@/types/store'
+import type { SettingsSlice, StartupSettings, ThemeConfig, ReasoningSettings } from '@/types/store'
 import { settingsApi } from '@/api/settings'
 import { BASE_URL } from '@/api/client'
+import { generateUUID } from '@/lib/uuid'
 
 /** Default reasoning settings — used as initial state and for restore-on-unbind. */
 export const REASONING_DEFAULTS: ReasoningSettings = {
@@ -11,11 +12,13 @@ export const REASONING_DEFAULTS: ReasoningSettings = {
   apiReasoning: false,
   reasoningEffort: 'auto',
   keepInHistory: 0,
+  thinkingDisplay: 'auto',
 }
 
 /** Keys that represent persisted data (not functions) */
 const DATA_KEYS: ReadonlySet<string> = new Set([
   'landingPageChatsDisplayed',
+  'landingPageLayoutMode',
   'charactersPerPage',
   'personasPerPage',
   'messagesPerPage',
@@ -44,7 +47,6 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'activeProfileId',
   'activePersonaId',
   'activeLoomPresetId',
-  'activeLumiPresetId',
   // Character browser preferences
   'favorites',
   'viewMode',
@@ -58,11 +60,13 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'personaFilterType',
   // Character-persona bindings
   'characterPersonaBindings',
+  'personaTagBindings',
   // Pack browser preferences
   'packFilterTab',
   'packSortField',
   // Active Lumia selections
   'selectedDefinition',
+  'selectedChimeraDefinitions',
   'selectedBehaviors',
   'selectedPersonalities',
   // Active Loom selections
@@ -73,6 +77,7 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'globalWorldBooks',
   // World info activation settings (budget, scan depth, recursion)
   'worldInfoSettings',
+  'worldBookEntryViewPrefs',
   // Image generation settings
   'imageGeneration',
   // Summarization settings
@@ -101,9 +106,10 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'componentOverrides',
   'chatHeadsEnabled',
   'chatHeadsSize',
-  'chatHeadsDirection',
-  'chatHeadsOpacity',
-  'voiceSettings',
+    'chatHeadsDirection',
+    'chatHeadsOpacity',
+    'spindleSettings',
+    'voiceSettings',
 ])
 
 // ── Debounced batch persistence ──────────────────────────────────────────
@@ -114,16 +120,12 @@ const PENDING_SETTINGS_KEY = '__lumiverse_pending_settings'
 const dirtyKeys = new Map<string, any>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let flushInFlight = false
+let activeFlushPromise: Promise<void> | null = null
 
-function flushDirtyKeys() {
-  flushTimer = null
-  if (dirtyKeys.size === 0) return
-
-  const batch = Object.fromEntries(dirtyKeys)
-  dirtyKeys.clear()
+function persistBatch(batch: Record<string, any>): Promise<void> {
   flushInFlight = true
 
-  settingsApi.putMany(batch).then(() => {
+  const request = settingsApi.putMany(batch).then(() => {
     // Flush succeeded — clear localStorage bridge since DB is now up to date
     try { localStorage.removeItem(PENDING_SETTINGS_KEY) } catch {}
   }).catch((err) => {
@@ -133,9 +135,19 @@ function flushDirtyKeys() {
       if (!dirtyKeys.has(k)) dirtyKeys.set(k, v)
     }
     scheduleFlush()
+    throw err
   }).finally(() => {
     flushInFlight = false
+    if (activeFlushPromise === request) activeFlushPromise = null
   })
+
+  activeFlushPromise = request
+  return request
+}
+
+function flushDirtyKeys() {
+  flushTimer = null
+  void flushSettingsNow().catch(() => {})
 }
 
 function scheduleFlush() {
@@ -146,6 +158,27 @@ function scheduleFlush() {
 export function persistKey(key: string, value: any) {
   dirtyKeys.set(key, value)
   scheduleFlush()
+}
+
+/**
+ * Merge a setting value loaded from storage against the current in-memory
+ * default. Recursive so nested keys the stored row is missing (or explicitly
+ * null'd) fall back to the default — prevents panels from crashing on
+ * `contextFilters.htmlTags.enabled`-style reads when a row was written before
+ * a field existed. Arrays and primitives replace the default wholesale.
+ */
+function isPlainObject(v: any): v is Record<string, any> {
+  return v != null && typeof v === 'object' && !Array.isArray(v)
+}
+
+function mergeStoredSetting(defaultValue: any, storedValue: any): any {
+  if (!isPlainObject(defaultValue)) return storedValue
+  if (!isPlainObject(storedValue)) return defaultValue
+  const merged: Record<string, any> = { ...defaultValue }
+  for (const key of Object.keys(storedValue)) {
+    merged[key] = mergeStoredSetting(defaultValue[key], storedValue[key])
+  }
+  return merged
 }
 
 /** Immediately flush any pending settings (e.g. on page unload). */
@@ -178,9 +211,25 @@ export function flushSettings() {
   }).catch(() => {})
 }
 
+/** Immediately persist all dirty settings and wait for the server commit. */
+export function flushSettingsNow(): Promise<void> {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+
+  if (dirtyKeys.size === 0) {
+    return activeFlushPromise ?? Promise.resolve()
+  }
+
+  const batch = Object.fromEntries(dirtyKeys)
+  dirtyKeys.clear()
+  return persistBatch(batch)
+}
+
 /** True when a flush is in flight or dirty keys are pending. */
 export function hasUnsavedSettings(): boolean {
-  return dirtyKeys.size > 0 || flushInFlight
+  return dirtyKeys.size > 0 || flushInFlight || activeFlushPromise !== null
 }
 
 /** Remove a key from the pending dirty-keys map so the next flush won't overwrite a direct PUT. */
@@ -194,7 +243,9 @@ if (typeof window !== 'undefined') {
 }
 
 export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
+  settingsLoaded: false,
   landingPageChatsDisplayed: 12,
+  landingPageLayoutMode: 'cards',
   charactersPerPage: 50,
   personasPerPage: 24,
   messagesPerPage: 50,
@@ -210,6 +261,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   modalMaxWidth: 900,
   portraitPanelSide: 'right',
   theme: null,
+  characterThemeOverlay: null,
   drawerSettings: {
     side: 'right',
     verticalPosition: 15,
@@ -217,6 +269,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     panelWidthMode: 'default',
     customPanelWidth: 35,
     showTabLabels: false,
+    hiddenTabIds: [],
   },
   oocEnabled: true,
   lumiaOOCStyle: 'social',
@@ -250,6 +303,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     maxTokenBudget: 0,
     minPriority: 0,
   },
+  worldBookEntryViewPrefs: {},
   promptBias: '',
   guidedGenerations: [],
   quickReplySets: [],
@@ -266,8 +320,12 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   chatHeadsSize: 48,
   chatHeadsDirection: 'column' as const,
   chatHeadsOpacity: 1,
-  customCSS: { css: '', enabled: false, revision: 0 },
+  customCSS: { css: '', enabled: false, revision: 0, bundleId: null },
   componentOverrides: {},
+  spindleSettings: {
+    interceptorTimeoutMs: 10_000,
+    dockPanelDesktopSide: 'right',
+  },
   voiceSettings: {
     sttProvider: 'webspeech' as const,
     sttLanguage: 'en-US',
@@ -284,6 +342,20 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       quoted: 'speech' as const,
       undecorated: 'narration' as const,
     },
+  },
+
+  hydrateStartupSettings: (settings: StartupSettings) => {
+    const patch: Record<string, any> = { settingsLoaded: true }
+
+    if (Array.isArray(settings.favorites)) patch.favorites = settings.favorites
+    if (settings.filterTab) patch.filterTab = settings.filterTab
+    if (settings.sortField) patch.sortField = settings.sortField
+    if (settings.sortDirection) patch.sortDirection = settings.sortDirection
+    if (settings.viewMode) patch.viewMode = settings.viewMode
+    if (typeof settings.charactersPerPage === 'number') patch.charactersPerPage = settings.charactersPerPage
+    if ('theme' in settings) patch.theme = settings.theme
+
+    set(patch as any)
   },
 
   setVoiceSettings: (partial) =>
@@ -315,12 +387,26 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     persistKey('theme', theme)
   },
 
+  setCharacterThemeOverlay: (characterThemeOverlay) => {
+    set({ characterThemeOverlay })
+  },
+
   setCustomCSS: (css) =>
     set((state) => {
       const customCSS = { ...state.customCSS, css, revision: state.customCSS.revision + 1 }
       persistKey('customCSS', customCSS)
       return { customCSS }
     }),
+
+  ensureThemeBundleId: () => {
+    const current = get().customCSS.bundleId
+    if (current) return current
+    const bundleId = generateUUID()
+    const customCSS = { ...get().customCSS, bundleId }
+    set({ customCSS })
+    persistKey('customCSS', customCSS)
+    return bundleId
+  },
 
   toggleCustomCSS: (enabled) =>
     set((state) => {
@@ -365,7 +451,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
 
   resetAllOverrides: () => {
     const componentOverrides = {}
-    const customCSS = { css: '', enabled: false, revision: 0 }
+    const customCSS = { ...get().customCSS, css: '', enabled: false, revision: 0 }
     persistKey('componentOverrides', componentOverrides)
     persistKey('customCSS', customCSS)
     set({ componentOverrides, customCSS })
@@ -381,7 +467,12 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     }
 
     // Layer 2: Global CSS
-    const customCSS = { css: pack.globalCSS || '', enabled: !!pack.globalCSS.trim(), revision: Date.now() }
+    const customCSS = {
+      css: pack.globalCSS || '',
+      enabled: !!pack.globalCSS.trim(),
+      revision: Date.now(),
+      bundleId: pack.bundleId || generateUUID(),
+    }
     patch.customCSS = customCSS
     persistKey('customCSS', customCSS)
 
@@ -400,10 +491,18 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     try {
       const rows = await settingsApi.getAll()
       const patch: Record<string, any> = {}
+      const defaults = get()
+      let migratedCharacterFilterTab = false
+      // Retroactive purge: `activeLumiPresetId` was a defunct preset pointer
+      // that still ghost-drove generation for users with a stale value. It has
+      // no UI setter; wipe it from the DB on load so it stops resolving to a
+      // preset behind the user's back.
+      if (rows.some((r) => r.key === 'activeLumiPresetId')) {
+        settingsApi.delete('activeLumiPresetId').catch(() => {})
+      }
       for (const row of rows) {
-        if (DATA_KEYS.has(row.key)) {
-          patch[row.key] = row.value
-        }
+        if (!DATA_KEYS.has(row.key)) continue
+        patch[row.key] = mergeStoredSetting((defaults as any)[row.key], row.value)
       }
 
       // Recover any settings the previous page wrote to localStorage but may
@@ -415,9 +514,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
           pendingKeys = JSON.parse(raw)
           if (pendingKeys) {
             for (const [k, v] of Object.entries(pendingKeys)) {
-              if (DATA_KEYS.has(k)) {
-                patch[k] = v
-              }
+              if (!DATA_KEYS.has(k)) continue
+              patch[k] = mergeStoredSetting((defaults as any)[k], v)
             }
           }
         }
@@ -427,8 +525,19 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       if (patch.theme && 'baseColors' in patch.theme && !('accent' in patch.theme)) {
         patch.theme = null
       }
+      if (patch.filterTab === 'all') {
+        patch.filterTab = 'characters'
+        migratedCharacterFilterTab = true
+      }
+      if (pendingKeys?.filterTab === 'all') {
+        pendingKeys.filterTab = 'characters'
+        migratedCharacterFilterTab = true
+      }
       if (Object.keys(patch).length > 0) {
         set(patch as any)
+      }
+      if (migratedCharacterFilterTab) {
+        settingsApi.put('filterTab', 'characters').catch(() => {})
       }
 
       // Flush recovered pending keys to the DB so subsequent loads are correct,
@@ -442,6 +551,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       }
     } catch (err) {
       console.error('[settings] Failed to load settings:', err)
+    } finally {
+      set({ settingsLoaded: true })
     }
   },
 })

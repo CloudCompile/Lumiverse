@@ -51,6 +51,8 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
+  strict?: boolean;
+  inputExamples?: Array<Record<string, unknown>>;
 }
 
 export interface GenerationParameters {
@@ -108,10 +110,14 @@ export interface AssemblyContext {
   chatId: string;
   connectionId?: string;
   presetId?: string;
+  /** When true, bypass preset-profile preset selection and use presetId directly. */
+  forcePresetId?: boolean;
   generationType: GenerationType;
   personaId?: string;
   /** For impersonate: controls how much of the preset is included. */
   impersonateMode?: ImpersonateMode;
+  /** For impersonate: free-form user text from the input box, appended to the impersonation prompt. */
+  impersonateInput?: string;
   /** For regenerate: exclude this message from chat history (it has a blank swipe). */
   excludeMessageId?: string;
   /** For group chats: generate a response as this specific character. */
@@ -130,6 +136,10 @@ export interface AssemblyContext {
   /** Pre-fetched data to avoid redundant DB calls during assembly.
    *  When provided, assembly reads from this instead of querying DB. */
   prefetched?: PrefetchedData;
+  /** Optional abort signal. When fired, in-flight embedding requests
+   *  (WI vector retrieval) are cancelled and assembly short-circuits with
+   *  an AbortError so the caller can unwind cleanly. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -196,6 +206,69 @@ export interface MemoryStats {
   settingsSource: "global" | "per_chat";
 }
 
+export interface DatabankStats {
+  enabled: boolean;
+  embeddingsEnabled: boolean;
+  activeBankCount: number;
+  activeDatabankIds: string[];
+  chunksRetrieved: number;
+  injectionMethod: "macro" | "fallback" | "none" | "disabled";
+  retrievalState:
+    | "cache_hit"
+    | "awaited_prefetch"
+    | "awaited_direct"
+    | "skipped_no_active_banks"
+    | "skipped_embeddings_disabled";
+  retrievedChunks: Array<{
+    score: number;
+    tokenEstimate: number;
+    documentName: string;
+    databankId: string;
+    preview: string;
+  }>;
+  queryPreview: string;
+}
+
+/**
+ * Result of the context-budget clipping step that runs at the end of prompt
+ * assembly. When `enabled` is true and `messagesDropped > 0`, oldest chat
+ * history messages were excluded so the assembly would fit within the preset's
+ * configured `contextSize` (minus response headroom + a small safety margin).
+ *
+ * When `enabled` is false, clipping was skipped (no contextSize configured,
+ * or the budget computed to <= 0 — see `budgetInvalid`).
+ */
+export interface ContextClipStats {
+  /** True when a context budget was resolved and the clip step ran. */
+  enabled: boolean;
+  /** Preset `contextSize` (→ `max_context_length`). 0 when unset. */
+  maxContext: number;
+  /** Reserved for the LLM response (`max_tokens`). */
+  maxResponseTokens: number;
+  /** Headroom for interceptors, deliberation inject, tokenizer variance. */
+  safetyMargin: number;
+  /** `maxContext - maxResponseTokens - safetyMargin`. */
+  inputBudget: number;
+  /** Tokens consumed by non-chat-history messages (system blocks, WI, prefill, …). */
+  fixedTokens: number;
+  /** `inputBudget - fixedTokens`. Can be negative when fixed overhead already exceeds budget. */
+  remainingHistoryBudget: number;
+  /** Chat-history tokens before clipping. */
+  chatHistoryTokensBefore: number;
+  /** Chat-history tokens after clipping. */
+  chatHistoryTokensAfter: number;
+  /** Number of chat-history messages excluded from the final assembly. */
+  messagesDropped: number;
+  /** Sum of tokens dropped (oldest messages). */
+  tokensDropped: number;
+  /** Display name of the tokenizer used, or "approximate" for the char/4 fallback. */
+  tokenizerUsed: string;
+  /** True when the budget computed to <= 0 (misconfigured preset) — no clipping attempted. */
+  budgetInvalid?: boolean;
+  /** True when fixed prompt overhead alone is larger than the available input budget. */
+  fixedOverBudget?: boolean;
+}
+
 export interface AssemblyResult {
   messages: LlmMessage[];
   breakdown: AssemblyBreakdownEntry[];
@@ -235,6 +308,11 @@ export interface AssemblyResult {
   };
   /** Statistics from long-term memory retrieval. */
   memoryStats?: MemoryStats;
+  /** Statistics from databank retrieval. */
+  databankStats?: DatabankStats;
+  /** Context-budget clipping stats. Present when assembly went through the
+   *  token-budget clip step (i.e. the preset-driven path, not legacyAssembly). */
+  contextClipStats?: ContextClipStats;
   /** Deferred WI state to persist after generation completes. Only the keys
    *  this writer owns; merged via mergeChatMetadata so concurrent user edits
    *  to chat metadata are not clobbered. */
@@ -246,7 +324,7 @@ export interface AssemblyResult {
 }
 
 export interface AssemblyBreakdownEntry {
-  type: 'block' | 'chat_history' | 'separator' | 'utility' | 'world_info' | 'authors_note' | 'append' | 'long_term_memory' | 'sidecar' | 'databank' | 'databank_mention';
+  type: 'block' | 'chat_history' | 'separator' | 'utility' | 'world_info' | 'authors_note' | 'append' | 'long_term_memory' | 'sidecar' | 'databank' | 'databank_mention' | 'extension';
   name: string;
   role?: string;
   content?: string;
@@ -259,4 +337,8 @@ export interface AssemblyBreakdownEntry {
   preCountedTokens?: number;
   /** If true, tokens are displayed but NOT added to the total (e.g. sidecar tokens spent on a separate LLM). */
   excludeFromTotal?: boolean;
+  /** Present for prompt blocks injected by Spindle interceptors. */
+  extensionId?: string;
+  /** Human-readable extension attribution for injected prompt blocks. */
+  extensionName?: string;
 }

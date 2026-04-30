@@ -1,18 +1,24 @@
-import { useEffect, useMemo, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useCallback, useState } from 'react'
 import { useParams } from 'react-router'
 import { UserRound, ListChecks } from 'lucide-react'
 import { useStore } from '@/store'
 import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
+import { memoryCortexApi, type CortexIngestionStatus } from '@/api/memory-cortex'
 import { generateApi } from '@/api/generate'
 import { loadoutsApi } from '@/api/loadouts'
+import { councilApi } from '@/api/council'
+import { recoverPooledGeneration } from '@/lib/generation-recovery'
 import { charactersApi } from '@/api/characters'
+import { packsApi } from '@/api/packs'
 import { imagesApi } from '@/api/images'
 import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
-import { resolveBinding } from '@/store/slices/personas'
+import { resolveAutoPersonaBinding } from '@/store/slices/personas'
 import type { WallpaperRef } from '@/types/store'
 import useSwipeKeyboard from '@/hooks/useSwipeKeyboard'
+import useEditKeyboard from '@/hooks/useEditKeyboard'
+import { councilSourceToTarget } from '@/hooks/useCouncilProfiles'
 import MessageList from './MessageList'
 import MessageSelectBar from './MessageSelectBar'
 import InputArea from './InputArea'
@@ -21,11 +27,116 @@ import CouncilPill from './CouncilPill'
 import PortraitPanel from './PortraitPanel'
 import ExpressionDisplay from './expressions/ExpressionDisplay'
 import FloatingAvatarViewer from './FloatingAvatarViewer'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/ws/events'
 import styles from './ChatView.module.css'
 import clsx from 'clsx'
 
+interface CortexNotice {
+  variant: 'processing' | 'error'
+  title: string
+  detail: string
+  percent?: number
+}
+
+interface CortexRebuildStatus {
+  chatId?: string
+  status: string
+  current?: number
+  total?: number
+  percent?: number
+  error?: string
+  source?: string
+}
+
+function formatIngestionDetail(status: CortexIngestionStatus): string {
+  const phaseDetail: Record<CortexIngestionStatus['phase'], string> = {
+    queued: 'Queued for processing',
+    font: 'Extracting font and style cues',
+    heuristics: 'Scoring salience and relationships',
+    sidecar: 'Running sidecar analysis',
+    persisting: 'Saving memory updates',
+    complete: 'Complete',
+    error: status.error || 'Processing failed',
+  }
+
+  return phaseDetail[status.phase] + (status.pendingJobs > 1 ? `, ${status.pendingJobs} jobs pending` : '')
+}
+
+function formatChunkProgress(payload: CortexRebuildStatus): string {
+  const current = payload.current ?? 0
+  const total = payload.total ?? 0
+  return total > 0 ? `, ${current}/${total} chunks` : ''
+}
+
+function formatRebuildDetail(payload: CortexRebuildStatus): string {
+  const action = payload.source === 'warmup'
+    ? 'Preparing Long-Term Chat Memory'
+    : 'Rebuilding Long-Term Chat Memory'
+
+  return action + formatChunkProgress(payload)
+}
+
+function buildCortexNotice(ingestionStatus: CortexIngestionStatus | null, rebuildStatus: CortexRebuildStatus | null): CortexNotice | null {
+  if (rebuildStatus?.status === 'error') {
+    return {
+      variant: 'error',
+      title: 'Memory',
+      detail: rebuildStatus.error || 'Chat memory rebuild failed.',
+      percent: rebuildStatus.percent,
+    }
+  }
+
+  if (ingestionStatus?.status === 'error') {
+    return {
+      variant: 'error',
+      title: 'Memory',
+      detail: ingestionStatus.error || 'Background memory processing failed.',
+    }
+  }
+
+  const rebuildProcessing = rebuildStatus?.status === 'processing'
+  const ingestionProcessing = ingestionStatus?.status === 'processing'
+
+  if (rebuildProcessing && ingestionProcessing) {
+    return {
+      variant: 'processing',
+      title: 'Memory',
+      detail: `Preparing Long-Term Chat Memory + Cortex${formatChunkProgress(rebuildStatus)}`,
+      percent: rebuildStatus.percent,
+    }
+  }
+
+  if (rebuildProcessing) {
+    return {
+      variant: 'processing',
+      title: 'Memory',
+      detail: formatRebuildDetail(rebuildStatus),
+      percent: rebuildStatus.percent,
+    }
+  }
+
+  if (ingestionProcessing) {
+    return {
+      variant: 'processing',
+      title: 'Memory',
+      detail: formatIngestionDetail(ingestionStatus),
+    }
+  }
+
+  return null
+}
+
+function normalizeRebuildStatus(payload: CortexRebuildStatus | null): CortexRebuildStatus | null {
+  if (!payload) return null
+  return payload.status === 'idle' || payload.status === 'complete' ? null : payload
+}
+
 export default function ChatView() {
   const { chatId } = useParams<{ chatId: string }>()
+  const autoSwitchedPersonaIdRef = useRef<string | null>(null)
+  const [ingestionStatus, setIngestionStatus] = useState<CortexIngestionStatus | null>(null)
+  const [rebuildStatus, setRebuildStatus] = useState<CortexRebuildStatus | null>(null)
   const setActiveChat = useStore((s) => s.setActiveChat)
   const setMessages = useStore((s) => s.setMessages)
   const messages = useStore((s) => s.messages)
@@ -47,6 +158,43 @@ export default function ChatView() {
   }, [messageSelectMode, setMessageSelectMode])
 
   useSwipeKeyboard()
+  useEditKeyboard()
+
+  const cortexNotice = useMemo(() => buildCortexNotice(ingestionStatus, rebuildStatus), [ingestionStatus, rebuildStatus])
+
+  useEffect(() => {
+    if (!chatId) return
+    let cancelled = false
+    setIngestionStatus(null)
+    setRebuildStatus(null)
+
+    Promise.all([
+      memoryCortexApi.getIngestionStatus(chatId).catch(() => null),
+      memoryCortexApi.getRebuildStatus(chatId).catch(() => null),
+    ]).then(([ingestion, rebuild]) => {
+      if (cancelled) return
+      setIngestionStatus(ingestion)
+      setRebuildStatus(normalizeRebuildStatus(rebuild))
+    })
+
+    memoryCortexApi.warm(chatId).catch(() => {})
+
+    const offIngestion = wsClient.on(EventType.CORTEX_INGESTION_PROGRESS, (payload: any) => {
+      if (!payload || payload.chatId !== chatId) return
+      setIngestionStatus(payload)
+    })
+
+    const offRebuild = wsClient.on(EventType.CORTEX_REBUILD_PROGRESS, (payload: any) => {
+      if (!payload || payload.chatId !== chatId) return
+      setRebuildStatus(normalizeRebuildStatus(payload))
+    })
+
+    return () => {
+      cancelled = true
+      offIngestion()
+      offRebuild()
+    }
+  }, [chatId])
 
   const innerStyle = useMemo(() => {
     switch (chatWidthMode) {
@@ -77,12 +225,13 @@ export default function ChatView() {
         setActiveChat(chatId, chat.character_id)
         setMessages(msgPage.data, msgPage.total)
 
-        // Clear completed/stopped chat heads — but keep active ones so they
-        // reappear if the user navigates away again while still generating
+        // Opening a chat acknowledges any terminal chat-head state globally so
+        // other devices stop showing a stale completed/stopped/error badge too.
         const existingHead = useStore.getState().chatHeads.find((h) => h.chatId === chatId)
         if (existingHead && (existingHead.status === 'completed' || existingHead.status === 'stopped' || existingHead.status === 'error')) {
-          useStore.getState().removeChatHead(chatId)
+          useStore.getState().deleteChatHead(chatId)
         }
+        generateApi.acknowledge(chatId).catch(() => {})
 
         // If there's a pending council tools failure for this chat, show the retry modal now
         const pendingFailure = useStore.getState().councilToolsFailure
@@ -92,78 +241,91 @@ export default function ChatView() {
           showCouncilRetryModal(pendingFailure)
         }
 
-        // Check for an active or recently-completed generation to recover
-        try {
-          const genStatus = await generateApi.getStatus(chatId)
-          if (cancelled) return
-          if (genStatus.active && genStatus.generationId && genStatus.status === 'streaming') {
-            // Resume streaming from pooled tokens
-            const state = useStore.getState()
-            state.startStreaming(genStatus.generationId, genStatus.targetMessageId)
-            if (genStatus.content) state.replaceStreamContent(genStatus.content)
-            if (genStatus.reasoning) state.replaceStreamReasoning(genStatus.reasoning)
-            if (genStatus.tokenSeq != null) state.setLastPooledSeq(genStatus.tokenSeq)
-            // Restore reasoning timer state:
-            if (genStatus.reasoningDurationMs) {
-              // Reasoning already finished — set the finalized duration directly
-              // so the label shows "Thought for Xs" instead of a running timer
-              useStore.setState({ streamingReasoningDuration: genStatus.reasoningDurationMs })
-            } else if (genStatus.reasoningStartedAt) {
-              // Reasoning is still ongoing — restore the start timestamp so the
-              // live timer and the closure variable continue from the correct point
-              state.setStreamingReasoningStartedAt(genStatus.reasoningStartedAt)
-            }
-          } else if (genStatus.active && genStatus.generationId) {
-            // Generation is in council/assembling — just wire up the generation ID
-            // so WS events are processed when streaming begins
-            useStore.getState().startStreaming(genStatus.generationId, genStatus.targetMessageId)
-          } else if (!genStatus.active && genStatus.completedMessageId) {
-            // Generation completed while we were away — refetch messages to include it
-            const freshMsgs = await messagesApi.list(chatId, { limit: pageSize, tail: true })
-            if (!cancelled) setMessages(freshMsgs.data, freshMsgs.total)
-          }
-        } catch { /* generation status check is best-effort */ }
+        // Recover any active or recently-completed generation. The helper is
+        // also invoked on visibilitychange and WS reconnect so that any path
+        // back to this chat re-syncs pooled tokens.
+        if (!cancelled) await recoverPooledGeneration(chatId)
 
-        // Auto-switch persona if this character has a binding
+        let openedCharacter: import('@/types/api').Character | null = null
         if (chat.character_id) {
-          const { characterPersonaBindings, personas: allPersonas, setActivePersona } = useStore.getState()
-          const rawBinding = characterPersonaBindings[chat.character_id]
-          if (rawBinding) {
-            const binding = resolveBinding(rawBinding)
-            if (allPersonas.some((p) => p.id === binding.personaId)) {
-              const boundPersona = allPersonas.find((p) => p.id === binding.personaId)
-              setActivePersona(binding.personaId)
-              if (boundPersona) {
-                toast.info(`Switched to persona: ${boundPersona.name}`)
-              }
-              // Apply bound addon states to the persona
-              if (binding.addonStates && Object.keys(binding.addonStates).length > 0) {
-                try {
-                  const p = await personasApi.get(binding.personaId)
-                  const addons = Array.isArray(p.metadata?.addons) ? p.metadata.addons.map((a: any) => ({ ...a })) : []
-                  const globalRefs = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons.map((r: any) => ({ ...r })) : []
-                  let changed = false
-                  for (const a of addons) {
-                    if (a.id in binding.addonStates && a.enabled !== binding.addonStates[a.id]) {
-                      a.enabled = binding.addonStates[a.id]
-                      changed = true
-                    }
-                  }
-                  for (const r of globalRefs) {
-                    if (r.id in binding.addonStates && r.enabled !== binding.addonStates[r.id]) {
-                      r.enabled = binding.addonStates[r.id]
-                      changed = true
-                    }
-                  }
-                  if (changed) {
-                    const updated = await personasApi.update(binding.personaId, {
-                      metadata: { ...p.metadata, addons, attached_global_addons: globalRefs },
-                    })
-                    useStore.getState().updatePersona(binding.personaId, updated)
-                  }
-                } catch { /* addon state application is best-effort */ }
-              }
+          openedCharacter = useStore.getState().characters.find((c) => c.id === chat.character_id) ?? null
+          if (!openedCharacter) {
+            openedCharacter = await charactersApi.get(chat.character_id).catch(() => null)
+            if (openedCharacter && !cancelled) {
+              useStore.getState().updateCharacter(openedCharacter.id, openedCharacter)
             }
+          }
+        }
+
+        // Character bindings are temporary chat-context overrides. When a chat
+        // has no binding, fall back to the user's default persona instead of
+        // leaking the previous chat's bound persona into the new chat.
+        {
+          const {
+            characterPersonaBindings,
+            personaTagBindings,
+            personas: allPersonas,
+            setActivePersona,
+            activePersonaId,
+          } = useStore.getState()
+          const defaultPersonaId = allPersonas.find((p) => p.is_default)?.id ?? null
+          const resolvedBinding = resolveAutoPersonaBinding({
+            characterId: chat.character_id,
+            characterTags: openedCharacter?.tags ?? [],
+            personas: allPersonas,
+            characterPersonaBindings,
+            personaTagBindings,
+          })
+          const boundPersona = resolvedBinding.personaId
+            ? allPersonas.find((p) => p.id === resolvedBinding.personaId) ?? null
+            : null
+
+          if (resolvedBinding.personaId && boundPersona) {
+            if (activePersonaId !== resolvedBinding.personaId) {
+              setActivePersona(resolvedBinding.personaId)
+              toast.info(`Switched to persona: ${boundPersona.name}`)
+            }
+            autoSwitchedPersonaIdRef.current = resolvedBinding.personaId
+
+            // Apply bound addon states to the persona
+            if (resolvedBinding.addonStates && Object.keys(resolvedBinding.addonStates).length > 0) {
+              try {
+                const p = await personasApi.get(resolvedBinding.personaId)
+                const addons = Array.isArray(p.metadata?.addons) ? p.metadata.addons.map((a: any) => ({ ...a })) : []
+                const globalRefs = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons.map((r: any) => ({ ...r })) : []
+                let changed = false
+                for (const a of addons) {
+                  if (a.id in resolvedBinding.addonStates && a.enabled !== resolvedBinding.addonStates[a.id]) {
+                    a.enabled = resolvedBinding.addonStates[a.id]
+                    changed = true
+                  }
+                }
+                for (const r of globalRefs) {
+                  if (r.id in resolvedBinding.addonStates && r.enabled !== resolvedBinding.addonStates[r.id]) {
+                    r.enabled = resolvedBinding.addonStates[r.id]
+                    changed = true
+                  }
+                }
+                if (changed) {
+                  const updated = await personasApi.update(resolvedBinding.personaId, {
+                    metadata: { ...p.metadata, addons, attached_global_addons: globalRefs },
+                  })
+                  useStore.getState().updatePersona(resolvedBinding.personaId, updated)
+                }
+              } catch { /* addon state application is best-effort */ }
+            }
+          } else {
+            const shouldRestoreDefault =
+              autoSwitchedPersonaIdRef.current !== null &&
+              defaultPersonaId !== null &&
+              activePersonaId !== defaultPersonaId &&
+              (activePersonaId === null || autoSwitchedPersonaIdRef.current === activePersonaId)
+
+            if (shouldRestoreDefault) {
+              setActivePersona(defaultPersonaId)
+            }
+
+            autoSwitchedPersonaIdRef.current = null
           }
         }
 
@@ -176,6 +338,31 @@ export default function ChatView() {
             toast.info(`Applied loadout: ${resolved.loadout.name}`)
           }
         } catch { /* no loadout binding — that's fine */ }
+
+        try {
+          const resolvedCouncil = await councilApi.resolve(chatId)
+          if (!cancelled) {
+            const store = useStore.getState()
+            store.setCouncilSettings(resolvedCouncil.council_settings)
+            store.setCouncilPersistenceTarget(councilSourceToTarget(resolvedCouncil.source, {
+              chatId,
+              characterId: chat.character_id,
+            }))
+
+            const memberPackIds = new Set(
+              resolvedCouncil.council_settings.members.map((member) => member.packId).filter(Boolean),
+            )
+            for (const packId of memberPackIds) {
+              if (!store.packsWithItems[packId]) {
+                packsApi.get(packId)
+                  .then((data) => useStore.getState().setPackWithItems(packId, data))
+                  .catch(() => {})
+              }
+            }
+          }
+        } catch {
+          // no council profile binding or resolution issue - keep current settings
+        }
 
         // Load per-chat wallpaper from metadata
         const wp = chat.metadata?.wallpaper as import('@/types/store').WallpaperRef | undefined
@@ -245,9 +432,13 @@ export default function ChatView() {
           // Refresh the active character on every chat open so profile/chat
           // surfaces don't rely on a stale cached avatar/image_id.
           if (chat.character_id) {
-            charactersApi.get(chat.character_id).then((char) => {
-              if (!cancelled) useStore.getState().updateCharacter(char.id, char)
-            }).catch(() => {})
+            if (openedCharacter) {
+              if (!cancelled) useStore.getState().updateCharacter(openedCharacter.id, openedCharacter)
+            } else {
+              charactersApi.get(chat.character_id).then((char) => {
+                if (!cancelled) useStore.getState().updateCharacter(char.id, char)
+              }).catch(() => {})
+            }
           }
         }
       } catch (err) {
@@ -378,6 +569,22 @@ export default function ChatView() {
         )}
 
         <div className={styles.chatColumn}>
+          {cortexNotice && (
+            <div className={styles.cortexNoticeDock} aria-live="polite" aria-atomic="true">
+              <div className={clsx(styles.cortexNotice, cortexNotice.variant === 'error' && styles.cortexNoticeError)}>
+                <span className={styles.cortexNoticeStatus} aria-hidden="true" />
+                <span className={styles.cortexNoticeTitle}>{cortexNotice.title}</span>
+                <span className={styles.cortexNoticeSeparator} aria-hidden="true">•</span>
+                <span className={styles.cortexNoticeDetail}>{cortexNotice.detail}</span>
+                <span className={styles.cortexNoticePercent}>{typeof cortexNotice.percent === 'number' ? `${cortexNotice.percent}%` : ''}</span>
+                {typeof cortexNotice.percent === 'number' && (
+                  <span className={styles.cortexNoticeBar} aria-hidden="true">
+                    <span className={styles.cortexNoticeFill} style={{ transform: `scaleX(${Math.max(0, Math.min(1, cortexNotice.percent / 100))})` }} />
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           <div className={styles.chatColumnInner} style={innerStyle} data-select-mode={messageSelectMode || undefined}>
             <div className={styles.chatToolbar}>
               <button

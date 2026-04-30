@@ -1,5 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import type {
   GenerationRequest,
   GenerationResponse,
@@ -20,6 +21,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       temperature: { ...COMMON_PARAMS.temperature, max: 2 },
       max_tokens: COMMON_PARAMS.max_tokens,
       top_p: COMMON_PARAMS.top_p,
+      top_k: COMMON_PARAMS.top_k,
       frequency_penalty: COMMON_PARAMS.frequency_penalty,
       presence_penalty: COMMON_PARAMS.presence_penalty,
       stop: COMMON_PARAMS.stop,
@@ -116,6 +118,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     // Map supported sampler params
     if (params.temperature !== undefined) body.temperature = params.temperature;
     if (params.top_p !== undefined) body.top_p = params.top_p;
+    if (params.top_k !== undefined) body.top_k = params.top_k;
     if (params.max_tokens !== undefined) body.max_output_tokens = params.max_tokens;
 
     // Passthrough: forward any extra params the caller set (e.g. reasoning,
@@ -249,11 +252,11 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const body = this.buildResponsesBody(request);
     body.stream = true;
 
+    // NOTE: signal intentionally NOT passed to fetch — see src/llm/stream-utils.ts.
     const res = await fetch(url, {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -264,22 +267,24 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     // Tool call accumulation for Responses API function_call streaming
     const fnCallBuffer: Map<string, { name: string; argsJson: string; callId: string }> = new Map();
 
     try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithAbort(reader, request.signal);
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        for (const line of lines) {
+          await maybeYield();
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
         const payload = trimmed.slice(6);
         if (payload === "[DONE]") return;
 

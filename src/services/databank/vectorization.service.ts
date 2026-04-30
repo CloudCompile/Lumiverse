@@ -10,6 +10,7 @@ import * as embeddingsSvc from "../embeddings.service";
 import * as crud from "./databank-crud.service";
 import { parseDocument } from "./document-parser.service";
 import { chunkDocument } from "./document-chunker.service";
+import { loadDatabankSettings } from "./databank-settings.service";
 import type { DatabankDocument } from "./types";
 
 const BATCH_SIZE = 50;
@@ -39,7 +40,12 @@ export async function processDocument(userId: string, docId: string): Promise<vo
     }
 
     // 2. Chunk the text
-    const chunkResults = chunkDocument(parsed.text);
+    const databankSettings = loadDatabankSettings(userId);
+    const chunkResults = chunkDocument(parsed.text, {
+      targetTokens: databankSettings.chunkTargetTokens,
+      maxTokens: databankSettings.chunkMaxTokens,
+      overlapTokens: databankSettings.chunkOverlapTokens,
+    });
     if (chunkResults.length === 0) {
       crud.updateDocumentStatus(docId, "error", { errorMessage: "No chunks produced from document" });
       emitStatus(userId, doc, "error", "No chunks produced from document");
@@ -110,35 +116,38 @@ async function vectorizeChunks(
   chunks: Array<{ id: string; content: string; chunkIndex: number }>,
   cfg: { model: string },
 ): Promise<void> {
-  // Process in batches
-  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-    const batch = chunks.slice(i, i + BATCH_SIZE);
-    const texts = batch.map((c) => c.content);
+  const failures: Error[] = [];
+  await embeddingsSvc.embedWithAdaptiveBatching(
+    userId,
+    chunks,
+    BATCH_SIZE,
+    (c) => c.content,
+    async (batch, _texts, vectors) => {
+      const lanceRows = batch.map((c, j) => ({
+        chatId: doc.databankId,
+        chunkId: c.id,
+        vector: vectors[j],
+        content: c.content,
+        metadata: {
+          documentId: doc.id,
+          databankId: doc.databankId,
+          documentName: doc.name,
+          chunkIndex: c.chunkIndex,
+          sourceType: "databank",
+        },
+      }));
 
-    const vectors = await embeddingsSvc.embedTexts(userId, texts);
+      await embeddingsSvc.batchUpsertDatabankVectors(userId, lanceRows);
+      crud.updateChunkVectorization(batch.map((c) => c.id), cfg.model);
+    },
+    (_batch, err) => {
+      failures.push(err);
+    },
+    { label: `databank:${doc.id.slice(0, 8)}` },
+  );
 
-    // Upsert to LanceDB via the existing batch pattern
-    const lanceRows = batch.map((c, j) => ({
-      chatId: doc.databankId, // owner_id = databankId for scope filtering
-      chunkId: c.id,
-      vector: vectors[j],
-      content: c.content,
-      metadata: {
-        documentId: doc.id,
-        databankId: doc.databankId,
-        documentName: doc.name,
-        chunkIndex: c.chunkIndex,
-        sourceType: "databank",
-      },
-    }));
-
-    await embeddingsSvc.batchUpsertDatabankVectors(userId, lanceRows);
-
-    // Mark chunks as vectorized
-    crud.updateChunkVectorization(
-      batch.map((c) => c.id),
-      cfg.model,
-    );
+  if (failures.length > 0) {
+    throw failures[0];
   }
 }
 

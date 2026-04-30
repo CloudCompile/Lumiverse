@@ -31,15 +31,6 @@
   background: color-mix(in srgb, var(--lumiverse-text-muted) 65%, transparent);
 }
 
-.listHidden {
-  opacity: 0;
-}
-
-.listRevealed {
-  opacity: 1;
-  transition: opacity 0.2s ease-out;
-}
-
 .sentinel {
   height: 1px;
   flex-shrink: 0;
@@ -48,7 +39,7 @@
 .loadingOlder {
   text-align: center;
   padding: 12px 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-muted);
   flex-shrink: 0;
 }
@@ -57,6 +48,7 @@
   position: relative;
   width: 100%;
   flex-shrink: 0;
+  overflow-anchor: none;
 }
 
 .virtualRow {
@@ -65,6 +57,8 @@
   left: 0;
   right: 0;
   padding-bottom: 8px;
+  contain: layout style;
+  will-change: transform;
 }
 
 .errorBubble {
@@ -100,6 +94,10 @@
   .list {
     scrollbar-width: none;
     -ms-overflow-style: none;
+  }
+
+  .virtualRow {
+    will-change: auto;
   }
 
   .list::-webkit-scrollbar {

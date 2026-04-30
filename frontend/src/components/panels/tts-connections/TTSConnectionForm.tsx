@@ -44,17 +44,21 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
   }, [voices, capabilities?.staticVoices])
 
   const fetchVoices = useCallback(async () => {
-    if (!profile?.id) return
     setVoicesLoading(true)
     try {
-      const result = await ttsConnectionsApi.voices(profile.id)
+      const result = await ttsConnectionsApi.previewVoices({
+        connection_id: profile?.id,
+        provider,
+        api_url: apiUrl.trim() || undefined,
+        api_key: apiKey.trim() || undefined,
+      })
       if (result.voices.length > 0) setVoices(result.voices)
     } catch {
       setVoices([])
     } finally {
       setVoicesLoading(false)
     }
-  }, [profile?.id])
+  }, [apiKey, apiUrl, profile?.id, provider])
 
   useEffect(() => {
     if (profile?.id && capabilities?.voiceListStyle === 'dynamic') {
@@ -115,7 +119,7 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
         />
       </FormField>
 
-      <FormField label="Voice" hint={!profile?.id && capabilities?.voiceListStyle === 'dynamic' ? 'Save connection first to fetch voice list' : undefined}>
+      <FormField label="Voice" hint={capabilities?.voiceListStyle === 'dynamic' ? 'Refresh uses the current form values, even before the connection is saved.' : undefined}>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           <Select
             value={voice}
@@ -132,15 +136,15 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
             <button
               type="button"
               onClick={fetchVoices}
-              disabled={voicesLoading || !profile?.id}
-              title={!profile?.id ? 'Save connection to fetch voices' : 'Refresh voices'}
+              disabled={voicesLoading}
+              title="Refresh voices"
               style={{
                 padding: 6,
                 border: 'none',
                 background: 'transparent',
-                cursor: !profile?.id ? 'not-allowed' : 'pointer',
+                cursor: voicesLoading ? 'progress' : 'pointer',
                 color: 'var(--lumiverse-text-muted)',
-                opacity: !profile?.id ? 0.4 : 1,
+                opacity: voicesLoading ? 0.7 : 1,
               }}
             >
               {voicesLoading ? <Loader size={14} /> : <RefreshCw size={14} />}

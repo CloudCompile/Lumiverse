@@ -17,6 +17,7 @@ import * as chatsSvc from "../services/chats.service";
 import * as connectionsSvc from "../services/connections.service";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as memoryCortex from "../services/memory-cortex";
+import { ChatLinkError } from "../services/memory-cortex/vault";
 import { getCharacter } from "../services/characters.service";
 import { getChat } from "../services/chats.service";
 import { eventBus } from "../ws/bus";
@@ -37,6 +38,64 @@ function ensureChatOwnership(c: Context, chatId: string):
   const chat = getChat(userId, chatId);
   if (!chat) return { ok: false, response: c.json({ error: "Chat not found" }, 404) };
   return { ok: true, userId };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function optionalTrimmedString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+async function resolveCortexParticipants(userId: string, chat: ReturnType<typeof getChat>) {
+  const characterNames: string[] = [];
+  const aliasMaps: Map<string, string>[] = [];
+
+  if (!chat) return { characterNames, descriptionAliases: undefined as Map<string, string> | undefined };
+
+  const character = getCharacter(userId, chat.character_id);
+  if (character) {
+    const normalized = memoryCortex.normalizeCharacterName(character.name);
+    characterNames.push(normalized);
+    aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, character.description, character.personality, character.scenario));
+  }
+
+  if (chat.metadata?.character_ids) {
+    for (const cid of chat.metadata.character_ids as string[]) {
+      const ch = getCharacter(userId, cid);
+      if (!ch) continue;
+      const normalized = memoryCortex.normalizeCharacterName(ch.name);
+      if (!characterNames.includes(normalized)) {
+        characterNames.push(normalized);
+        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, ch.description, ch.personality));
+      }
+    }
+  }
+
+  try {
+    const { resolvePersonaOrDefault } = require("../services/personas.service");
+    const persona = resolvePersonaOrDefault(userId);
+    if (persona?.name) {
+      const normalized = memoryCortex.normalizeCharacterName(persona.name);
+      if (!characterNames.includes(normalized)) {
+        characterNames.push(normalized);
+        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, persona.description));
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  const descriptionAliases = memoryCortex.mergeDescriptionAliases(...aliasMaps);
+  return {
+    characterNames,
+    descriptionAliases: descriptionAliases.size > 0 ? descriptionAliases : undefined,
+  };
 }
 
 // ─── Configuration ─────────────────────────────────────────────
@@ -830,7 +889,17 @@ app.get("/chats/:chatId/cortex-stats", (c) => {
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
   const stats = memoryCortex.getCortexUsageStats(chatId);
-  return c.json(stats);
+  const telemetry = memoryCortex.getIngestionTelemetry(chatId);
+  return c.json({ ...stats, ingestionTelemetry: telemetry });
+});
+
+app.get("/chats/:chatId/ingestion-status", (c) => {
+  const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const status = memoryCortex.getIngestionStatus(chatId);
+  if (!status) return c.json({ status: "idle", phase: "complete", chatId, chunkId: null, startedAt: null, updatedAt: Date.now(), pendingJobs: 0, timings: null });
+  return c.json(status);
 });
 
 // ─── Rebuild ───────────────────────────────────────────────────
@@ -855,39 +924,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   const chat = getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  // Gather character names + description aliases for entity extraction
-  const characterNames: string[] = [];
-  const aliasMaps: Map<string, string>[] = [];
-  const character = getCharacter(userId, chat.character_id);
-  if (character) {
-    const normalized = memoryCortex.normalizeCharacterName(character.name);
-    characterNames.push(normalized);
-    aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, character.description, character.personality, character.scenario));
-  }
-  if (chat.metadata?.character_ids) {
-    for (const cid of chat.metadata.character_ids as string[]) {
-      const ch = getCharacter(userId, cid);
-      if (!ch) continue;
-      const normalized = memoryCortex.normalizeCharacterName(ch.name);
-      if (!characterNames.includes(normalized)) {
-        characterNames.push(normalized);
-        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, ch.description, ch.personality));
-      }
-    }
-  }
-  try {
-    const { resolvePersonaOrDefault } = require("../services/personas.service");
-    const persona = resolvePersonaOrDefault(userId);
-    if (persona?.name) {
-      const normalized = memoryCortex.normalizeCharacterName(persona.name);
-      if (!characterNames.includes(normalized)) {
-        characterNames.push(normalized);
-        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, persona.description));
-      }
-    }
-  } catch { /* non-fatal */ }
-  // Merge with collision detection (safe for group chats)
-  const descriptionAliases = memoryCortex.mergeDescriptionAliases(...aliasMaps);
+  const { characterNames, descriptionAliases } = await resolveCortexParticipants(userId, chat);
 
   // Build sidecar adapter if Tier 2 is configured
   const cortexConfig = memoryCortex.getCortexConfig(userId);
@@ -943,7 +980,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
         percent: Math.round((current / total) * 100),
       }, userId);
     },
-    descriptionAliases.size > 0 ? descriptionAliases : undefined,
+    descriptionAliases,
   ).then((result) => {
     eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
       chatId,
@@ -960,6 +997,78 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   });
 
   return c.json({ status: "started", chatId });
+});
+
+app.post("/chats/:chatId/warm", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const chat = getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Chat not found" }, 404);
+
+  const config = memoryCortex.getCortexConfig(userId);
+  if (!config.enabled) {
+    return c.json({ status: "skipped", reason: "cortex_disabled", chatId });
+  }
+
+  const stats = memoryCortex.getCortexUsageStats(chatId);
+  const rebuild = memoryCortex.getRebuildStatus(chatId);
+  const ingestion = memoryCortex.getIngestionStatus(chatId);
+
+  if (rebuild?.status === "processing") {
+    return c.json({ status: "skipped", reason: "rebuild_in_progress", chatId });
+  }
+  if (chatsSvc.isChatChunkRebuildInProgress(chatId)) {
+    return c.json({ status: "skipped", reason: "chunk_rebuild_in_progress", chatId });
+  }
+  if (ingestion?.status === "processing") {
+    return c.json({ status: "skipped", reason: "ingestion_in_progress", chatId });
+  }
+  if (stats.chunkCount === 0) {
+    return c.json({ status: "skipped", reason: "no_chunks", chatId });
+  }
+  if (stats.chunkCount <= 2 && Math.floor(Date.now() / 1000) - chat.updated_at < 20) {
+    return c.json({ status: "skipped", reason: "recent_chat", chatId });
+  }
+  if (stats.salienceRecordCount >= stats.chunkCount && stats.entityCount > 0) {
+    return c.json({ status: "skipped", reason: "already_ready", chatId });
+  }
+
+  const { characterNames, descriptionAliases } = await resolveCortexParticipants(userId, chat);
+  memoryCortex.rebuildCortex(
+    userId,
+    chatId,
+    characterNames,
+    undefined,
+    undefined,
+    (current, total) => {
+      eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
+        chatId,
+        status: "processing",
+        current,
+        total,
+        percent: Math.round((current / total) * 100),
+        source: "warmup",
+      }, userId);
+    },
+    descriptionAliases,
+  ).then((result) => {
+    eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
+      chatId,
+      status: "complete",
+      source: "warmup",
+      ...result,
+    }, userId);
+  }).catch((err) => {
+    console.error("[memory-cortex] Warmup rebuild failed:", err);
+    eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
+      chatId,
+      status: "error",
+      source: "warmup",
+      error: err?.message || "Warmup failed",
+    }, userId);
+  });
+
+  return c.json({ status: "started", reason: "warmup_started", chatId });
 });
 
 // ─── Heuristics Engine Migration ──────────────────────────────
@@ -1081,6 +1190,27 @@ app.delete("/vaults/:id", (c) => {
   return c.json({ success: true });
 });
 
+/** POST /vaults/:id/reindex — Rebuild the vault's chunk snapshot.
+ *  Either re-snapshots from the live source chat (when it still exists and
+ *  has vectorized chunks) or re-embeds the vault's existing stored content
+ *  against the current embedding config. Idempotent. */
+app.post("/vaults/:id/reindex", async (c) => {
+  const userId = c.get("userId");
+  const vaultId = c.req.param("id");
+  try {
+    const result = await memoryCortex.reindexVault(userId, vaultId);
+    // Invalidate linked-cortex cache on every chat this vault is attached to
+    // so the next generation picks up the refreshed snapshot.
+    memoryCortex.invalidateLinkedCortexCacheForVault(vaultId);
+    eventBus.emit(EventType.CORTEX_VAULT_REINDEXED, {
+      vaultId, mode: result.mode, chunkCount: result.chunkCount,
+    }, userId);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message ?? "Reindex failed" }, err.message === "Vault not found" ? 404 : 500);
+  }
+});
+
 // ─── Chat Links ──────────────────────────────────────────────
 
 /** POST /chats/:chatId/links — Attach a vault or interlink to a chat */
@@ -1090,15 +1220,48 @@ app.post("/chats/:chatId/links", async (c) => {
   const chat = getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  const { linkType, vaultId, targetChatId, label, bidirectional } = await c.req.json();
-  if (!linkType || !["vault", "interlink"].includes(linkType)) {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!isRecord(body)) {
+    return c.json({ error: "Request body must be a JSON object" }, 400);
+  }
+
+  const linkTypeRaw = body.linkType ?? body.link_type;
+  const linkTypeValue = typeof linkTypeRaw === "string" ? linkTypeRaw.trim() : "";
+  if (!linkTypeValue || !["vault", "interlink"].includes(linkTypeValue)) {
     return c.json({ error: "linkType must be 'vault' or 'interlink'" }, 400);
   }
+  const linkType = linkTypeValue as "vault" | "interlink";
+
+  const vaultId = optionalTrimmedString(body.vaultId ?? body.vault_id);
+  const targetChatId = optionalTrimmedString(body.targetChatId ?? body.target_chat_id);
+  const label = optionalTrimmedString(body.label);
+  const bidirectionalRaw = body.bidirectional ?? body.bidirectional_link;
+  if (
+    body.label !== undefined && typeof body.label !== "string"
+  ) {
+    return c.json({ error: "label must be a string when provided" }, 400);
+  }
+  if (
+    bidirectionalRaw !== undefined && optionalBoolean(bidirectionalRaw) === undefined
+  ) {
+    return c.json({ error: "bidirectional must be a boolean when provided" }, 400);
+  }
+  const bidirectional = optionalBoolean(bidirectionalRaw);
 
   try {
     const links = memoryCortex.attachLink(userId, chatId, linkType, {
       vaultId, targetChatId, label, bidirectional,
     });
+    memoryCortex.invalidateLinkedCortexCache(chatId);
+    for (const link of links) {
+      memoryCortex.invalidateLinkedCortexCache(link.chatId);
+    }
     for (const link of links) {
       eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
         chatId: link.chatId, linkId: link.id, action: "attached",
@@ -1106,7 +1269,11 @@ app.post("/chats/:chatId/links", async (c) => {
     }
     return c.json({ data: links }, 201);
   } catch (err: any) {
-    return c.json({ error: err.message }, 400);
+    if (err instanceof ChatLinkError) {
+      return c.json({ error: err.message }, { status: err.status as 400 | 404 | 409 });
+    }
+    console.error("[memory-cortex] failed to attach chat link:", err);
+    return c.json({ error: "Failed to attach chat link" }, 500);
   }
 });
 
@@ -1120,14 +1287,16 @@ app.get("/chats/:chatId/links", (c) => {
 
 /** PATCH /chats/:chatId/links/:linkId — Toggle link enabled state */
 app.patch("/chats/:chatId/links/:linkId", async (c) => {
-  const userId = c.get("userId");
-  const linkId = c.req.param("linkId");
   const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const userId = owned.userId;
+  const linkId = c.req.param("linkId");
   const { enabled } = await c.req.json();
   if (typeof enabled !== "boolean") {
     return c.json({ error: "enabled (boolean) is required" }, 400);
   }
-  const ok = memoryCortex.toggleLink(userId, linkId, enabled);
+  const ok = memoryCortex.toggleLink(userId, chatId, linkId, enabled);
   if (!ok) return c.json({ error: "Link not found or not owned" }, 404);
   memoryCortex.invalidateLinkedCortexCache(chatId);
   eventBus.emit(EventType.CORTEX_LINK_CHANGED, {
@@ -1138,10 +1307,12 @@ app.patch("/chats/:chatId/links/:linkId", async (c) => {
 
 /** DELETE /chats/:chatId/links/:linkId — Remove a link */
 app.delete("/chats/:chatId/links/:linkId", (c) => {
-  const userId = c.get("userId");
-  const linkId = c.req.param("linkId");
   const chatId = c.req.param("chatId");
-  const ok = memoryCortex.removeLink(userId, linkId);
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const userId = owned.userId;
+  const linkId = c.req.param("linkId");
+  const ok = memoryCortex.removeLink(userId, chatId, linkId);
   if (!ok) return c.json({ error: "Link not found or not owned" }, 404);
   memoryCortex.invalidateLinkedCortexCache(chatId);
   eventBus.emit(EventType.CORTEX_LINK_CHANGED, {

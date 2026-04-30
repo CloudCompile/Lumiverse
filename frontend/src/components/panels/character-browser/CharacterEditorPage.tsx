@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, ImagePlus, Download, Code2, ChevronDown } from 'lucide-react'
+import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, ImagePlus, Download, Code2 } from 'lucide-react'
 import { IconNotebook } from '@tabler/icons-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Spinner } from '@/components/shared/Spinner'
@@ -24,13 +24,25 @@ import type { Character, CharacterGalleryItem } from '@/types/api'
 import type { RegexScript } from '@/types/regex'
 import { toast } from '@/lib/toast'
 import { Button } from '@/components/shared/FormComponents'
+import SearchableSelect from '@/components/shared/SearchableSelect'
+import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
-import { getCharacterWorldBookIds, setCharacterWorldBookIds } from '@/utils/character-world-books'
+import {
+  getCharacterWorldBookIds,
+  getEmbeddedCharacterBookEntryCount,
+  setCharacterWorldBookIds,
+} from '@/utils/character-world-books'
 import ExpressionEditorTab from './ExpressionEditorTab'
 import AlternateFieldEditor from './AlternateFieldEditor'
 import AlternateAvatarManager from './AlternateAvatarManager'
 import type { AlternateAvatarEntry } from './AlternateAvatarManager'
+import { VoiceGuidanceEditor } from '@/components/dream-weaver/components/VoiceGuidanceEditor'
+import {
+  EMPTY_DREAM_WEAVER_VOICE_GUIDANCE,
+  getDreamWeaverAppearanceText,
+  getDreamWeaverCharacterMetadata,
+} from '@/lib/dream-weaver-character'
 
 const DEBOUNCE_MS = 2000
 
@@ -46,11 +58,16 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'advanced', label: 'Advanced' },
 ]
 
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 export default function CharacterEditorPage() {
   const editingCharacterId = useStore((s) => s.editingCharacterId)
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
   const allCharacters = useStore((s) => s.characters)
   const activeChatId = useStore((s) => s.activeChatId)
+  const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const setActiveChatAvatarId = useStore((s) => s.setActiveChatAvatarId)
   const updateCharInStore = useStore((s) => s.updateCharacter)
@@ -173,9 +190,21 @@ export default function CharacterEditorPage() {
     fetchRegexScripts()
   }, [fetchRegexScripts])
 
+  const upsertWorldBookOption = useCallback((book: { id: string; name: string }) => {
+    setWorldBooks((prev) => {
+      const existingIndex = prev.findIndex((item) => item.id === book.id)
+      if (existingIndex === -1) return [book, ...prev]
+
+      const next = [...prev]
+      next[existingIndex] = book
+      return next
+    })
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     const loadWorldBooks = async () => {
+      if (!editingCharacterId) return
       try {
         const res = await worldBooksApi.list({ limit: 200 })
         if (!cancelled) setWorldBooks(res.data.map((b) => ({ id: b.id, name: b.name })))
@@ -187,17 +216,19 @@ export default function CharacterEditorPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [editingCharacterId])
 
   const handleGalleryUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (!file || !editingCharacterId) return
+      const files = Array.from(e.target.files ?? [])
+      if (files.length === 0 || !editingCharacterId) return
       e.target.value = ''
       setGalleryUploading(true)
       try {
-        const item = await characterGalleryApi.upload(editingCharacterId, file)
-        setGalleryItems((prev) => [...prev, item])
+        const items = files.length === 1
+          ? [await characterGalleryApi.upload(editingCharacterId, files[0])]
+          : await characterGalleryApi.uploadMany(editingCharacterId, files)
+        if (items.length > 0) setGalleryItems((prev) => [...prev, ...items])
       } catch {
         // upload failed
       } finally {
@@ -284,6 +315,21 @@ export default function CharacterEditorPage() {
   // immediate save lands so the in-flight changes get persisted together.
   const pendingExtensionsRef = useRef<Record<string, any> | null>(null)
 
+  const workingExtensions = useMemo(() => {
+    try {
+      const parsed = JSON.parse(extensionsJson)
+      if (isRecord(parsed)) return parsed
+    } catch {
+    }
+
+    return pendingExtensionsRef.current ?? character?.extensions ?? {}
+  }, [extensionsJson, character?.extensions])
+
+  const dreamWeaverMetadata = useMemo(
+    () => getDreamWeaverCharacterMetadata({ extensions: workingExtensions } as Pick<Character, 'extensions'>),
+    [workingExtensions],
+  )
+
   const flushExtensionsSave = useCallback(async () => {
     if (!editingCharacterId) return
     clearTimeout(timers.current['extensions'])
@@ -318,6 +364,25 @@ export default function CharacterEditorPage() {
     [editingCharacterId, character, flushExtensionsSave]
   )
 
+  const mutateDreamWeaver = useCallback(
+    (mutator: (metadata: Record<string, any>) => Record<string, any>) => {
+      mutateExtensions((ext) => {
+        const next = { ...ext }
+        const currentDreamWeaver = isRecord(ext.dream_weaver) ? { ...ext.dream_weaver } : {}
+        const updatedDreamWeaver = mutator(currentDreamWeaver)
+
+        if (Object.keys(updatedDreamWeaver).length > 0) {
+          next.dream_weaver = updatedDreamWeaver
+        } else {
+          delete next.dream_weaver
+        }
+
+        return next
+      }, false)
+    },
+    [mutateExtensions],
+  )
+
   const handleNameChange = useCallback(
     (value: string) => {
       setName(value)
@@ -332,6 +397,46 @@ export default function CharacterEditorPage() {
       debouncedSave(field, value)
     },
     [debouncedSave]
+  )
+
+  const handleDreamWeaverAppearanceChange = useCallback(
+    (value: string) => {
+      mutateDreamWeaver((metadata) => {
+        const next = { ...metadata }
+        if (value.trim()) next.appearance = value
+        else delete next.appearance
+        return next
+      })
+    },
+    [mutateDreamWeaver],
+  )
+
+  const handleDreamWeaverVoiceChange = useCallback(
+    (voiceGuidance: typeof EMPTY_DREAM_WEAVER_VOICE_GUIDANCE) => {
+      mutateDreamWeaver((metadata) => {
+        const hasStructuredRules = Object.values(voiceGuidance.rules).some((items) => items.length > 0)
+        const hasVoiceContent = hasStructuredRules || Boolean(voiceGuidance.compiled.trim())
+        const next = { ...metadata }
+
+        if (hasVoiceContent) {
+          next.voice_guidance = {
+            compiled: voiceGuidance.compiled,
+            rules: {
+              baseline: [...voiceGuidance.rules.baseline],
+              rhythm: [...voiceGuidance.rules.rhythm],
+              diction: [...voiceGuidance.rules.diction],
+              quirks: [...voiceGuidance.rules.quirks],
+              hard_nos: [...voiceGuidance.rules.hard_nos],
+            },
+          }
+        } else {
+          delete next.voice_guidance
+        }
+
+        return next
+      })
+    },
+    [mutateDreamWeaver],
   )
 
   const handleAlternatesChange = useCallback(
@@ -493,20 +598,6 @@ export default function CharacterEditorPage() {
     [character?.extensions]
   )
 
-  const handleToggleWorldBook = useCallback(
-    (worldBookId: string) => {
-      mutateExtensions((ext) => {
-        const currentIds = getCharacterWorldBookIds(ext)
-        const nextIds = currentIds.includes(worldBookId)
-          ? currentIds.filter((id) => id !== worldBookId)
-          : [...currentIds, worldBookId]
-        if (nextIds.length === 0) clearActivatedWorldInfo()
-        return setCharacterWorldBookIds(ext, nextIds)
-      }, true)
-    },
-    [mutateExtensions, clearActivatedWorldInfo]
-  )
-
   const handleRemoveWorldBook = useCallback(
     (worldBookId: string) => {
       mutateExtensions((ext) => {
@@ -519,42 +610,21 @@ export default function CharacterEditorPage() {
     [mutateExtensions, clearActivatedWorldInfo]
   )
 
-  // World book popover state
-  const [wbPopoverOpen, setWbPopoverOpen] = useState(false)
-  const wbAddBtnRef = useRef<HTMLButtonElement>(null)
-  const wbPopoverRef = useRef<HTMLDivElement>(null)
-  const wbFieldGroupRef = useRef<HTMLDivElement>(null)
-  const [wbPopoverPos, setWbPopoverPos] = useState<{ top: number; left: number; width: number } | null>(null)
-
-  useEffect(() => {
-    if (!wbPopoverOpen) return
-    const handleClick = (e: MouseEvent) => {
-      if (
-        wbPopoverRef.current && !wbPopoverRef.current.contains(e.target as Node) &&
-        wbAddBtnRef.current && !wbAddBtnRef.current.contains(e.target as Node)
-      ) {
-        setWbPopoverOpen(false)
+  const handleWorldBookIdsChange = useCallback(
+    async (ids: string[]) => {
+      let approvedIds = ids
+      if (activeChatId && editingCharacterId === activeCharacterId) {
+        const allowedAddedIds = await filterWorldBooksForChatContextAttachment(
+          worldBooks.filter((book) => ids.includes(book.id) && !attachedWorldBookIds.includes(book.id)),
+        )
+        approvedIds = ids.filter((id) => attachedWorldBookIds.includes(id) || allowedAddedIds.includes(id))
       }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [wbPopoverOpen])
 
-  const openWbPopover = useCallback(() => {
-    setWbPopoverOpen((prev) => {
-      const next = !prev
-      if (next && wbAddBtnRef.current && wbFieldGroupRef.current) {
-        const btnRect = wbAddBtnRef.current.getBoundingClientRect()
-        const containerRect = wbFieldGroupRef.current.getBoundingClientRect()
-        setWbPopoverPos({
-          top: btnRect.bottom + 4,
-          left: containerRect.left,
-          width: containerRect.width,
-        })
-      }
-      return next
-    })
-  }, [])
+      mutateExtensions((ext) => setCharacterWorldBookIds(ext, approvedIds), true)
+      if (approvedIds.length === 0) clearActivatedWorldInfo()
+    },
+    [activeChatId, activeCharacterId, attachedWorldBookIds, clearActivatedWorldInfo, editingCharacterId, mutateExtensions, worldBooks]
+  )
 
   // Avatar
   const handleCropComplete = useCallback(
@@ -830,6 +900,15 @@ export default function CharacterEditorPage() {
                 <div className={styles.tabContent}>
                   {activeTab === 'core' && (
                     <>
+                      {dreamWeaverMetadata && (
+                        <Field
+                          label="Appearance"
+                          helper="Appearance data for Dream Weaver characters."
+                          value={getDreamWeaverAppearanceText(dreamWeaverMetadata)}
+                          onChange={handleDreamWeaverAppearanceChange}
+                          rows={4}
+                        />
+                      )}
                       <AlternateFieldEditor
                         label="Description"
                         helper="The character's physical appearance, backstory, and other details."
@@ -862,6 +941,18 @@ export default function CharacterEditorPage() {
 
                   {activeTab === 'system' && (
                     <>
+                      {dreamWeaverMetadata && (
+                        <div className={styles.fieldGroup}>
+                          <span className={styles.fieldLabel}>Voice Guidance</span>
+                          <span className={styles.fieldHelper}>
+                            Structured voice rules are used at runtime first, compiled guidance remains the fallback.
+                          </span>
+                          <VoiceGuidanceEditor
+                            voice={dreamWeaverMetadata.voiceGuidance || EMPTY_DREAM_WEAVER_VOICE_GUIDANCE}
+                            onChange={handleDreamWeaverVoiceChange}
+                          />
+                        </div>
+                      )}
                       <Field
                         label="System Prompt"
                         helper="Instructions injected at the start of every conversation."
@@ -1037,7 +1128,7 @@ export default function CharacterEditorPage() {
                           disabled={galleryUploading}
                         >
                           <ImagePlus size={20} />
-                          <span>{galleryUploading ? 'Uploading...' : 'Add Image'}</span>
+                          <span>{galleryUploading ? 'Uploading...' : 'Add Images'}</span>
                         </button>
                       </div>
 
@@ -1045,6 +1136,7 @@ export default function CharacterEditorPage() {
                         ref={galleryFileRef}
                         type="file"
                         accept="image/*"
+                        multiple
                         className={styles.hiddenInput}
                         onChange={handleGalleryUpload}
                       />
@@ -1077,50 +1169,24 @@ export default function CharacterEditorPage() {
 
                   {activeTab === 'advanced' && (
                     <>
-                      <div ref={wbFieldGroupRef} className={styles.fieldGroup}>
+                      <div className={styles.fieldGroup}>
                         <span className={styles.fieldLabel}>Attached World Books</span>
                         <span className={styles.fieldHelper}>Used by prompt assembly for world info activation. Attach multiple for richer lore.</span>
                         <div className={styles.charWbHeader}>
-                          <button
-                            ref={wbAddBtnRef}
-                            type="button"
-                            className={styles.charWbAddBtn}
-                            onClick={openWbPopover}
-                          >
-                            <Plus size={11} />
-                            <span>Add</span>
-                            <ChevronDown
-                              size={10}
-                              className={clsx(styles.chevron, wbPopoverOpen && styles.chevronOpen)}
-                            />
-                          </button>
-                          {wbPopoverOpen && wbPopoverPos && createPortal(
-                            <div
-                              ref={wbPopoverRef}
-                              className={styles.charWbPopover}
-                              style={{ top: wbPopoverPos.top, left: wbPopoverPos.left, width: wbPopoverPos.width }}
-                            >
-                              {worldBooks.length === 0 ? (
-                                <div className={styles.charWbPopoverEmpty}>No world books available</div>
-                              ) : (
-                                worldBooks.map((wb) => {
-                                  const isActive = attachedWorldBookIds.includes(wb.id)
-                                  return (
-                                    <button
-                                      key={wb.id}
-                                      type="button"
-                                      className={clsx(styles.charWbPopoverItem, isActive && styles.charWbPopoverItemActive)}
-                                      onClick={() => handleToggleWorldBook(wb.id)}
-                                    >
-                                      <span className={styles.charWbPopoverCheck}>{isActive ? '\u2713' : ''}</span>
-                                      <span className={styles.charWbPopoverName}>{wb.name}</span>
-                                    </button>
-                                  )
-                                })
-                              )}
-                            </div>,
-                            document.body
-                          )}
+                          <SearchableSelect
+                            multi
+                            value={attachedWorldBookIds}
+                            onChange={(ids) => { void handleWorldBookIdsChange(ids) }}
+                            options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name }))}
+                            placeholder="Add world books…"
+                            triggerLabel="Add"
+                            triggerIcon={<Plus size={11} />}
+                            searchPlaceholder="Search world books…"
+                            emptyMessage="No world books available"
+                            className={styles.charWbSelect}
+                            portal
+                            minWidth={260}
+                          />
                         </div>
                         {attachedWorldBookIds.length > 0 ? (
                           <div className={styles.charWbPills}>
@@ -1146,13 +1212,13 @@ export default function CharacterEditorPage() {
                         )}
                       </div>
 
-                      {character.extensions?.character_book?.entries?.length > 0 && (
+                      {getEmbeddedCharacterBookEntryCount(character.extensions) > 0 && (
                         <div className={styles.lorebookImportSection}>
                           <IconNotebook size={14} />
                           <div className={styles.lorebookImportInfo}>
                             <span className={styles.fieldLabel}>Embedded Lorebook</span>
                             <span className={styles.fieldHelper}>
-                              {character.extensions.character_book.entries.length} entries found in character card
+                              {getEmbeddedCharacterBookEntryCount(character.extensions)} entries found in character card
                             </span>
                           </div>
                           {lorebookResult ? (
@@ -1167,6 +1233,7 @@ export default function CharacterEditorPage() {
                                 setLorebookImporting(true)
                                 try {
                                   const res = await worldBooksApi.importCharacterBook(editingCharacterId)
+                                  upsertWorldBookOption({ id: res.world_book.id, name: res.world_book.name })
                                   mutateExtensions((ext) => {
                                     const currentIds = getCharacterWorldBookIds(ext)
                                     return setCharacterWorldBookIds(ext, [...currentIds, res.world_book.id])
@@ -1223,20 +1290,18 @@ export default function CharacterEditorPage() {
                           }
                           if (unboundGlobals.length === 0) return null
                           return (
-                            <select
-                              className={styles.fieldInput}
+                            <SearchableSelect
                               value=""
-                              onChange={(e) => {
-                                if (e.target.value) handleBindRegex(e.target.value)
-                              }}
-                            >
-                              <option value="">Bind a global regex to this character...</option>
-                              {unboundGlobals.map((s) => (
-                                <option key={s.id} value={s.id}>
-                                  {s.name} ({s.target})
-                                </option>
-                              ))}
-                            </select>
+                              onChange={(v) => { if (v) handleBindRegex(v) }}
+                              options={unboundGlobals.map((s) => ({
+                                value: s.id,
+                                label: s.name,
+                                sublabel: s.target,
+                              }))}
+                              placeholder="Bind a global regex to this character…"
+                              searchPlaceholder="Search regex scripts…"
+                              emptyMessage="No unbound global regex scripts"
+                            />
                           )
                         })()}
                       </div>

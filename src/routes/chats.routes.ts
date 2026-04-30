@@ -1,9 +1,47 @@
 import { Hono } from "hono";
 import * as svc from "../services/chats.service";
 import * as personasSvc from "../services/personas.service";
+import * as charactersSvc from "../services/characters.service";
 import { parsePagination } from "../services/pagination";
 import { RECENT_CHATS_DEFAULT_LIMIT } from "../types/pagination";
-import { parseDateString, parseMessageDate } from "../migration/st-reader";
+import { parseStChatJsonl, parseStGroupChatJsonl } from "../migration/st-reader";
+import {
+  messageContentProcessorChain,
+  type MessageContentProcessorCtx,
+} from "../spindle/message-content-processor";
+
+async function runMessageContentProcessors(
+  ctx: MessageContentProcessorCtx,
+  userId: string
+): Promise<MessageContentProcessorCtx> {
+  if (messageContentProcessorChain.count === 0) return ctx;
+  return messageContentProcessorChain.run(ctx, userId);
+}
+
+// Auto-greetings are inserted by service-layer createMessage calls that
+// bypass the per-route processor hook; run the chain explicitly so the
+// DB holds resolved content before MESSAGE_SENT broadcasts.
+async function processChatGreeting(userId: string, chat: { id: string }) {
+  if (messageContentProcessorChain.count === 0) return;
+  const msgs = svc.listMessagesTail(userId, chat.id, 1);
+  const greeting = msgs.data[0];
+  if (!greeting || greeting.is_user || greeting.extra?.greeting !== true) return;
+  const ctx: MessageContentProcessorCtx = {
+    chatId: chat.id,
+    messageId: greeting.id,
+    content: greeting.content,
+    extra: greeting.extra,
+    origin: "create",
+    userId,
+  };
+  const processed = await messageContentProcessorChain.run(ctx, userId);
+  const update: { content?: string; extra?: Record<string, unknown> } = {};
+  if (processed.content !== greeting.content) update.content = processed.content;
+  if (processed.extra && processed.extra !== greeting.extra) update.extra = processed.extra;
+  if (update.content !== undefined || update.extra !== undefined) {
+    svc.updateMessage(userId, greeting.id, update);
+  }
+}
 
 const app = new Hono();
 
@@ -34,11 +72,21 @@ app.get("/character-chats/:characterId", (c) => {
   return c.json(svc.listChatSummaries(userId, characterId));
 });
 
+app.get("/group-chats", (c) => {
+  const userId = c.get("userId");
+  const rawCharacterIds = c.req.query("character_ids");
+  const characterIds = rawCharacterIds
+    ? rawCharacterIds.split(",").map((id) => id.trim()).filter(Boolean)
+    : undefined;
+  return c.json(svc.listGroupChatSummaries(userId, characterIds));
+});
+
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (!body.character_id) return c.json({ error: "character_id is required" }, 400);
   const chat = svc.createChat(userId, body);
+  await processChatGreeting(userId, chat);
   return c.json(chat, 201);
 });
 
@@ -49,6 +97,7 @@ app.post("/group", async (c) => {
     return c.json({ error: "character_ids must be an array with at least 2 entries" }, 400);
   }
   const chat = svc.createGroupChat(userId, body);
+  await processChatGreeting(userId, chat);
   return c.json(chat, 201);
 });
 
@@ -76,6 +125,7 @@ app.post("/:id/members/:characterId", async (c) => {
     greeting_index: body.greeting_index,
   });
   if (!updated) return c.json({ error: "Not found, not a group chat, character not found, or already a member" }, 400);
+  if (!body.skip_greeting) await processChatGreeting(userId, updated);
   return c.json(updated);
 });
 
@@ -172,7 +222,7 @@ app.post("/import", async (c) => {
       extra: m.extra,
     }));
 
-    const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages);
+    const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages, userId);
 
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
@@ -200,85 +250,105 @@ app.post("/import-st", async (c) => {
     return c.json({ error: "file is required" }, 400);
   }
 
-  const text = await file.text();
-  const lines = text.split("\n").filter((l) => l.trim());
-  if (lines.length === 0) return c.json({ error: "File is empty" }, 400);
-
-  // Detect and parse optional ST metadata header (line 0)
-  let chatName = (file.name || "import").replace(/\.jsonl$/i, "");
-  let chatCreatedAt: number | undefined;
-
-  try {
-    const meta = JSON.parse(lines[0]);
-    if (meta.chat_metadata || meta.user_name !== undefined) {
-      chatName = meta.chat_metadata?.name || chatName;
-      if (meta.create_date) {
-        const ts = parseDateString(meta.create_date);
-        if (ts) chatCreatedAt = ts;
-      }
-    }
-  } catch { /* not a metadata line */ }
-
-  const startLine = (() => {
-    try {
-      const first = JSON.parse(lines[0]);
-      if (first.user_name !== undefined || first.chat_metadata) return 1;
-    } catch { /* ignore */ }
-    return 0;
-  })();
-
-  const messages: {
-    is_user: boolean;
-    name: string;
-    content: string;
-    send_date: number;
-    swipes?: string[];
-    swipe_id?: number;
-    extra?: Record<string, any>;
-  }[] = [];
-
-  for (let i = startLine; i < lines.length; i++) {
-    try {
-      const msg = JSON.parse(lines[i]);
-      const msgSwipes: string[] | undefined = Array.isArray(msg.swipes) ? msg.swipes : undefined;
-      const swipeId: number | undefined = typeof msg.swipe_id === "number" ? msg.swipe_id : undefined;
-
-      // ST sometimes leaves `mes` empty when the active swipe holds the content.
-      // Resolve: mes → swipes[swipe_id] → swipes[0] → "".
-      const content =
-        msg.mes ||
-        msg.content ||
-        (msgSwipes && swipeId !== undefined ? msgSwipes[swipeId] : undefined) ||
-        (msgSwipes ? msgSwipes[0] : undefined) ||
-        "";
-
-      if (!content && !msg.name) continue;
-
-      messages.push({
-        is_user: !!msg.is_user,
-        name: msg.name || (msg.is_user ? "User" : "Character"),
-        content,
-        send_date: parseMessageDate(msg),
-        swipes: msgSwipes,
-        swipe_id: swipeId,
-        extra: msg.extra || undefined,
-      });
-    } catch { /* skip unparseable lines */ }
-  }
-
-  if (messages.length === 0) {
+  const parsed = parseStChatJsonl(await file.text(), (file.name || "import").replace(/\.jsonl$/i, ""));
+  if (!parsed) {
     return c.json({ error: "No valid messages found in file" }, 400);
   }
 
   try {
     const chat = svc.createChatRaw(userId, {
       character_id: characterId,
-      name: chatName,
+      name: parsed.name,
       metadata: {},
-      ...(chatCreatedAt ? { created_at: chatCreatedAt } : {}),
+      ...(parsed.createdAt ? { created_at: parsed.createdAt } : {}),
     });
 
-    const msgCount = svc.bulkInsertMessages(chat.id, messages);
+    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages, userId);
+    return c.json({
+      chat_id: chat.id,
+      name: chat.name,
+      message_count: msgCount,
+      speaker_name_fallback_count: parsed.speakerNameFallbackCount ?? 0,
+    }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Import failed" }, 500);
+  }
+});
+
+app.post("/import-st-group", async (c) => {
+  const userId = c.get("userId");
+
+  let formData: FormData;
+  try {
+    formData = await c.req.formData();
+  } catch {
+    return c.json({ error: "Expected multipart/form-data" }, 400);
+  }
+
+  const characterIds = formData
+    .getAll("character_ids")
+    .map((value) => typeof value === "string" ? value.trim() : "")
+    .filter(Boolean);
+  const greetingCharacterIdValue = formData.get("greeting_character_id");
+  const greetingCharacterId = typeof greetingCharacterIdValue === "string" ? greetingCharacterIdValue.trim() : "";
+  const file = formData.get("file") as File | null;
+
+  if (characterIds.length < 2) {
+    return c.json({ error: "character_ids must contain at least 2 entries" }, 400);
+  }
+  if (!file) {
+    return c.json({ error: "file is required" }, 400);
+  }
+
+  const uniqueCharacterIds = Array.from(new Set(characterIds));
+  const characters = charactersSvc.getCharactersByIds(userId, uniqueCharacterIds);
+  if (characters.size !== uniqueCharacterIds.length) {
+    return c.json({ error: "One or more group characters were not found" }, 404);
+  }
+
+  const filenameToId = new Map<string, string>();
+  for (const [id, character] of characters.entries()) {
+    const sourceFilename = typeof character.extensions?._lumiverse_source_filename === "string"
+      ? character.extensions._lumiverse_source_filename.trim()
+      : "";
+    const addKey = (key: string) => {
+      const normalized = key.trim();
+      if (!normalized) return;
+      filenameToId.set(normalized, id);
+      filenameToId.set(normalized.toLowerCase(), id);
+    };
+    addKey(character.name);
+    addKey(sourceFilename);
+    if (sourceFilename.toLowerCase().endsWith(".png")) addKey(sourceFilename.slice(0, -4));
+  }
+
+  const personas = personasSvc.listPersonas(userId, { limit: 10000, offset: 0 });
+  const personaNameToId = new Map<string, string>();
+  for (const persona of personas.data) {
+    if (persona.name) personaNameToId.set(persona.name, persona.id);
+  }
+
+  const parsed = parseStGroupChatJsonl(
+    await file.text(),
+    (file.name || "group").replace(/\.jsonl$/i, ""),
+    personaNameToId,
+    filenameToId,
+  );
+  if (!parsed) {
+    return c.json({ error: "No valid messages found in file" }, 400);
+  }
+
+  try {
+    const chat = svc.createChatRaw(userId, {
+      character_id: greetingCharacterId && characters.has(greetingCharacterId)
+        ? greetingCharacterId
+        : uniqueCharacterIds[0],
+      name: parsed.name,
+      metadata: { group: true, character_ids: uniqueCharacterIds },
+      ...(parsed.createdAt ? { created_at: parsed.createdAt } : {}),
+    });
+
+    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages, userId);
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
     return c.json({ error: err.message || "Import failed" }, 500);
@@ -404,14 +474,40 @@ app.post("/:chatId/messages", async (c) => {
     return c.json({ error: "name and content are required" }, 400);
   }
 
+  const processed = await runMessageContentProcessors(
+    { chatId, content: body.content, extra: body.extra, origin: "create", userId },
+    userId
+  );
+  body.content = processed.content;
+  if (processed.extra !== undefined) body.extra = processed.extra;
+
   const msg = svc.createMessage(chatId, body, userId);
   return c.json(msg, 201);
 });
 
 app.put("/:chatId/messages/:id", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
-  const msg = svc.updateMessage(userId, c.req.param("id"), body);
+
+  if (body.content !== undefined) {
+    const processed = await runMessageContentProcessors(
+      {
+        chatId,
+        messageId,
+        content: body.content,
+        extra: body.extra,
+        origin: "update",
+        userId,
+      },
+      userId
+    );
+    body.content = processed.content;
+    if (processed.extra !== undefined) body.extra = processed.extra;
+  }
+
+  const msg = svc.updateMessage(userId, messageId, body);
   if (!msg) return c.json({ error: "Not found" }, 404);
   return c.json(msg);
 });
@@ -425,13 +521,25 @@ app.delete("/:chatId/messages/:id", (c) => {
 
 app.post("/:chatId/messages/:id/swipe", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
   let msg = null;
 
   if (body.direction === "left" || body.direction === "right") {
-    msg = svc.cycleSwipe(userId, c.req.param("id"), body.direction);
+    msg = svc.cycleSwipe(userId, messageId, body.direction);
   } else if (body.content !== undefined) {
-    msg = svc.addSwipe(userId, c.req.param("id"), body.content);
+    const processed = await runMessageContentProcessors(
+      {
+        chatId,
+        messageId,
+        content: body.content,
+        origin: "swipe_add",
+        userId,
+      },
+      userId
+    );
+    msg = svc.addSwipe(userId, messageId, processed.content);
   } else {
     return c.json({ error: "direction or content is required" }, 400);
   }
@@ -442,10 +550,25 @@ app.post("/:chatId/messages/:id/swipe", async (c) => {
 
 app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
   if (body.content === undefined) return c.json({ error: "content is required" }, 400);
   const idx = parseInt(c.req.param("idx"), 10);
-  const msg = svc.updateSwipe(userId, c.req.param("id"), idx, body.content);
+
+  const processed = await runMessageContentProcessors(
+    {
+      chatId,
+      messageId,
+      content: body.content,
+      origin: "swipe_update",
+      swipeIndex: idx,
+      userId,
+    },
+    userId
+  );
+
+  const msg = svc.updateSwipe(userId, messageId, idx, processed.content);
   if (!msg) return c.json({ error: "Not found or invalid swipe index" }, 404);
   return c.json(msg);
 });

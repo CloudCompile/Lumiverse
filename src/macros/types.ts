@@ -84,6 +84,10 @@ export interface MacroDefinition {
   aliases?: string[];
   /** When true, extension macros cannot overwrite this definition */
   builtIn?: boolean;
+  /** When true, the handler's return value is guaranteed to never contain
+   *  unresolved macro markers ({{...}}). Skips the post-handler recursive
+   *  expansion check for a small performance win on hot-path macros. */
+  terminal?: boolean;
   handler: MacroHandler;
 }
 
@@ -102,6 +106,8 @@ export interface MacroExecContext {
   args: string[];
   rawArgs: AstNode[][];
   flags: MacroFlags;
+  /** False when the caller explicitly requested a dry / non-committing resolve. */
+  commit: boolean;
   isScoped: boolean;
   body: string;
   bodyRaw: AstNode[];
@@ -118,6 +124,8 @@ export interface MacroExecContext {
 // ============================================================================
 
 export interface MacroEnv {
+  /** False when macro evaluation should avoid durable side effects. */
+  commit: boolean;
   names: {
     user: string;
     char: string;
@@ -186,6 +194,11 @@ export interface MacroEnv {
   /** Pre-normalized lowercase key → value map for O(1) dynamic macro lookup.
    *  Built automatically by buildEnv(); kept in sync if dynamicMacros changes. */
   _dynamicMacrosLower?: Map<string, string | MacroHandler | MacroDefinition>;
+  /** Optional abort signal. When present, the evaluator checks `aborted` between
+   *  top-level iteration passes so a user's /generate/stop can tear down a long
+   *  macro expansion (e.g. nested {{evalm}} / recursive custom macros) rather
+   *  than holding the event loop until the 5-pass loop converges. */
+  signal?: AbortSignal;
   extra: Record<string, any>;
 }
 

@@ -10,6 +10,7 @@ import {
   destroyAllPlacementsForExtension,
 } from './placement-helper'
 import { generateUUID } from '@/lib/uuid'
+import { installSpindleNavigationGuards } from './navigation-guards'
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { useStore } from '@/store'
@@ -23,9 +24,63 @@ interface LoadedExtension {
   teardown?: () => void
   eventUnsubs: (() => void)[]
   backendHandlers: Set<(payload: unknown) => void>
+  processHandlers: Map<string, FrontendProcessHandler>
+  activeProcesses: Map<string, ActiveFrontendProcess>
   mountRoots: Element[]
   stopMountSync?: () => void
 }
+
+type FrontendProcessHandler = (
+  process: FrontendProcessContextLocal,
+) => void | (() => void) | Promise<void | (() => void)>
+
+interface FrontendProcessContextLocal {
+  processId: string
+  kind: string
+  key?: string
+  payload: unknown
+  metadata?: Record<string, unknown>
+  ready(): void
+  heartbeat(): void
+  send(payload: unknown): void
+  onMessage(handler: (payload: unknown) => void): () => void
+  complete(result?: unknown): void
+  fail(error: string): void
+  onStop(handler: (detail: { reason?: string }) => void): () => void
+}
+
+interface ActiveFrontendProcess {
+  processId: string
+  kind: string
+  key?: string
+  payload: unknown
+  metadata?: Record<string, unknown>
+  readySent: boolean
+  terminal: boolean
+  cleanup?: () => void | Promise<void>
+  messageHandlers: Set<(payload: unknown) => void>
+  stopHandlers: Set<(detail: { reason?: string }) => void>
+}
+
+type FrontendProcessWirePayload =
+  | {
+      action: 'spawn'
+      processId: string
+      kind: string
+      key?: string
+      payload?: unknown
+      metadata?: Record<string, unknown>
+    }
+  | {
+      action: 'message'
+      processId: string
+      payload: unknown
+    }
+  | {
+      action: 'stop'
+      processId: string
+      reason?: string
+    }
 
 const loadedExtensions = new Map<string, LoadedExtension>()
 const loadInFlight = new Map<string, Promise<void>>()
@@ -37,7 +92,8 @@ function getManifestSignature(manifest: SpindleManifest): string {
 
 async function doLoadFrontendExtension(
   extensionId: string,
-  manifest: SpindleManifest
+  manifest: SpindleManifest,
+  force = false
 ): Promise<void> {
   const generation = (loadGeneration.get(extensionId) || 0) + 1
   loadGeneration.set(extensionId, generation)
@@ -46,7 +102,7 @@ async function doLoadFrontendExtension(
   const manifestSignature = getManifestSignature(manifest)
   const existing = loadedExtensions.get(extensionId)
 
-  if (existing?.manifestSignature === manifestSignature) {
+  if (!force && existing?.manifestSignature === manifestSignature) {
     return
   }
 
@@ -57,15 +113,26 @@ async function doLoadFrontendExtension(
   const bundleUrl = `/api/v1/spindle/${extensionId}/frontend`
 
   try {
-    const response = await fetch(bundleUrl)
+    const responsePromise = fetch(bundleUrl)
+    const permissionsPromise = spindleApi.getPermissions(extensionId)
+      .then((permRes) => permRes.granted)
+      .catch(() => [] as string[])
+    installSpindleNavigationGuards()
+
+    const response = await responsePromise
     if (!response.ok) return // No frontend bundle
 
-    const code = await response.text()
-    const blob = new Blob([code], { type: 'application/javascript' })
+    const blob = await response.blob()
     const blobUrl = URL.createObjectURL(blob)
 
     const mod: SpindleFrontendModule = await import(/* @vite-ignore */ blobUrl)
     URL.revokeObjectURL(blobUrl)
+
+    // SECURITY: Spindle extensions execute in the main document context.
+    // IFrames, frames, objects, and embeds are EXPLICITLY prohibited and
+    // blocked by the document CSP (frame-src 'none'). Extension views must
+    // use the provided placement APIs (mount, drawer, dock, float) which
+    // inject content directly into the React-managed DOM — never via frames.
 
     if (typeof mod.setup !== 'function') {
       console.warn(`[Spindle:${manifest.identifier}] Frontend module missing setup()`)
@@ -75,16 +142,12 @@ async function doLoadFrontendExtension(
     const dom = createDOMHelper(extensionId)
     const eventUnsubs: (() => void)[] = []
     const backendHandlers = new Set<(payload: unknown) => void>()
+    const processHandlers = new Map<string, FrontendProcessHandler>()
+    const activeProcesses = new Map<string, ActiveFrontendProcess>()
     const mountRoots = new Map<string, Element>()
 
     // Cache granted permissions for synchronous permission checks in ui methods
-    let cachedGrantedPermissions: string[] = []
-    try {
-      const permRes = await spindleApi.getPermissions(extensionId)
-      cachedGrantedPermissions = permRes.granted
-    } catch {
-      // If we can't fetch permissions, default to empty (most restrictive)
-    }
+    let cachedGrantedPermissions: string[] = await permissionsPromise
     const mountedPoints = new Set<string>()
     let openModalCount = 0
 
@@ -116,8 +179,11 @@ async function doLoadFrontendExtension(
       mountRoots.clear()
       mountedPoints.clear()
     }
-
-    const context: SpindleFrontendContext = {
+    const context: SpindleFrontendContext & {
+      processes: {
+        register(kind: string, handler: FrontendProcessHandler): () => void
+      }
+    } = {
       dom,
       events: {
         on(event: string, handler: (payload: unknown) => void): () => void {
@@ -243,7 +309,7 @@ async function doLoadFrontendExtension(
             padding: '12px 16px', borderBottom: '1px solid var(--lumiverse-border)',
           })
           const titleEl = document.createElement('h3')
-          Object.assign(titleEl.style, { margin: '0', fontSize: '15px', fontWeight: '600', color: 'var(--lumiverse-text)' })
+          Object.assign(titleEl.style, { margin: '0', fontSize: 'calc(15px * var(--lumiverse-font-scale, 1))', fontWeight: '600', color: 'var(--lumiverse-text)' })
           titleEl.textContent = options?.title || ''
           header.appendChild(titleEl)
 
@@ -424,9 +490,23 @@ async function doLoadFrontendExtension(
           backendHandlers.delete(handler)
         }
       },
+      processes: {
+        register(kind: string, handler: FrontendProcessHandler): () => void {
+          const normalized = kind.trim()
+          if (!normalized) {
+            throw new Error('process kind is required')
+          }
+          processHandlers.set(normalized, handler)
+          return () => {
+            if (processHandlers.get(normalized) === handler) {
+              processHandlers.delete(normalized)
+            }
+          }
+        },
+      },
       messages: {
         registerTagInterceptor(options, handler) {
-          return registerTagInterceptor(extensionId, options, handler)
+          return registerTagInterceptor(extensionId, manifest.name || manifest.identifier || 'Extension', options, handler)
         },
       },
       manifest,
@@ -462,6 +542,8 @@ async function doLoadFrontendExtension(
       teardown: typeof teardownFn === 'function' ? teardownFn : mod.teardown,
       eventUnsubs,
       backendHandlers,
+      processHandlers,
+      activeProcesses,
       mountRoots: Array.from(mountRoots.values()),
       stopMountSync: cleanupMountInfra,
     })
@@ -474,14 +556,15 @@ async function doLoadFrontendExtension(
 
 export async function loadFrontendExtension(
   extensionId: string,
-  manifest: SpindleManifest
+  manifest: SpindleManifest,
+  force = false
 ): Promise<void> {
   const pending = loadInFlight.get(extensionId)
   const next = (pending || Promise.resolve())
     .catch(() => {
       // continue queue even after previous failure
     })
-    .then(() => doLoadFrontendExtension(extensionId, manifest))
+    .then(() => doLoadFrontendExtension(extensionId, manifest, force))
 
   loadInFlight.set(extensionId, next)
   try {
@@ -496,6 +579,24 @@ export async function loadFrontendExtension(
 export async function unloadFrontendExtension(extensionId: string): Promise<void> {
   const loaded = loadedExtensions.get(extensionId)
   if (!loaded) return
+
+  for (const process of Array.from(loaded.activeProcesses.values())) {
+    try {
+      loaded.activeProcesses.delete(process.processId)
+      process.terminal = true
+      void process.cleanup?.()
+      process.messageHandlers.clear()
+      process.stopHandlers.clear()
+      wsClient.send({
+        type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+        extensionId,
+        processId: process.processId,
+        event: 'frontend_unloaded',
+      })
+    } catch {
+      // no-op
+    }
+  }
 
   try {
     loaded.teardown?.()
@@ -520,6 +621,7 @@ export async function unloadFrontendExtension(extensionId: string): Promise<void
   }
 
   loaded.backendHandlers.clear()
+  loaded.processHandlers.clear()
   unregisterTagInterceptorsByExtension(extensionId)
   destroyAllPlacementsForExtension(extensionId)
   loadedExtensions.delete(extensionId)
@@ -536,6 +638,167 @@ export function routeBackendMessage(extensionId: string, payload: unknown): void
       handler(payload)
     } catch (err) {
       console.error(`[Spindle] Backend message handler error for ${loaded.identifier}:`, err)
+    }
+  }
+}
+
+export function routeFrontendProcessEvent(extensionId: string, payload: FrontendProcessWirePayload): void {
+  const loaded = loadedExtensions.get(extensionId)
+  if (!loaded) return
+
+  if (payload.action === 'spawn') {
+    void (async () => {
+      const handler = loaded.processHandlers.get(payload.kind)
+      if (!handler) {
+        wsClient.send({
+          type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+          extensionId,
+          processId: payload.processId,
+          event: 'fail',
+          error: `No frontend process handler registered for kind \"${payload.kind}\"`,
+        })
+        return
+      }
+
+      const process: ActiveFrontendProcess = {
+        processId: payload.processId,
+        kind: payload.kind,
+        key: payload.key,
+        payload: payload.payload,
+        metadata: payload.metadata,
+        readySent: false,
+        terminal: false,
+        messageHandlers: new Set(),
+        stopHandlers: new Set(),
+      }
+      loaded.activeProcesses.set(payload.processId, process)
+
+      const ctx: FrontendProcessContextLocal = {
+        processId: payload.processId,
+        kind: payload.kind,
+        ...(payload.key ? { key: payload.key } : {}),
+        payload: payload.payload,
+        ...(payload.metadata ? { metadata: payload.metadata } : {}),
+        ready() {
+          if (process.terminal || process.readySent) return
+          process.readySent = true
+          wsClient.send({
+            type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+            extensionId,
+            processId: payload.processId,
+            event: 'ready',
+          })
+        },
+        heartbeat() {
+          if (process.terminal) return
+          wsClient.send({
+            type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+            extensionId,
+            processId: payload.processId,
+            event: 'heartbeat',
+          })
+        },
+        send(messagePayload: unknown) {
+          if (process.terminal) return
+          wsClient.send({
+            type: 'SPINDLE_FRONTEND_PROCESS_MSG',
+            extensionId,
+            processId: payload.processId,
+            payload: messagePayload,
+          })
+        },
+        onMessage(handler) {
+          process.messageHandlers.add(handler)
+          return () => {
+            process.messageHandlers.delete(handler)
+          }
+        },
+        complete(_result?: unknown) {
+          if (process.terminal) return
+          process.terminal = true
+          loaded.activeProcesses.delete(process.processId)
+          try { void process.cleanup?.() } catch {}
+          process.messageHandlers.clear()
+          process.stopHandlers.clear()
+          wsClient.send({
+            type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+            extensionId,
+            processId: payload.processId,
+            event: 'complete',
+          })
+        },
+        fail(error: string) {
+          if (process.terminal) return
+          process.terminal = true
+          loaded.activeProcesses.delete(process.processId)
+          try { void process.cleanup?.() } catch {}
+          process.messageHandlers.clear()
+          process.stopHandlers.clear()
+          wsClient.send({
+            type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+            extensionId,
+            processId: payload.processId,
+            event: 'fail',
+            error,
+          })
+        },
+        onStop(handler) {
+          process.stopHandlers.add(handler)
+          return () => {
+            process.stopHandlers.delete(handler)
+          }
+        },
+      }
+
+      try {
+        const cleanup = await handler(ctx)
+        if (typeof cleanup === 'function') {
+          process.cleanup = cleanup
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.fail(message)
+      }
+    })()
+    return
+  }
+
+  const process = loaded.activeProcesses.get(payload.processId)
+  if (!process) return
+
+  if (payload.action === 'message') {
+    for (const handler of process.messageHandlers) {
+      try {
+        handler(payload.payload)
+      } catch (err) {
+        console.error(`[Spindle] Frontend process message handler error for ${loaded.identifier}:`, err)
+      }
+    }
+    return
+  }
+
+  if (payload.action === 'stop') {
+    if (process.stopHandlers.size === 0) {
+      process.terminal = true
+      loaded.activeProcesses.delete(process.processId)
+      try { void process.cleanup?.() } catch {}
+      process.messageHandlers.clear()
+      process.stopHandlers.clear()
+      wsClient.send({
+        type: 'SPINDLE_FRONTEND_PROCESS_EVENT',
+        extensionId,
+        processId: payload.processId,
+        event: 'complete',
+      })
+      return
+    }
+
+    for (const handler of process.stopHandlers) {
+      try {
+        handler({ reason: payload.reason })
+      } catch (err) {
+        console.error(`[Spindle] Frontend process stop handler error for ${loaded.identifier}:`, err)
+      }
     }
   }
 }

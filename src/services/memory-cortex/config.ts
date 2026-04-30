@@ -14,6 +14,11 @@
  */
 
 import * as settingsSvc from "../settings.service";
+import {
+  getDefaultEntityExtractionFilters,
+  normalizeEntityExtractionFilters,
+  type MemoryEntityExtractionFilters,
+} from "./entity-extraction-filters";
 
 const SETTINGS_KEY = "memoryCortexConfig";
 
@@ -44,6 +49,13 @@ export interface ConsolidationConfig {
   maxTokensPerSummary: number;
 }
 
+export interface ThoughtMarkerConfig {
+  /** Prefix marking a character thought block, e.g. <thinking> */
+  prefix: string;
+  /** Suffix marking a character thought block, e.g. </thinking> */
+  suffix: string;
+}
+
 export interface MemoryCortexConfig {
   /** Master switch — disabling preserves all data but skips cortex retrieval */
   enabled: boolean;
@@ -55,6 +67,9 @@ export interface MemoryCortexConfig {
   entityTracking: boolean;
   /** Entity extraction strategy */
   entityExtractionMode: "heuristic" | "sidecar" | "off";
+
+  /** Optional custom delimiters for character thought text in chat content */
+  thoughtMarkers: ThoughtMarkerConfig;
 
   /** Score chunk importance */
   salienceScoring: boolean;
@@ -141,6 +156,9 @@ export interface MemoryCortexConfig {
 
   /** Custom proper noun whitelist (fantasy terms that shouldn't be filtered) */
   entityWhitelist: string[];
+
+  /** Per-entity-type heuristics controls for header noise and guided extraction */
+  entityExtractionFilters: MemoryEntityExtractionFilters;
 }
 
 // ─── Defaults ──────────────────────────────────────────────────
@@ -159,6 +177,10 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
   presetMode: "simple",
   entityTracking: true,
   entityExtractionMode: "heuristic",
+  thoughtMarkers: {
+    prefix: "",
+    suffix: "",
+  },
   salienceScoring: true,
   salienceScoringMode: "heuristic",
   sidecar: {
@@ -197,6 +219,7 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
     minConfidence: 0.4,
   },
   entityWhitelist: [],
+  entityExtractionFilters: getDefaultEntityExtractionFilters(),
 };
 
 // ─── Preset Resolvers ──────────────────────────────────────────
@@ -319,6 +342,10 @@ export function normalizeCortexConfig(
     presetMode: input.presetMode ?? defaults.presetMode,
     entityTracking: input.entityTracking ?? defaults.entityTracking,
     entityExtractionMode: input.entityExtractionMode ?? defaults.entityExtractionMode,
+    thoughtMarkers: {
+      prefix: input.thoughtMarkers?.prefix ?? defaults.thoughtMarkers.prefix,
+      suffix: input.thoughtMarkers?.suffix ?? defaults.thoughtMarkers.suffix,
+    },
     salienceScoring: input.salienceScoring ?? defaults.salienceScoring,
     salienceScoringMode: input.salienceScoringMode ?? defaults.salienceScoringMode,
     sidecar: {
@@ -364,5 +391,6 @@ export function normalizeCortexConfig(
       minConfidence: input.entityPruning?.minConfidence ?? defaults.entityPruning.minConfidence,
     },
     entityWhitelist: input.entityWhitelist ?? defaults.entityWhitelist,
+    entityExtractionFilters: normalizeEntityExtractionFilters(input.entityExtractionFilters),
   };
 }

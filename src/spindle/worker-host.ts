@@ -3,13 +3,18 @@ import type {
   WorkerToHost,
   HostToWorker,
   LlmMessageDTO,
+  InterceptorBreakdownEntryDTO,
   ToolRegistration,
   ExtensionInfo,
   ConnectionProfileDTO,
   CharacterDTO,
+  CharacterAvatarUploadDTO,
   ChatDTO,
   WorldBookDTO,
   WorldBookEntryDTO,
+  DatabankDTO,
+  DatabankDocumentDTO,
+  DatabankDocumentCreateDTO,
   PersonaDTO,
   ActivatedWorldInfoEntryDTO,
   DryRunResultDTO,
@@ -17,6 +22,7 @@ import type {
   ThemeOverrideDTO,
   SpindleCommandDTO,
   SpindleCommandContextDTO,
+  CouncilMemberContext,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
@@ -26,6 +32,16 @@ import { EventType } from "../ws/events";
 import { registry as macroRegistry } from "../macros";
 import { interceptorPipeline, type InterceptorResult } from "./interceptor-pipeline";
 import { contextHandlerChain } from "./context-handler";
+import {
+  messageContentProcessorChain,
+  type MessageContentProcessorCtx,
+  type MessageContentProcessorResult,
+} from "./message-content-processor";
+import {
+  macroInterceptorChain,
+  type MacroInterceptorCtx,
+  type MacroInterceptorResult,
+} from "./macro-interceptor";
 import { toolRegistry } from "./tool-registry";
 import * as managerSvc from "./manager.service";
 import * as generateSvc from "../services/generate.service";
@@ -37,17 +53,29 @@ import {
   setCharacterWorldBookIds,
 } from "../utils/character-world-books";
 import * as worldBooksSvc from "../services/world-books.service";
+import * as databanksSvc from "../services/databank";
+import * as filesSvc from "../services/files.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
+import * as councilSettingsSvc from "../services/council/council-settings.service";
+import * as packsSvc from "../services/packs.service";
+import { buildCouncilMemberContext } from "../services/council/tool-runtime";
+import { resolveInterceptorTimeout } from "../services/spindle-settings.service";
+import { getSidecarSettings } from "../services/sidecar-settings.service";
 import * as colorExtractionSvc from "../services/color-extraction.service";
 import { generateThemeVariables as generateThemeVariablesFn } from "../utils/theme-engine";
 import * as promptAssemblySvc from "../services/prompt-assembly.service";
 import * as embeddingsSvc from "../services/embeddings.service";
+import * as tokenizerSvc from "../services/tokenizer.service";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
+import { spawnAsync } from "./spawn-async";
 import { getImageProvider, getImageProviderList } from "../image-gen/registry";
 import "../image-gen/index";
 import { getEphemeralPoolConfig } from "./ephemeral-pool.service";
+import { createRuntimeTransport, type RuntimeTransport } from "./runtime-transport";
+import { getTextContent, type LlmMessage } from "../llm/types";
 import { getDb } from "../db/connection";
+import { normalizeSpindleAppNavigationPath } from "./url-safety";
 import {
   getMessages as getChatMessages,
   createMessage as createChatMessage,
@@ -75,9 +103,329 @@ import {
 } from "fs";
 import http from "node:http";
 import https from "node:https";
+import { createHash } from "crypto";
 import { join, resolve, relative, sep } from "path";
 
 const EPHEMERAL_MAX_FILES = 250;
+
+type TokenModelSource = "main" | "sidecar" | "explicit";
+
+type TokenCountResult = {
+  total_tokens: number;
+  model: string;
+  modelSource: TokenModelSource;
+  tokenizer_id: string | null;
+  tokenizer_name: string;
+  approximate: boolean;
+};
+
+type FrontendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type FrontendProcessExitReason =
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "timed_out"
+  | "frontend_unloaded"
+  | "backend_unloaded"
+  | "replaced";
+
+type FrontendProcessInfo = {
+  processId: string;
+  kind: string;
+  key?: string;
+  state: FrontendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: FrontendProcessExitReason;
+  error?: string;
+};
+
+type FrontendProcessLifecycleEvent = {
+  processId: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: FrontendProcessState;
+  previousState?: FrontendProcessState;
+  at: string;
+  exitReason?: FrontendProcessExitReason;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type FrontendProcessRecord = FrontendProcessInfo & {
+  requestId: string;
+  startupTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setTimeout> | null;
+  startupTimeoutMs: number;
+  heartbeatTimeoutMs: number;
+  stopReason?: string;
+};
+
+type BackendProcessState =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "timed_out";
+
+type BackendProcessExitReason =
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "timed_out"
+  | "backend_unloaded"
+  | "replaced";
+
+type BackendProcessInfo = {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  state: BackendProcessState;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt: string;
+  readyAt?: string;
+  lastHeartbeatAt?: string;
+  endedAt?: string;
+  exitReason?: BackendProcessExitReason;
+  error?: string;
+};
+
+type BackendProcessLifecycleEvent = {
+  processId: string;
+  entry: string;
+  kind: string;
+  key?: string;
+  userId?: string;
+  state: BackendProcessState;
+  previousState?: BackendProcessState;
+  at: string;
+  exitReason?: BackendProcessExitReason;
+  error?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type BackendProcessRecord = BackendProcessInfo & {
+  requestId: string;
+  runtime: RuntimeTransport;
+  startupTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setTimeout> | null;
+  stopTimer: ReturnType<typeof setTimeout> | null;
+  startupTimeoutMs: number;
+  heartbeatTimeoutMs: number;
+  stopReason?: string;
+};
+
+type BackendProcessRuntimeInit = {
+  processId: string;
+  entry: string;
+  entryPath: string;
+  kind: string;
+  key?: string;
+  payload?: unknown;
+  metadata?: Record<string, unknown>;
+  userId?: string;
+};
+
+type HostToBackendProcessRuntime =
+  | { type: "init"; process: BackendProcessRuntimeInit }
+  | { type: "stop"; reason?: string }
+  | { type: "message"; payload: unknown };
+
+type BackendProcessRuntimeToHost =
+  | { type: "ready" }
+  | { type: "heartbeat" }
+  | { type: "message"; payload: unknown }
+  | { type: "complete" }
+  | { type: "fail"; error: string }
+  | { type: "stopped" };
+
+type RuntimeWorkerToHost =
+  | WorkerToHost
+  | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
+  | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
+  | {
+      type: "user_storage_write_binary";
+      requestId: string;
+      path: string;
+      data: Uint8Array;
+      userId?: string;
+    }
+  | { type: "user_storage_move"; requestId: string; from: string; to: string; userId?: string }
+  | { type: "user_storage_stat"; requestId: string; path: string; userId?: string }
+  | {
+      type: "tokens_count_text";
+      requestId: string;
+      text: string;
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_messages";
+      requestId: string;
+      messages: Array<Pick<LlmMessageDTO, "role" | "content">>;
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_chat";
+      requestId: string;
+      chatId: string;
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "databanks_list";
+      requestId: string;
+      limit?: number;
+      offset?: number;
+      scope?: "global" | "character" | "chat";
+      scopeId?: string | null;
+      userId?: string;
+    }
+  | { type: "databanks_get"; requestId: string; databankId: string; userId?: string }
+  | { type: "databanks_create"; requestId: string; input: import("lumiverse-spindle-types").DatabankCreateDTO; userId?: string }
+  | { type: "databanks_update"; requestId: string; databankId: string; input: import("lumiverse-spindle-types").DatabankUpdateDTO; userId?: string }
+  | { type: "databanks_delete"; requestId: string; databankId: string; userId?: string }
+  | {
+      type: "databank_documents_list";
+      requestId: string;
+      databankId: string;
+      limit?: number;
+      offset?: number;
+      userId?: string;
+    }
+  | { type: "databank_documents_get"; requestId: string; documentId: string; userId?: string }
+  | {
+      type: "databank_documents_create";
+      requestId: string;
+      databankId: string;
+      input: DatabankDocumentCreateDTO;
+      userId?: string;
+    }
+  | {
+      type: "databank_documents_update";
+      requestId: string;
+      documentId: string;
+      input: import("lumiverse-spindle-types").DatabankDocumentUpdateDTO;
+      userId?: string;
+    }
+  | { type: "databank_documents_delete"; requestId: string; documentId: string; userId?: string }
+  | { type: "databank_documents_get_content"; requestId: string; documentId: string; userId?: string }
+  | { type: "databank_documents_reprocess"; requestId: string; documentId: string; userId?: string }
+  | { type: "register_message_content_processor"; priority?: number }
+  | {
+      type: "message_content_processor_result";
+      requestId: string;
+      result: unknown;
+    }
+  | { type: "register_macro_interceptor"; priority?: number }
+  | {
+      type: "macro_interceptor_result";
+      requestId: string;
+      result: unknown;
+    }
+  | {
+      type: "frontend_process_spawn";
+      requestId: string;
+      options: {
+        kind: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "frontend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: FrontendProcessState;
+      };
+    }
+  | { type: "frontend_process_get"; requestId: string; processId: string }
+  | {
+      type: "frontend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "frontend_process_send"; processId: string; payload: unknown; userId?: string }
+  | {
+      type: "backend_process_spawn";
+      requestId: string;
+      options: {
+        entry: string;
+        kind?: string;
+        key?: string;
+        payload?: unknown;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+        startupTimeoutMs?: number;
+        heartbeatTimeoutMs?: number;
+        replaceExisting?: boolean;
+      };
+    }
+  | {
+      type: "backend_process_list";
+      requestId: string;
+      filter?: {
+        userId?: string;
+        kind?: string;
+        key?: string;
+        state?: BackendProcessState;
+      };
+    }
+  | { type: "backend_process_get"; requestId: string; processId: string }
+  | {
+      type: "backend_process_stop";
+      requestId: string;
+      processId: string;
+      options?: { userId?: string; reason?: string };
+    }
+  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string };
+
+type RuntimeHostToWorker =
+  | HostToWorker
+  | {
+      type: "message_content_processor_request";
+      requestId: string;
+      ctx: MessageContentProcessorCtx;
+    }
+  | {
+      type: "macro_interceptor_request";
+      requestId: string;
+      ctx: MacroInterceptorCtx;
+    }
+  | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
+  | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
+  | { type: "backend_process_lifecycle"; event: BackendProcessLifecycleEvent }
+  | { type: "backend_process_message"; processId: string; payload: unknown; userId: string };
 
 let cachedBackendVersion: string | null = null;
 let cachedFrontendVersion: string | null = null;
@@ -274,14 +622,23 @@ export class WorkerHost {
     "--lumiverse-transition",
     "--lumiverse-transition-fast",
   ]);
-  private worker: Worker | null = null;
+  private runtime: RuntimeTransport | null = null;
   private eventUnsubscribers = new Map<string, () => void>();
   private pendingRequests = new Map<
     string,
     { resolve: (value: unknown) => void; reject: (reason: unknown) => void }
   >();
+  /**
+   * AbortControllers for in-flight `request_generation` calls, keyed by the
+   * worker-supplied `requestId`. The worker posts `cancel_generation` with the
+   * same id when an extension's `AbortSignal` fires; the host calls
+   * `controller.abort()` to tear down the upstream LLM request.
+   */
+  private generationAbortControllers = new Map<string, AbortController>();
   private interceptorUnregister: (() => void) | null = null;
   private contextHandlerUnregister: (() => void) | null = null;
+  private messageContentProcessorUnregister: (() => void) | null = null;
+  private macroInterceptorUnregister: (() => void) | null = null;
   private registeredMacroNames = new Set<string>();
   private macroValueCache = new Map<string, string>();
   private toastTimestamps: number[] = [];
@@ -289,11 +646,20 @@ export class WorkerHost {
   private static readonly TOAST_RATE_WINDOW_MS = 10_000;
   private registeredCommands: SpindleCommandDTO[] = [];
   private static readonly MAX_COMMANDS_PER_EXTENSION = 20;
+  private static readonly MAX_BACKEND_PROCESSES = 16;
   private commandInvokedHandlers = new Set<string>(); // tracked for cleanup only
   private onWorkerReady: (() => void) | null = null;
   private onWorkerShutdownAck: (() => void) | null = null;
+  private onRuntimeExit: (() => void) | null = null;
+  private runtimeExitPromise: Promise<void> | null = null;
+  private runtimeStopping = false;
+  private runtimeStatsInterval: ReturnType<typeof setInterval> | null = null;
   private readonly installScope: "operator" | "user";
   private readonly installedByUserId: string | null;
+  private frontendProcesses = new Map<string, FrontendProcessRecord>();
+  private frontendProcessKeyIndex = new Map<string, string>();
+  private backendProcesses = new Map<string, BackendProcessRecord>();
+  private backendProcessKeyIndex = new Map<string, string>();
 
   constructor(
     public readonly extensionId: string,
@@ -323,6 +689,446 @@ export class WorkerHost {
     }
   }
 
+  private resolveFrontendProcessUserId(userId?: string): string {
+    if (this.installScope === "user") {
+      if (!this.installedByUserId) {
+        throw new Error("Extension owner is not set");
+      }
+      return this.installedByUserId;
+    }
+
+    if (typeof userId !== "string" || !userId.trim()) {
+      throw new Error("userId is required when spawning a managed process");
+    }
+
+    return userId.trim();
+  }
+
+  private buildFrontendProcessKey(userId: string, kind: string, key: string): string {
+    return `${userId}:${kind}:${key}`;
+  }
+
+  private snapshotFrontendProcess(record: FrontendProcessRecord): FrontendProcessInfo {
+    return {
+      processId: record.processId,
+      kind: record.kind,
+      ...(record.key ? { key: record.key } : {}),
+      state: record.state,
+      ...(record.userId ? { userId: record.userId } : {}),
+      ...(record.metadata ? { metadata: record.metadata } : {}),
+      startedAt: record.startedAt,
+      ...(record.readyAt ? { readyAt: record.readyAt } : {}),
+      ...(record.lastHeartbeatAt ? { lastHeartbeatAt: record.lastHeartbeatAt } : {}),
+      ...(record.endedAt ? { endedAt: record.endedAt } : {}),
+      ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+      ...(record.error ? { error: record.error } : {}),
+    };
+  }
+
+  private clearFrontendProcessTimers(record: FrontendProcessRecord): void {
+    if (record.startupTimer) {
+      clearTimeout(record.startupTimer);
+      record.startupTimer = null;
+    }
+    if (record.heartbeatTimer) {
+      clearTimeout(record.heartbeatTimer);
+      record.heartbeatTimer = null;
+    }
+  }
+
+  private emitFrontendProcessLifecycle(
+    record: FrontendProcessRecord,
+    previousState?: FrontendProcessState
+  ): void {
+    this.postToWorker({
+      type: "frontend_process_lifecycle",
+      event: {
+        processId: record.processId,
+        kind: record.kind,
+        ...(record.key ? { key: record.key } : {}),
+        ...(record.userId ? { userId: record.userId } : {}),
+        state: record.state,
+        ...(previousState ? { previousState } : {}),
+        at: record.endedAt ?? record.lastHeartbeatAt ?? record.readyAt ?? record.startedAt,
+        ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+        ...(record.error ? { error: record.error } : {}),
+        ...(record.metadata ? { metadata: record.metadata } : {}),
+      },
+    });
+  }
+
+  private armFrontendHeartbeatTimer(record: FrontendProcessRecord): void {
+    if (record.heartbeatTimeoutMs <= 0) return;
+    if (record.heartbeatTimer) clearTimeout(record.heartbeatTimer);
+    record.heartbeatTimer = setTimeout(() => {
+      const latest = this.frontendProcesses.get(record.processId);
+      if (!latest) return;
+      this.requestFrontendProcessStop(latest, "timed_out");
+      this.finalizeFrontendProcess(latest, "timed_out", "timed_out", "Frontend process heartbeat timed out");
+    }, record.heartbeatTimeoutMs);
+  }
+
+  private requestFrontendProcessStop(record: FrontendProcessRecord, reason?: string): void {
+    eventBus.emit(
+      EventType.SPINDLE_FRONTEND_PROCESS,
+      {
+        extensionId: this.extensionId,
+        identifier: this.manifest.identifier,
+        action: "stop",
+        processId: record.processId,
+        ...(reason ? { reason } : {}),
+      },
+      record.userId,
+    );
+  }
+
+  private transitionFrontendProcess(
+    record: FrontendProcessRecord,
+    nextState: FrontendProcessState,
+    extras?: { readyAt?: string; lastHeartbeatAt?: string; endedAt?: string; exitReason?: FrontendProcessExitReason; error?: string }
+  ): void {
+    if (record.state === nextState && !extras) return;
+    const previousState = record.state;
+    record.state = nextState;
+    if (extras?.readyAt) record.readyAt = extras.readyAt;
+    if (extras?.lastHeartbeatAt) record.lastHeartbeatAt = extras.lastHeartbeatAt;
+    if (extras?.endedAt) record.endedAt = extras.endedAt;
+    if (extras?.exitReason) record.exitReason = extras.exitReason;
+    if (extras && "error" in extras) {
+      record.error = extras.error;
+    }
+    this.emitFrontendProcessLifecycle(record, previousState);
+  }
+
+  private finalizeFrontendProcess(
+    record: FrontendProcessRecord,
+    state: Extract<FrontendProcessState, "stopped" | "completed" | "failed" | "timed_out">,
+    exitReason: FrontendProcessExitReason,
+    error?: string,
+  ): void {
+    this.clearFrontendProcessTimers(record);
+    this.transitionFrontendProcess(record, state, {
+      endedAt: new Date().toISOString(),
+      exitReason,
+      ...(error ? { error } : { error: undefined }),
+    });
+    this.frontendProcesses.delete(record.processId);
+    if (record.key) {
+      this.frontendProcessKeyIndex.delete(
+        this.buildFrontendProcessKey(record.userId ?? "", record.kind, record.key)
+      );
+    }
+  }
+
+  private getFrontendProcessRecord(processId: string): FrontendProcessRecord | null {
+    return this.frontendProcesses.get(processId) ?? null;
+  }
+
+  private getFrontendProcessForUser(processId: string, userId: string): FrontendProcessRecord | null {
+    const record = this.frontendProcesses.get(processId);
+    if (!record) return null;
+    if (record.userId && record.userId !== userId) return null;
+    return record;
+  }
+
+  private stopAllFrontendProcesses(exitReason: FrontendProcessExitReason): void {
+    for (const record of Array.from(this.frontendProcesses.values())) {
+      this.requestFrontendProcessStop(record, exitReason);
+      this.clearFrontendProcessTimers(record);
+      this.frontendProcesses.delete(record.processId);
+      if (record.key) {
+        this.frontendProcessKeyIndex.delete(
+          this.buildFrontendProcessKey(record.userId ?? "", record.kind, record.key)
+        );
+      }
+    }
+  }
+
+  private getBackendProcessRuntimeMode(): Extract<import("./runtime-transport").RuntimeTransportMode, "process" | "sandbox"> {
+    const raw = process.env.LUMIVERSE_SPINDLE_RUNTIME_MODE?.trim().toLowerCase();
+    return raw === "sandbox" ? "sandbox" : "process";
+  }
+
+  private buildBackendProcessKey(userId: string, kind: string, key: string): string {
+    return `${userId}:${kind}:${key}`;
+  }
+
+  private snapshotBackendProcess(record: BackendProcessRecord): BackendProcessInfo {
+    return {
+      processId: record.processId,
+      entry: record.entry,
+      kind: record.kind,
+      ...(record.key ? { key: record.key } : {}),
+      state: record.state,
+      ...(record.userId ? { userId: record.userId } : {}),
+      ...(record.metadata ? { metadata: record.metadata } : {}),
+      startedAt: record.startedAt,
+      ...(record.readyAt ? { readyAt: record.readyAt } : {}),
+      ...(record.lastHeartbeatAt ? { lastHeartbeatAt: record.lastHeartbeatAt } : {}),
+      ...(record.endedAt ? { endedAt: record.endedAt } : {}),
+      ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+      ...(record.error ? { error: record.error } : {}),
+    };
+  }
+
+  private clearBackendProcessTimers(record: BackendProcessRecord): void {
+    if (record.startupTimer) {
+      clearTimeout(record.startupTimer);
+      record.startupTimer = null;
+    }
+    if (record.heartbeatTimer) {
+      clearTimeout(record.heartbeatTimer);
+      record.heartbeatTimer = null;
+    }
+    if (record.stopTimer) {
+      clearTimeout(record.stopTimer);
+      record.stopTimer = null;
+    }
+  }
+
+  private emitBackendProcessLifecycle(
+    record: BackendProcessRecord,
+    previousState?: BackendProcessState
+  ): void {
+    this.postToWorker({
+      type: "backend_process_lifecycle",
+      event: {
+        processId: record.processId,
+        entry: record.entry,
+        kind: record.kind,
+        ...(record.key ? { key: record.key } : {}),
+        ...(record.userId ? { userId: record.userId } : {}),
+        state: record.state,
+        ...(previousState ? { previousState } : {}),
+        at: record.endedAt ?? record.lastHeartbeatAt ?? record.readyAt ?? record.startedAt,
+        ...(record.exitReason ? { exitReason: record.exitReason } : {}),
+        ...(record.error ? { error: record.error } : {}),
+        ...(record.metadata ? { metadata: record.metadata } : {}),
+      },
+    });
+  }
+
+  private armBackendHeartbeatTimer(record: BackendProcessRecord): void {
+    if (record.heartbeatTimeoutMs <= 0) return;
+    if (record.heartbeatTimer) clearTimeout(record.heartbeatTimer);
+    record.heartbeatTimer = setTimeout(() => {
+      const latest = this.backendProcesses.get(record.processId);
+      if (!latest) return;
+      try {
+        latest.runtime.terminate(true);
+      } catch {
+        // ignore
+      }
+      this.finalizeBackendProcess(latest, "timed_out", "timed_out", "Backend process heartbeat timed out");
+    }, record.heartbeatTimeoutMs);
+  }
+
+  private armBackendStopTimer(record: BackendProcessRecord): void {
+    if (record.stopTimer) clearTimeout(record.stopTimer);
+    record.stopTimer = setTimeout(() => {
+      const latest = this.backendProcesses.get(record.processId);
+      if (!latest) return;
+      try {
+        latest.runtime.terminate(true);
+      } catch {
+        // ignore
+      }
+      this.finalizeBackendProcess(latest, "stopped", "stopped", "Backend process force-stopped after stop timeout");
+    }, 5_000);
+  }
+
+  private transitionBackendProcess(
+    record: BackendProcessRecord,
+    nextState: BackendProcessState,
+    extras?: { readyAt?: string; lastHeartbeatAt?: string; endedAt?: string; exitReason?: BackendProcessExitReason; error?: string }
+  ): void {
+    if (record.state === nextState && !extras) return;
+    const previousState = record.state;
+    record.state = nextState;
+    if (extras?.readyAt) record.readyAt = extras.readyAt;
+    if (extras?.lastHeartbeatAt) record.lastHeartbeatAt = extras.lastHeartbeatAt;
+    if (extras?.endedAt) record.endedAt = extras.endedAt;
+    if (extras?.exitReason) record.exitReason = extras.exitReason;
+    if (extras && "error" in extras) {
+      record.error = extras.error;
+    }
+    this.emitBackendProcessLifecycle(record, previousState);
+  }
+
+  private finalizeBackendProcess(
+    record: BackendProcessRecord,
+    state: Extract<BackendProcessState, "stopped" | "completed" | "failed" | "timed_out">,
+    exitReason: BackendProcessExitReason,
+    error?: string,
+  ): void {
+    this.clearBackendProcessTimers(record);
+    this.transitionBackendProcess(record, state, {
+      endedAt: new Date().toISOString(),
+      exitReason,
+      ...(error ? { error } : { error: undefined }),
+    });
+    this.backendProcesses.delete(record.processId);
+    if (record.key) {
+      this.backendProcessKeyIndex.delete(
+        this.buildBackendProcessKey(record.userId ?? "", record.kind, record.key)
+      );
+    }
+  }
+
+  private getBackendProcessRecord(processId: string): BackendProcessRecord | null {
+    return this.backendProcesses.get(processId) ?? null;
+  }
+
+  private async resolveBackendProcessEntryPath(entry: string): Promise<string> {
+    const normalized = typeof entry === "string" ? entry.trim().replace(/\\/g, "/") : "";
+    if (!normalized) throw new Error("entry is required");
+    if (normalized.startsWith("/") || normalized.split("/").includes("..")) {
+      throw new Error("entry must be a relative path inside the extension repo");
+    }
+    if (!normalized.startsWith("dist/")) {
+      throw new Error("backend process entries must live under dist/");
+    }
+    if (!/\.(?:cjs|mjs|js)$/.test(normalized)) {
+      throw new Error("backend process entry must be a built JavaScript file");
+    }
+
+    const repoPath = managerSvc.getRepoPath(this.manifest.identifier);
+    const repoAbs = resolve(repoPath);
+    const entryPath = resolve(repoAbs, normalized);
+    const insideRepo = entryPath === repoAbs || entryPath.startsWith(`${repoAbs}${sep}`);
+    if (!insideRepo) {
+      throw new Error(`Path traversal detected in backend process entry: ${entry}`);
+    }
+    if (!(await Bun.file(entryPath).exists())) {
+      throw new Error(`Backend process entry not found: ${normalized}`);
+    }
+
+    const blocked = managerSvc.detectDangerousBackendCapabilities(await Bun.file(entryPath).text());
+    if (blocked.length > 0) {
+      throw new Error(
+        `Backend process entry \"${normalized}\" uses blocked backend capabilities: ${blocked.join(", ")}`
+      );
+    }
+
+    return entryPath;
+  }
+
+  private handleBackendProcessRuntimeMessage(
+    processId: string,
+    message: BackendProcessRuntimeToHost
+  ): void {
+    const record = this.backendProcesses.get(processId);
+    if (!record) return;
+
+    switch (message.type) {
+      case "ready": {
+        if (record.state !== "starting") return;
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        const now = new Date().toISOString();
+        this.transitionBackendProcess(record, "running", {
+          readyAt: now,
+          lastHeartbeatAt: now,
+        });
+        this.armBackendHeartbeatTimer(record);
+        this.postToWorker({
+          type: "response",
+          requestId: record.requestId,
+          result: this.snapshotBackendProcess(record),
+        });
+        return;
+      }
+
+      case "heartbeat": {
+        if (record.state !== "running") return;
+        const now = new Date().toISOString();
+        this.transitionBackendProcess(record, "running", { lastHeartbeatAt: now });
+        this.armBackendHeartbeatTimer(record);
+        return;
+      }
+
+      case "message": {
+        this.postToWorker({
+          type: "backend_process_message",
+          processId: record.processId,
+          payload: message.payload,
+          userId: record.userId ?? "",
+        });
+        return;
+      }
+
+      case "complete": {
+        if (record.state === "starting") {
+          this.rejectRequest(record.requestId, new Error("Backend process completed before it became ready"));
+        }
+        this.finalizeBackendProcess(record, "completed", "completed");
+        return;
+      }
+
+      case "fail": {
+        const error = message.error?.trim() || "Backend process failed";
+        if (record.state === "starting") {
+          this.rejectRequest(record.requestId, new Error(error));
+        }
+        this.finalizeBackendProcess(record, "failed", "failed", error);
+        return;
+      }
+
+      case "stopped": {
+        if (record.state === "starting") {
+          this.rejectRequest(record.requestId, new Error("Backend process stopped before it became ready"));
+        }
+        this.finalizeBackendProcess(record, "stopped", "stopped");
+        return;
+      }
+    }
+  }
+
+  private handleBackendProcessRuntimeExit(
+    processId: string,
+    exitCode: number | null,
+    signalCode: number | null,
+    error?: Error,
+  ): void {
+    const record = this.backendProcesses.get(processId);
+    if (!record) return;
+
+    const details = error?.message || `Backend process exited (code=${exitCode ?? "null"}, signal=${signalCode ?? "null"})`;
+    if (record.state === "starting") {
+      this.rejectRequest(record.requestId, new Error(details));
+      this.finalizeBackendProcess(record, "failed", "failed", details);
+      return;
+    }
+    if (record.state === "stopping") {
+      this.finalizeBackendProcess(record, "stopped", "stopped");
+      return;
+    }
+    this.finalizeBackendProcess(record, "failed", "failed", details);
+  }
+
+  private stopAllBackendProcesses(exitReason: BackendProcessExitReason): void {
+    for (const record of Array.from(this.backendProcesses.values())) {
+      this.clearBackendProcessTimers(record);
+      try {
+        record.runtime.terminate(true);
+      } catch {
+        // ignore
+      }
+      this.transitionBackendProcess(record, "stopped", {
+        endedAt: new Date().toISOString(),
+        exitReason,
+      });
+      this.backendProcesses.delete(record.processId);
+      if (record.key) {
+        this.backendProcessKeyIndex.delete(
+          this.buildBackendProcessKey(record.userId ?? "", record.kind, record.key)
+        );
+      }
+    }
+  }
+
   private getStorageRootPath(identifier: string = this.manifest.identifier): string {
     if (identifier === this.manifest.identifier && this.installScope === "user") {
       if (!this.installedByUserId) {
@@ -331,6 +1137,79 @@ export class WorkerHost {
       return managerSvc.getUserExtensionStoragePath(identifier, this.installedByUserId);
     }
     return managerSvc.getStoragePath(identifier);
+  }
+
+  private getRuntimeSampleIntervalMs(): number {
+    if (!this.isRuntimeStatsEnabled()) return 0;
+    const raw = process.env.LUMIVERSE_SPINDLE_RUNTIME_SAMPLE_INTERVAL_MS?.trim();
+    if (!raw) return 30_000;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
+  private isRuntimeStatsEnabled(): boolean {
+    const raw = process.env.LUMIVERSE_SPINDLE_RUNTIME_STATS?.trim().toLowerCase();
+    return raw === "1" || raw === "true" || raw === "yes";
+  }
+
+  private async sampleRuntimeRssKb(): Promise<number | null> {
+    const pid = this.runtime?.pid;
+    if (!pid || pid <= 0) return null;
+
+    const sampled = await spawnAsync(["ps", "-o", "rss=", "-p", String(pid)], {
+      timeoutMs: 1_500,
+      ignoreStdout: false,
+    });
+    if (sampled.exitCode !== 0) return null;
+
+    const rssKb = parseInt(sampled.stdout.trim(), 10);
+    return Number.isFinite(rssKb) && rssKb > 0 ? rssKb : null;
+  }
+
+  private async emitRuntimeStats(phase: "startup" | "sample" | "shutdown", startupMs?: number): Promise<void> {
+    if (!this.isRuntimeStatsEnabled()) return;
+
+    const runtimeMode = this.runtime?.mode ?? "worker";
+    const pid = this.runtime?.pid ?? null;
+    const rssKb = runtimeMode === "worker" ? null : await this.sampleRuntimeRssKb();
+    const payload = {
+      extensionId: this.extensionId,
+      identifier: this.manifest.identifier,
+      name: this.manifest.name,
+      runtimeMode,
+      phase,
+      pid,
+      rssKb,
+      ...(typeof startupMs === "number" ? { startupMs } : {}),
+    };
+
+    eventBus.emit(EventType.SPINDLE_RUNTIME_STATS, payload);
+
+    const parts = [
+      `mode=${runtimeMode}`,
+      `phase=${phase}`,
+      ...(pid ? [`pid=${pid}`] : []),
+      ...(typeof startupMs === "number" ? [`startupMs=${startupMs.toFixed(2)}`] : []),
+      ...(typeof rssKb === "number" ? [`rssKb=${rssKb}`] : []),
+    ];
+    console.info(`[Spindle:${this.manifest.identifier}] Runtime stats ${parts.join(" ")}`);
+  }
+
+  private startRuntimeStatsSampling(): void {
+    if (!this.runtime || this.runtime.mode === "worker") return;
+    const intervalMs = this.getRuntimeSampleIntervalMs();
+    if (intervalMs <= 0) return;
+
+    this.stopRuntimeStatsSampling();
+    this.runtimeStatsInterval = setInterval(() => {
+      void this.emitRuntimeStats("sample");
+    }, intervalMs);
+  }
+
+  private stopRuntimeStatsSampling(): void {
+    if (!this.runtimeStatsInterval) return;
+    clearInterval(this.runtimeStatsInterval);
+    this.runtimeStatsInterval = null;
   }
 
   async start(): Promise<void> {
@@ -343,9 +1222,61 @@ export class WorkerHost {
     }
 
     const runtimePath = join(import.meta.dir, "worker-runtime.ts");
+    const storagePath = this.getStorageRootPath(this.manifest.identifier);
+    const repoPath = managerSvc.getRepoPath(this.manifest.identifier);
+    this.runtimeStopping = false;
+    this.runtimeExitPromise = new Promise<void>((resolve) => {
+      this.onRuntimeExit = resolve;
+    });
+    const startTime = performance.now();
 
-    this.worker = new Worker(runtimePath, {
-      type: "module",
+    this.runtime = createRuntimeTransport({
+      runtimePath,
+      extensionIdentifier: this.manifest.identifier,
+      repoPath,
+      storagePath,
+      onMessage: (message) => {
+        this.handleMessage(message as RuntimeWorkerToHost);
+      },
+      onError: (message) => {
+        console.error(
+          `[Spindle:${this.manifest.identifier}] Worker error:`,
+          message
+        );
+        eventBus.emit(EventType.SPINDLE_EXTENSION_ERROR, {
+          extensionId: this.extensionId,
+          identifier: this.manifest.identifier,
+          error: message,
+        });
+
+        try {
+          this.runtime?.postMessage({ type: "ping" } as any);
+        } catch {
+          console.warn(
+            `[Spindle:${this.manifest.identifier}] Worker appears dead after error, cleaning up registrations`
+          );
+          this.cleanup();
+        }
+      },
+      onExit: (exitCode, signalCode, error) => {
+        const wasStopping = this.runtimeStopping;
+        this.onWorkerShutdownAck?.();
+        this.onWorkerShutdownAck = null;
+        this.onRuntimeExit?.();
+        this.onRuntimeExit = null;
+        if (wasStopping) {
+          this.cleanup();
+          return;
+        }
+        const details = error?.message || `Runtime exited (code=${exitCode ?? "null"}, signal=${signalCode ?? "null"})`;
+        console.error(`[Spindle:${this.manifest.identifier}] Runtime exited unexpectedly:`, details);
+        eventBus.emit(EventType.SPINDLE_EXTENSION_ERROR, {
+          extensionId: this.extensionId,
+          identifier: this.manifest.identifier,
+          error: details,
+        });
+        this.cleanup();
+      },
     });
 
     // Wait for the worker to finish loading the extension and registering
@@ -365,36 +1296,7 @@ export class WorkerHost {
       };
     });
 
-    this.worker.onmessage = (event) => {
-      this.handleMessage(event.data as WorkerToHost);
-    };
-
-    this.worker.onerror = (event) => {
-      console.error(
-        `[Spindle:${this.manifest.identifier}] Worker error:`,
-        event.message
-      );
-      eventBus.emit(EventType.SPINDLE_EXTENSION_ERROR, {
-        extensionId: this.extensionId,
-        identifier: this.manifest.identifier,
-        error: event.message,
-      });
-
-      // Detect fatal worker crash: try a no-op postMessage to see if the
-      // worker is still alive. If it throws, the worker is dead — clean up
-      // registered macros/interceptors so they don't silently fail forever.
-      try {
-        this.worker?.postMessage({ type: "ping" } as any);
-      } catch {
-        console.warn(
-          `[Spindle:${this.manifest.identifier}] Worker appears dead after error, cleaning up registrations`
-        );
-        this.cleanup();
-      }
-    };
-
     // Send init message with the extension's backend entry path
-    const storagePath = this.getStorageRootPath(this.manifest.identifier);
     this.postToWorker({
       type: "init",
       manifest: { ...this.manifest, entry_backend: entryPath },
@@ -402,10 +1304,18 @@ export class WorkerHost {
     });
 
     await readyPromise;
+    await this.emitRuntimeStats("startup", performance.now() - startTime);
+    this.startRuntimeStatsSampling();
   }
 
   async stop(): Promise<void> {
-    if (!this.worker) return;
+    if (!this.runtime) return;
+    const runtime = this.runtime;
+    const runtimeExitPromise = this.runtimeExitPromise;
+    this.runtimeStopping = true;
+    this.stopRuntimeStatsSampling();
+    this.stopAllFrontendProcesses("backend_unloaded");
+    this.stopAllBackendProcesses("backend_unloaded");
 
     // Wait for the worker to acknowledge shutdown (posted right before
     // process.exit(0) in worker-runtime.ts) — or fall back to terminate()
@@ -427,7 +1337,7 @@ export class WorkerHost {
       const timer = setTimeout(() => {
         // Fallback: worker never acknowledged. Force-terminate.
         try {
-          this.worker?.terminate();
+          runtime.terminate();
         } catch {
           // ignore — terminate is best-effort
         }
@@ -444,10 +1354,49 @@ export class WorkerHost {
       }
     });
 
-    this.cleanup();
+    if (runtime.mode === "worker") {
+      await this.emitRuntimeStats("shutdown");
+      this.cleanup();
+      return;
+    }
+
+    if (runtimeExitPromise) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(forceKillTimer);
+          clearTimeout(finalTimeout);
+          resolve();
+        };
+
+        const forceKillTimer = setTimeout(() => {
+          try {
+            runtime.terminate(true);
+          } catch {
+            // ignore — SIGKILL is best-effort
+          }
+        }, 5_000);
+
+        // Last-resort guard so update paths do not hang forever if Bun fails
+        // to report subprocess exit after termination.
+        const finalTimeout = setTimeout(finish, 7_500);
+
+        void runtimeExitPromise.finally(finish);
+      });
+    }
   }
 
   private cleanup(): void {
+    this.stopRuntimeStatsSampling();
+    this.stopAllFrontendProcesses("backend_unloaded");
+    this.stopAllBackendProcesses("backend_unloaded");
+    this.onWorkerReady = null;
+    this.onWorkerShutdownAck = null;
+    this.onRuntimeExit?.();
+    this.onRuntimeExit = null;
+    this.runtimeExitPromise = null;
     // Unsubscribe from all events
     for (const unsub of this.eventUnsubscribers.values()) {
       unsub();
@@ -461,6 +1410,13 @@ export class WorkerHost {
     // Unregister context handler
     this.contextHandlerUnregister?.();
     this.contextHandlerUnregister = null;
+
+    // Unregister message content processor
+    this.messageContentProcessorUnregister?.();
+    this.messageContentProcessorUnregister = null;
+
+    this.macroInterceptorUnregister?.();
+    this.macroInterceptorUnregister = null;
 
     // Unregister all tools for this extension
     toolRegistry.unregisterByExtension(this.extensionId);
@@ -485,6 +1441,8 @@ export class WorkerHost {
     // Unregister interceptors and context handlers
     interceptorPipeline.unregisterByExtension(this.extensionId);
     contextHandlerChain.unregisterByExtension(this.extensionId);
+    messageContentProcessorChain.unregisterByExtension(this.extensionId);
+    macroInterceptorChain.unregisterByExtension(this.extensionId);
 
     // Reject pending requests
     for (const [, pending] of this.pendingRequests) {
@@ -492,15 +1450,129 @@ export class WorkerHost {
     }
     this.pendingRequests.clear();
 
-    this.worker = null;
+    // Abort any in-flight generations so upstream HTTP requests don't leak
+    // past the extension's lifetime.
+    for (const controller of this.generationAbortControllers.values()) {
+      controller.abort();
+    }
+    this.generationAbortControllers.clear();
+
+    this.runtime = null;
+    this.runtimeStopping = false;
   }
 
-  private postToWorker(msg: HostToWorker): void {
-    this.worker?.postMessage(msg);
+  private handleRuntimeTransportFailure(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[Spindle:${this.manifest.identifier}] Runtime transport failed, cleaning up: ${message}`
+    );
+    this.cleanup();
+  }
+
+  private postToWorker(msg: RuntimeHostToWorker): void {
+    if (!this.runtime) return;
+    try {
+      this.runtime.postMessage(msg);
+    } catch (error) {
+      this.handleRuntimeTransportFailure(error);
+    }
   }
 
   sendFrontendMessage(payload: unknown, userId: string): void {
     this.postToWorker({ type: "frontend_message", payload, userId });
+  }
+
+  private sendFrontendProcessEvent(
+    userId: string,
+    payload: Record<string, unknown>,
+  ): void {
+    eventBus.emit(
+      EventType.SPINDLE_FRONTEND_PROCESS,
+      {
+        extensionId: this.extensionId,
+        identifier: this.manifest.identifier,
+        ...payload,
+      },
+      userId,
+    );
+  }
+
+  handleFrontendProcessEvent(
+    processId: string,
+    userId: string,
+    event: "ready" | "heartbeat" | "complete" | "fail" | "frontend_unloaded",
+    error?: string,
+  ): void {
+    const record = this.getFrontendProcessForUser(processId, userId);
+    if (!record) return;
+
+    switch (event) {
+      case "ready": {
+        if (record.state !== "starting") return;
+        const now = new Date().toISOString();
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        this.transitionFrontendProcess(record, "running", {
+          readyAt: now,
+          lastHeartbeatAt: now,
+          error: undefined,
+        });
+        this.armFrontendHeartbeatTimer(record);
+        this.resolveRequest(record.requestId, this.snapshotFrontendProcess(record));
+        break;
+      }
+      case "heartbeat": {
+        if (record.state !== "running" && record.state !== "stopping") return;
+        const now = new Date().toISOString();
+        record.lastHeartbeatAt = now;
+        this.armFrontendHeartbeatTimer(record);
+        break;
+      }
+      case "complete": {
+        if (record.state === "completed" || record.state === "failed" || record.state === "timed_out" || record.state === "stopped") {
+          return;
+        }
+        this.finalizeFrontendProcess(
+          record,
+          record.state === "stopping" ? "stopped" : "completed",
+          record.state === "stopping" ? "stopped" : "completed",
+        );
+        break;
+      }
+      case "fail": {
+        if (record.state === "completed" || record.state === "failed" || record.state === "timed_out" || record.state === "stopped") {
+          return;
+        }
+        const message = error?.trim() || "Frontend process failed";
+        if (record.state === "starting") {
+          this.clearFrontendProcessTimers(record);
+          this.finalizeFrontendProcess(record, "failed", "failed", message);
+          this.rejectRequest(processId, new Error(message));
+        } else {
+          this.finalizeFrontendProcess(record, "failed", "failed", message);
+        }
+        break;
+      }
+      case "frontend_unloaded": {
+        if (record.state === "starting") {
+          const message = "Frontend extension unloaded before the process became ready";
+          this.clearFrontendProcessTimers(record);
+          this.finalizeFrontendProcess(record, "failed", "frontend_unloaded", message);
+          this.rejectRequest(processId, new Error(message));
+          return;
+        }
+        this.finalizeFrontendProcess(record, "stopped", "frontend_unloaded", error);
+        break;
+      }
+    }
+  }
+
+  handleFrontendProcessMessage(processId: string, userId: string, payload: unknown): void {
+    const record = this.getFrontendProcessForUser(processId, userId);
+    if (!record) return;
+    this.postToWorker({ type: "frontend_process_message", processId, payload, userId });
   }
 
   /**
@@ -515,11 +1587,26 @@ export class WorkerHost {
   /**
    * Invoke an extension-registered tool and wait for the result.
    * Used by council execution to route tool calls to the owning extension.
+   *
+   * `councilMember` — when provided by the council execution path — is a
+   * trusted, host-built snapshot of the assigned member's identity and
+   * personality fields. It is delivered alongside the invocation args so the
+   * extension handler can personalise its tool output. The context is sourced
+   * entirely server-side and kept on a separate top-level field so user-space
+   * `args` cannot collide with or spoof it.
+   *
+   * `contextMessages` — when provided — are the structured chat messages that
+   * were also flattened into `args.context` for backwards compatibility.
+   * Forwarded on its own top-level field (same rationale as `councilMember`:
+   * host-provided truth that must not collide with user-space `args`).
+   * Multipart content is flattened to its text portion via `getTextContent`.
    */
   invokeExtensionTool(
     toolName: string,
     args: Record<string, unknown>,
-    timeoutMs = 30_000
+    timeoutMs = 30_000,
+    councilMember?: CouncilMemberContext,
+    contextMessages?: LlmMessage[]
   ): Promise<string> {
     const requestId = crypto.randomUUID();
 
@@ -533,11 +1620,21 @@ export class WorkerHost {
       sanitizedArgs[key] = value;
     }
 
+    const contextMessagesDTO: LlmMessageDTO[] | undefined = contextMessages?.map(
+      (m) => ({
+        role: m.role,
+        content: getTextContent(m),
+        ...(m.name ? { name: m.name } : {}),
+      })
+    );
+
     this.postToWorker({
       type: "tool_invocation",
       requestId,
       toolName,
       args: sanitizedArgs,
+      ...(councilMember ? { councilMember } : {}),
+      ...(contextMessagesDTO ? { contextMessages: contextMessagesDTO } : {}),
     });
 
     return new Promise((resolve, reject) => {
@@ -607,7 +1704,7 @@ export class WorkerHost {
     });
   }
 
-  private handleMessage(msg: WorkerToHost): void {
+  private handleMessage(msg: RuntimeWorkerToHost): void {
     switch (msg.type) {
       case "subscribe_event":
         this.handleSubscribeEvent(msg.event);
@@ -638,7 +1735,16 @@ export class WorkerHost {
             interceptParams = undefined;
           }
         }
-        this.resolveRequest(msg.requestId, { messages: msg.messages, parameters: interceptParams });
+        const interceptBreakdown = Array.isArray(msg.breakdown)
+          ? msg.breakdown
+              .map((entry) => this.normalizeInterceptorBreakdownEntry(entry, msg.messages))
+              .filter((entry): entry is NonNullable<typeof entry> => !!entry)
+          : undefined;
+        this.resolveRequest(msg.requestId, {
+          messages: msg.messages,
+          parameters: interceptParams,
+          ...(interceptBreakdown && interceptBreakdown.length > 0 ? { breakdown: interceptBreakdown } : {}),
+        });
         break;
       }
       case "register_tool":
@@ -649,6 +1755,12 @@ export class WorkerHost {
         break;
       case "request_generation":
         this.handleGeneration(msg.requestId, msg.input);
+        break;
+      case "request_generation_stream":
+        this.handleGenerationStream(msg.requestId, msg.input);
+        break;
+      case "cancel_generation":
+        this.handleCancelGeneration(msg.requestId);
         break;
       // ─── Dry Run (gated: "generation") ───────────────────────────────
       case "generate_dry_run":
@@ -790,6 +1902,18 @@ export class WorkerHost {
       case "context_handler_result":
         this.resolveRequest(msg.requestId, msg.context);
         break;
+      case "register_message_content_processor":
+        this.handleRegisterMessageContentProcessor(msg.priority);
+        break;
+      case "message_content_processor_result":
+        this.resolveRequest(msg.requestId, msg.result);
+        break;
+      case "register_macro_interceptor":
+        this.handleRegisterMacroInterceptor(msg.priority);
+        break;
+      case "macro_interceptor_result":
+        this.resolveRequest(msg.requestId, msg.result);
+        break;
       case "tool_invocation_result":
         if (msg.error) {
           this.rejectRequest(msg.requestId, new Error(msg.error));
@@ -810,6 +1934,12 @@ export class WorkerHost {
       case "user_storage_write":
         this.handleUserStorageWrite(msg.requestId, msg.path, msg.data, msg.userId);
         break;
+      case "user_storage_read_binary":
+        this.handleUserStorageReadBinary(msg.requestId, msg.path, msg.userId);
+        break;
+      case "user_storage_write_binary":
+        this.handleUserStorageWriteBinary(msg.requestId, msg.path, msg.data, msg.userId);
+        break;
       case "user_storage_delete":
         this.handleUserStorageDelete(msg.requestId, msg.path, msg.userId);
         break;
@@ -821,6 +1951,12 @@ export class WorkerHost {
         break;
       case "user_storage_mkdir":
         this.handleUserStorageMkdir(msg.requestId, msg.path, msg.userId);
+        break;
+      case "user_storage_move":
+        this.handleUserStorageMove(msg.requestId, msg.from, msg.to, msg.userId);
+        break;
+      case "user_storage_stat":
+        this.handleUserStorageStat(msg.requestId, msg.path, msg.userId);
         break;
       case "enclave_put":
         this.handleEnclavePut(msg.requestId, msg.key, msg.value, msg.userId);
@@ -926,6 +2062,9 @@ export class WorkerHost {
       case "characters_create":
         this.handleCharactersCreate(msg.requestId, msg.input, msg.userId);
         break;
+      case "characters_set_avatar":
+        this.handleCharactersSetAvatar(msg.requestId, msg.characterId, msg.avatar, msg.userId);
+        break;
       case "characters_update":
         this.handleCharactersUpdate(msg.requestId, msg.characterId, msg.input, msg.userId);
         break;
@@ -988,6 +2127,44 @@ export class WorkerHost {
       case "world_books_get_activated":
         this.handleWorldBooksGetActivated(msg.requestId, msg.chatId, msg.userId);
         break;
+      // ─── Databanks (gated: "databanks") ─────────────────────────────
+      case "databanks_list":
+        this.handleDatabanksList(msg.requestId, msg.limit, msg.offset, msg.scope, msg.scopeId, msg.userId);
+        break;
+      case "databanks_get":
+        this.handleDatabanksGet(msg.requestId, msg.databankId, msg.userId);
+        break;
+      case "databanks_create":
+        this.handleDatabanksCreate(msg.requestId, msg.input, msg.userId);
+        break;
+      case "databanks_update":
+        this.handleDatabanksUpdate(msg.requestId, msg.databankId, msg.input, msg.userId);
+        break;
+      case "databanks_delete":
+        this.handleDatabanksDelete(msg.requestId, msg.databankId, msg.userId);
+        break;
+      // ─── Databank Documents (gated: "databanks") ───────────────────
+      case "databank_documents_list":
+        this.handleDatabankDocumentsList(msg.requestId, msg.databankId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "databank_documents_get":
+        this.handleDatabankDocumentsGet(msg.requestId, msg.documentId, msg.userId);
+        break;
+      case "databank_documents_create":
+        this.handleDatabankDocumentsCreate(msg.requestId, msg.databankId, msg.input, msg.userId);
+        break;
+      case "databank_documents_update":
+        this.handleDatabankDocumentsUpdate(msg.requestId, msg.documentId, msg.input, msg.userId);
+        break;
+      case "databank_documents_delete":
+        this.handleDatabankDocumentsDelete(msg.requestId, msg.documentId, msg.userId);
+        break;
+      case "databank_documents_get_content":
+        this.handleDatabankDocumentsGetContent(msg.requestId, msg.documentId, msg.userId);
+        break;
+      case "databank_documents_reprocess":
+        this.handleDatabankDocumentsReprocess(msg.requestId, msg.documentId, msg.userId);
+        break;
       // ─── Personas (gated: "personas") ──────────────────────────────────
       case "personas_list":
         this.handlePersonasList(msg.requestId, msg.limit, msg.offset, msg.userId);
@@ -1016,9 +2193,25 @@ export class WorkerHost {
       case "personas_get_world_book":
         this.handlePersonasGetWorldBook(msg.requestId, msg.personaId, msg.userId);
         break;
+      // ─── Council (free tier, read-only) ─────────────────────────────
+      case "council_get_settings":
+        this.handleCouncilGetSettings(msg.requestId, msg.userId);
+        break;
+      case "council_get_members":
+        this.handleCouncilGetMembers(msg.requestId, msg.userId);
+        break;
+      case "council_get_available_lumia_items":
+        this.handleCouncilGetAvailableLumiaItems(msg.requestId, msg.userId);
+        break;
       // ─── Toast (free tier) ────────────────────────────────────────────
       case "toast_show":
-        this.handleToastShow(msg.toastType, msg.message, msg.title, msg.duration);
+        this.handleToastShow(
+          msg.toastType,
+          msg.message,
+          msg.title,
+          msg.duration,
+          "userId" in msg ? msg.userId : undefined,
+        );
         break;
       case "log":
         this.handleLog(msg.level, msg.message);
@@ -1036,6 +2229,16 @@ export class WorkerHost {
         break;
       case "version_get_frontend":
         this.handleVersionGetFrontend(msg.requestId);
+        break;
+      // ─── Token Counting (free tier) ───────────────────────────────────
+      case "tokens_count_text":
+        this.handleTokensCountText(msg.requestId, msg.text, msg.model, msg.modelSource, msg.userId);
+        break;
+      case "tokens_count_messages":
+        this.handleTokensCountMessages(msg.requestId, msg.messages, msg.model, msg.modelSource, msg.userId);
+        break;
+      case "tokens_count_chat":
+        this.handleTokensCountChat(msg.requestId, msg.chatId, msg.model, msg.modelSource, msg.userId);
         break;
       // ─── Push Notifications (gated: "push_notification") ──────────────
       case "push_send":
@@ -1065,9 +2268,47 @@ export class WorkerHost {
       case "input_prompt_open":
         this.handleInputPromptOpen(msg.requestId, msg.title, msg.message, msg.placeholder, msg.defaultValue, msg.submitLabel, msg.cancelLabel, msg.multiline, msg.userId);
         break;
+      // ─── Frontend Process Lifecycle (free tier) ───────────────────────
+      case "frontend_process_spawn":
+        this.handleFrontendProcessSpawn(msg.requestId, msg.options);
+        break;
+      case "frontend_process_list":
+        this.handleFrontendProcessList(msg.requestId, msg.filter);
+        break;
+      case "frontend_process_get":
+        this.handleFrontendProcessGet(msg.requestId, msg.processId);
+        break;
+      case "frontend_process_stop":
+        this.handleFrontendProcessStop(msg.requestId, msg.processId, msg.options);
+        break;
+      case "frontend_process_send":
+        this.handleFrontendProcessSend(msg.processId, msg.payload, msg.userId);
+        break;
+      case "backend_process_spawn":
+        void this.handleBackendProcessSpawn(msg.requestId, msg.options);
+        break;
+      case "backend_process_list":
+        this.handleBackendProcessList(msg.requestId, msg.filter);
+        break;
+      case "backend_process_get":
+        this.handleBackendProcessGet(msg.requestId, msg.processId);
+        break;
+      case "backend_process_stop":
+        this.handleBackendProcessStop(msg.requestId, msg.processId, msg.options);
+        break;
+      case "backend_process_send":
+        this.handleBackendProcessSend(msg.processId, msg.payload, msg.userId);
+        break;
       // ─── Macro Resolution (free tier — no permission needed) ────────────
       case "macros_resolve":
-        this.handleMacrosResolve(msg.requestId, msg.template, msg.chatId, msg.characterId, msg.userId);
+        this.handleMacrosResolve(
+          msg.requestId,
+          msg.template,
+          msg.chatId,
+          msg.characterId,
+          msg.userId,
+          (msg as any).commit !== false,
+        );
         break;
       // ─── Image Generation (gated: "image_gen") ─────────────────────────
       case "image_gen_generate":
@@ -1123,6 +2364,7 @@ export class WorkerHost {
   /** Generation-related events that require the `generation` permission. */
   private static readonly GENERATION_EVENTS = new Set([
     EventType.GENERATION_STARTED,
+    EventType.GENERATION_IN_PROGRESS,
     EventType.GENERATION_ENDED,
     EventType.GENERATION_STOPPED,
     EventType.STREAM_TOKEN_RECEIVED,
@@ -1214,7 +2456,7 @@ export class WorkerHost {
       handler: async (ctx) => {
         // Bail immediately if the worker is not running — avoids a 5s timeout
         // that would stall prompt assembly for every extension macro.
-        if (!this.worker) {
+        if (!this.runtime) {
           console.debug("[Spindle:%s] Macro '%s' skipped: worker not running", this.manifest.identifier, macroName);
           return "";
         }
@@ -1296,6 +2538,7 @@ export class WorkerHost {
                   name: ctx.name,
                   args: ctx.args,
                   flags: ctx.flags,
+                  commit: ctx.commit !== false,
                   isScoped: ctx.isScoped,
                   body: ctx.body,
                   offset: ctx.offset,
@@ -1310,7 +2553,7 @@ export class WorkerHost {
             console.warn("[Spindle:%s] Macro '%s' postToWorker failed: %s", this.manifest.identifier, macroName, err);
             // postMessage failure means the worker is dead — clean up to
             // prevent all subsequent extension macros from timing out (5s each).
-            if (this.worker) {
+            if (this.runtime) {
               console.warn("[Spindle:%s] Worker appears dead, cleaning up registrations", this.manifest.identifier);
               this.cleanup();
             }
@@ -1350,13 +2593,25 @@ export class WorkerHost {
       return;
     }
 
+    const scopedUserId = this.getScopedUserId();
+    // Resolve per-run so user-level spindleSettings changes (and any future
+    // hot-reloaded manifest changes) propagate without requiring the
+    // extension to tear down and re-register its interceptor.
+    const resolveTimeoutMs = () =>
+      resolveInterceptorTimeout(
+        this.manifest.interceptorTimeoutMs,
+        this.getScopedUserId(),
+      );
+
     this.interceptorUnregister?.();
     this.interceptorUnregister = interceptorPipeline.register({
       extensionId: this.extensionId,
-      userId: this.getScopedUserId(),
+      userId: scopedUserId,
       priority: priority ?? 100,
+      resolveTimeoutMs,
       handler: async (messages, context) => {
         const requestId = crypto.randomUUID();
+        const timeoutMs = resolveTimeoutMs();
 
         this.postToWorker({
           type: "intercept_request",
@@ -1370,10 +2625,10 @@ export class WorkerHost {
             this.pendingRequests.delete(requestId);
             reject(
               new Error(
-                `Interceptor timeout from ${this.manifest.identifier}`
+                `Interceptor timeout from ${this.manifest.identifier} (${Math.round(timeoutMs / 1000)}s)`
               )
             );
-          }, 10_000);
+          }, timeoutMs);
 
           this.pendingRequests.set(requestId, {
             resolve: (val) => {
@@ -1388,6 +2643,29 @@ export class WorkerHost {
         });
       },
     });
+  }
+
+  private normalizeInterceptorBreakdownEntry(
+    entry: InterceptorBreakdownEntryDTO,
+    messages: LlmMessageDTO[],
+  ): NonNullable<InterceptorResult["breakdown"]>[number] | null {
+    const messageIndex = Number(entry?.messageIndex);
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex >= messages.length) {
+      return null;
+    }
+    const message = messages[messageIndex];
+    const extensionName = String(this.manifest.name || this.manifest.identifier || this.extensionId).trim();
+    const label = typeof entry?.name === "string" && entry.name.trim()
+      ? entry.name.trim()
+      : extensionName;
+    return {
+      messageIndex,
+      name: label,
+      role: message.role,
+      content: message.content,
+      extensionId: this.manifest.identifier,
+      extensionName,
+    };
   }
 
   // ─── Tool registration ───────────────────────────────────────────────
@@ -1438,6 +2716,11 @@ export class WorkerHost {
     }
     this.enforceScopedUser(resolvedUserId);
 
+    // Register an AbortController so the worker can cancel via
+    // `cancel_generation` if the extension aborts its AbortSignal.
+    const abortController = new AbortController();
+    this.generationAbortControllers.set(requestId, abortController);
+
     try {
       let result: unknown;
       switch (input.type) {
@@ -1449,6 +2732,7 @@ export class WorkerHost {
             parameters: input.parameters,
             connection_id: input.connection_id,
             tools: input.tools,
+            signal: abortController.signal,
           });
           break;
         case "quiet":
@@ -1457,12 +2741,14 @@ export class WorkerHost {
             connection_id: input.connection_id,
             parameters: input.parameters,
             tools: input.tools,
+            signal: abortController.signal,
           });
           break;
         case "batch":
           result = await generateSvc.batchGenerate(resolvedUserId, {
             requests: input.requests || [],
             concurrent: input.concurrent,
+            signal: abortController.signal,
           });
           break;
         default:
@@ -1470,11 +2756,158 @@ export class WorkerHost {
       }
       this.postToWorker({ type: "response", requestId, result });
     } catch (err: any) {
+      // Surface aborts with a stable error name so the worker can synthesise
+      // a real DOMException AbortError on the extension side.
+      const aborted = abortController.signal.aborted || err?.name === "AbortError";
       this.postToWorker({
         type: "response",
         requestId,
-        error: err.message,
+        error: aborted ? "AbortError: Generation aborted" : err?.message ?? String(err),
       });
+    } finally {
+      this.generationAbortControllers.delete(requestId);
+    }
+  }
+
+  private handleCancelGeneration(requestId: string): void {
+    const controller = this.generationAbortControllers.get(requestId);
+    if (!controller) return;
+    controller.abort();
+    // The map entry is cleared in handleGeneration / handleGenerationStream's
+    // finally block once the awaited service call rejects.
+  }
+
+  /**
+   * Streaming counterpart to {@link handleGeneration}. Forwards each chunk
+   * from the upstream provider to the worker as a `generation_stream_chunk`
+   * message, then emits a terminal `done` chunk built from the accumulator.
+   * On abort/error, sends `generation_stream_error` instead.
+   *
+   * Only `raw` and `quiet` types are supported here — `batch` is a
+   * convenience wrapper and intentionally not exposed for streaming.
+   */
+  private async handleGenerationStream(
+    requestId: string,
+    input: any
+  ): Promise<void> {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+      this.postToWorker({
+        type: "generation_stream_error",
+        requestId,
+        error: `${PERMISSION_DENIED_PREFIX} generation — Generation permission not granted`,
+      });
+      return;
+    }
+
+    const resolvedUserId = this.resolveEffectiveUserId(input.userId);
+    if (!resolvedUserId) {
+      this.postToWorker({
+        type: "generation_stream_error",
+        requestId,
+        error: "userId is required for operator-scoped extensions",
+      });
+      return;
+    }
+    try {
+      this.enforceScopedUser(resolvedUserId);
+    } catch (err: any) {
+      this.postToWorker({
+        type: "generation_stream_error",
+        requestId,
+        error: err?.message ?? String(err),
+      });
+      return;
+    }
+
+    const abortController = new AbortController();
+    this.generationAbortControllers.set(requestId, abortController);
+
+    try {
+      let stream: AsyncGenerator<import("../llm/types").StreamChunk, void, unknown>;
+      switch (input.type) {
+        case "raw":
+          stream = await generateSvc.rawGenerateStream(resolvedUserId, {
+            provider: input.provider || "",
+            model: input.model || "",
+            messages: input.messages || [],
+            parameters: input.parameters,
+            connection_id: input.connection_id,
+            tools: input.tools,
+            signal: abortController.signal,
+          });
+          break;
+        case "quiet":
+          stream = await generateSvc.quietGenerateStream(resolvedUserId, {
+            messages: input.messages || [],
+            connection_id: input.connection_id,
+            parameters: input.parameters,
+            tools: input.tools,
+            signal: abortController.signal,
+          });
+          break;
+        default:
+          throw new Error(`Streaming is not supported for generation type: ${input.type}`);
+      }
+
+      let content = "";
+      let reasoning = "";
+      let finishReason = "stop";
+      let toolCalls: import("../llm/types").ToolCallResult[] | undefined;
+      let usage: import("../llm/types").GenerationResponse["usage"];
+
+      for await (const chunk of stream) {
+        if (abortController.signal.aborted) break;
+        if (chunk.token) {
+          content += chunk.token;
+          this.postToWorker({
+            type: "generation_stream_chunk",
+            requestId,
+            chunk: { type: "token", token: chunk.token },
+          });
+        }
+        if (chunk.reasoning) {
+          reasoning += chunk.reasoning;
+          this.postToWorker({
+            type: "generation_stream_chunk",
+            requestId,
+            chunk: { type: "reasoning", token: chunk.reasoning },
+          });
+        }
+        if (chunk.finish_reason) finishReason = chunk.finish_reason;
+        if (chunk.tool_calls) toolCalls = chunk.tool_calls;
+        if (chunk.usage) usage = chunk.usage;
+      }
+
+      if (abortController.signal.aborted) {
+        this.postToWorker({
+          type: "generation_stream_error",
+          requestId,
+          error: "AbortError: Generation aborted",
+        });
+        return;
+      }
+
+      this.postToWorker({
+        type: "generation_stream_chunk",
+        requestId,
+        chunk: {
+          type: "done",
+          content,
+          reasoning: reasoning || undefined,
+          finish_reason: finishReason,
+          tool_calls: toolCalls,
+          usage,
+        },
+      });
+    } catch (err: any) {
+      const aborted = abortController.signal.aborted || err?.name === "AbortError";
+      this.postToWorker({
+        type: "generation_stream_error",
+        requestId,
+        error: aborted ? "AbortError: Generation aborted" : err?.message ?? String(err),
+      });
+    } finally {
+      this.generationAbortControllers.delete(requestId);
     }
   }
 
@@ -2001,6 +3434,43 @@ export class WorkerHost {
     }
   }
 
+  private handleUserStorageReadBinary(requestId: string, path: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveUserScopedUserId(userId);
+      const fullPath = this.resolveUserStoragePath(path, resolvedUserId);
+      if (!existsSync(fullPath)) {
+        this.postToWorker({ type: "response", requestId, error: "File not found" });
+        return;
+      }
+      const data = readFileSync(fullPath);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: new Uint8Array(data),
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleUserStorageWriteBinary(
+    requestId: string,
+    path: string,
+    data: Uint8Array,
+    userId?: string
+  ): void {
+    try {
+      const resolvedUserId = this.resolveUserScopedUserId(userId);
+      const fullPath = this.resolveUserStoragePath(path, resolvedUserId);
+      const dir = resolve(fullPath, "..");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(fullPath, data);
+      this.postToWorker({ type: "response", requestId, result: true });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
   private handleUserStorageDelete(requestId: string, path: string, userId?: string): void {
     try {
       const resolvedUserId = this.resolveUserScopedUserId(userId);
@@ -2058,6 +3528,59 @@ export class WorkerHost {
       const fullPath = this.resolveUserStoragePath(path, resolvedUserId);
       mkdirSync(fullPath, { recursive: true });
       this.postToWorker({ type: "response", requestId, result: true });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleUserStorageMove(requestId: string, from: string, to: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveUserScopedUserId(userId);
+      const fromPath = this.resolveUserStoragePath(from, resolvedUserId);
+      const toPath = this.resolveUserStoragePath(to, resolvedUserId);
+      if (!existsSync(fromPath)) {
+        this.postToWorker({ type: "response", requestId, error: "File not found" });
+        return;
+      }
+      mkdirSync(resolve(toPath, ".."), { recursive: true });
+      renameSync(fromPath, toPath);
+      this.postToWorker({ type: "response", requestId, result: true });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleUserStorageStat(requestId: string, path: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveUserScopedUserId(userId);
+      const fullPath = this.resolveUserStoragePath(path, resolvedUserId);
+      if (!existsSync(fullPath)) {
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: {
+            exists: false,
+            isFile: false,
+            isDirectory: false,
+            sizeBytes: 0,
+            modifiedAt: new Date(0).toISOString(),
+          },
+        });
+        return;
+      }
+
+      const stat = statSync(fullPath);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          exists: true,
+          isFile: stat.isFile(),
+          isDirectory: stat.isDirectory(),
+          sizeBytes: stat.size,
+          modifiedAt: new Date(stat.mtimeMs).toISOString(),
+        },
+      });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
@@ -2823,24 +4346,31 @@ export class WorkerHost {
       this.enforceScopedUser(userId);
 
       const messages = getChatMessages(userId, chatId).map((m) => {
-        const role = this.mapChatRole(m.is_user, (m.extra || {}) as Record<string, unknown>);
-        const extra = (m.extra || {}) as Record<string, unknown>;
+        const rawExtra = (m.extra || {}) as Record<string, unknown>;
+        const role = this.mapChatRole(m.is_user, rawExtra);
+
+        // Split spindle_metadata out of extra so it's surfaced as `metadata`
+        // and not echoed twice on the wire.
+        const { spindle_metadata, ...extra } = rawExtra;
         const metadata =
-          typeof extra.spindle_metadata === "object" && extra.spindle_metadata
-            ? (extra.spindle_metadata as Record<string, unknown>)
+          typeof spindle_metadata === "object" && spindle_metadata
+            ? (spindle_metadata as Record<string, unknown>)
             : undefined;
 
         const swipes = Array.isArray(m.swipes) ? m.swipes.slice() : [];
         const swipeId =
           typeof m.swipe_id === "number" && Number.isFinite(m.swipe_id) ? m.swipe_id : 0;
+        const swipeDates = Array.isArray(m.swipe_dates) ? [...m.swipe_dates] : [];
 
         return {
           id: m.id,
           role,
           content: m.content,
+          extra,
           metadata,
           swipe_id: swipeId,
           swipes,
+          swipe_dates: swipeDates,
         };
       });
 
@@ -2903,7 +4433,14 @@ export class WorkerHost {
     requestId: string,
     chatId: string,
     messageId: string,
-    patch: { content?: string; metadata?: Record<string, unknown> }
+    patch: {
+      content?: string;
+      metadata?: Record<string, unknown>;
+      swipes?: string[];
+      swipe_id?: number;
+      swipe_dates?: number[];
+      reasoning?: { text?: string | null; duration?: number | null };
+    }
   ): void {
     try {
       if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
@@ -2920,13 +4457,33 @@ export class WorkerHost {
       }
 
       const extra = { ...(current.extra || {}) } as Record<string, unknown>;
+      let extraDirty = false;
+
       if (patch.metadata !== undefined) {
         extra.spindle_metadata = patch.metadata;
+        extraDirty = true;
+      }
+
+      if (patch.reasoning && typeof patch.reasoning === "object") {
+        const r = patch.reasoning;
+        if (r.text !== undefined) {
+          if (r.text === null) delete extra.reasoning;
+          else extra.reasoning = r.text;
+          extraDirty = true;
+        }
+        if (r.duration !== undefined) {
+          if (r.duration === null) delete extra.reasoning_duration;
+          else extra.reasoning_duration = r.duration;
+          extraDirty = true;
+        }
       }
 
       updateChatMessage(userId, messageId, {
         content: patch.content,
-        extra: patch.metadata !== undefined ? extra : undefined,
+        extra: extraDirty ? extra : undefined,
+        swipes: patch.swipes,
+        swipe_id: patch.swipe_id,
+        swipe_dates: patch.swipe_dates,
       });
 
       this.postToWorker({ type: "response", requestId, result: true });
@@ -3370,6 +4927,112 @@ export class WorkerHost {
     });
   }
 
+  // ─── Message content processor ───────────────────────────────────────
+
+  private handleRegisterMessageContentProcessor(priority?: number): void {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      console.warn(
+        `[Spindle:${this.manifest.identifier}] chat_mutation permission not granted for registerMessageContentProcessor`
+      );
+      this.postToWorker({
+        type: "permission_denied",
+        permission: "chat_mutation",
+        operation: "registerMessageContentProcessor",
+      });
+      return;
+    }
+
+    this.messageContentProcessorUnregister?.();
+    this.messageContentProcessorUnregister = messageContentProcessorChain.register({
+      extensionId: this.extensionId,
+      userId: this.getScopedUserId(),
+      priority: priority ?? 100,
+      handler: async (ctx: MessageContentProcessorCtx) => {
+        const requestId = crypto.randomUUID();
+
+        this.postToWorker({
+          type: "message_content_processor_request",
+          requestId,
+          ctx,
+        });
+
+        return new Promise<MessageContentProcessorResult | void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            this.pendingRequests.delete(requestId);
+            reject(
+              new Error(
+                `Message content processor timeout from ${this.manifest.identifier}`
+              )
+            );
+          }, 10_000);
+
+          this.pendingRequests.set(requestId, {
+            resolve: (val) => {
+              clearTimeout(timeout);
+              resolve(val as MessageContentProcessorResult | undefined);
+            },
+            reject: (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            },
+          });
+        });
+      },
+    });
+  }
+
+  private handleRegisterMacroInterceptor(priority?: number): void {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "macro_interceptor")) {
+      console.warn(
+        `[Spindle:${this.manifest.identifier}] macro_interceptor permission not granted for registerMacroInterceptor`
+      );
+      this.postToWorker({
+        type: "permission_denied",
+        permission: "macro_interceptor",
+        operation: "registerMacroInterceptor",
+      });
+      return;
+    }
+
+    this.macroInterceptorUnregister?.();
+    this.macroInterceptorUnregister = macroInterceptorChain.register({
+      extensionId: this.extensionId,
+      userId: this.getScopedUserId(),
+      priority: priority ?? 100,
+      handler: async (ctx: MacroInterceptorCtx) => {
+        const requestId = crypto.randomUUID();
+
+        this.postToWorker({
+          type: "macro_interceptor_request",
+          requestId,
+          ctx,
+        });
+
+        return new Promise<MacroInterceptorResult | void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            this.pendingRequests.delete(requestId);
+            reject(
+              new Error(
+                `Macro interceptor timeout from ${this.manifest.identifier}`
+              )
+            );
+          }, 10_000);
+
+          this.pendingRequests.set(requestId, {
+            resolve: (val) => {
+              clearTimeout(timeout);
+              resolve(val as MacroInterceptorResult | undefined);
+            },
+            reject: (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            },
+          });
+        });
+      },
+    });
+  }
+
   // ─── Variables (free tier — no permission gating) ────────────────────
 
   private getLocalVars(chatId: string): Record<string, string> {
@@ -3613,6 +5276,7 @@ export class WorkerHost {
       creator: c.creator || "",
       image_id: c.image_id || null,
       world_book_ids: getCharacterWorldBookIds(c.extensions),
+      extensions: c.extensions || {},
       created_at: c.created_at,
       updated_at: c.updated_at,
     };
@@ -3708,15 +5372,58 @@ export class WorkerHost {
         alternate_greetings: input.alternate_greetings,
         creator: input.creator,
       };
-      if (input.world_book_ids !== undefined) {
+      if (input.world_book_ids !== undefined || input.extensions !== undefined) {
         const ids = this.sanitizeWorldBookIds(input.world_book_ids);
-        createInput.extensions = setCharacterWorldBookIds({}, ids);
+        createInput.extensions = setCharacterWorldBookIds(
+          input.extensions && typeof input.extensions === "object" && !Array.isArray(input.extensions)
+            ? input.extensions
+            : {},
+          ids,
+        );
       }
       const c = charactersSvc.createCharacter(resolvedUserId, createInput);
       this.postToWorker({ type: "response", requestId, result: this.toCharacterDTO(c) });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
+  }
+
+  private handleCharactersSetAvatar(
+    requestId: string,
+    characterId: string,
+    avatar: CharacterAvatarUploadDTO,
+    userId?: string,
+  ): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        if (!(avatar?.data instanceof Uint8Array) || avatar.data.byteLength === 0) {
+          throw new Error("Avatar data must be a non-empty Uint8Array");
+        }
+
+        const mimeType = typeof avatar.mime_type === "string" && avatar.mime_type.trim()
+          ? avatar.mime_type.trim()
+          : "image/png";
+        const filename = typeof avatar.filename === "string" && avatar.filename.trim()
+          ? avatar.filename.trim()
+          : "avatar.png";
+
+        const avatarBytes = Uint8Array.from(avatar.data);
+        const file = new File([avatarBytes.buffer], filename, { type: mimeType });
+        const updated = await charactersSvc.replaceCharacterAvatar(resolvedUserId, characterId, file);
+        if (!updated) throw new Error("Character not found");
+
+        this.postToWorker({ type: "response", requestId, result: this.toCharacterDTO(updated) });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
   }
 
   private handleCharactersUpdate(requestId: string, characterId: string, input: any, userId?: string): void {
@@ -3728,9 +5435,6 @@ export class WorkerHost {
       if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
       this.enforceScopedUser(resolvedUserId);
 
-      // Whitelist allowed update fields. The raw `extensions` blob is never
-      // accepted from extensions — only structured fields like `world_book_ids`
-      // are allowed to mutate it, and only via the dedicated helper.
       const update: any = {};
       const passthroughFields = [
         "name", "description", "personality", "scenario", "first_mes",
@@ -3741,11 +5445,22 @@ export class WorkerHost {
         if (input?.[field] !== undefined) update[field] = input[field];
       }
 
+      const existing = charactersSvc.getCharacter(resolvedUserId, characterId);
+      if (!existing) throw new Error("Character not found");
+
+      let mergedExtensions: Record<string, any> | undefined;
+      if (input?.extensions !== undefined) {
+        if (typeof input.extensions !== "object" || Array.isArray(input.extensions)) {
+          throw new Error("extensions must be a plain object");
+        }
+        mergedExtensions = { ...existing.extensions, ...input.extensions };
+      }
+
       if (input?.world_book_ids !== undefined) {
-        const existing = charactersSvc.getCharacter(resolvedUserId, characterId);
-        if (!existing) throw new Error("Character not found");
         const ids = this.sanitizeWorldBookIds(input.world_book_ids);
-        update.extensions = setCharacterWorldBookIds(existing.extensions || {}, ids);
+        update.extensions = setCharacterWorldBookIds(mergedExtensions || existing.extensions || {}, ids);
+      } else if (mergedExtensions !== undefined) {
+        update.extensions = mergedExtensions;
       }
 
       const c = charactersSvc.updateCharacter(resolvedUserId, characterId, update);
@@ -4142,6 +5857,375 @@ export class WorkerHost {
     }
   }
 
+  // ─── Databanks CRUD (gated: "databanks") ─────────────────────────────
+
+  private toDatabankDTO(bank: any): DatabankDTO {
+    return {
+      id: bank.id,
+      name: bank.name || "",
+      description: bank.description || "",
+      scope: bank.scope,
+      scope_id: bank.scopeId ?? null,
+      enabled: !!bank.enabled,
+      metadata: (typeof bank.metadata === "object" && bank.metadata) ? bank.metadata : {},
+      document_count: typeof bank.documentCount === "number" ? bank.documentCount : undefined,
+      created_at: bank.createdAt,
+      updated_at: bank.updatedAt,
+    };
+  }
+
+  private toDatabankDocumentDTO(doc: any): DatabankDocumentDTO {
+    return {
+      id: doc.id,
+      databank_id: doc.databankId,
+      name: doc.name || "",
+      slug: doc.slug || "",
+      mime_type: doc.mimeType || "",
+      file_size: doc.fileSize ?? 0,
+      content_hash: doc.contentHash || "",
+      total_chunks: doc.totalChunks ?? 0,
+      status: doc.status,
+      error_message: doc.errorMessage ?? null,
+      metadata: (typeof doc.metadata === "object" && doc.metadata) ? doc.metadata : {},
+      created_at: doc.createdAt,
+      updated_at: doc.updatedAt,
+    };
+  }
+
+  private handleDatabanksList(
+    requestId: string,
+    limit?: number,
+    offset?: number,
+    scope?: string,
+    scopeId?: string | null,
+    userId?: string,
+  ): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const normalizedScope =
+        scope === undefined
+          ? undefined
+          : scope === "global" || scope === "character" || scope === "chat"
+            ? scope
+            : null;
+      if (normalizedScope === null) throw new Error("Databank scope must be 'global', 'character', or 'chat'");
+
+      const result = databanksSvc.listDatabanks(
+        resolvedUserId,
+        {
+          limit: Math.min(limit || 50, 200),
+          offset: offset || 0,
+        },
+        {
+          scope: normalizedScope,
+          scopeId: typeof scopeId === "string" ? scopeId : undefined,
+        },
+      );
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          data: result.data.map((bank) => this.toDatabankDTO(bank)),
+          total: result.total,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabanksGet(requestId: string, databankId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const bank = databanksSvc.getDatabank(resolvedUserId, databankId);
+      this.postToWorker({ type: "response", requestId, result: bank ? this.toDatabankDTO(bank) : null });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabanksCreate(requestId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      if (!input?.name || typeof input.name !== "string" || !input.name.trim()) {
+        throw new Error("Databank name is required");
+      }
+      if (input.scope !== "global" && input.scope !== "character" && input.scope !== "chat") {
+        throw new Error("Databank scope must be 'global', 'character', or 'chat'");
+      }
+      if (input.scope !== "global" && (!input.scope_id || typeof input.scope_id !== "string")) {
+        throw new Error("scope_id is required for character and chat databanks");
+      }
+
+      const bank = databanksSvc.createDatabank(resolvedUserId, {
+        name: input.name.trim(),
+        description: typeof input.description === "string" ? input.description : undefined,
+        scope: input.scope,
+        scopeId: input.scope_id ?? null,
+      });
+      this.postToWorker({ type: "response", requestId, result: this.toDatabankDTO(bank) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabanksUpdate(requestId: string, databankId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const bank = databanksSvc.updateDatabank(resolvedUserId, databankId, {
+        name: typeof input?.name === "string" ? input.name : undefined,
+        description: typeof input?.description === "string" ? input.description : undefined,
+        enabled: typeof input?.enabled === "boolean" ? input.enabled : undefined,
+      });
+      if (!bank) throw new Error("Databank not found");
+
+      this.postToWorker({ type: "response", requestId, result: this.toDatabankDTO(bank) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabanksDelete(requestId: string, databankId: string, userId?: string): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        await databanksSvc.deleteDatabankVectors(resolvedUserId, databankId);
+        const deleted = await databanksSvc.deleteDatabank(resolvedUserId, databankId);
+        this.postToWorker({ type: "response", requestId, result: deleted });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  // ─── Databank Documents CRUD (gated: "databanks") ────────────────────
+
+  private handleDatabankDocumentsList(
+    requestId: string,
+    databankId: string,
+    limit?: number,
+    offset?: number,
+    userId?: string,
+  ): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const result = databanksSvc.listDocuments(resolvedUserId, databankId, {
+        limit: Math.min(limit || 50, 200),
+        offset: offset || 0,
+      });
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          data: result.data.map((doc) => this.toDatabankDocumentDTO(doc)),
+          total: result.total,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabankDocumentsGet(requestId: string, documentId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const doc = databanksSvc.getDocument(resolvedUserId, documentId);
+      this.postToWorker({ type: "response", requestId, result: doc ? this.toDatabankDocumentDTO(doc) : null });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabankDocumentsCreate(
+    requestId: string,
+    databankId: string,
+    input: DatabankDocumentCreateDTO,
+    userId?: string,
+  ): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        const bank = databanksSvc.getDatabank(resolvedUserId, databankId);
+        if (!bank) throw new Error("Databank not found");
+        if (!(input?.data instanceof Uint8Array) || input.data.byteLength === 0) {
+          throw new Error("Document data must be a non-empty Uint8Array");
+        }
+        if (!input.filename || typeof input.filename !== "string" || !input.filename.trim()) {
+          throw new Error("Document filename is required");
+        }
+        const filename = input.filename.trim();
+        if (!databanksSvc.isSupportedFormat(filename)) {
+          throw new Error(`Unsupported file format. Supported: ${databanksSvc.getSupportedExtensions().join(", ")}`);
+        }
+        if (input.data.byteLength > 10 * 1024 * 1024) {
+          throw new Error("File too large. Maximum 10MB.");
+        }
+
+        const bytes = Uint8Array.from(input.data);
+        const mimeType = typeof input.mime_type === "string" ? input.mime_type.trim() : "";
+        const file = new File([bytes], filename, { type: mimeType || "application/octet-stream" });
+        const storedFilename = await filesSvc.saveUpload(file, resolvedUserId, "databank");
+        const hash = createHash("sha256").update(bytes).digest("hex");
+        const displayName = typeof input.name === "string" && input.name.trim()
+          ? input.name.trim()
+          : filename.replace(/\.[^.]+$/, "");
+
+        const doc = databanksSvc.createDocument(
+          resolvedUserId,
+          databankId,
+          displayName,
+          storedFilename,
+          mimeType,
+          bytes.byteLength,
+          hash,
+        );
+
+        databanksSvc.processDocument(resolvedUserId, doc.id).catch((err) => {
+          console.error(`[databank] Background processing failed for ${doc.id}:`, err);
+        });
+
+        this.postToWorker({ type: "response", requestId, result: this.toDatabankDocumentDTO(doc) });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleDatabankDocumentsUpdate(requestId: string, documentId: string, input: any, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      if (!input?.name || typeof input.name !== "string" || !input.name.trim()) {
+        throw new Error("Document name is required");
+      }
+
+      const doc = databanksSvc.renameDocument(resolvedUserId, documentId, input.name.trim());
+      if (!doc) throw new Error("Document not found");
+
+      this.postToWorker({ type: "response", requestId, result: this.toDatabankDocumentDTO(doc) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabankDocumentsDelete(requestId: string, documentId: string, userId?: string): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        await databanksSvc.deleteDocumentVectors(resolvedUserId, documentId);
+        const deleted = await databanksSvc.deleteDocument(resolvedUserId, documentId);
+        this.postToWorker({ type: "response", requestId, result: deleted });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleDatabankDocumentsGetContent(requestId: string, documentId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const content = databanksSvc.getDocumentContent(resolvedUserId, documentId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: content === null ? null : { content },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleDatabankDocumentsReprocess(requestId: string, documentId: string, userId?: string): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        const doc = databanksSvc.getDocument(resolvedUserId, documentId);
+        if (!doc) throw new Error("Document not found");
+
+        await databanksSvc.deleteDocumentVectors(resolvedUserId, documentId);
+        databanksSvc.updateDocumentStatus(documentId, "pending");
+        databanksSvc.processDocument(resolvedUserId, documentId).catch((err) => {
+          console.error(`[databank] Reprocessing failed for ${documentId}:`, err);
+        });
+
+        this.postToWorker({ type: "response", requestId, result: { success: true, status: "processing" } });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
   // ─── Personas CRUD (gated: "personas") ────────────────────────────────
 
   private toPersonaDTO(p: any): PersonaDTO {
@@ -4428,6 +6512,8 @@ export class WorkerHost {
           firstMessageIndex: b.firstMessageIndex,
           preCountedTokens: b.preCountedTokens,
           excludeFromTotal: b.excludeFromTotal,
+          extensionId: b.extensionId,
+          extensionName: b.extensionName,
         })),
         parameters: dryRunResult.parameters,
         model: dryRunResult.model,
@@ -4510,6 +6596,7 @@ export class WorkerHost {
     message: string,
     title?: string,
     duration?: number,
+    userId?: string,
   ): void {
     const validTypes = ["success", "warning", "error", "info"];
     if (!validTypes.includes(toastType)) {
@@ -4543,7 +6630,18 @@ export class WorkerHost {
       sanitizedDuration = Math.max(1000, Math.min(30_000, sanitizedDuration));
     }
 
-    // Broadcast — scoped to extension owner for user-scoped extensions
+    let targetUserId: string | undefined;
+    if (this.installScope === "user") {
+      targetUserId = this.installedByUserId ?? undefined;
+    } else if (typeof userId === "string" && userId.trim()) {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (resolvedUserId) {
+        this.enforceScopedUser(resolvedUserId);
+        targetUserId = resolvedUserId;
+      }
+    }
+
+    // Broadcast only when an operator-scoped extension omits userId.
     eventBus.emit(
       EventType.SPINDLE_TOAST,
       {
@@ -4554,7 +6652,7 @@ export class WorkerHost {
         title: sanitizedTitle,
         duration: sanitizedDuration,
       },
-      this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+      targetUserId,
     );
   }
 
@@ -4624,7 +6722,7 @@ export class WorkerHost {
 
   /** Called by the WS handler when the frontend invokes a command. */
   invokeCommand(commandId: string, context: SpindleCommandContextDTO, userId: string): void {
-    if (!this.worker) return;
+    if (!this.runtime) return;
     if (!this.registeredCommands.some((c) => c.id === commandId)) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] Command "${commandId}" not registered`,
@@ -4718,7 +6816,10 @@ export class WorkerHost {
         title: sanitizedTitle,
         body: body || "",
         tag: tag ? `ext-${this.manifest.identifier}-${tag}`.slice(0, 100) : undefined,
-        data: { url: url || "/", characterName: this.manifest.name },
+        data: {
+          url: normalizeSpindleAppNavigationPath(url),
+          characterName: this.manifest.name,
+        },
         icon: sanitizedIcon,
         image: sanitizedImage,
       };
@@ -4808,6 +6909,555 @@ export class WorkerHost {
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
+  }
+
+  // ─── Token Counting (free tier) ─────────────────────────────────────
+
+  private normalizeTokenCountMessages(
+    messages: Array<Pick<LlmMessageDTO, "role" | "content">>
+  ): tokenizerSvc.TokenCountMessageLike[] {
+    if (!Array.isArray(messages)) {
+      throw new Error("messages must be an array");
+    }
+
+    return messages.map((message, index) => {
+      const role = message?.role;
+      const content = message?.content;
+      if (role !== "system" && role !== "user" && role !== "assistant") {
+        throw new Error(`messages[${index}].role must be system, user, or assistant`);
+      }
+      if (typeof content !== "string") {
+        throw new Error(`messages[${index}].content must be a string`);
+      }
+      return { role, content };
+    });
+  }
+
+  private async resolveTokenCountModel(
+    userId: string,
+    explicitModel?: string,
+    modelSource: TokenModelSource = "main"
+  ): Promise<{ model: string; modelSource: TokenModelSource }> {
+    if (explicitModel !== undefined) {
+      const model = String(explicitModel).trim();
+      if (!model) {
+        throw new Error("model must be a non-empty string");
+      }
+      return { model, modelSource: "explicit" };
+    }
+
+    if (modelSource === "sidecar") {
+      const sidecar = getSidecarSettings(userId);
+      if (!sidecar.connectionProfileId) {
+        throw new Error("No sidecar connection configured");
+      }
+
+      const connection = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
+      if (!connection) {
+        throw new Error("Selected sidecar connection not found");
+      }
+
+      const model = String(sidecar.model || connection.model || "").trim();
+      if (!model) {
+        throw new Error("Selected sidecar connection does not have a model configured");
+      }
+
+      return { model, modelSource: "sidecar" };
+    }
+
+    const connection = connectionsSvc.getDefaultConnection(userId);
+    if (!connection) {
+      throw new Error("No default connection configured");
+    }
+
+    const model = String(connection.model || "").trim();
+    if (!model) {
+      throw new Error("Default connection does not have a model configured");
+    }
+
+    return { model, modelSource: "main" };
+  }
+
+  private async buildTokenCountResult(
+    userId: string,
+    input: string | tokenizerSvc.TokenCountMessageLike[],
+    explicitModel?: string,
+    modelSource: TokenModelSource = "main"
+  ): Promise<TokenCountResult> {
+    const { model, modelSource: resolvedSource } = await this.resolveTokenCountModel(userId, explicitModel, modelSource);
+    const tokenizerId = tokenizerSvc.getTokenizerIdForModel(model);
+    const { count, name } = await tokenizerSvc.resolveCounter(model);
+    const text = Array.isArray(input)
+      ? tokenizerSvc.flattenMessagesForTokenCount(input)
+      : input;
+
+    return {
+      total_tokens: count(text),
+      model,
+      modelSource: resolvedSource,
+      tokenizer_id: tokenizerId,
+      tokenizer_name: name,
+      approximate: name === tokenizerSvc.APPROXIMATE_TOKENIZER_NAME,
+    };
+  }
+
+  private async handleTokensCountText(
+    requestId: string,
+    text: string,
+    model?: string,
+    modelSource?: TokenModelSource,
+    userId?: string
+  ): Promise<void> {
+    try {
+      if (typeof text !== "string") {
+        throw new Error("text must be a string");
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const result = await this.buildTokenCountResult(resolvedUserId, text, model, modelSource);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleTokensCountMessages(
+    requestId: string,
+    messages: Array<Pick<LlmMessageDTO, "role" | "content">>,
+    model?: string,
+    modelSource?: TokenModelSource,
+    userId?: string
+  ): Promise<void> {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const normalized = this.normalizeTokenCountMessages(messages);
+      const result = await this.buildTokenCountResult(resolvedUserId, normalized, model, modelSource);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleTokensCountChat(
+    requestId: string,
+    chatId: string,
+    model?: string,
+    modelSource?: TokenModelSource,
+    userId?: string
+  ): Promise<void> {
+    try {
+      const chatOwnerId = this.getChatOwnerId(chatId);
+      if (!chatOwnerId) throw new Error("Chat not found");
+      this.enforceScopedUser(chatOwnerId);
+
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (resolvedUserId && resolvedUserId !== chatOwnerId) {
+        throw new Error("chatId does not belong to the requested userId");
+      }
+
+      const messages = getChatMessages(chatOwnerId, chatId).map((message) => ({
+        role: this.mapChatRole(message.is_user, (message.extra || {}) as Record<string, unknown>),
+        content: message.content,
+      }));
+
+      const result = await this.buildTokenCountResult(chatOwnerId, messages, model, modelSource);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Frontend Process Lifecycle (free tier) ─────────────────────────
+
+  private handleFrontendProcessSpawn(
+    requestId: string,
+    options: {
+      kind: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }
+  ): void {
+    try {
+      const kind = typeof options?.kind === "string" ? options.kind.trim() : "";
+      if (!kind) throw new Error("kind is required");
+
+      const userId = this.resolveFrontendProcessUserId(options?.userId);
+      const processId = crypto.randomUUID();
+      const key = typeof options?.key === "string" && options.key.trim() ? options.key.trim() : undefined;
+      const startupTimeoutMs = Math.max(1_000, Math.min(120_000, Math.round(options?.startupTimeoutMs ?? 15_000)));
+      const heartbeatTimeoutMs = Math.max(0, Math.min(120_000, Math.round(options?.heartbeatTimeoutMs ?? 15_000)));
+
+      if (key) {
+        const dedupeKey = this.buildFrontendProcessKey(userId, kind, key);
+        const existingId = this.frontendProcessKeyIndex.get(dedupeKey);
+        if (existingId) {
+          const existing = this.frontendProcesses.get(existingId);
+          if (existing) {
+            if (!options?.replaceExisting) {
+              throw new Error(`Frontend process already exists for kind \"${kind}\" and key \"${key}\"`);
+            }
+            this.requestFrontendProcessStop(existing, "replaced");
+            if (existing.state === "starting") {
+              this.rejectRequest(existing.requestId, new Error("Frontend process was replaced before it became ready"));
+            }
+            this.finalizeFrontendProcess(existing, "stopped", "replaced");
+          }
+        }
+      }
+
+      const record: FrontendProcessRecord = {
+        requestId,
+        processId,
+        kind,
+        ...(key ? { key } : {}),
+        state: "starting",
+        userId,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+        startedAt: new Date().toISOString(),
+        startupTimer: null,
+        heartbeatTimer: null,
+        startupTimeoutMs,
+        heartbeatTimeoutMs,
+      };
+
+      this.frontendProcesses.set(processId, record);
+      if (key) {
+        this.frontendProcessKeyIndex.set(
+          this.buildFrontendProcessKey(userId, kind, key),
+          processId
+        );
+      }
+
+      this.emitFrontendProcessLifecycle(record);
+
+      record.startupTimer = setTimeout(() => {
+        const latest = this.frontendProcesses.get(processId);
+        if (!latest || latest.state !== "starting") return;
+        this.requestFrontendProcessStop(latest, "timed_out");
+        this.finalizeFrontendProcess(latest, "timed_out", "timed_out", "Frontend process startup timed out");
+        this.rejectRequest(requestId, new Error("Frontend process startup timed out"));
+      }, startupTimeoutMs);
+
+      this.sendFrontendProcessEvent(userId, {
+        action: "spawn",
+        processId,
+        kind,
+        ...(key ? { key } : {}),
+        payload: options?.payload,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessList(
+    requestId: string,
+    filter?: { userId?: string; kind?: string; key?: string; state?: FrontendProcessState }
+  ): void {
+    try {
+      const userId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof filter?.userId === "string" && filter.userId.trim()
+            ? filter.userId.trim()
+            : undefined;
+      const items = Array.from(this.frontendProcesses.values())
+        .filter((record) => {
+          if (userId && record.userId !== userId) return false;
+          if (filter?.kind && record.kind !== filter.kind) return false;
+          if (filter?.key && record.key !== filter.key) return false;
+          if (filter?.state && record.state !== filter.state) return false;
+          return true;
+        })
+        .map((record) => this.snapshotFrontendProcess(record));
+      this.postToWorker({ type: "response", requestId, result: items });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessGet(requestId: string, processId: string): void {
+    try {
+      const record = this.getFrontendProcessRecord(processId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: record ? this.snapshotFrontendProcess(record) : null,
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessStop(
+    requestId: string,
+    processId: string,
+    options?: { userId?: string; reason?: string }
+  ): void {
+    try {
+      const record = this.getFrontendProcessRecord(processId);
+      if (!record) {
+        this.postToWorker({ type: "response", requestId, result: undefined });
+        return;
+      }
+      const resolvedUserId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof options?.userId === "string" && options.userId.trim()
+            ? options.userId.trim()
+            : undefined;
+      if (resolvedUserId && record.userId !== resolvedUserId) {
+        throw new Error("processId does not belong to the requested userId");
+      }
+      if (record.state === "starting" || record.state === "running") {
+        record.stopReason = options?.reason;
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        this.transitionFrontendProcess(record, "stopping");
+      }
+      this.requestFrontendProcessStop(record, options?.reason ?? "stopped");
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleFrontendProcessSend(processId: string, payload: unknown, userId?: string): void {
+    const record = this.getFrontendProcessRecord(processId);
+    if (!record) return;
+    if (this.installScope === "operator" && userId && record.userId !== userId) return;
+    this.sendFrontendProcessEvent(record.userId ?? this.resolveFrontendProcessUserId(userId), {
+      action: "message",
+      processId,
+      payload,
+    });
+  }
+
+  private async handleBackendProcessSpawn(
+    requestId: string,
+    options: {
+      entry: string;
+      kind?: string;
+      key?: string;
+      payload?: unknown;
+      metadata?: Record<string, unknown>;
+      userId?: string;
+      startupTimeoutMs?: number;
+      heartbeatTimeoutMs?: number;
+      replaceExisting?: boolean;
+    }
+  ): Promise<void> {
+    try {
+      const entryPath = await this.resolveBackendProcessEntryPath(options?.entry ?? "");
+      const entry = typeof options?.entry === "string" ? options.entry.trim().replace(/\\/g, "/") : "";
+      const kind = typeof options?.kind === "string" && options.kind.trim() ? options.kind.trim() : entry;
+      const userId = this.resolveFrontendProcessUserId(options?.userId);
+      const processId = crypto.randomUUID();
+      const key = typeof options?.key === "string" && options.key.trim() ? options.key.trim() : undefined;
+      const startupTimeoutMs = Math.max(1_000, Math.min(120_000, Math.round(options?.startupTimeoutMs ?? 15_000)));
+      const heartbeatTimeoutMs = Math.max(0, Math.min(120_000, Math.round(options?.heartbeatTimeoutMs ?? 15_000)));
+
+      if (key) {
+        const dedupeKey = this.buildBackendProcessKey(userId, kind, key);
+        const existingId = this.backendProcessKeyIndex.get(dedupeKey);
+        if (existingId) {
+          const existing = this.backendProcesses.get(existingId);
+          if (existing) {
+            if (!options?.replaceExisting) {
+              throw new Error(`Backend process already exists for kind \"${kind}\" and key \"${key}\"`);
+            }
+            if (existing.state === "starting") {
+              this.rejectRequest(existing.requestId, new Error("Backend process was replaced before it became ready"));
+            }
+            this.clearBackendProcessTimers(existing);
+            try {
+              existing.runtime.terminate(true);
+            } catch {
+              // ignore
+            }
+            this.finalizeBackendProcess(existing, "stopped", "replaced");
+          }
+        }
+      }
+
+      if (this.backendProcesses.size >= WorkerHost.MAX_BACKEND_PROCESSES) {
+        throw new Error(`Backend process limit reached (${WorkerHost.MAX_BACKEND_PROCESSES})`);
+      }
+
+      const runtimePath = join(import.meta.dir, "backend-process-runtime.ts");
+      const storagePath = this.getStorageRootPath(this.manifest.identifier);
+      const repoPath = managerSvc.getRepoPath(this.manifest.identifier);
+      const runtime = createRuntimeTransport({
+        runtimePath,
+        extensionIdentifier: this.manifest.identifier,
+        repoPath,
+        storagePath,
+        mode: this.getBackendProcessRuntimeMode(),
+        onMessage: (message) => {
+          this.handleBackendProcessRuntimeMessage(processId, message as BackendProcessRuntimeToHost);
+        },
+        onError: (message) => {
+          const record = this.backendProcesses.get(processId);
+          if (!record) return;
+          this.finalizeBackendProcess(record, "failed", "failed", message);
+        },
+        onExit: (exitCode, signalCode, error) => {
+          this.handleBackendProcessRuntimeExit(processId, exitCode, signalCode, error);
+        },
+      });
+
+      const record: BackendProcessRecord = {
+        requestId,
+        runtime,
+        processId,
+        entry,
+        kind,
+        ...(key ? { key } : {}),
+        state: "starting",
+        userId,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+        startedAt: new Date().toISOString(),
+        startupTimer: null,
+        heartbeatTimer: null,
+        stopTimer: null,
+        startupTimeoutMs,
+        heartbeatTimeoutMs,
+      };
+
+      this.backendProcesses.set(processId, record);
+      if (key) {
+        this.backendProcessKeyIndex.set(
+          this.buildBackendProcessKey(userId, kind, key),
+          processId
+        );
+      }
+
+      this.emitBackendProcessLifecycle(record);
+
+      record.startupTimer = setTimeout(() => {
+        const latest = this.backendProcesses.get(processId);
+        if (!latest || latest.state !== "starting") return;
+        try {
+          latest.runtime.terminate(true);
+        } catch {
+          // ignore
+        }
+        this.finalizeBackendProcess(latest, "timed_out", "timed_out", "Backend process startup timed out");
+        this.rejectRequest(requestId, new Error("Backend process startup timed out"));
+      }, startupTimeoutMs);
+
+      runtime.postMessage({
+        type: "init",
+        process: {
+          processId,
+          entry,
+          entryPath,
+          kind,
+          ...(key ? { key } : {}),
+          payload: options?.payload,
+          ...(options?.metadata ? { metadata: options.metadata } : {}),
+          ...(userId ? { userId } : {}),
+        },
+      } satisfies HostToBackendProcessRuntime);
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessList(
+    requestId: string,
+    filter?: { userId?: string; kind?: string; key?: string; state?: BackendProcessState }
+  ): void {
+    try {
+      const userId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof filter?.userId === "string" && filter.userId.trim()
+            ? filter.userId.trim()
+            : undefined;
+      const items = Array.from(this.backendProcesses.values())
+        .filter((record) => {
+          if (userId && record.userId !== userId) return false;
+          if (filter?.kind && record.kind !== filter.kind) return false;
+          if (filter?.key && record.key !== filter.key) return false;
+          if (filter?.state && record.state !== filter.state) return false;
+          return true;
+        })
+        .map((record) => this.snapshotBackendProcess(record));
+      this.postToWorker({ type: "response", requestId, result: items });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessGet(requestId: string, processId: string): void {
+    try {
+      const record = this.getBackendProcessRecord(processId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: record ? this.snapshotBackendProcess(record) : null,
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessStop(
+    requestId: string,
+    processId: string,
+    options?: { userId?: string; reason?: string }
+  ): void {
+    try {
+      const record = this.getBackendProcessRecord(processId);
+      if (!record) {
+        this.postToWorker({ type: "response", requestId, result: undefined });
+        return;
+      }
+      const resolvedUserId =
+        this.installScope === "user"
+          ? this.installedByUserId ?? undefined
+          : typeof options?.userId === "string" && options.userId.trim()
+            ? options.userId.trim()
+            : undefined;
+      if (resolvedUserId && record.userId !== resolvedUserId) {
+        throw new Error("processId does not belong to the requested userId");
+      }
+      if (record.state === "starting" || record.state === "running") {
+        record.stopReason = options?.reason;
+        if (record.startupTimer) {
+          clearTimeout(record.startupTimer);
+          record.startupTimer = null;
+        }
+        this.transitionBackendProcess(record, "stopping");
+        this.armBackendStopTimer(record);
+      }
+      record.runtime.postMessage({
+        type: "stop",
+        ...(options?.reason ? { reason: options.reason } : {}),
+      } satisfies HostToBackendProcessRuntime);
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleBackendProcessSend(processId: string, payload: unknown, userId?: string): void {
+    const record = this.getBackendProcessRecord(processId);
+    if (!record) return;
+    if (this.installScope === "operator" && userId && record.userId !== userId) return;
+    record.runtime.postMessage({ type: "message", payload } satisfies HostToBackendProcessRuntime);
   }
 
   // ─── Version (free tier) ────────────────────────────────────────────
@@ -5051,6 +7701,7 @@ export class WorkerHost {
     chatId?: string,
     characterId?: string,
     userId?: string,
+    commit = true,
   ): Promise<void> {
     try {
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5087,6 +7738,7 @@ export class WorkerHost {
               chat,
               messages,
               generationType: "normal",
+              commit,
               connection,
             });
           }
@@ -5105,6 +7757,7 @@ export class WorkerHost {
             chat: { id: "", character_id: character.id, name: "", metadata: {}, created_at: 0, updated_at: 0 } as any,
             messages: [],
             generationType: "normal",
+            commit,
             connection,
           });
         }
@@ -5115,6 +7768,7 @@ export class WorkerHost {
         const persona = personasSvc.getDefaultPersona(resolvedUserId);
         const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
         env = {
+          commit,
           names: {
             user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
             charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", groupLastSpeaker: "",
@@ -5150,8 +7804,8 @@ export class WorkerHost {
 
   // ─── Theme (gated: "app_manipulation") ──────────────────────────────
 
-  /** Active CSS variable overrides for this extension (null = none). */
-  private themeOverrides: ThemeOverrideDTO | null = null;
+  /** Active CSS variable overrides for this extension, keyed by effective userId. */
+  private themeOverrides = new Map<string, ThemeOverrideDTO>();
 
   private handleThemeApply(requestId: string, overrides: ThemeOverrideDTO, userId?: string): void {
     if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
@@ -5164,6 +7818,13 @@ export class WorkerHost {
     }
 
     try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) {
+        this.postToWorker({ type: "response", requestId, error: "userId is required for operator-scoped extensions" });
+        return;
+      }
+      this.enforceScopedUser(resolvedUserId);
+
       // Validate: variables must be a Record<string, string> if provided
       if (overrides.variables) {
         if (typeof overrides.variables !== "object" || Array.isArray(overrides.variables)) {
@@ -5213,7 +7874,7 @@ export class WorkerHost {
         }
       }
 
-      this.commitThemeOverrides(overrides);
+      this.commitThemeOverrides(resolvedUserId, overrides);
 
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
@@ -5232,12 +7893,13 @@ export class WorkerHost {
     return WorkerHost.FULL_THEME_SENTINEL_KEYS.every((key) => key in vars);
   }
 
-  private commitThemeOverrides(overrides: ThemeOverrideDTO): void {
-    const existingByMode = this.themeOverrides?.variablesByMode ?? {};
+  private commitThemeOverrides(userId: string, overrides: ThemeOverrideDTO): void {
+    const current = this.themeOverrides.get(userId);
+    const existingByMode = current?.variablesByMode ?? {};
     const nextVariables = this.shouldReplaceThemeScope(overrides.variables)
       ? { ...(overrides.variables ?? {}) }
       : {
-          ...(this.themeOverrides?.variables ?? {}),
+          ...(current?.variables ?? {}),
           ...(overrides.variables ?? {}),
         };
     const nextDarkVars = overrides.variablesByMode?.dark
@@ -5251,7 +7913,7 @@ export class WorkerHost {
         : { ...existingByMode.light, ...overrides.variablesByMode.light }
       : existingByMode.light;
 
-    this.themeOverrides = {
+    const nextOverrides: ThemeOverrideDTO = {
       variables: nextVariables,
       variablesByMode: (nextDarkVars || nextLightVars)
         ? {
@@ -5261,14 +7923,16 @@ export class WorkerHost {
         : undefined,
     };
 
+    this.themeOverrides.set(userId, nextOverrides);
+
     eventBus.emit(
       EventType.SPINDLE_THEME_OVERRIDES,
       {
         extensionId: this.extensionId,
         extensionName: this.manifest.name,
-        overrides: this.themeOverrides,
+        overrides: nextOverrides,
       },
-      this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+      userId,
     );
   }
 
@@ -5287,7 +7951,12 @@ export class WorkerHost {
     }
 
     try {
-      if (!palette?.accent || typeof palette.accent.h !== "number" || typeof palette.accent.s !== "number" || typeof palette.accent.l !== "number") {
+      if (palette == null) {
+        this.handleThemeClear(requestId, userId);
+        return;
+      }
+
+      if (!palette.accent || typeof palette.accent.h !== "number" || typeof palette.accent.s !== "number" || typeof palette.accent.l !== "number") {
         this.postToWorker({ type: "response", requestId, error: "palette.accent must be { h: number, s: number, l: number }" });
         return;
       }
@@ -5304,7 +7973,7 @@ export class WorkerHost {
       }
       this.enforceScopedUser(resolvedUserId);
 
-      this.emitPaletteColorOverrides(accent);
+      this.emitPaletteColorOverrides(accent, resolvedUserId);
 
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
@@ -5323,7 +7992,14 @@ export class WorkerHost {
     }
 
     try {
-      this.themeOverrides = null;
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) {
+        this.postToWorker({ type: "response", requestId, error: "userId is required for operator-scoped extensions" });
+        return;
+      }
+      this.enforceScopedUser(resolvedUserId);
+
+      this.themeOverrides.delete(resolvedUserId);
 
       // Broadcast clear to frontend
       eventBus.emit(
@@ -5333,7 +8009,7 @@ export class WorkerHost {
           extensionName: this.manifest.name,
           overrides: null,
         },
-        this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
+        resolvedUserId,
       );
 
       this.postToWorker({ type: "response", requestId, result: true });
@@ -5350,7 +8026,7 @@ export class WorkerHost {
    * correct opacity. User preference keys (blur, radii, fonts, scale,
    * transitions) are stripped — applyPalette only changes colors.
    */
-  private emitPaletteColorOverrides(accent: { h: number; s: number; l: number }): void {
+  private emitPaletteColorOverrides(accent: { h: number; s: number; l: number }, userId: string): void {
     const strip = (vars: Record<string, string>) => {
       const out: Record<string, string> = {};
       for (const [k, v] of Object.entries(vars)) {
@@ -5359,9 +8035,7 @@ export class WorkerHost {
       return out;
     };
 
-    const connectedUserIds = this.installScope === "operator"
-      ? eventBus.getConnectedUserIds()
-      : (this.installedByUserId ? [this.installedByUserId] : []);
+    const connectedUserIds = [userId];
 
     for (const uid of connectedUserIds) {
       const themeSetting = settingsSvc.getSetting(uid, "theme");
@@ -5376,6 +8050,8 @@ export class WorkerHost {
           light: strip(generateThemeVariablesFn({ ...base, mode: "light" })),
         },
       } as ThemeOverrideDTO & { paletteAccent: { h: number; s: number; l: number } };
+
+      this.themeOverrides.set(uid, overrides);
 
       eventBus.emit(
         EventType.SPINDLE_THEME_OVERRIDES,
@@ -5479,17 +8155,61 @@ export class WorkerHost {
 
   /** Called on worker shutdown to clean up theme overrides. */
   clearThemeOverrides(): void {
-    if (this.themeOverrides) {
-      this.themeOverrides = null;
-      eventBus.emit(
-        EventType.SPINDLE_THEME_OVERRIDES,
-        {
-          extensionId: this.extensionId,
-          extensionName: this.manifest.name,
-          overrides: null,
-        },
-        this.installScope === "user" ? this.installedByUserId ?? undefined : undefined,
-      );
+    if (this.themeOverrides.size > 0) {
+      for (const userId of this.themeOverrides.keys()) {
+        eventBus.emit(
+          EventType.SPINDLE_THEME_OVERRIDES,
+          {
+            extensionId: this.extensionId,
+            extensionName: this.manifest.name,
+            overrides: null,
+          },
+          userId,
+        );
+      }
+      this.themeOverrides.clear();
+    }
+  }
+
+  // ─── Council (free tier, read-only) ────────────────────────────────
+
+  private handleCouncilGetSettings(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      const settings = councilSettingsSvc.getCouncilSettings(resolvedUserId);
+      this.postToWorker({ type: "response", requestId, result: settings });
+    } catch (err) {
+      this.postToWorker({ type: "response", requestId, error: String(err) });
+    }
+  }
+
+  private handleCouncilGetMembers(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      const settings = councilSettingsSvc.getCouncilSettings(resolvedUserId);
+      
+      // We need to fetch the LumiaItems to build the full context
+      const allLumiaItems = packsSvc.getAllLumiaItems(resolvedUserId);
+      const itemsById = new Map(allLumiaItems.map((item) => [item.id, item]));
+
+      const membersCtx = settings.members.map((member) => {
+        const item = itemsById.get(member.itemId) || null;
+        return buildCouncilMemberContext(member, item);
+      });
+
+      this.postToWorker({ type: "response", requestId, result: membersCtx });
+    } catch (err) {
+      this.postToWorker({ type: "response", requestId, error: String(err) });
+    }
+  }
+
+  private handleCouncilGetAvailableLumiaItems(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      const items = packsSvc.getAllLumiaItems(resolvedUserId);
+      this.postToWorker({ type: "response", requestId, result: items });
+    } catch (err) {
+      this.postToWorker({ type: "response", requestId, error: String(err) });
     }
   }
 

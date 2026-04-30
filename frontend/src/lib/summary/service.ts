@@ -1,5 +1,6 @@
 import { generateApi } from '@/api/generate'
 import { chatsApi, messagesApi } from '@/api/chats'
+import { useStore } from '@/store'
 import {
   buildSummarizationPrompt,
   FALLBACK_SUMMARIZATION_SYSTEM_PROMPT,
@@ -79,15 +80,16 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
     userPromptOverride,
   } = opts
 
-  // Fetch chat for existing summary
-  const chat = await chatsApi.get(chatId)
+  const [chat, msgPage] = await Promise.all([
+    chatsApi.get(chatId, { messages: false }),
+    messagesApi.list(chatId, { limit: Math.max(1, messageContext), tail: true }),
+  ])
+
   const existingSummary = (chat.metadata?.[LOOM_SUMMARY_KEY] as string) || ''
-
-  // Fetch recent messages
-  const { data: allMessages } = await messagesApi.list(chatId, { limit: 500, offset: 0 })
-  if (allMessages.length === 0) return null
-
-  const recentMessages = allMessages.slice(-messageContext)
+  const recentMessages = msgPage.data
+  if (msgPage.total === 0 || recentMessages.length === 0) {
+    throw new Error('No messages to summarize')
+  }
 
   // Fetch default templates up front — needed whenever an override is empty
   const defaults = await loadSummarizationDefaults()
@@ -105,10 +107,15 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
     systemTemplate: defaults.systemPrompt,
     userTemplate: defaults.userPrompt,
   })
-  if (!prompt) return null
+  if (!prompt) {
+    throw new Error('Failed to build summarization prompt')
+  }
 
-  // Send to backend via summarize endpoint (sidecar-aware, not localhost-restricted)
+  // Send to backend via summarize endpoint (sidecar-aware, not localhost-restricted).
+  // Passing chat_id lets the server register this job in its summarize-pool so
+  // other tabs / reconnects can recover the in-flight state.
   const result = await generateApi.summarize({
+    chat_id: chatId,
     connection_id: connectionId,
     messages: [
       { role: 'system', content: prompt.systemPrompt },
@@ -117,19 +124,22 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
   })
 
   const summaryText = result.content?.trim()
-  if (!summaryText) return null
-
-  // Store summary in chat metadata
-  const updatedMetadata = {
-    ...(chat.metadata || {}),
-    [LOOM_SUMMARY_KEY]: summaryText,
-    [LOOM_LAST_SUMMARIZED_KEY]: {
-      messageCount: allMessages.length,
-      timestamp: Date.now(),
-    } satisfies LastSummarizedInfo,
+  if (!summaryText) {
+    if (result.reasoning) {
+      throw new Error('Model returned only reasoning with no summary content')
+    }
+    throw new Error(`No summary generated (finish reason: ${result.finish_reason || 'unknown'})`)
   }
 
-  await chatsApi.update(chatId, { metadata: updatedMetadata })
+  // Store summary in chat metadata
+  await chatsApi.patchMetadata(chatId, {
+    [LOOM_SUMMARY_KEY]: summaryText,
+    [LOOM_LAST_SUMMARIZED_KEY]: {
+      messageCount: msgPage.total,
+      timestamp: Date.now(),
+    } satisfies LastSummarizedInfo,
+  })
+  useStore.getState().setLastSummaryMutation({ chatId, summaryText })
 
   return summaryText
 }
@@ -138,27 +148,22 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
  * Save a manually edited summary to chat metadata.
  */
 export async function saveSummary(chatId: string, summaryText: string): Promise<void> {
-  const chat = await chatsApi.get(chatId)
-  const metadata = { ...(chat.metadata || {}) }
-
-  if (summaryText.trim()) {
-    metadata[LOOM_SUMMARY_KEY] = summaryText.trim()
-  } else {
-    delete metadata[LOOM_SUMMARY_KEY]
-  }
-
-  await chatsApi.update(chatId, { metadata })
+  const normalized = summaryText.trim()
+  await chatsApi.patchMetadata(chatId, {
+    [LOOM_SUMMARY_KEY]: normalized || null,
+  })
+  useStore.getState().setLastSummaryMutation({ chatId, summaryText: normalized })
 }
 
 /**
  * Clear the summary from chat metadata.
  */
 export async function clearSummary(chatId: string): Promise<void> {
-  const chat = await chatsApi.get(chatId)
-  const metadata = { ...(chat.metadata || {}) }
-  delete metadata[LOOM_SUMMARY_KEY]
-  delete metadata[LOOM_LAST_SUMMARIZED_KEY]
-  await chatsApi.update(chatId, { metadata })
+  await chatsApi.patchMetadata(chatId, {
+    [LOOM_SUMMARY_KEY]: null,
+    [LOOM_LAST_SUMMARIZED_KEY]: null,
+  })
+  useStore.getState().setLastSummaryMutation({ chatId, summaryText: '' })
 }
 
 /**

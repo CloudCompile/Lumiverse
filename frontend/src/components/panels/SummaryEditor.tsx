@@ -11,6 +11,7 @@ import NumberStepper from '@/components/shared/NumberStepper'
 import { Toggle } from '@/components/shared/Toggle'
 import { Badge } from '@/components/shared/Badge'
 import { Button } from '@/components/shared/FormComponents'
+import SearchableSelect from '@/components/shared/SearchableSelect'
 import { Spinner } from '@/components/shared/Spinner'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import {
@@ -304,17 +305,17 @@ function SummarizationConfig() {
           ) : (
             <div className={styles.field}>
               <label className={styles.fieldLabel} htmlFor="sum-conn">Connection Profile</label>
-              <select
-                id="sum-conn"
-                className={styles.fieldSelect}
+              <SearchableSelect
                 value={summarization.dedicatedConnectionId || ''}
-                onChange={(e) => setSummarization({ dedicatedConnectionId: e.target.value || null })}
-              >
-                <option value="">Select a connection...</option>
-                {connectionOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
+                onChange={(val) => setSummarization({ dedicatedConnectionId: val || null })}
+                options={connectionOptions}
+                placeholder="Select a connection…"
+                searchPlaceholder="Search connections…"
+                ariaLabel="Connection Profile"
+                emptyMessage="No connection profiles configured"
+                clearable
+                clearLabel="No dedicated connection"
+              />
             </div>
           )}
         </Section>

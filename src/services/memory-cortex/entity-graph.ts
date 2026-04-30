@@ -115,6 +115,139 @@ function safeJsonObject(raw: string | null | undefined): Record<string, any> {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
+interface EntityTypeEvidenceState {
+  scores: Partial<Record<EntityType, number>>;
+  counts: Partial<Record<EntityType, number>>;
+  lastObservedType?: EntityType;
+  lastObservedAt?: number;
+  lastResolvedType?: EntityType;
+  lastResolvedAt?: number;
+}
+
+interface EntityMetadataState extends Record<string, any> {
+  typeEvidence?: EntityTypeEvidenceState;
+}
+
+const ADAPTIVE_ENTITY_TYPES = new Set<EntityType>(["concept", "faction", "event"]);
+const CROSS_CHUNK_PROMOTION_TARGETS: EntityType[] = ["faction", "event"];
+
+function clampTypeEvidenceWeight(value: number): number {
+  if (!Number.isFinite(value)) return 0.35;
+  return Math.max(0.2, Math.min(1, value));
+}
+
+function normalizeTypeEvidenceState(raw: unknown): EntityTypeEvidenceState {
+  const record = raw && typeof raw === "object" ? raw as Record<string, any> : {};
+  const scores: Partial<Record<EntityType, number>> = {};
+  const counts: Partial<Record<EntityType, number>> = {};
+
+  for (const type of ["character", "location", "item", "faction", "concept", "event"] as EntityType[]) {
+    const rawScore = Number(record.scores?.[type]);
+    const rawCount = Number(record.counts?.[type]);
+    if (Number.isFinite(rawScore) && rawScore > 0) scores[type] = rawScore;
+    if (Number.isFinite(rawCount) && rawCount > 0) counts[type] = Math.floor(rawCount);
+  }
+
+  return {
+    scores,
+    counts,
+    lastObservedType: record.lastObservedType,
+    lastObservedAt: Number.isFinite(Number(record.lastObservedAt)) ? Number(record.lastObservedAt) : undefined,
+    lastResolvedType: record.lastResolvedType,
+    lastResolvedAt: Number.isFinite(Number(record.lastResolvedAt)) ? Number(record.lastResolvedAt) : undefined,
+  };
+}
+
+function normalizeEntityMetadata(raw: unknown): EntityMetadataState {
+  const record = raw && typeof raw === "object" ? { ...(raw as Record<string, any>) } : {};
+  record.typeEvidence = normalizeTypeEvidenceState(record.typeEvidence);
+  return record as EntityMetadataState;
+}
+
+function accumulateTypeEvidence(
+  metadata: EntityMetadataState,
+  extracted: ExtractedEntity,
+  observedAt: number,
+): EntityMetadataState {
+  const next = normalizeEntityMetadata(metadata);
+  const evidence = next.typeEvidence ?? normalizeTypeEvidenceState(null);
+  const weight = clampTypeEvidenceWeight(extracted.confidence);
+  evidence.scores[extracted.type] = (evidence.scores[extracted.type] ?? 0) + weight;
+  evidence.counts[extracted.type] = (evidence.counts[extracted.type] ?? 0) + 1;
+  evidence.lastObservedType = extracted.type;
+  evidence.lastObservedAt = observedAt;
+  next.typeEvidence = evidence;
+  return next;
+}
+
+function resolveEntityTypeFromEvidence(
+  currentType: EntityType,
+  metadata: EntityMetadataState,
+  mentionCount: number,
+): EntityType {
+  if (!ADAPTIVE_ENTITY_TYPES.has(currentType)) return currentType;
+
+  const evidence = normalizeTypeEvidenceState(metadata.typeEvidence);
+  const conceptScore = evidence.scores.concept ?? 0;
+  const conceptCount = evidence.counts.concept ?? 0;
+
+  let bestTarget: { type: EntityType; score: number; count: number } | null = null;
+  for (const type of CROSS_CHUNK_PROMOTION_TARGETS) {
+    const score = evidence.scores[type] ?? 0;
+    const count = evidence.counts[type] ?? 0;
+    if (!bestTarget || score > bestTarget.score || (score === bestTarget.score && count > bestTarget.count)) {
+      bestTarget = { type, score, count };
+    }
+  }
+
+  if (
+    bestTarget
+    && bestTarget.count >= 2
+    && bestTarget.score >= 1.3
+    && bestTarget.score >= conceptScore + 0.35
+  ) {
+    return bestTarget.type;
+  }
+
+  if (currentType !== "concept") {
+    const currentScore = evidence.scores[currentType] ?? 0;
+    const currentCount = evidence.counts[currentType] ?? 0;
+    if (
+      mentionCount <= 4
+      && conceptCount >= 2
+      && conceptScore >= currentScore + 0.45
+      && currentCount <= 1
+    ) {
+      return "concept";
+    }
+  }
+
+  return currentType;
+}
+
+function resolveEntityConfidence(
+  currentConfidence: EntityConfidence,
+  extracted: ExtractedEntity,
+  mentionCount: number,
+  resolvedType: EntityType,
+  metadata: EntityMetadataState,
+): EntityConfidence {
+  if (currentConfidence === "confirmed" || !extracted.provisional) return "confirmed";
+  void mentionCount;
+  void resolvedType;
+  void metadata;
+  return "provisional";
+}
+
+function markResolvedType(metadata: EntityMetadataState, resolvedType: EntityType, resolvedAt: number): EntityMetadataState {
+  const next = normalizeEntityMetadata(metadata);
+  const evidence = next.typeEvidence ?? normalizeTypeEvidenceState(null);
+  evidence.lastResolvedType = resolvedType;
+  evidence.lastResolvedAt = resolvedAt;
+  next.typeEvidence = evidence;
+  return next;
+}
+
 // ─── Canonical Resolution (BUG 1 fix) ─────────────────────────
 // Every edge write resolves source/target through this function.
 // Prevents entity graph fracture ("Pulchra" vs "Pulchra Fellini").
@@ -524,35 +657,61 @@ export function upsertEntity(
   const existing = findEntityByName(chatId, extracted.name);
 
   if (existing) {
-    // Update existing entity
+    // Update existing entity, including cross-chunk type evidence.
     const newAliases = mergeAliases(existing.aliases, extracted.aliases);
+    const nextMentionCount = existing.mentionCount + 1;
+    const nextMetadata = accumulateTypeEvidence(existing.metadata as EntityMetadataState, extracted, chunkTimestamp);
+    const resolvedType = resolveEntityTypeFromEvidence(existing.entityType, nextMetadata, nextMentionCount);
+    const resolvedConfidence = resolveEntityConfidence(existing.confidence, extracted, nextMentionCount, resolvedType, nextMetadata);
+    const persistedMetadata = markResolvedType(nextMetadata, resolvedType, chunkTimestamp);
     db.query(
       `UPDATE memory_entities SET
         last_seen_chunk_id = ?,
         last_seen_at = ?,
         mention_count = mention_count + 1,
         aliases = ?,
+        entity_type = ?,
+        confidence = ?,
+        metadata = ?,
         updated_at = ?
        WHERE id = ?`,
-    ).run(chunkId, chunkTimestamp, JSON.stringify(newAliases), now, existing.id);
+    ).run(
+      chunkId,
+      chunkTimestamp,
+      JSON.stringify(newAliases),
+      resolvedType,
+      resolvedConfidence,
+      JSON.stringify(persistedMetadata),
+      now,
+      existing.id,
+    );
 
     return existing.id;
   }
 
   // Create new entity
   const id = crypto.randomUUID();
-  const confidence = extracted.provisional ? "provisional" : "confirmed";
+  const initialMetadata = accumulateTypeEvidence(normalizeEntityMetadata(null), extracted, chunkTimestamp);
+  const resolvedType = resolveEntityTypeFromEvidence(extracted.type, initialMetadata, 1);
+  const confidence = resolveEntityConfidence(
+    extracted.provisional ? "provisional" : "confirmed",
+    extracted,
+    1,
+    resolvedType,
+    initialMetadata,
+  );
+  const persistedMetadata = markResolvedType(initialMetadata, resolvedType, chunkTimestamp);
   db.query(
     `INSERT INTO memory_entities
       (id, chat_id, name, entity_type, aliases, first_seen_chunk_id, last_seen_chunk_id,
-       first_seen_at, last_seen_at, mention_count, last_mention_timestamp,
+       first_seen_at, last_seen_at, mention_count, last_mention_timestamp, metadata,
        confidence, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
   ).run(
-    id, chatId, extracted.name, extracted.type,
+    id, chatId, extracted.name, resolvedType,
     JSON.stringify(extracted.aliases),
     chunkId, chunkId, chunkTimestamp, chunkTimestamp,
-    chunkTimestamp, confidence,
+    chunkTimestamp, JSON.stringify(persistedMetadata), confidence,
     now, now,
   );
 
@@ -1704,14 +1863,24 @@ export function processProvisionalEntities(
   let promoted = 0;
   let decayed = 0;
 
-  // Promote provisional entities with enough mentions
-  const toPromote = db
-    .query(
-      `UPDATE memory_entities SET confidence = 'confirmed', updated_at = ?
-       WHERE chat_id = ? AND confidence = 'provisional' AND mention_count >= ?`,
-    )
-    .run(now, chatId, corroborationThreshold);
-  promoted = toPromote.changes;
+  const provisionalRows = db
+    .query("SELECT * FROM memory_entities WHERE chat_id = ? AND confidence = 'provisional'")
+    .all(chatId) as MemoryEntityRow[];
+
+  for (const row of provisionalRows) {
+    const entity = rowToEntity(row);
+    const metadata = normalizeEntityMetadata(entity.metadata);
+    const resolvedType = resolveEntityTypeFromEvidence(entity.entityType, metadata, entity.mentionCount);
+    const shouldConfirm = entity.mentionCount >= corroborationThreshold || (normalizeTypeEvidenceState(metadata.typeEvidence).counts[resolvedType] ?? 0) >= corroborationThreshold;
+    if (!shouldConfirm) continue;
+
+    const persistedMetadata = markResolvedType(metadata, resolvedType, now);
+    db.query(
+      `UPDATE memory_entities SET confidence = 'confirmed', entity_type = ?, metadata = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(resolvedType, JSON.stringify(persistedMetadata), now, entity.id);
+    promoted += 1;
+  }
 
   // Decay old provisional entities that were never corroborated
   const totalChunks = db

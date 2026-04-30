@@ -4,6 +4,10 @@ import { EventType } from "../ws/events";
 import type { Character, CharacterSummary, CreateCharacterInput, UpdateCharacterInput } from "../types/character";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
+import * as filesSvc from "./files.service";
+import * as imagesSvc from "./images.service";
+import { deleteRegexScriptsByCharacterId } from "./regex-scripts.service";
+import { deleteAutoManagedCharacterWorldBooks } from "./world-books.service";
 
 // ─── Summary queries (lightweight, for character browser) ─────────────────
 
@@ -23,17 +27,27 @@ function rowToSummary(row: any): CharacterSummary {
   };
 }
 
-/** Escape special FTS5 query characters and append prefix wildcard */
+/**
+ * Build an FTS5 MATCH query for the trigram tokenizer. Each whitespace-delimited
+ * token is wrapped in a quoted phrase (substring needle); tokens are AND-ed
+ * together. Embedded double quotes are escaped by doubling per FTS5 syntax.
+ *
+ * Returns "" when the trimmed input is shorter than the trigram minimum (3
+ * chars). Callers must fall back to LIKE in that case — see `buildLikeFallback`.
+ */
 function sanitizeFtsQuery(input: string): string {
-  // Remove FTS5 operators/syntax characters
-  const cleaned = input.replace(/[":*()^{}~\-]/g, " ").trim();
-  if (!cleaned) return "";
-  // Split into tokens, add prefix wildcard to each for partial matching
-  return cleaned
+  const trimmed = input.trim();
+  if (trimmed.length < 3) return "";
+  return trimmed
     .split(/\s+/)
     .filter(Boolean)
-    .map((t) => `"${t}"*`)
+    .map((t) => `"${t.replace(/"/g, '""')}"`)
     .join(" ");
+}
+
+/** Escape SQL LIKE metacharacters so a raw user query is matched literally. */
+function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, "\\$&");
 }
 
 export interface SummaryQueryOptions {
@@ -54,6 +68,15 @@ export function listCharacterSummaries(
   const db = getDb();
   const { search, tags, sort, direction = "desc", favoriteIds, filterMode = "all", seed } = options;
 
+  if (filterMode === "favorites" && (!favoriteIds || favoriteIds.length === 0)) {
+    return {
+      data: [],
+      total: 0,
+      limit: pagination.limit,
+      offset: pagination.offset,
+    };
+  }
+
   // Use discover sort if requested
   if (sort === "discover") {
     return listCharacterSummariesDiscover(userId, pagination, options);
@@ -62,14 +85,26 @@ export function listCharacterSummaries(
   const whereClauses: string[] = ["c.user_id = ?"];
   const whereParams: any[] = [userId];
 
-  // FTS5 search
+  // FTS5 (trigram) search — falls back to LIKE for 1–2 char queries that
+  // trigram cannot match (common for 2-char CJK names like 魔王).
   let fromClause = "characters c";
+  let usedFts = false;
   if (search) {
     const ftsQuery = sanitizeFtsQuery(search);
     if (ftsQuery) {
       fromClause = "characters c JOIN characters_fts fts ON fts.rowid = c.rowid";
       whereClauses.push("characters_fts MATCH ?");
       whereParams.push(ftsQuery);
+      usedFts = true;
+    } else {
+      const trimmed = search.trim();
+      if (trimmed) {
+        const like = `%${escapeLike(trimmed)}%`;
+        whereClauses.push(
+          "(c.name LIKE ? ESCAPE '\\' OR c.creator LIKE ? ESCAPE '\\' OR c.tags LIKE ? ESCAPE '\\')"
+        );
+        whereParams.push(like, like, like);
+      }
     }
   }
 
@@ -94,8 +129,10 @@ export function listCharacterSummaries(
 
   // Sort
   let orderBy: string;
-  if (search && !sort) {
-    orderBy = "ORDER BY rank"; // FTS5 relevance
+  if (usedFts && !sort) {
+    orderBy = "ORDER BY rank"; // FTS5 relevance — only valid when MATCH was used
+  } else if (search && !sort) {
+    orderBy = "ORDER BY c.updated_at DESC"; // LIKE fallback has no rank column
   } else {
     switch (sort) {
       case "name":
@@ -108,26 +145,16 @@ export function listCharacterSummaries(
       default:
         orderBy = `ORDER BY c.updated_at ${direction === "desc" ? "DESC" : "ASC"}`;
         break;
-    }
+      }
   }
 
-  // Count
-  const countRow = db
-    .query(`SELECT COUNT(*) as count FROM ${fromClause} WHERE ${whereStr}`)
-    .get(...whereParams) as { count: number } | null;
-  const total = countRow?.count ?? 0;
-
-  // Data
-  const rows = db
-    .query(`SELECT ${SUMMARY_COLUMNS} FROM ${fromClause} WHERE ${whereStr} ${orderBy} LIMIT ? OFFSET ?`)
-    .all(...whereParams, pagination.limit, pagination.offset) as any[];
-
-  return {
-    data: rows.map(rowToSummary),
-    total,
-    limit: pagination.limit,
-    offset: pagination.offset,
-  };
+  return paginatedQuery(
+    `SELECT ${SUMMARY_COLUMNS} FROM ${fromClause} WHERE ${whereStr} ${orderBy}`,
+    `SELECT COUNT(*) as count FROM ${fromClause} WHERE ${whereStr}`,
+    whereParams,
+    pagination,
+    rowToSummary
+  );
 }
 
 function listCharacterSummariesDiscover(
@@ -140,6 +167,15 @@ function listCharacterSummariesDiscover(
   const shuffleSeed = options.seed ?? Math.floor(Date.now() / 86_400_000);
   const { search, tags, favoriteIds, filterMode = "all" } = options;
 
+  if (filterMode === "favorites" && (!favoriteIds || favoriteIds.length === 0)) {
+    return {
+      data: [],
+      total: 0,
+      limit: pagination.limit,
+      offset: pagination.offset,
+    };
+  }
+
   const whereClauses: string[] = ["c.user_id = ?"];
   const whereParams: any[] = [userId];
 
@@ -150,6 +186,15 @@ function listCharacterSummariesDiscover(
       extraJoin = "JOIN characters_fts fts ON fts.rowid = c.rowid";
       whereClauses.push("characters_fts MATCH ?");
       whereParams.push(ftsQuery);
+    } else {
+      const trimmed = search.trim();
+      if (trimmed) {
+        const like = `%${escapeLike(trimmed)}%`;
+        whereClauses.push(
+          "(c.name LIKE ? ESCAPE '\\' OR c.creator LIKE ? ESCAPE '\\' OR c.tags LIKE ? ESCAPE '\\')"
+        );
+        whereParams.push(like, like, like);
+      }
     }
   }
 
@@ -344,9 +389,14 @@ export function listCharactersDiscover(
 
 // Prepared statement for hot-path character fetch
 let _stmtCharById: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
+let _stmtCharByIdGen = -1;
 
 export function getCharacter(userId: string, id: string): Character | null {
-  if (!_stmtCharById) _stmtCharById = getDb().query("SELECT * FROM characters WHERE id = ? AND user_id = ?");
+  const gen = require("../db/connection").getDbGeneration() as number;
+  if (!_stmtCharById || _stmtCharByIdGen !== gen) {
+    _stmtCharById = getDb().query("SELECT * FROM characters WHERE id = ? AND user_id = ?");
+    _stmtCharByIdGen = gen;
+  }
   const row = _stmtCharById.get(id, userId) as any;
   if (!row) return null;
   return rowToCharacter(row);
@@ -395,7 +445,9 @@ export function createCharacter(userId: string, input: CreateCharacterInput): Ch
       now
     );
 
-  return getCharacter(userId, id)!;
+  const character = getCharacter(userId, id)!;
+  eventBus.emit(EventType.CHARACTER_CREATED, { id, character }, userId);
+  return character;
 }
 
 export function updateCharacter(userId: string, id: string, input: UpdateCharacterInput): Character | null {
@@ -453,6 +505,24 @@ export function setCharacterImage(userId: string, id: string, imageId: string): 
   return result.changes > 0;
 }
 
+export async function replaceCharacterAvatar(userId: string, id: string, file: File): Promise<Character | null> {
+  const existing = getCharacter(userId, id);
+  if (!existing) return null;
+
+  if (existing.image_id) imagesSvc.deleteImage(userId, existing.image_id);
+  if (existing.avatar_path) await filesSvc.deleteAvatar(existing.avatar_path);
+
+  const image = await imagesSvc.uploadImage(userId, file);
+  setCharacterImage(userId, id, image.id);
+  setCharacterAvatar(userId, id, image.filename);
+
+  const updated = getCharacter(userId, id);
+  if (!updated) return null;
+
+  eventBus.emit(EventType.CHARACTER_EDITED, { id, character: updated }, userId);
+  return updated;
+}
+
 export function duplicateCharacter(userId: string, id: string): Character | null {
   const existing = getCharacter(userId, id);
   if (!existing) return null;
@@ -488,7 +558,7 @@ export function duplicateCharacter(userId: string, id: string): Character | null
     );
 
   const character = getCharacter(userId, newId)!;
-  eventBus.emit(EventType.CHARACTER_EDITED, { id: newId, character }, userId);
+  eventBus.emit(EventType.CHARACTER_CREATED, { id: newId, character }, userId);
   return character;
 }
 
@@ -525,8 +595,13 @@ export function setCharacterSourceFilename(userId: string, id: string, sourceFil
 }
 
 export function deleteCharacter(userId: string, id: string): boolean {
+  const existing = getCharacter(userId, id);
+  if (!existing) return false;
+
   const result = getDb().query("DELETE FROM characters WHERE id = ? AND user_id = ?").run(id, userId);
   if (result.changes > 0) {
+    deleteAutoManagedCharacterWorldBooks(userId, id);
+    deleteRegexScriptsByCharacterId(userId, id);
     eventBus.emit(EventType.CHARACTER_DELETED, { id }, userId);
   }
   return result.changes > 0;

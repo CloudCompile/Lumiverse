@@ -4,7 +4,10 @@ import type { Context, Next } from "hono";
 import * as svc from "../services/generate.service";
 import * as breakdownSvc from "../services/breakdown.service";
 import * as poolSvc from "../services/generation-pool.service";
+import * as summarizePoolSvc from "../services/summarize-pool.service";
 import { getSummarizationPromptDefaults } from "../services/summarization-prompts.service";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
 
 const LOCALHOST_ADDRS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -25,7 +28,7 @@ function chatRoute(handler: (input: any) => Promise<any>, extras?: Record<string
     const body = await c.req.json();
     if (!body.chat_id) return c.json({ error: "chat_id is required" }, 400);
     try {
-      const result = await handler({ ...body, userId, ...extras });
+      const result = await handler({ ...body, userId, signal: c.req.raw.signal, ...extras });
       return c.json(result);
     } catch (err: any) {
       return c.json({ error: err.message }, 400);
@@ -71,8 +74,11 @@ app.post("/acknowledge", async (c) => {
   const userId = c.get("userId");
   const { chatId } = await c.req.json<{ chatId: string }>();
   if (!chatId) return c.json({ error: "chatId required" }, 400);
-  poolSvc.acknowledgeChat(userId, chatId);
-  return c.json({ acknowledged: true });
+  const generationIds = poolSvc.acknowledgeChat(userId, chatId);
+  if (generationIds.length > 0) {
+    eventBus.emit(EventType.GENERATION_ACKNOWLEDGED, { chatId, generationIds }, userId);
+  }
+  return c.json({ acknowledged: true, removed: generationIds.length, generationIds });
 });
 
 app.get("/status/:chatId", (c) => {
@@ -85,6 +91,8 @@ app.get("/status/:chatId", (c) => {
     active,
     generationId: entry.generationId,
     status: entry.status,
+    councilRetryPending: entry.councilRetryPending || false,
+    councilToolsFailure: entry.councilToolsFailure,
     content: entry.content,
     reasoning: entry.reasoning,
     tokenSeq: entry.tokenSeq,
@@ -147,6 +155,18 @@ app.post("/summarize", async (c) => {
     const status = err.message.includes("No connection") || err.message.includes("Unknown provider") || err.message.includes("No API key") ? 400 : 502;
     return c.json({ error: err.message }, status);
   }
+});
+
+app.get("/summarize/status/:chatId", (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const entry = summarizePoolSvc.getSummarizePoolEntry(userId, chatId);
+  if (!entry) return c.json({ active: false });
+  return c.json({
+    active: true,
+    generationId: entry.generationId,
+    startedAt: entry.startedAt,
+  });
 });
 
 // --- Extension endpoints (localhost-only, synchronous, stateless) ---

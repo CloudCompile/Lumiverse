@@ -12,8 +12,10 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [focused, setFocused] = useState<string | null>(null)
   const login = useStore((s) => s.login)
+  const authError = useStore((s) => s.authError)
   const navigate = useNavigate()
   const formRef = useRef<HTMLFormElement>(null)
+  const visibleError = error ?? authError
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -145,14 +147,14 @@ export default function LoginPage() {
               </div>
             </motion.div>
 
-            {error && (
+            {visibleError && (
               <motion.div
                 className={styles.error}
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 transition={{ duration: 0.2 }}
               >
-                <div className={styles.errorInner}>{error}</div>
+                <div className={styles.errorInner}>{visibleError}</div>
               </motion.div>
             )}
 

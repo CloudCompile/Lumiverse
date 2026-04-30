@@ -101,6 +101,14 @@ app.post("/sessions/:id/sync-world", (c) => {
   return c.json(result);
 });
 
+// Repair missing character-card data for legacy finalized sessions
+app.post("/sessions/:id/repair-character", (c) => {
+  const userId = c.get("userId");
+  const sessionId = c.req.param("id");
+  const result = dreamWeaverSvc.repairCharacterCardDataFromSessionIfMissing(userId, sessionId);
+  return c.json(result);
+});
+
 // Delete session
 app.delete("/sessions/:id", (c) => {
   const userId = c.get("userId");
@@ -249,6 +257,7 @@ app.post("/visual/tag-suggestions", async (c) => {
     const result = await suggestVisualTags({
       userId,
       connectionId: session.connection_id,
+      model: session.model,
       draft,
       params: dwParams,
       signal: dwAbort?.signal,

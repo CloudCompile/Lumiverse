@@ -98,13 +98,130 @@
   position: relative;
 }
 
+.cortexNoticeDock {
+  position: absolute;
+  top: 48px;
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.cortexNotice {
+  position: relative;
+  display: grid;
+  grid-template-columns: 8px 8ch auto minmax(0, 1fr) 4ch;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: min(680px, calc(100vw - 40px));
+  padding: 10px 14px;
+  padding-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--lumiverse-primary) 30%, var(--lcs-glass-border, var(--lumiverse-border)));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 9%, var(--lcs-glass-bg, var(--lumiverse-bg-elevated)));
+  box-shadow: var(--lumiverse-shadow-sm), 0 0 0 1px color-mix(in srgb, var(--lumiverse-primary) 14%, transparent);
+  color: var(--lumiverse-text);
+  overflow: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+:global([data-glass]) .cortexNotice {
+  backdrop-filter: blur(var(--lcs-glass-blur, 8px));
+  -webkit-backdrop-filter: blur(var(--lcs-glass-blur, 8px));
+}
+
+.cortexNoticeError {
+  border-color: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 34%, var(--lcs-glass-border, var(--lumiverse-border)));
+  background: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 10%, var(--lcs-glass-bg, var(--lumiverse-bg-elevated)));
+  box-shadow: var(--lumiverse-shadow-sm), 0 0 0 1px color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 18%, transparent);
+}
+
+.cortexNoticeStatus {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--lumiverse-primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--lumiverse-primary) 16%, transparent);
+}
+
+.cortexNoticeError .cortexNoticeStatus {
+  background: var(--lumiverse-danger, #ff6b6b);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 16%, transparent);
+}
+
+.cortexNoticeTitle {
+  min-width: 0;
+  max-width: 8ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  font-weight: 700;
+}
+
+.cortexNoticeSeparator {
+  width: 1ch;
+  text-align: center;
+  color: var(--lumiverse-text-dim);
+}
+
+.cortexNoticeDetail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-muted);
+}
+
+.cortexNoticePercent {
+  width: 4ch;
+  text-align: right;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-variant-numeric: tabular-nums;
+  color: var(--lumiverse-primary-text);
+}
+
+.cortexNoticeError .cortexNoticePercent {
+  color: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 70%, white);
+}
+
+.cortexNoticeBar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 6px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lumiverse-border) 70%, transparent);
+}
+
+.cortexNoticeFill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  background: linear-gradient(90deg, var(--lumiverse-primary), color-mix(in srgb, var(--lumiverse-primary) 60%, white));
+}
+
+.cortexNoticeError .cortexNoticeFill {
+  background: linear-gradient(90deg, var(--lumiverse-danger, #ff6b6b), color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 60%, white));
+}
+
 .chatToolbar {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 4px 12px 0;
+  padding: 6px 12px;
   gap: 4px;
   flex-shrink: 0;
+  background: var(--lcs-glass-bg, var(--lumiverse-bg-elevated));
+  border-bottom: 1px solid var(--lcs-glass-border, var(--lumiverse-border));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .toolbarBtn {
@@ -235,6 +352,29 @@
 }
 
 @media (max-width: 600px) {
+  .cortexNoticeDock {
+    top: 54px;
+    left: 8px;
+    right: 8px;
+  }
+
+  .cortexNotice {
+    grid-template-columns: 8px 8ch auto minmax(0, 1fr) 3.5ch;
+    width: calc(100vw - 16px);
+    gap: 6px;
+    padding: 9px 12px;
+    padding-bottom: 11px;
+  }
+
+  .cortexNoticeTitle {
+    max-width: 8ch;
+  }
+
+  .cortexNoticePercent {
+    width: 3.5ch;
+    font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  }
+
   .portraitSide {
     display: none;
   }

@@ -1,14 +1,33 @@
 import type { LlmMessageDTO } from "lumiverse-spindle-types";
+import { DEFAULT_INTERCEPTOR_TIMEOUT_MS } from "../services/spindle-settings.service";
+
+export interface InterceptorBreakdownEntry {
+  messageIndex: number;
+  name: string;
+  role: LlmMessageDTO["role"];
+  content: string;
+  extensionId: string;
+  extensionName: string;
+}
 
 export interface InterceptorResult {
   messages: LlmMessageDTO[];
   parameters?: Record<string, unknown>;
+  breakdown?: InterceptorBreakdownEntry[];
 }
 
 export interface Interceptor {
   extensionId: string;
   userId?: string | null;
   priority: number; // lower = runs first
+  /**
+   * Called immediately before each invocation to determine the wall-clock
+   * budget for this interceptor. Resolving per-run (instead of at
+   * registration) lets user-level `spindleSettings.interceptorTimeoutMs`
+   * changes propagate live without requiring extensions to re-register.
+   * Falls back to `DEFAULT_INTERCEPTOR_TIMEOUT_MS` if omitted.
+   */
+  resolveTimeoutMs?: () => number;
   handler: (
     messages: LlmMessageDTO[],
     context: unknown
@@ -41,10 +60,23 @@ class InterceptorPipeline {
   ): Promise<InterceptorResult> {
     let result = messages;
     let mergedParameters: Record<string, unknown> | undefined;
+    const mergedBreakdown: InterceptorBreakdownEntry[] = [];
 
     for (const interceptor of this.interceptors) {
       if (interceptor.userId && interceptor.userId !== userId) {
         continue;
+      }
+      let timeoutMs = DEFAULT_INTERCEPTOR_TIMEOUT_MS;
+      if (interceptor.resolveTimeoutMs) {
+        try {
+          const resolved = interceptor.resolveTimeoutMs();
+          if (Number.isFinite(resolved) && resolved > 0) timeoutMs = resolved;
+        } catch (err) {
+          console.warn(
+            `[Spindle] Interceptor timeout resolver threw for ${interceptor.extensionId}:`,
+            err
+          );
+        }
       }
       try {
         const output = await Promise.race([
@@ -54,16 +86,19 @@ class InterceptorPipeline {
               () =>
                 reject(
                   new Error(
-                    `Interceptor from ${interceptor.extensionId} timed out (10s)`
+                    `Interceptor from ${interceptor.extensionId} timed out (${Math.round(timeoutMs / 1000)}s)`
                   )
                 ),
-              10_000
+              timeoutMs
             )
           ),
         ]);
         result = output.messages;
         if (output.parameters && Object.keys(output.parameters).length > 0) {
           mergedParameters = { ...mergedParameters, ...output.parameters };
+        }
+        if (output.breakdown && output.breakdown.length > 0) {
+          mergedBreakdown.push(...output.breakdown);
         }
       } catch (err) {
         console.error(
@@ -74,7 +109,11 @@ class InterceptorPipeline {
       }
     }
 
-    return { messages: result, parameters: mergedParameters };
+    return {
+      messages: result,
+      parameters: mergedParameters,
+      ...(mergedBreakdown.length > 0 ? { breakdown: mergedBreakdown } : {}),
+    };
   }
 
   get count(): number {

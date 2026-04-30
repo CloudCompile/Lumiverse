@@ -7,6 +7,7 @@ import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
 import { parsePagination } from "../services/pagination";
 import {
+  collectWorldInfoSources,
   collectVectorActivatedWorldInfoDetailed,
   getWorldInfoVectorQueryPreview,
   mergeActivatedWorldInfoEntries,
@@ -17,6 +18,7 @@ import { activateWorldInfo, finalizeActivatedWorldInfoEntries, type WiState, typ
 import type { WorldBookEntry } from "../types/world-book";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
+import { loadWorldBookVectorSettings } from "../services/world-book-vector-settings.service";
 
 const MAX_IMPORT_RESPONSE_BYTES = 100 * 1024 * 1024; // 100 MB
 
@@ -469,7 +471,6 @@ app.post("/:id/diagnostics", async (c) => {
   const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
   const messages = chatsSvc.getMessages(userId, chat.id);
   const vectorSummary = svc.getWorldBookVectorSummary(userId, bookId)!;
-  const bookEntries = svc.listEntries(userId, bookId);
   const attachmentSources = {
     character: getCharacterWorldBookIds(character.extensions).includes(bookId),
     persona: persona?.attached_world_book_id === bookId,
@@ -479,6 +480,9 @@ app.post("/:id/diagnostics", async (c) => {
   const isAttached = attachmentSources.character || attachmentSources.persona || attachmentSources.global || attachmentSources.chat;
 
   const embeddings = await embeddingsSvc.getEmbeddingConfig(userId);
+  const worldBookVectorSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: embeddings.retrieval_top_k,
+  });
   const queryPreview = await getWorldInfoVectorQueryPreview(userId, messages);
   const blockerMessages: string[] = [];
 
@@ -488,6 +492,14 @@ app.post("/:id/diagnostics", async (c) => {
 
   const worldInfoSettings = (settingsSvc.getSetting(userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
+  const wiSources = collectWorldInfoSources(
+    userId,
+    character,
+    persona,
+    globalWorldBooks,
+    chatWorldBookIds,
+  );
+  const bookEntries = wiSources.entries.filter((entry) => entry.world_book_id === bookId);
 
   const wiResult = isAttached
     ? activateWorldInfo({
@@ -506,7 +518,7 @@ app.post("/:id/diagnostics", async (c) => {
       });
 
   const vectorDetail = isAttached
-    ? await collectVectorActivatedWorldInfoDetailed(userId, [bookId], bookEntries, messages)
+    ? await collectVectorActivatedWorldInfoDetailed(userId, chat.id, [bookId], bookEntries, messages)
       : {
         entries: [],
         candidateTrace: [],
@@ -517,8 +529,8 @@ app.post("/:id/diagnostics", async (c) => {
         thresholdRejected: 0,
         hitsAfterRerankCutoff: 0,
         rerankRejected: 0,
-        topK: Math.max(1, embeddings.retrieval_top_k || 4),
-        cap: Math.max(1, embeddings.retrieval_top_k || 4),
+        topK: Math.max(1, worldBookVectorSettings.retrievalTopK || embeddings.retrieval_top_k || 4),
+        cap: Math.max(1, worldBookVectorSettings.retrievalTopK || embeddings.retrieval_top_k || 4),
         blockerMessages: [] as string[],
       };
 
@@ -760,7 +772,7 @@ app.post("/import-character-book", async (c) => {
   if (!character) return c.json({ error: "Character not found" }, 404);
 
   const characterBook = character.extensions?.character_book;
-  if (!characterBook?.entries?.length) {
+  if (svc.countImportedWorldBookEntries(characterBook?.entries) === 0) {
     return c.json({ error: "No embedded character book found" }, 400);
   }
 
@@ -776,12 +788,19 @@ app.post("/import-character-book", async (c) => {
 
 // --- Entry endpoints ---
 
+const VALID_ENTRY_SORT_KEYS = new Set(["order", "priority", "created", "updated", "name"]);
+
 app.get("/:id/entries", (c) => {
   const userId = c.get("userId");
   const book = svc.getWorldBook(userId, c.req.param("id"));
   if (!book) return c.json({ error: "World book not found" }, 404);
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listEntriesPaginated(userId, book.id, pagination));
+  const rawSortBy = c.req.query("sort_by");
+  const rawSortDir = c.req.query("sort_dir");
+  const sortBy = rawSortBy && VALID_ENTRY_SORT_KEYS.has(rawSortBy) ? (rawSortBy as svc.EntrySortKey) : undefined;
+  const sortDir = rawSortDir === "desc" || rawSortDir === "asc" ? rawSortDir : undefined;
+  const search = c.req.query("search") || undefined;
+  return c.json(svc.listEntriesPaginated(userId, book.id, pagination, { sortBy, sortDir, search }));
 });
 
 app.post("/:id/entries", async (c) => {
@@ -794,12 +813,58 @@ app.post("/:id/entries", async (c) => {
   return c.json(entry, 201);
 });
 
+app.post("/:id/entries/reorder", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  const book = svc.getWorldBook(userId, bookId);
+  if (!book) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json();
+  if (!Array.isArray(body?.ordered_ids) || body.ordered_ids.length === 0) {
+    return c.json({ error: "ordered_ids is required" }, 400);
+  }
+  const success = svc.reorderEntries(userId, bookId, body.ordered_ids);
+  if (!success) return c.json({ error: "Unable to reorder entries" }, 400);
+  return c.json({ success: true, count: body.ordered_ids.length });
+});
+
+app.post("/:id/entries/bulk", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  const book = svc.getWorldBook(userId, bookId);
+  if (!book) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json();
+  if (!body?.action) return c.json({ error: "action is required" }, 400);
+  if (!Array.isArray(body?.entry_ids) || body.entry_ids.length === 0) {
+    return c.json({ error: "entry_ids is required" }, 400);
+  }
+  try {
+    const result = svc.bulkOperateEntries(userId, bookId, body);
+    if (!result) return c.json({ error: "World book not found" }, 404);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Bulk action failed" }, 400);
+  }
+});
+
 app.put("/:id/entries/:eid", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   const entry = svc.updateEntry(userId, c.req.param("eid"), body);
   if (!entry) return c.json({ error: "Not found" }, 404);
   return c.json(entry);
+});
+
+app.post("/:id/entries/:eid/duplicate", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  const book = svc.getWorldBook(userId, bookId);
+  if (!book) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const entry = svc.getEntry(userId, c.req.param("eid"));
+  if (!entry || entry.world_book_id !== bookId) return c.json({ error: "Not found" }, 404);
+  const duplicated = svc.duplicateEntry(userId, entry.id, body);
+  if (!duplicated) return c.json({ error: "Target world book not found" }, 404);
+  return c.json(duplicated, 201);
 });
 
 app.delete("/:id/entries/:eid", (c) => {

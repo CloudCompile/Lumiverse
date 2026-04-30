@@ -42,6 +42,13 @@ Thumbs.db
 .idea/
 
 # =============================================================================
+# Generated
+# =============================================================================
+frontend/src/lib/generatedComponentProps.ts
+frontend/src/lib/generatedCssVariables.ts
+frontend/src/lib/generatedComponentCss.ts
+
+# =============================================================================
 # Zensical docs build output
 # =============================================================================
 
@@ -51,6 +58,7 @@ Thumbs.db
 
 !LICENSE.md
 !README.md
+!SECURITY.md
 scripts/release.sh
 scripts/release-main.sh
 scripts/release-rc.sh

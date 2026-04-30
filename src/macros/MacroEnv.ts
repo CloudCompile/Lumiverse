@@ -6,6 +6,7 @@ import type { Message } from "../types/message";
 import type { ConnectionProfile } from "../types/connection-profile";
 import type { GenerationType } from "../llm/types";
 import type { MacroEnv, MacroHandler, MacroDefinition } from "./types";
+import { stripLegacyDreamWeaverVoiceSection } from "../services/dream-weaver/runtime-prompt";
 
 export interface BuildEnvContext {
   character: Character;
@@ -13,6 +14,8 @@ export interface BuildEnvContext {
   chat: Chat;
   messages: Message[];
   generationType: GenerationType;
+  /** Defaults to true. False marks the evaluation as dry / non-committing. */
+  commit?: boolean;
   connection?: ConnectionProfile | null;
   userId?: string;
   dynamicMacros?: Record<string, string | MacroHandler | MacroDefinition>;
@@ -24,6 +27,8 @@ export interface BuildEnvContext {
   targetCharacterId?: string;
   /** Pre-resolved name of the target/focused character. Falls back to character.name if targetCharacterId is set. */
   targetCharacterName?: string;
+  /** Optional abort signal — threaded onto MacroEnv so the evaluator can cancel between iterations. */
+  signal?: AbortSignal;
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
@@ -41,6 +46,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     : "";
 
   return {
+    commit: ctx.commit !== false,
     names: {
       user: persona?.name || "User",
       char: getEffectiveCharacterName(character),
@@ -64,15 +70,15 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       personaSubjectivePronoun: persona?.subjective_pronoun || "",
       personaObjectivePronoun: persona?.objective_pronoun || "",
       personaPossessivePronoun: persona?.possessive_pronoun || "",
-      mesExamples: character.mes_example || getDreamWeaverVoiceGuidance(character) || "",
+      mesExamples: character.mes_example || "",
       mesExamplesRaw: character.mes_example || "",
-      systemPrompt: character.system_prompt || "",
+      systemPrompt: stripLegacyDreamWeaverVoiceSection(character.system_prompt || "", character),
       postHistoryInstructions: character.post_history_instructions || "",
       depthPrompt: (character.extensions?.depth_prompt as string) || "",
       creatorNotes: character.creator_notes || "",
       version: (character.extensions?.version as string) || "",
       creator: character.creator || "",
-      firstMessage: character.first_mes || "",
+      firstMessage: resolveChatGreeting(character, chat, messages),
     },
     chat: {
       id: chat.id,
@@ -101,6 +107,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     },
     dynamicMacros: ctx.dynamicMacros || {},
     _dynamicMacrosLower: buildDynamicLookup(ctx.dynamicMacros),
+    signal: ctx.signal,
     extra: {
       userId: ctx.userId ?? (chat as any).user_id as string | undefined,
       messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
@@ -108,6 +115,28 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       characterTags: Array.isArray((character as any).tags) ? (character as any).tags : [],
     },
   };
+}
+
+function resolveChatGreeting(character: Character, chat: Chat, messages: Message[]): string {
+  const metadataOverride = chat.metadata?.greeting_override;
+  if (typeof metadataOverride === "string") return metadataOverride;
+
+  if (chat.metadata?.group) {
+    const taggedGreeting = messages.find((message) =>
+      !message.is_user
+      && message.extra?.greeting === true
+      && message.extra?.greeting_character_id === character.id,
+    );
+    return taggedGreeting?.content || character.first_mes || "";
+  }
+
+  const taggedGreeting = messages.find((message) => !message.is_user && message.extra?.greeting === true);
+  if (taggedGreeting?.content) return taggedGreeting.content;
+
+  const openingMessage = messages[0];
+  if (openingMessage && !openingMessage.is_user) return openingMessage.content;
+
+  return character.first_mes || "";
 }
 
 /** Build a lowercase-keyed Map from dynamicMacros for O(1) lookup. */
@@ -142,19 +171,6 @@ export function resolveGroupCharacterNames(
     if (name) names.push(name);
   }
   return names.length > 0 ? names : undefined;
-}
-
-/**
- * Dream Weaver cards don't populate `mes_example` — they use voice guidance
- * instead. When the `dialogue_examples` block resolves `{{mesExamples}}`, this
- * lets DW cards fill that slot with their compiled voice guidance so preset
- * prompt orders that include dialogue examples still work.
- */
-function getDreamWeaverVoiceGuidance(character: Character): string {
-  const dw = character.extensions?.dream_weaver as
-    | { voice_guidance?: { compiled?: string } }
-    | undefined;
-  return dw?.voice_guidance?.compiled?.trim() || "";
 }
 
 function buildPersonaWithAddons(persona: Persona | null): string {

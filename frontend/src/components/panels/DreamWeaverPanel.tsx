@@ -22,11 +22,13 @@ import {
 import {
   Button,
   EditorSection,
-  Select,
   TextArea,
   TextInput,
 } from '@/components/shared/FormComponents'
+import SearchableSelect from '@/components/shared/SearchableSelect'
+import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { getPersonaAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
 import { useStore } from '@/store'
 import { EventType } from '@/types/ws-events'
@@ -67,6 +69,10 @@ export default function DreamWeaverPanel() {
   const [connections, setConnections] = useState<ConnectionProfile[]>([])
   const [selectedPersonaId, setSelectedPersonaId] = useState<string | null>(null)
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null)
+  const [selectedModel, setSelectedModel] = useState('')
+  const [connectionModels, setConnectionModels] = useState<string[]>([])
+  const [connectionModelLabels, setConnectionModelLabels] = useState<Record<string, string>>({})
+  const [connectionModelsLoading, setConnectionModelsLoading] = useState(false)
   const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Partial<Record<ArchiveKey, boolean>>>({})
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isCreating, setIsCreating] = useState(false)
@@ -143,6 +149,30 @@ export default function DreamWeaverPanel() {
     }).catch(() => {})
   }, [])
 
+  const fetchConnectionModels = useCallback(async () => {
+    if (!resolvedConnectionId) {
+      setConnectionModels([])
+      setConnectionModelLabels({})
+      return
+    }
+
+    setConnectionModelsLoading(true)
+    try {
+      const result = await connectionsApi.models(resolvedConnectionId)
+      setConnectionModels(result.models || [])
+      setConnectionModelLabels(result.model_labels || {})
+    } catch {
+      setConnectionModels([])
+      setConnectionModelLabels({})
+    } finally {
+      setConnectionModelsLoading(false)
+    }
+  }, [resolvedConnectionId])
+
+  useEffect(() => {
+    void fetchConnectionModels()
+  }, [fetchConnectionModels])
+
   const updateGenParam = useCallback(<K extends keyof DWGenParams>(key: K, value: DWGenParams[K]) => {
     setGenParams((prev) => {
       const next = { ...prev, [key]: value }
@@ -191,6 +221,7 @@ export default function DreamWeaverPanel() {
         dislikes: dislikes.trim() || undefined,
         persona_id: resolvedPersonaId || undefined,
         connection_id: resolvedConnectionId || undefined,
+        model: selectedModel.trim() || undefined,
       })
       try {
         await dreamWeaverApi.generateDraft(session.id)
@@ -232,18 +263,26 @@ export default function DreamWeaverPanel() {
   }
 
   const personaOptions = useMemo(
-    () =>
-      personas.length === 0
-        ? [{ value: '', label: 'No personas available' }]
-        : personas.map((p) => ({ value: p.id, label: p.name })),
+    () => personas.map((p) => {
+      const avatarUrl = getPersonaAvatarThumbUrlById(p.id, p.image_id)
+      const initial = p.name.trim().charAt(0).toUpperCase() || '?'
+      const title = p.title?.trim()
+      return {
+        value: p.id,
+        label: p.name,
+        sublabel: title || undefined,
+        leading: avatarUrl ? (
+          <img src={avatarUrl} alt="" loading="lazy" />
+        ) : (
+          <span>{initial}</span>
+        ),
+      }
+    }),
     [personas],
   )
 
   const connectionOptions = useMemo(
-    () =>
-      connections.length === 0
-        ? [{ value: '', label: 'No connections available' }]
-        : connections.map((c) => ({ value: c.id, label: c.name })),
+    () => connections.map((c) => ({ value: c.id, label: c.name })),
     [connections],
   )
 
@@ -262,24 +301,53 @@ export default function DreamWeaverPanel() {
           />
         </div>
 
-        {/* Persona + Connection */}
-        <div className={styles.grid2}>
+        {/* Persona / Connection / Model */}
+        <div className={styles.selectorsGrid}>
           <div className={styles.field}>
             <span className={styles.fieldLabel}>Persona</span>
-            <Select
+            <SearchableSelect
               value={resolvedPersonaId ?? ''}
               onChange={(v) => setSelectedPersonaId(v || null)}
               options={personaOptions}
+              placeholder="Select a persona…"
+              searchPlaceholder="Search personas…"
+              emptyMessage="No personas available"
               disabled={personas.length === 0}
+              ariaLabel="Persona"
+              portal
             />
           </div>
           <div className={styles.field}>
             <span className={styles.fieldLabel}>Connection</span>
-            <Select
+            <SearchableSelect
               value={resolvedConnectionId ?? ''}
-              onChange={(v) => setSelectedConnectionId(v || null)}
+              onChange={(v) => {
+                setSelectedConnectionId(v || null)
+                setSelectedModel('')
+              }}
               options={connectionOptions}
+              placeholder="Select a connection…"
+              searchPlaceholder="Search connections…"
+              emptyMessage="No connections available"
               disabled={connections.length === 0}
+              ariaLabel="Connection"
+              portal
+            />
+          </div>
+          <div className={styles.field}>
+            <span className={styles.fieldLabel}>Model</span>
+            <ModelCombobox
+              value={selectedModel}
+              onChange={setSelectedModel}
+              models={connectionModels}
+              modelLabels={connectionModelLabels}
+              loading={connectionModelsLoading}
+              onRefresh={fetchConnectionModels}
+              autoRefreshOnFocus
+              refreshKey={resolvedConnectionId ?? ''}
+              placeholder="Leave empty to use connection default"
+              emptyMessage={resolvedConnectionId ? 'No models returned for this connection. Enter one manually or leave it blank to use the connection default.' : 'No connection available.'}
+              disabled={!resolvedConnectionId}
             />
           </div>
         </div>

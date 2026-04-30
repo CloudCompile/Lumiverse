@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, type ReactNode, Fragment } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, useDeferredValue, type ReactNode, Fragment } from 'react'
 import {
   DndContext,
   closestCenter,
@@ -54,7 +54,7 @@ import {
   Unlink,
 } from 'lucide-react'
 import clsx from 'clsx'
-import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
+import ExpandedTextEditor, { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { resolveMacros as resolveMacrosApi } from '@/api/macros'
 import { useLoomBuilder } from '@/hooks/useLoomBuilder'
@@ -73,7 +73,9 @@ import {
   DEFAULT_COMPLETION_SETTINGS,
   DEFAULT_ADVANCED_SETTINGS,
 } from '@/lib/loom/constants'
-import type { PromptBlock, LoomConnectionProfile, SamplerParam, MacroGroup } from '@/lib/loom/types'
+import type { PromptBlock, PromptVariableDef, LoomConnectionProfile, SamplerParam, MacroGroup, CategoryGroup } from '@/lib/loom/types'
+import { PromptVariablesModal } from '@/components/shared/PromptVariablesModal'
+import { VariablesEditor } from './PromptVariablesEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { useStore as __contextMeterStore } from '@/store'
@@ -123,12 +125,13 @@ interface SortableCategoryItemProps {
   onDelete: (id: string) => void
   onToggle: (id: string) => void
   childCount: number
+  dragDisabled?: boolean
 }
 
 function SortableCategoryItem({
-  block, isCollapsed, onToggleCollapse, onEdit, onDelete, onToggle, childCount,
+  block, isCollapsed, onToggleCollapse, onEdit, onDelete, onToggle, childCount, dragDisabled = false,
 }: SortableCategoryItemProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.id })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
   const style = { transform: CSS.Transform.toString(transform), transition }
   const isDisabled = !block.enabled
   const displayName = block.name.replace(/^\u2501\s*/, '')
@@ -139,20 +142,29 @@ function SortableCategoryItem({
       className={clsx(s.item, s.categoryHeader, isDragging && s.itemDragging, isDisabled && s.itemDisabled)}
       style={style}
     >
-      <span {...attributes} {...listeners} className={s.dragHandle} title="Drag to reorder (moves all items in this category)">
+      <span
+        {...attributes}
+        {...listeners}
+        className={clsx(s.dragHandle, dragDisabled && s.dragHandleDisabled)}
+        title={dragDisabled ? 'Reordering disabled while searching' : 'Drag to reorder (moves all items in this category)'}
+      >
         <GripVertical size={14} />
       </span>
       <Button size="icon-sm" variant="ghost" onClick={onToggleCollapse} title={isCollapsed ? 'Expand category' : 'Collapse category'}>
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </Button>
       <div className={s.categoryMeta} onClick={onToggleCollapse}>
-        <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>{displayName}</span>
-        <span className={s.categoryCount}>({childCount})</span>
-        {block.categoryMode && (
-          <span className={s.groupBadge}>
-            {block.categoryMode === 'radio' ? 'pick one' : 'multi'}
-          </span>
-        )}
+        <span className={clsx(s.categoryName, s.truncTooltip)} data-tooltip={displayName}>
+          <span className={s.categoryNameText}>{displayName}</span>
+        </span>
+        <span className={s.categoryMetaBadges}>
+          <span className={s.categoryCount}>({childCount})</span>
+          {block.categoryMode && (
+            <span className={s.groupBadge}>
+              {block.categoryMode === 'radio' ? 'pick one' : 'multi'}
+            </span>
+          )}
+        </span>
       </div>
       <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
@@ -177,10 +189,11 @@ interface SortableBlockItemProps {
   onDelete: (id: string) => void
   onToggle: (id: string) => void
   indented: boolean
+  dragDisabled?: boolean
 }
 
-function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented }: SortableBlockItemProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.id })
+function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDisabled = false }: SortableBlockItemProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
   const style = { transform: CSS.Transform.toString(transform), transition }
   const isMarker = block.marker && block.marker !== 'category'
   const isDisabled = !block.enabled
@@ -192,30 +205,37 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented }: Sort
       className={clsx(s.item, isDragging && s.itemDragging, isMarker && s.marker, indented && s.itemIndented, isDisabled && s.itemDisabled)}
       style={style}
     >
-      <span {...attributes} {...listeners} className={s.dragHandle} title="Drag to reorder">
+      <span
+        {...attributes}
+        {...listeners}
+        className={clsx(s.dragHandle, dragDisabled && s.dragHandleDisabled)}
+        title={dragDisabled ? 'Reordering disabled while searching' : 'Drag to reorder'}
+      >
         <GripVertical size={14} />
       </span>
       <div className={clsx(s.blockContent, s.truncTooltip)} data-tooltip={block.name}>
         <div className={s.blockNameRow}>
           <span className={s.blockName}>
-            {isMarker && <Hash size={12} style={{ marginRight: '4px', opacity: 0.6 }} />}
-            {block.isLocked && <Lock size={10} style={{ marginRight: '4px', opacity: 0.4 }} />}
-            {block.name}
+            {isMarker && <Hash size={12} className={s.blockNameIcon} />}
+            {block.isLocked && <Lock size={10} className={clsx(s.blockNameIcon, s.blockNameIconMuted)} />}
+            <span className={s.blockNameText}>{block.name}</span>
           </span>
-          {!isMarker && (
-            <span className={clsx(s.badge, ROLE_BADGES[block.role] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[block.role] || block.role}</span>
-          )}
-          {isMarker && (
-            <span className={clsx(s.badge, s.badgeMarker)}>marker</span>
-          )}
-          {block.injectionTrigger?.length > 0 && (
-            <span style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
-              {block.injectionTrigger.map(t => {
-                const meta = INJECTION_TRIGGER_TYPES.find(tt => tt.value === t)
-                return meta ? <span key={t} className={s.triggerBadge}>{meta.shortLabel}</span> : null
-              })}
-            </span>
-          )}
+          <span className={s.blockMetaRow}>
+            {!isMarker && (
+              <span className={clsx(s.badge, ROLE_BADGES[block.role] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[block.role] || block.role}</span>
+            )}
+            {isMarker && (
+              <span className={clsx(s.badge, s.badgeMarker)}>marker</span>
+            )}
+            {block.injectionTrigger?.length > 0 && (
+              <span className={s.triggerBadgeList}>
+                {block.injectionTrigger.map(t => {
+                  const meta = INJECTION_TRIGGER_TYPES.find(tt => tt.value === t)
+                  return meta ? <span key={t} className={s.triggerBadge}>{meta.shortLabel}</span> : null
+                })}
+              </span>
+            )}
+          </span>
         </div>
         {preview && !isMarker && <span className={s.blockPreview}>{preview}</span>}
       </div>
@@ -256,6 +276,9 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
   const [isLocked, setIsLocked] = useState(block.isLocked || false)
   const [injectionTrigger, setInjectionTrigger] = useState<string[]>(block.injectionTrigger || [])
   const [categoryMode, setCategoryMode] = useState<PromptBlock['categoryMode']>(block.categoryMode ?? null)
+  const [variables, setVariables] = useState<PromptVariableDef[]>(
+    Array.isArray(block.variables) ? block.variables : [],
+  )
   const [showMacros, setShowMacros] = useState(false)
   const [macroSearch, setMacroSearch] = useState('')
   const [showPreview, setShowPreview] = useState(false)
@@ -301,12 +324,14 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
 
   const handleSave = () => {
     const isAppend = role === 'user_append' || role === 'assistant_append'
+    const cleanedVariables = variables.filter((v) => v && v.name?.trim().length > 0)
     onSave({
       name, role, content,
       position: isAppend ? 'pre_history' : position,
       depth: (position === 'in_history' || isAppend) ? depth : 0,
       isLocked, injectionTrigger,
       categoryMode: block.marker === 'category' ? categoryMode : null,
+      variables: cleanedVariables.length ? cleanedVariables : undefined,
     })
   }
 
@@ -344,7 +369,7 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
       {compact && (
         <div className={s.toolbar} style={{ justifyContent: 'space-between' }}>
           <Button size="icon-sm" variant="ghost" onClick={onBack} title="Back to list"><ArrowLeft size={18} /></Button>
-          <span style={{ fontSize: '13px', fontWeight: 600 }}>Edit Block</span>
+          <span style={{ fontSize: 'calc(13px * var(--lumiverse-font-scale, 1))', fontWeight: 600 }}>Edit Block</span>
           <button className={clsx(s.btn, s.btnPrimary, s.btnSmall)} onClick={handleSave} type="button"><Check size={12} /> Save</button>
         </div>
       )}
@@ -435,7 +460,7 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
               <button className={clsx(s.btn, s.btnSmall, showPreview && s.btnPrimary)} onClick={() => setShowPreview(!showPreview)} type="button">
                 <Eye size={12} /> {showPreview ? 'Hide Preview' : 'Preview'}
               </button>
-              {showPreview && previewLoading && <span style={{ fontSize: '10px', color: 'var(--lumiverse-text-dim)' }}>Resolving...</span>}
+              {showPreview && previewLoading && <span style={{ fontSize: 'calc(10px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)' }}>Resolving...</span>}
             </div>
             {showPreview && (
               <div className={s.previewPanel}>
@@ -491,6 +516,8 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
                 : `Block only fires on: ${injectionTrigger.join(', ')}`}
             </span>
           </div>
+
+          <VariablesEditor variables={variables} onChange={setVariables} />
         </div>
       </div>
       {showExpandedEditor && (
@@ -635,8 +662,16 @@ interface SamplerSliderProps {
   onChange: (key: string, value: number | null) => void
 }
 
+function isSamplerParamSet(param: SamplerParam, value: number | null | undefined) {
+  if (value === null || value === undefined) return false
+  if (param.optIn && value === param.defaultHint) return false
+  return true
+}
+
 function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
-  const isSet = value !== null && value !== undefined
+  const isSet = isSamplerParamSet(param, value)
+  const hasIncludeToggle = !!param.includeToggle
+  const isIncluded = hasIncludeToggle ? isSet : true
   const trackRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
   const dragValueRef = useRef<number | null>(null)
@@ -714,15 +749,35 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
     commitInput(localInput)
   }, [localInput, commitInput])
 
+  const handleToggleIncluded = useCallback((checked: boolean) => {
+    if (!hasIncludeToggle) return
+    if (!checked) {
+      onChange(param.key, null)
+      return
+    }
+
+    const nextValue = value ?? param.defaultHint
+    onChange(param.key, nextValue)
+  }, [hasIncludeToggle, onChange, param.defaultHint, param.key, value])
+
   const pct = ((currentValue - param.min) / (param.max - param.min)) * 100
 
   return (
     <div className={s.sliderRow}>
       <div className={s.sliderHeader}>
-        <span className={clsx(s.sliderLabel, isSet ? s.sliderLabelSet : s.sliderLabelUnset)}>{param.label}</span>
+        {hasIncludeToggle ? (
+          <Toggle.Checkbox
+            checked={isIncluded}
+            onChange={handleToggleIncluded}
+            label={<span className={clsx(s.sliderLabel, isSet ? s.sliderLabelSet : s.sliderLabelUnset)}>{param.label}</span>}
+            className={s.sliderToggle}
+          />
+        ) : (
+          <span className={clsx(s.sliderLabel, isSet ? s.sliderLabelSet : s.sliderLabelUnset)}>{param.label}</span>
+        )}
         <input
           type="number"
-          value={localInput}
+          value={isIncluded ? localInput : ''}
           onChange={handleInputChange}
           onBlur={handleInputBlur}
           className={clsx(s.sliderInput, isSet ? s.sliderInputSet : s.sliderInputUnset)}
@@ -730,20 +785,23 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
           max={param.max}
           step={param.step}
           placeholder={String(param.defaultHint)}
+          disabled={!isIncluded}
         />
       </div>
       <div
         ref={trackRef}
-        className={s.sliderTrack}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
+        className={s.sliderTrackArea}
+        onPointerDown={isIncluded ? handlePointerDown : undefined}
+        onPointerMove={isIncluded ? handlePointerMove : undefined}
+        onPointerUp={isIncluded ? handlePointerUp : undefined}
         onDoubleClick={() => onChange(param.key, null)}
         title="Double-click to reset"
-        style={{ opacity: isSet ? 1 : 0.4 }}
+        style={{ opacity: !isIncluded ? 0.2 : isSet ? 1 : 0.4 }}
       >
-        <div className={s.sliderFill} style={{ width: `${pct}%` }} />
-        <div className={s.sliderThumb} style={{ left: `${pct}%` }} />
+        <div className={s.sliderTrack}>
+          <div className={s.sliderFill} style={{ width: `${pct}%` }} />
+          <div className={s.sliderThumb} style={{ left: `${pct}%` }} />
+        </div>
       </div>
     </div>
   )
@@ -782,7 +840,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
   const visibleParams = samplerParams.filter(p => supported.has(p.key))
   const activeCount = visibleParams.filter(p => {
     const v = overrides[p.key]
-    return v !== null && v !== undefined
+    return isSamplerParamSet(p, v)
   }).length
 
   const handleChangeParam = (key: string, value: number | null) => {
@@ -813,7 +871,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
         onClick={() => { setIsExpanded(!isExpanded); if (!isExpanded) onRefreshProfile() }}
       >
         <Settings2 size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-        <span className={s.accordionTitle}>Generation</span>
+        <span className={s.accordionTitle}>Samplers</span>
         {activeCount > 0 && <span className={s.accordionBadge}>{activeCount}</span>}
         {body.enabled && <Code2 size={10} style={{ color: 'var(--lumiverse-primary)', flexShrink: 0 }} />}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
@@ -830,7 +888,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
             <SamplerSlider key={param.key} param={param} value={overrides[param.key]} onChange={handleChangeParam} />
           ))}
           {visibleParams.length === 0 && (
-            <div style={{ fontSize: '11px', color: 'var(--lumiverse-text-dim)', padding: '8px 0', textAlign: 'center' }}>
+            <div style={{ fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)', padding: '8px 0', textAlign: 'center' }}>
               No sampler overrides available for this provider.
             </div>
           )}
@@ -895,11 +953,14 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
             </button>
           )}
         </div>
-        {multiline ? (
-          <textarea className={s.settingsTextarea} value={value} onChange={e => handleChange(fieldKey, e.target.value)} spellCheck={false} />
-        ) : (
-          <input className={s.settingsInput} value={value} onChange={e => handleChange(fieldKey, e.target.value)} />
-        )}
+        <ExpandableTextarea
+          className={s.settingsTextarea}
+          value={value}
+          onChange={next => handleChange(fieldKey, next)}
+          title={`${label} — Prompt Behavior`}
+          rows={multiline ? 4 : 2}
+          spellCheck={false}
+        />
         {hint && <span className={s.settingsHint}>{hint}</span>}
       </div>
     )
@@ -916,11 +977,12 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
       {isExpanded && (
         <div className={s.accordionBody}>
           <Field fieldKey="continueNudge" label="Continue Nudge" hint="Injected when continuing a response" multiline />
+          <Field fieldKey="emptySendNudge" label="Empty Send Nudge" hint="Injected when nudging for a fresh reply from an assistant-ending chat" multiline />
           <Field fieldKey="impersonationPrompt" label="Impersonation Prompt" hint="Injected when impersonating the user" multiline />
           <Field fieldKey="groupNudge" label="Group Nudge" hint="Injected in group chats" multiline />
           <Field fieldKey="newChatPrompt" label="New Chat Separator" hint="Inserted at conversation start" />
           <Field fieldKey="newGroupChatPrompt" label="New Group Chat Separator" hint="Inserted at group conversation start" />
-          <Field fieldKey="sendIfEmpty" label="Send If Empty" hint="Sent as user message when input is empty" />
+          <Field fieldKey="sendIfEmpty" label="Send If Empty" hint="Sent as a user message when the final assistant content is blank" />
         </div>
       )}
     </div>
@@ -935,8 +997,9 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
   const [isExpanded, setIsExpanded] = useState(false)
   const settings = completionSettings || {}
   const defaults = DEFAULT_COMPLETION_SETTINGS
+  const visibleKeys = Object.keys(defaults).filter(key => key !== 'namesBehavior')
 
-  const activeCount = Object.keys(defaults).filter(key => {
+  const activeCount = visibleKeys.filter(key => {
     const current = settings[key] ?? defaults[key as keyof typeof defaults]
     return current !== defaults[key as keyof typeof defaults]
   }).length
@@ -974,12 +1037,6 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
                 {CONTINUE_POSTFIX_OPTIONS.map(opt => <option key={opt.label} value={opt.value}>{opt.label}</option>)}
               </select>
             </div>
-            <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
-              <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Names in Messages</span>
-              <select className={s.settingsInput} style={{ cursor: 'pointer' }} value={settings.namesBehavior ?? defaults.namesBehavior} onChange={e => handleChange('namesBehavior', parseInt(e.target.value))}>
-                {NAMES_BEHAVIOR_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-              </select>
-            </div>
           </div>
           <hr className={s.menuDivider} />
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
@@ -999,17 +1056,30 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
 // ADVANCED SETTINGS
 // ============================================================================
 
-function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings: any; onSave: (updates: Record<string, any>) => void }) {
+function AdvancedSettingsPanel({
+  advancedSettings,
+  completionSettings,
+  onSave,
+  onSaveCompletion,
+}: {
+  advancedSettings: any
+  completionSettings: any
+  onSave: (updates: Record<string, any>) => void
+  onSaveCompletion: (updates: Record<string, any>) => void
+}) {
   const [isExpanded, setIsExpanded] = useState(false)
   const [stopInput, setStopInput] = useState('')
   const settings = advancedSettings || {}
   const defaults = DEFAULT_ADVANCED_SETTINGS
+  const completion = completionSettings || {}
+  const completionDefaults = DEFAULT_COMPLETION_SETTINGS
 
   const seed = settings.seed ?? defaults.seed
   const stopStrings: string[] = settings.customStopStrings ?? defaults.customStopStrings
   const collapseMessages: boolean = settings.collapseMessages ?? defaults.collapseMessages
+  const namesBehavior = completion.namesBehavior ?? completionDefaults.namesBehavior
 
-  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages
+  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages || namesBehavior !== completionDefaults.namesBehavior
 
   const handleSeedChange = (value: string) => {
     const num = parseInt(value)
@@ -1032,11 +1102,18 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
       <div className={clsx(s.accordionHeader, isActive && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <Wrench size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
         <span className={s.accordionTitle}>Advanced</span>
-        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0)}</span>}
+        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0) + (namesBehavior !== completionDefaults.namesBehavior ? 1 : 0)}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
         <div className={s.accordionBody}>
+          <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Names in Messages</span>
+            <select className={s.settingsInput} style={{ cursor: 'pointer' }} value={namesBehavior} onChange={e => onSaveCompletion({ namesBehavior: parseInt(e.target.value) })}>
+              {NAMES_BEHAVIOR_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+            </select>
+            <span className={s.settingsHint}>Controls how speaker names are represented when formatting messages, including collapsed mode.</span>
+          </div>
           <div className={s.settingsField}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Seed</span>
@@ -1051,7 +1128,7 @@ function AdvancedSettingsPanel({ advancedSettings, onSave }: { advancedSettings:
             <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Custom Stop Strings</span>
             <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
               <input className={s.settingsInput} style={{ flex: 1 }} value={stopInput} onChange={e => setStopInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddStopString() } }} placeholder="Type and press Enter" />
-              <button className={s.btn} style={{ padding: '4px 8px', fontSize: '11px' }} onClick={handleAddStopString} type="button">
+              <button className={s.btn} style={{ padding: '4px 8px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }} onClick={handleAddStopString} type="button">
                 <Plus size={10} />
               </button>
             </div>
@@ -1172,6 +1249,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     savePromptBehavior,
     saveCompletionSettings,
     saveAdvancedSettings,
+    savePromptVariableValues,
     importFromFile,
     importFromST,
     exportInternal,
@@ -1198,14 +1276,38 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     }
   }, [presetProfiles.defaults, activePreset, saveBlocks, addToast])
 
-  // Apply preset profile binding when the resolved binding changes (chat/character/default switch).
-  // Uses refs for values we read but don't want to trigger the effect on.
-  const saveBlocksRef = useRef(saveBlocks)
-  saveBlocksRef.current = saveBlocks
+  // Apply the resolved preset profile binding to the active preset's blocks
+  // whenever the chat/character context changes and the hook confirms its
+  // binding state is fresh for that new context (isResolved). Keying off
+  // activeChatId + activeCharacterId — not just the binding reference —
+  // guarantees the effect re-runs on every chat switch, even when two
+  // characters happen to share structurally-identical block states.
+  //
+  // activePreset is read through a ref so user-driven block toggles (which
+  // mutate activePreset) don't re-fire this effect and fight the toggle by
+  // re-applying the binding.
   const activePresetRef = useRef(activePreset)
+  const lastProfileContextRef = useRef<string | null>(null)
   activePresetRef.current = activePreset
 
   useEffect(() => {
+    if (!presetProfiles.isResolved) return
+
+    const contextKey = `${presetProfiles.activeChatId ?? 'none'}:${presetProfiles.activeCharacterId ?? 'none'}:${presetProfiles.activeSource}`
+    const contextChanged = lastProfileContextRef.current !== contextKey
+    if (contextChanged) {
+      lastProfileContextRef.current = contextKey
+    }
+
+    if (
+      presetProfiles.resolvedPresetId
+      && presetProfiles.resolvedPresetId !== activePresetRef.current?.id
+      && (contextChanged || !activePresetRef.current?.id)
+    ) {
+      presetProfiles.selectResolvedPreset()
+      return
+    }
+
     const binding = presetProfiles.activeBinding
     const currentBlocks = activePresetRef.current?.blocks
     if (!binding || !currentBlocks?.length) return
@@ -1214,12 +1316,21 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       b.id in binding.block_states ? { ...b, enabled: binding.block_states[b.id] } : b
     )
 
-    // Only save if something actually changed
     const changed = updatedBlocks.some((b, i) => b.enabled !== currentBlocks[i].enabled)
     if (changed) {
-      saveBlocksRef.current(updatedBlocks)
+      saveBlocks(updatedBlocks)
     }
-  }, [presetProfiles.activeBinding])
+  }, [
+    presetProfiles.isResolved,
+    presetProfiles.resolvedPresetId,
+    presetProfiles.selectResolvedPreset,
+    presetProfiles.activeBinding,
+    presetProfiles.activeSource,
+    presetProfiles.activeChatId,
+    presetProfiles.activeCharacterId,
+    activePreset?.id,
+    saveBlocks,
+  ])
 
   const [view, setView] = useState<'list' | 'edit'>('list')
   const [editingBlock, setEditingBlock] = useState<PromptBlock | null>(null)
@@ -1227,12 +1338,26 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
   const [markerMenuOpen, setMarkerMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [showLegacyExportConfirm, setShowLegacyExportConfirm] = useState(false)
+  const [showPromptVariablesModal, setShowPromptVariablesModal] = useState(false)
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
+  const [isSearchOpen, setIsSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+
+  const hasConfigurableVariables = useMemo(() => {
+    return (activePreset?.blocks ?? []).some(
+      (b) => b.enabled && Array.isArray(b.variables) && b.variables.length > 0,
+    )
+  }, [activePreset?.blocks])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importTypeRef = useRef<string>('json')
   const lastCollapsedPresetRef = useRef<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const scrollTopRef = useRef(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const deferredSearchQuery = useDeferredValue(searchQuery)
+  const trimmedSearchQuery = searchQuery.trim()
+  const deferredTrimmedSearchQuery = deferredSearchQuery.trim()
+  const isSearchVisible = isSearchOpen || trimmedSearchQuery.length > 0
 
   // Track scroll position so we can restore it after state-driven re-renders
   // (block saves, toggles, reorders) and after returning from the block editor.
@@ -1257,6 +1382,39 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
 
   const groups = useMemo(() => computeGroups(activePreset?.blocks), [activePreset?.blocks])
 
+  const searchTokens = useMemo(
+    () => deferredTrimmedSearchQuery.toLowerCase().split(/\s+/).filter(Boolean),
+    [deferredTrimmedSearchQuery],
+  )
+
+  const searchableBlockText = useMemo(() => {
+    const entries = (activePreset?.blocks ?? [])
+      .filter((block) => block.marker !== 'category')
+      .map((block) => [block.id, `${block.name}\n${block.content || ''}`.toLowerCase()] as const)
+    return new Map(entries)
+  }, [activePreset?.blocks])
+
+  const isSearchActive = searchTokens.length > 0
+
+  const displayedGroups = useMemo<CategoryGroup[]>(() => {
+    if (!isSearchActive) return groups
+
+    return groups
+      .map((group) => ({
+        ...group,
+        children: group.children.filter((block) => {
+          const searchableText = searchableBlockText.get(block.id) ?? ''
+          return searchTokens.every((token) => searchableText.includes(token))
+        }),
+      }))
+      .filter((group) => group.children.length > 0)
+  }, [groups, isSearchActive, searchableBlockText, searchTokens])
+
+  const searchMatchCount = useMemo(
+    () => displayedGroups.reduce((count, group) => count + group.children.length, 0),
+    [displayedGroups],
+  )
+
   useEffect(() => {
     if (activePreset?.blocks && activePresetId && activePresetId !== lastCollapsedPresetRef.current) {
       lastCollapsedPresetRef.current = activePresetId
@@ -1265,12 +1423,23 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     }
   }, [activePresetId, activePreset])
 
+  useEffect(() => {
+    setIsSearchOpen(false)
+    setSearchQuery('')
+  }, [activePresetId])
+
+  useEffect(() => {
+    if (!isSearchVisible) return
+    const frame = requestAnimationFrame(() => searchInputRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [isSearchVisible])
+
   const visibleBlockIds = useMemo(() => {
     const ids: string[] = []
-    for (const group of groups) {
+    for (const group of displayedGroups) {
       if (group.categoryBlock) {
         ids.push(group.categoryBlock.id)
-        if (!collapsedCategories.has(group.categoryBlock.id)) {
+        if (isSearchActive || !collapsedCategories.has(group.categoryBlock.id)) {
           for (const child of group.children) ids.push(child.id)
         }
       } else {
@@ -1278,7 +1447,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       }
     }
     return ids
-  }, [groups, collapsedCategories])
+  }, [displayedGroups, collapsedCategories, isSearchActive])
 
   const toggleCollapse = useCallback((categoryId: string) => {
     setCollapsedCategories(prev => {
@@ -1288,6 +1457,30 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       return next
     })
   }, [])
+
+  const toggleSearch = useCallback(() => {
+    if (isSearchVisible) {
+      setSearchQuery('')
+      setIsSearchOpen(false)
+      return
+    }
+    setIsSearchOpen(true)
+  }, [isSearchVisible])
+
+  const clearSearch = useCallback(() => {
+    setSearchQuery('')
+    searchInputRef.current?.focus()
+  }, [])
+
+  const handleSearchKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    if (trimmedSearchQuery.length > 0) {
+      setSearchQuery('')
+      return
+    }
+    setIsSearchOpen(false)
+  }, [trimmedSearchQuery])
 
   const handleDragEnd = useCallback((event: any) => {
     const { active, over } = event
@@ -1407,7 +1600,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       if (importTypeRef.current === 'st') {
         await importFromST(json, file.name)
       } else {
-        await importFromFile(json)
+        await importFromFile(json, file.name)
       }
     } catch (err) {
       console.error('[LoomBuilder] Import failed:', err)
@@ -1436,19 +1629,60 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         {/* Preset Selector */}
         <div className={s.toolbar}>
           <PresetSelector
-          registry={registry}
-          activePresetId={activePresetId}
-          activePresetName={activePreset?.name ?? null}
-          onSelect={selectPreset}
-          onCreate={createPreset}
-          onRename={handleRenamePreset}
-          onDuplicate={handleDuplicatePreset}
-          onDelete={handleDeletePreset}
-          onImport={handleImport}
-          onExport={handleExport}
-          onExportLegacy={() => setShowLegacyExportConfirm(true)}
-        />
-      </div>
+            registry={registry}
+            activePresetId={activePresetId}
+            activePresetName={activePreset?.name ?? null}
+            onSelect={selectPreset}
+            onCreate={createPreset}
+            onRename={handleRenamePreset}
+            onDuplicate={handleDuplicatePreset}
+            onDelete={handleDeletePreset}
+            onImport={handleImport}
+            onExport={handleExport}
+            onExportLegacy={() => setShowLegacyExportConfirm(true)}
+          />
+          <button
+            type="button"
+            className={clsx(s.btn, s.searchToggle, isSearchVisible && s.searchToggleActive)}
+            onClick={toggleSearch}
+            disabled={!activePreset}
+            title={isSearchVisible ? 'Close prompt search' : 'Search prompts'}
+          >
+            <Search size={14} />
+            {isSearchVisible ? 'Close Search' : 'Search'}
+          </button>
+          {activePreset && isSearchVisible && (
+            <div className={s.searchBarRow}>
+              <div className={s.searchField}>
+                <Search size={14} className={s.searchIcon} />
+                <input
+                  ref={searchInputRef}
+                  className={s.searchInput}
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                  placeholder="Search prompt titles and content..."
+                  inputMode="search"
+                  enterKeyHint="search"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                {trimmedSearchQuery.length > 0 && (
+                  <button type="button" className={s.searchClear} onClick={clearSearch} title="Clear search">
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              <div className={s.searchMeta}>
+                {isSearchActive
+                  ? `${searchMatchCount} match${searchMatchCount === 1 ? '' : 'es'}`
+                  : 'Search prompt titles and content'}
+              </div>
+            </div>
+          )}
+       </div>
 
       {/* Connection profile */}
       {activePreset && connectionProfile && (() => {
@@ -1478,7 +1712,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                 className={s.profileBtn}
                 onClick={presetProfiles.captureDefaults}
                 disabled={presetProfiles.isLoading}
-                title="Capture current block states as defaults"
+                title="Capture the current preset and block states as this preset's defaults"
                 type="button"
               >
                 <Camera size={10} /> Capture Defaults
@@ -1488,7 +1722,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                 className={clsx(s.profileBtn, s.profileBtnActive)}
                 onClick={reapplyDefaults}
                 disabled={presetProfiles.isLoading}
-                title="Reapply default block states"
+                title="Reapply this preset's default block states"
                 type="button"
               >
                 <RotateCcw size={10} /> Defaults
@@ -1504,13 +1738,17 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
               </button>
             )}
 
-            {/* Bind / unbind character */}
-            {!presetProfiles.hasCharacterBinding ? (
+            {/* Bind / unbind character — hidden in group chats (chat-only) */}
+            {presetProfiles.characterBindingEnabled && (!presetProfiles.hasCharacterBinding ? (
               <button
                 className={s.profileBtn}
                 onClick={presetProfiles.bindToCharacter}
-                disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset}
-                title={!presetProfiles.hasDefaults ? 'Capture defaults first' : 'Bind current block states to this character'}
+                disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset || !presetProfiles.activeCharacterId}
+                title={
+                  !presetProfiles.activeCharacterId ? 'No active character — open a chat first'
+                    : !presetProfiles.hasDefaults ? 'Capture defaults first'
+                      : 'Bind the current preset and block states to this character'
+                }
                 type="button"
               >
                 <Link size={10} /> Character
@@ -1519,8 +1757,8 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
               <button
                 className={clsx(s.profileBtn, s.profileBtnActive)}
                 onClick={presetProfiles.bindToCharacter}
-                disabled={presetProfiles.isLoading}
-                title="Rebind current block states to this character"
+                disabled={presetProfiles.isLoading || !presetProfiles.activeCharacterId}
+                title="Rebind the current preset and block states to this character"
                 type="button"
               >
                 <RotateCcw size={10} /> Character
@@ -1534,15 +1772,19 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                   <X size={8} />
                 </span>
               </button>
-            )}
+            ))}
 
             {/* Bind / unbind chat */}
             {!presetProfiles.hasChatBinding ? (
               <button
                 className={s.profileBtn}
                 onClick={presetProfiles.bindToChat}
-                disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset}
-                title={!presetProfiles.hasDefaults ? 'Capture defaults first' : 'Bind current block states to this chat'}
+                disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset || !presetProfiles.activeChatId}
+                title={
+                  !presetProfiles.activeChatId ? 'No active chat — open a chat first'
+                    : !presetProfiles.hasDefaults ? 'Capture defaults first'
+                      : 'Bind the current preset and block states to this chat'
+                }
                 type="button"
               >
                 <Link size={10} /> Chat
@@ -1551,8 +1793,8 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
               <button
                 className={clsx(s.profileBtn, s.profileBtnActive)}
                 onClick={presetProfiles.bindToChat}
-                disabled={presetProfiles.isLoading}
-                title="Rebind current block states to this chat"
+                disabled={presetProfiles.isLoading || !presetProfiles.activeChatId}
+                title="Rebind the current preset and block states to this chat"
                 type="button"
               >
                 <RotateCcw size={10} /> Chat
@@ -1595,8 +1837,21 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         )}
         {activePreset && <PromptBehaviorSettings promptBehavior={activePreset.promptBehavior} onSave={savePromptBehavior} />}
         {activePreset && <CompletionSettingsPanel completionSettings={activePreset.completionSettings} onSave={saveCompletionSettings} />}
-        {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} onSave={saveAdvancedSettings} />}
+        {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} completionSettings={activePreset.completionSettings} onSave={saveAdvancedSettings} onSaveCompletion={saveCompletionSettings} />}
         {activePreset && <ContextMeter />}
+
+        {activePreset && hasConfigurableVariables && (
+          <div style={{ padding: '0 12px 8px' }}>
+            <button
+              type="button"
+              className={clsx(s.btn)}
+              style={{ width: '100%', justifyContent: 'center' }}
+              onClick={() => setShowPromptVariablesModal(true)}
+            >
+              <Settings2 size={14} /> Configure Prompt Variables
+            </button>
+          </div>
+        )}
 
         {/* Block list or empty state */}
         <div className={s.blockList}>
@@ -1605,31 +1860,39 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
           ) : !activePreset ? (
             <div className={s.emptyState}>
               <Layers size={40} style={{ opacity: 0.3 }} />
-              <div style={{ fontSize: '14px', fontWeight: 500 }}>No Preset Selected</div>
-              <div style={{ fontSize: '12px' }}>Create a new preset or select an existing one to start building.</div>
+              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))', fontWeight: 500 }}>No Preset Selected</div>
+              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>Create a new preset or select an existing one to start building.</div>
             </div>
           ) : activePreset.blocks.length === 0 ? (
             <div className={s.emptyState}>
-              <div style={{ fontSize: '14px' }}>No blocks yet</div>
-              <div style={{ fontSize: '12px' }}>Add a prompt block or marker to get started.</div>
+              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))' }}>No blocks yet</div>
+              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>Add a prompt block or marker to get started.</div>
+            </div>
+          ) : isSearchActive && searchMatchCount === 0 ? (
+            <div className={s.emptyState}>
+              <Search size={32} style={{ opacity: 0.3 }} />
+              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))', fontWeight: 500 }}>No matching prompts</div>
+              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>Search matches prompt titles and content within this preset.</div>
+              <button type="button" className={s.btn} onClick={clearSearch}>Clear Search</button>
             </div>
           ) : (
             <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
               <SortableContext items={visibleBlockIds} strategy={verticalListSortingStrategy}>
-                {groups.map(group => (
+                {displayedGroups.map(group => (
                   <Fragment key={group.categoryBlock?.id || 'ungrouped'}>
                     {group.categoryBlock && (
                       <SortableCategoryItem
                         block={group.categoryBlock}
-                        isCollapsed={collapsedCategories.has(group.categoryBlock.id)}
-                        onToggleCollapse={() => toggleCollapse(group.categoryBlock!.id)}
+                        isCollapsed={isSearchActive ? false : collapsedCategories.has(group.categoryBlock.id)}
+                        onToggleCollapse={isSearchActive ? () => {} : () => toggleCollapse(group.categoryBlock!.id)}
                         onEdit={handleEdit}
                         onDelete={handleDelete}
                         onToggle={toggleBlock}
                         childCount={group.children.length}
+                        dragDisabled={isSearchActive}
                       />
                     )}
-                    {(!group.categoryBlock || !collapsedCategories.has(group.categoryBlock.id)) &&
+                    {(!group.categoryBlock || isSearchActive || !collapsedCategories.has(group.categoryBlock.id)) &&
                       group.children.map(block => (
                         <SortableBlockItem
                           key={block.id}
@@ -1638,6 +1901,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                           onDelete={handleDelete}
                           onToggle={toggleBlock}
                           indented={!!group.categoryBlock}
+                          dragDisabled={isSearchActive}
                         />
                       ))
                     }
@@ -1741,6 +2005,16 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
           onConfirm={confirmDeleteBlock}
           onCancel={() => setConfirmDelete(null)}
         />
+
+        {activePreset && (
+          <PromptVariablesModal
+            isOpen={showPromptVariablesModal}
+            blocks={activePreset.blocks}
+            values={activePreset.promptVariables ?? {}}
+            onSave={savePromptVariableValues}
+            onClose={() => setShowPromptVariablesModal(false)}
+          />
+        )}
       </div>
     </PanelFadeIn>
   )

@@ -13,6 +13,7 @@ export interface WorldBookEntry {
   id: string;
   world_book_id: string;
   uid: string;
+  outlet_name: string | null;
   key: string[];
   keysecondary: string[];
   content: string;
@@ -227,6 +228,7 @@ export interface CreateWorldBookInput {
 export type UpdateWorldBookInput = Partial<CreateWorldBookInput>;
 
 export interface CreateWorldBookEntryInput {
+  outlet_name?: string | null;
   key?: string[];
   keysecondary?: string[];
   content?: string;
@@ -262,14 +264,60 @@ export interface CreateWorldBookEntryInput {
 
 export type UpdateWorldBookEntryInput = CreateWorldBookEntryInput;
 
+export interface DuplicateWorldBookEntryInput {
+  target_book_id?: string | null;
+}
+
+export interface ReorderWorldBookEntriesInput {
+  ordered_ids: string[];
+}
+
+export interface WorldBookEntryBulkDeleteInput {
+  action: "delete";
+  entry_ids: string[];
+}
+
+export interface WorldBookEntryBulkMoveInput {
+  action: "move";
+  entry_ids: string[];
+  target_book_id: string;
+}
+
+export interface WorldBookEntryBulkRenumberInput {
+  action: "renumber";
+  entry_ids: string[];
+  start?: number | null;
+  step?: number;
+  direction?: "asc" | "desc";
+}
+
+export interface WorldBookEntryBulkAddKeywordInput {
+  action: "add_keyword";
+  entry_ids: string[];
+  keyword: string;
+  target?: "primary" | "secondary";
+}
+
+export type WorldBookEntryBulkActionInput =
+  | WorldBookEntryBulkDeleteInput
+  | WorldBookEntryBulkMoveInput
+  | WorldBookEntryBulkRenumberInput
+  | WorldBookEntryBulkAddKeywordInput;
+
+export interface WorldBookEntryBulkActionResult {
+  action: WorldBookEntryBulkActionInput["action"];
+  affected: number;
+  target_book_id?: string;
+}
+
 // --- World Info Assembly Cache ---
 
 export interface WorldInfoCache {
-  before: Array<{ content: string; role: "system" | "user" | "assistant" }>;         // position 0
-  after: Array<{ content: string; role: "system" | "user" | "assistant" }>;          // position 1
-  anBefore: Array<{ content: string; role: "system" | "user" | "assistant" }>;       // position 2
-  anAfter: Array<{ content: string; role: "system" | "user" | "assistant" }>;        // position 3
-  depth: Array<{ content: string; depth: number; role: "system" | "user" | "assistant" }>; // position 4
-  emBefore: Array<{ content: string; role: "system" | "user" | "assistant" }>;       // position 5
-  emAfter: Array<{ content: string; role: "system" | "user" | "assistant" }>;        // position 6
+  before: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;         // position 0
+  after: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;          // position 1
+  anBefore: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;       // position 2
+  anAfter: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;        // position 3
+  depth: Array<{ content: string; depth: number; role: "system" | "user" | "assistant"; entryLabel: string }>; // position 4
+  emBefore: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;       // position 5
+  emAfter: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;        // position 6
 }

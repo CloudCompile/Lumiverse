@@ -3,10 +3,16 @@ import { FormField, TextInput, Select, Button } from '@/components/shared/FormCo
 import { Toggle } from '@/components/shared/Toggle'
 import { connectionsApi } from '@/api/connections'
 import { useStore } from '@/store'
+import {
+  areReasoningSettingsEqual,
+  getReasoningBindingSummary,
+  normalizeReasoningSettingsForProvider,
+} from '@/lib/reasoning-binding'
 import ModelCombobox from './ModelCombobox'
 import OpenRouterSettings from './OpenRouterSettings'
 import type { ProviderInfo, ConnectionProfile, CreateConnectionProfileInput } from '@/types/api'
 import type { OpenRouterConnectionSettings } from '@/api/openrouter'
+import type { ReasoningSettings } from '@/types/store'
 import styles from '../ConnectionManager.module.css'
 
 interface ConnectionFormProps {
@@ -21,6 +27,7 @@ interface ConnectionFormProps {
 const FALLBACK_PROVIDERS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
+  { value: 'infermatic', label: 'Infermatic' },
   { value: 'pollinations_text', label: 'Pollinations (Text)' },
   { value: 'pollinations', label: 'Pollinations (Gen)' },
   { value: 'openrouter', label: 'OpenRouter' },
@@ -43,8 +50,12 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   const [isDefault, setIsDefault] = useState(profile?.is_default || false)
   const [useResponsesApi, setUseResponsesApi] = useState(profile?.metadata?.use_responses_api || false)
   const [useSubscriptionApi, setUseSubscriptionApi] = useState(profile?.metadata?.use_subscription_api || false)
+  const [useZaiCodingPlanEndpoint, setUseZaiCodingPlanEndpoint] = useState(profile?.metadata?.use_coding_plan_endpoint || false)
   const [bindReasoning, setBindReasoning] = useState(!!profile?.metadata?.reasoningBindings)
   const reasoningSettings = useStore((s) => s.reasoningSettings)
+  const [boundReasoningSettings, setBoundReasoningSettings] = useState<ReasoningSettings>(
+    () => ({ ...(profile?.metadata?.reasoningBindings?.settings || reasoningSettings) })
+  )
   const [models, setModels] = useState<string[]>([])
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -71,10 +82,30 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
   const isPollinations = provider === 'pollinations'
 
   const fetchModels = useCallback(async () => {
-    if (!profile?.id) return
     setModelsLoading(true)
     try {
-      const result = await connectionsApi.models(profile.id)
+      const metadata: Record<string, any> = { ...profile?.metadata }
+      if (provider === 'nanogpt') {
+        metadata.use_subscription_api = useSubscriptionApi
+      } else {
+        delete metadata.use_subscription_api
+      }
+      if (provider === 'zai') {
+        metadata.use_coding_plan_endpoint = useZaiCodingPlanEndpoint
+      } else {
+        delete metadata.use_coding_plan_endpoint
+      }
+      if (isVertexAI) {
+        metadata.vertex_region = vertexRegion
+      }
+
+      const result = await connectionsApi.previewModels({
+        connection_id: profile?.id,
+        provider,
+        api_url: isVertexAI ? undefined : (apiUrl.trim() || undefined),
+        metadata,
+        api_key: apiKey.trim() || undefined,
+      })
       setModels(result.models)
       setModelLabels(result.model_labels || {})
     } catch {
@@ -83,7 +114,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } finally {
       setModelsLoading(false)
     }
-  }, [profile?.id])
+  }, [apiKey, apiUrl, isVertexAI, profile?.id, profile?.metadata, provider, useSubscriptionApi, useZaiCodingPlanEndpoint, vertexRegion])
 
   useEffect(() => {
     if (profile?.id) fetchModels()
@@ -175,10 +206,19 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
 
   const showResponsesApiToggle = provider === 'openai'
   const showSubscriptionApiToggle = provider === 'nanogpt'
+  const showZaiCodingPlanToggle = provider === 'zai'
   const isOpenRouter = provider === 'openrouter'
   // Vertex AI derives its host from `metadata.vertex_region`, so the API URL
   // field has no purpose and we don't display it.
   const hideApiUrl = isOpenRouter || provider === 'nanogpt' || isVertexAI
+  const normalizedBoundReasoningSettings = normalizeReasoningSettingsForProvider(boundReasoningSettings, provider, model)
+  const normalizedCurrentReasoningSettings = normalizeReasoningSettingsForProvider(reasoningSettings, provider, model)
+  const bindingMatchesCurrent = areReasoningSettingsEqual(normalizedBoundReasoningSettings, normalizedCurrentReasoningSettings)
+
+  useEffect(() => {
+    setBindReasoning(!!profile?.metadata?.reasoningBindings)
+    setBoundReasoningSettings({ ...(profile?.metadata?.reasoningBindings?.settings || reasoningSettings) })
+  }, [profile?.id])
 
   const handlePollinationsSignIn = useCallback(async () => {
     setByopStatus(null)
@@ -242,8 +282,13 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } else {
       delete metadata.use_subscription_api
     }
+    if (showZaiCodingPlanToggle) {
+      metadata.use_coding_plan_endpoint = useZaiCodingPlanEndpoint
+    } else {
+      delete metadata.use_coding_plan_endpoint
+    }
     if (bindReasoning) {
-      metadata.reasoningBindings = { settings: { ...reasoningSettings } }
+      metadata.reasoningBindings = { settings: normalizedBoundReasoningSettings }
     } else {
       delete metadata.reasoningBindings
     }
@@ -279,7 +324,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       is_default: isDefault,
       metadata,
     })
-  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, bindReasoning, reasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
+  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, useZaiCodingPlanEndpoint, showZaiCodingPlanToggle, bindReasoning, boundReasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
 
   return (
     <div className={styles.form}>
@@ -358,7 +403,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           <TextInput value={apiUrl} onChange={setApiUrl} placeholder={urlPlaceholder} />
         </FormField>
       )}
-      <FormField label="Model" hint={!profile?.id ? 'Save connection first to fetch model list' : undefined}>
+      <FormField label="Model" hint="Refresh uses the current form values, even before the connection is saved.">
         <ModelCombobox
           value={model}
           onChange={setModel}
@@ -366,7 +411,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           modelLabels={modelLabels}
           loading={modelsLoading}
           onRefresh={fetchModels}
-          disabled={!profile?.id}
+          appearance="standard"
           placeholder={isVertexAI ? 'gemini-2.5-flash' : 'gpt-4o'}
         />
       </FormField>
@@ -381,6 +426,11 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       {showSubscriptionApiToggle && (
         <FormField label="">
           <Toggle.Checkbox checked={useSubscriptionApi} onChange={setUseSubscriptionApi} label="Use Subscription API" hint="Use /api/subscription/v1 to only use models from your NanoGPT subscription" />
+        </FormField>
+      )}
+      {showZaiCodingPlanToggle && (
+        <FormField label="">
+          <Toggle.Checkbox checked={useZaiCodingPlanEndpoint} onChange={setUseZaiCodingPlanEndpoint} label="Use Coding Plan Endpoint" hint="Use /api/coding/paas/v4 for Z.AI Coding Plan access instead of the general /api/paas/v4 endpoint" />
         </FormField>
       )}
       {isOpenRouter && (
@@ -400,6 +450,29 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       <FormField label="">
         <Toggle.Checkbox checked={bindReasoning} onChange={setBindReasoning} label="Bind reasoning settings" hint="Save current reasoning settings and auto-apply when this connection is selected" />
       </FormField>
+      {bindReasoning && (
+        <div className={styles.bindingCard}>
+          <div className={styles.bindingCardHeader}>
+            <div>
+              <div className={styles.bindingCardTitle}>Saved reasoning snapshot</div>
+              <div className={styles.bindingCardSummary}>{getReasoningBindingSummary(normalizedBoundReasoningSettings)}</div>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setBoundReasoningSettings({ ...reasoningSettings })}
+              title={bindingMatchesCurrent ? 'Snapshot already matches the current reasoning settings' : 'Replace the saved snapshot with the current reasoning settings'}
+            >
+              {bindingMatchesCurrent ? 'Captured' : 'Capture Current'}
+            </Button>
+          </div>
+          {!bindingMatchesCurrent && (
+            <div className={styles.bindingCardHint}>
+              Current panel values differ from this connection's saved snapshot.
+            </div>
+          )}
+        </div>
+      )}
       <div className={styles.formActions}>
         <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
         <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!name.trim()}>

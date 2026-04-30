@@ -73,6 +73,18 @@ Both fields are optional. Only provided fields are updated.
 
 `getActive()` reads the `activeChatId` setting that the frontend persists whenever the user opens or closes a chat. This lets extensions discover the current chat without subscribing to events.
 
+You can also react to chat switches in real time by subscribing to the `CHAT_SWITCHED` event:
+
+```ts
+spindle.on('CHAT_SWITCHED', (payload) => {
+  if (payload.chatId) {
+    spindle.log.info(`User switched to chat ${payload.chatId}`)
+  } else {
+    spindle.log.info('User returned to the home screen')
+  }
+})
+```
+
 ```ts
 // React to the active chat
 const active = await spindle.chats.getActive()

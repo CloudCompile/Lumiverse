@@ -33,6 +33,7 @@ These are always available:
 | `"characters"` | Full CRUD on character cards (list, get, create, update, delete) |
 | `"chats"` | CRUD on chat sessions (list, get, update, delete) + get active chat |
 | `"world_books"` | Full CRUD on world books and their entries (list, get, create, update, delete) |
+| `"databanks"` | Full CRUD on databanks and their documents (list, get, create, update, delete, reprocess, read parsed content) |
 | `"personas"` | Full CRUD on personas (list, get, create, update, delete) + active switching + attached world book retrieval |
 | `"chat_mutation"` | Read and modify chat messages (append, update, delete) |
 | `"event_tracking"` | Track, query, and replay extension-level telemetry events |

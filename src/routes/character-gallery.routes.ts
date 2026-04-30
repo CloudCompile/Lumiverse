@@ -3,6 +3,11 @@ import * as svc from "../services/character-gallery.service";
 
 const app = new Hono();
 
+function getGalleryFiles(formData: FormData): File[] {
+  const parts = [...formData.getAll("images"), ...formData.getAll("image")];
+  return parts.filter((part): part is File => part instanceof File && part.size > 0);
+}
+
 // GET / — list gallery items for a character
 app.get("/", (c) => {
   const userId = c.get("userId");
@@ -19,7 +24,7 @@ app.post("/bulk", async (c) => {
   if (!characterId) return c.json({ error: "characterId is required" }, 400);
   const formData = await c.req.formData();
 
-  const files = formData.getAll("images") as File[];
+  const files = getGalleryFiles(formData);
   if (!files.length) return c.json({ error: "images are required" }, 400);
   if (files.length > 100) return c.json({ error: "Maximum 100 images per request" }, 400);
 
@@ -34,7 +39,7 @@ app.post("/", async (c) => {
   if (!characterId) return c.json({ error: "characterId is required" }, 400);
   const formData = await c.req.formData();
 
-  const file = formData.get("image") as File | null;
+  const file = getGalleryFiles(formData)[0] ?? null;
   if (!file) return c.json({ error: "image file is required" }, 400);
 
   const caption = (formData.get("caption") as string) || "";

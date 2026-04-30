@@ -32,56 +32,71 @@ const ENTITY_BLOCKLIST = new Set([
 
 // ─── System Prompt ─────────────────────────────────────────────
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a narrative data extractor for a roleplay memory system. You will be given a passage of roleplay text. Your job is to call ALL four provided tools to extract structured data from it.
+const EXTRACTION_SYSTEM_PROMPT = `You are a deterministic extraction engine for a roleplay memory system.
 
-## YOUR WORKFLOW
+Convert ONE passage into structured data by calling ALL FOUR tools exactly once.
+Return empty arrays when a tool has nothing to report.
 
-1. **score_salience** — Rate the passage's narrative importance and tag emotional tones and story events.
-2. **extract_entities** — Identify every named person, place, thing, faction, or event that appears by proper name.
-3. **extract_relationships** — For each pair of named entities that interact in this passage, record their relationship.
-4. **extract_font_colors** — If HTML color tags are present, map each color to the character who speaks/narrates in it.
+GLOBAL RULES
+- Use ONLY evidence from the exact passage.
+- Do NOT use genre knowledge, outside world knowledge, or likely guesses.
+- Do NOT invent names, relationships, motives, symbolism, themes, or implications.
+- If a detail is ambiguous, weakly implied, or unsupported, omit it.
+- Prefer omission over contamination. Missing data is acceptable; wrong data is harmful.
+- Treat each tool independently. A relationship or fact must be supported by the passage itself.
 
-You MUST call every tool exactly once. Use empty arrays when a tool has nothing to report.
+TOOL CHECKLIST
+1. score_salience
+2. extract_entities
+3. extract_relationships
+4. extract_font_colors
 
-## ENTITY EXTRACTION RULES
-
-An entity is a **proper name** — a unique identifier for a specific person, place, thing, or group.
-- GOOD: "Melina", "Thornhaven", "Sixth Street", "Dark Brotherhood", "Excalibur"
-- BAD: "Barely", "Personal", "Cost", "Strange", "STOP", "Having climbed"
-
-When known entities are listed below with aliases, ALWAYS use the canonical (primary) name, never a nickname. For NEW entities not in the known list, use the exact name from the passage.
+ENTITY RULES
+An entity is a proper name for a specific character, place, item, faction, event, or named concept.
+- Good: "Melina", "Thornhaven", "Sixth Street", "Dark Brotherhood", "Excalibur"
+- Bad: "Barely", "Personal", "Cost", "Strange", "STOP", "Having climbed"
 
 Do NOT extract:
-- Common English words, even if capitalized (sentence starts, after em-dashes, dialogue)
-- Verbs, adjectives, adverbs, or sentence fragments
-- ALL-CAPS words (emphasis/shouting in roleplay, not proper nouns)
+- Capitalized common words caused by sentence starts or formatting
+- Verbs, adjectives, adverbs, interjections, or sentence fragments
+- ALL-CAPS emphasis words
 - Meta-references: User, You, AI, Player, Narrator, Character, Assistant, System, Bot, Human, NPC, OOC
-- Pronouns or pronoun-only references — if someone is only called "she" or "he", skip them
-- When uncertain, skip it. Missing an entity is fine; extracting garbage corrupts the database.
+- Pronouns or pronoun-only references
+- Tracker/header scaffolding such as timestamps, weather labels, status readouts, HUD labels, emoji wrappers, or repeated metadata blocks unless they contain a real proper name that matters outside the scaffold
 
-## NICKNAME / ALIAS DISCOVERY
+KNOWN ENTITY RULE
+When known entities are supplied with aliases, ALWAYS use the canonical name in tool output, never the alias.
+For truly new entities, use the exact proper name from the passage.
 
-Watch for moments where the text reveals that a name is a nickname, alias, or alternate form for a known entity. Common patterns:
-- "Call me X", "People call me X", "Known as X", "Friends call her X"
-- "X — or Y as she preferred", "X, nicknamed Y"
-- Shortened/diminutive forms used interchangeably with a full name in the same passage (e.g., "Mel" used for "Melina", "Liz" for "Elizabeth")
-- Titles or epithets used as names ("The Iron Queen" for "Seraphina")
+ALIAS RULE
+Only report discovered_aliases when the passage explicitly reveals that two names refer to the same entity.
+Good evidence includes statements such as "Call me X", "known as X", "X, nicknamed Y", or a clear full-name/short-name equivalence in the same passage.
+Do NOT guess aliases from vibe or superficial similarity alone.
 
-When you detect a nickname or alias, report it in the discovered_aliases array of the extract_entities tool. Use the CANONICAL name as canonical_name and the nickname as alias. This is critical for preventing duplicate entity records.
+RELATIONSHIP RULES
+- Both source and target must be proper names present in the passage.
+- Only record a relationship when the passage directly supports an enduring or role-like connection, or explicitly states the relationship.
+- Do NOT create a relationship just because two named entities appear in the same scene, speak once, stand near each other, or are mentioned together.
+- Do NOT infer hidden history, likely alliances, family ties, or romance unless the passage itself supports it.
+- If the passage shows only a transient interaction with no stable relationship signal, return no relationship for that pair.
 
-## RELATIONSHIP RULES
+SCORING RULES
+- Importance is about lasting narrative consequence, not prose intensity.
+- Score high for durable changes: deaths, betrayals, discoveries, promises, arrivals, departures, confessions, transformations, status shifts, major gains/losses.
+- Score low for filler, routine banter, scene dressing, repeated habits, or atmospheric prose with no lasting consequence.
+- key_facts must be concrete, verifiable statements traceable to the passage. Prefer durable developments over filler.
+- Do NOT put impressions, themes, personality judgments, or unsupported interpretations in key_facts.
 
-Both source and target must be proper names that appear in the passage. Never create relationships between aliases of the same entity, or with pronouns/meta-references.
-
-## SCORING RULES
-
-Score importance by **lasting narrative consequence** (deaths, promises, discoveries, revelations) — NOT by dramatic prose style or emotional intensity of the writing. Key facts must be concrete and verifiable: names learned, items acquired, locations visited, promises made.`;
+FONT COLOR RULES
+- Only report colors that are actually present in HTML color tags in the passage.
+- Map each color to the named character directly supported by the passage.
+- If the owner of a color is unclear, omit that attribution instead of guessing.`;
 
 // ─── Tool Definitions ──────────────────────────────────────────
 
 const TOOL_SALIENCE: ToolDefinition = {
   name: "score_salience",
-  description: "Rate the passage's narrative importance and identify emotional tones and story signals.",
+  description: "Score lasting narrative consequence only. Return factual emotional_tones, narrative_flags, and key_facts that are directly supported by the passage. Use empty arrays for anything absent.",
   parameters: {
     type: "object",
     properties: {
@@ -94,26 +109,26 @@ const TOOL_SALIENCE: ToolDefinition = {
       emotional_tones: {
         type: "array",
         items: { type: "string", enum: ["grief", "joy", "tension", "dread", "intimacy", "betrayal", "revelation", "resolve", "humor", "melancholy", "awe", "fury"] },
-        description: "Up to 3 emotional tones clearly expressed in the passage (not merely implied by dramatic prose).",
+        description: "Up to 3 emotional tones clearly expressed in the passage. Do not tag tone based only on dramatic writing style.",
       },
       narrative_flags: {
         type: "array",
         items: { type: "string", enum: ["first_meeting", "death", "promise", "confession", "departure", "transformation", "battle", "discovery", "reunion", "loss"] },
-        description: "Story events that actually occur in this passage. Only include flags that genuinely apply.",
+        description: "Story events that explicitly occur in this passage. Empty array if none.",
       },
       key_facts: {
         type: "array",
         items: { type: "string" },
-        description: "Concrete, verifiable facts from the text. Examples: 'Melina promised to return', 'The sword was broken', 'They arrived at Dustwell'. Not vibes or impressions.",
+        description: "Concrete, verifiable facts from the passage. Prefer durable developments over filler. Good: 'Melina promised to return', 'The sword was broken', 'They arrived at Dustwell'. Bad: 'The mood was intense', 'Kael seemed suspicious'. Empty array if nothing durable happened.",
       },
     },
-    required: ["importance", "emotional_tones"],
+    required: ["importance", "emotional_tones", "narrative_flags", "key_facts"],
   },
 };
 
 const TOOL_ENTITIES: ToolDefinition = {
   name: "extract_entities",
-  description: "Extract named entities (people, places, things, factions) that appear by proper name in the passage. Return an empty array if no proper nouns appear.",
+  description: "Extract only proper-name entities that appear in the passage. Reject capitalized common words, pronouns, meta references, and formatting noise. Use canonical known names when provided. Return empty arrays when nothing qualifies.",
   parameters: {
     type: "object",
     properties: {
@@ -126,7 +141,7 @@ const TOOL_ENTITIES: ToolDefinition = {
             type: {
               type: "string",
               enum: ["character", "location", "item", "faction", "event", "concept"],
-              description: "character=named person/creature, location=named place/address, item=named object/weapon/vehicle, faction=named group/org, event=named historical occurrence, concept=named doctrine/prophecy (rarest — prefer other types when uncertain).",
+              description: "character=named person/creature, location=named place/address, item=named object/weapon/vehicle, faction=named group/org, event=named historical occurrence, concept=named doctrine/prophecy. Use concept rarely; prefer more concrete types when supported.",
             },
             role: {
               type: "string",
@@ -136,7 +151,7 @@ const TOOL_ENTITIES: ToolDefinition = {
           },
           required: ["name", "type"],
         },
-        description: "Named entities found in the passage.",
+        description: "Proper-name entities found in the passage. Empty array if none.",
       },
       discovered_aliases: {
         type: "array",
@@ -145,11 +160,11 @@ const TOOL_ENTITIES: ToolDefinition = {
           properties: {
             canonical_name: { type: "string", description: "The known/full/primary name of the entity (must match a known entity or be the longer form)." },
             alias: { type: "string", description: "The nickname, shortened name, title, or alternate form discovered in this passage." },
-            evidence: { type: "string", description: "Brief quote or context showing the alias connection (e.g., 'Call me Mel')." },
+            evidence: { type: "string", description: "Brief quote or context showing the alias connection, e.g. 'Call me Mel'." },
           },
           required: ["canonical_name", "alias"],
         },
-        description: "Nicknames, aliases, or alternate names discovered in this passage that refer to known entities. Report when the text reveals X is also known as Y. Empty array if none.",
+        description: "Aliases only when the passage explicitly reveals that two names refer to the same entity. Empty array if none.",
       },
       status_changes: {
         type: "array",
@@ -160,22 +175,22 @@ const TOOL_ENTITIES: ToolDefinition = {
             change: {
               type: "string",
               enum: ["injured", "healed", "died", "transformed", "betrayed", "allied", "departed", "arrived"],
-              description: "What happened to this entity.",
+              description: "What explicitly happened to this entity in the passage.",
             },
-            detail: { type: "string", description: "Brief description of the change." },
+            detail: { type: "string", description: "Brief factual description of the change, not interpretation." },
           },
           required: ["entity", "change"],
         },
         description: "Status changes that explicitly occurred in this passage. Empty array if none.",
       },
     },
-    required: ["entities"],
+    required: ["entities", "discovered_aliases", "status_changes"],
   },
 };
 
 const TOOL_RELATIONSHIPS: ToolDefinition = {
   name: "extract_relationships",
-  description: "Extract relationships between pairs of named entities that both appear in the passage. Both source and target must be proper names from the text. Return an empty array if fewer than 2 named entities appear.",
+  description: "Extract only directly supported relationships between named entities in the passage. Do not infer relationships from co-presence alone. Return an empty array if no stable or explicit relationship is supported.",
   parameters: {
     type: "object",
     properties: {
@@ -189,14 +204,14 @@ const TOOL_RELATIONSHIPS: ToolDefinition = {
             type: {
               type: "string",
               enum: ["ally", "enemy", "lover", "parent", "child", "sibling", "mentor", "rival", "owns", "member_of", "located_in", "fears", "serves", "custom"],
-              description: "The kind of relationship between these two entities.",
+              description: "The relationship directly supported by the passage. Use custom when the connection is explicit but does not fit another enum.",
             },
-            label: { type: "string", description: "Brief human-readable descriptor, e.g. 'childhood friends', 'sworn enemies'." },
-            sentiment: { type: "number", minimum: -1, maximum: 1, description: "Emotional valence: -1.0 (hostile) to 1.0 (warm)." },
+            label: { type: "string", description: "Short factual descriptor, e.g. 'childhood friends', 'captain of', 'sworn enemies'. Do not use poetic language." },
+            sentiment: { type: "number", minimum: -1, maximum: 1, description: "Emotional valence of the relationship as shown in the passage: -1.0 hostile, 0 neutral/unclear, 1.0 warm." },
           },
           required: ["source", "target", "type"],
         },
-        description: "Relationships between named entities in the passage.",
+        description: "Relationships directly supported by the passage. Empty array if none.",
       },
     },
     required: ["relationships"],
@@ -205,7 +220,7 @@ const TOOL_RELATIONSHIPS: ToolDefinition = {
 
 const TOOL_FONT_COLORS: ToolDefinition = {
   name: "extract_font_colors",
-  description: "Map HTML color tags to characters. If the passage contains <font color=...> or <span style='color:...'> tags, identify which named character speaks or narrates in each color. Return an empty array if no color tags are present.",
+  description: "Map HTML color tags to named characters only when the passage supports the attribution. Return an empty array if no color tags are present or the owner is unclear.",
   parameters: {
     type: "object",
     properties: {
@@ -215,7 +230,7 @@ const TOOL_FONT_COLORS: ToolDefinition = {
           type: "object",
           properties: {
             hex_color: { type: "string", description: "The hex color value, e.g. '#ff9999' or '#E6E6FA'." },
-            character_name: { type: "string", description: "Proper name of the character who uses this color." },
+            character_name: { type: "string", description: "Canonical proper name of the character who uses this color." },
             usage_type: {
               type: "string",
               enum: ["speech", "thought", "narration"],
@@ -224,7 +239,7 @@ const TOOL_FONT_COLORS: ToolDefinition = {
           },
           required: ["hex_color", "character_name", "usage_type"],
         },
-        description: "Color-to-character mappings found in the passage.",
+        description: "Color-to-character mappings found in the passage. Empty array if none.",
       },
     },
     required: ["color_attributions"],
@@ -278,7 +293,7 @@ export function parseToolCallResults(
         importance = typeof args.importance === "number" ? args.importance : 5;
         emotionalTags = validateEmotionalTags(args.emotional_tones);
         narrativeFlags = validateNarrativeFlags(args.narrative_flags);
-        keyFacts = Array.isArray(args.key_facts) ? args.key_facts.filter((f: any) => typeof f === "string") : [];
+        keyFacts = validateKeyFacts(args.key_facts);
         break;
       case "extract_entities":
         entities = validateEntities(args.entities);
@@ -449,9 +464,9 @@ export async function extractWithSidecar(
           const aliasStr = e.aliases.length > 0 ? ` (aka ${e.aliases.join(", ")})` : "";
           return `- ${e.name} [${e.type}]${aliasStr}`;
         });
-      entityHint = `\n\nKnown entities — ALWAYS use the canonical name, never aliases:\n${lines.join("\n")}`;
+      entityHint = `\n\n<known_entities>\nUse these canonical names when they match the passage. Never output an alias when a canonical name is listed here.\n${lines.join("\n")}\n</known_entities>`;
     } else if (options?.characterNames?.length) {
-      entityHint = `\nKnown characters in this roleplay: ${options.characterNames.join(", ")}. Extract these if they appear, plus any NEW proper names.`;
+      entityHint = `\n\n<known_characters>\n${options.characterNames.join(", ")}\n</known_characters>\nUse these names exactly if they appear.`;
     }
 
     const response = await generateRawFn({
@@ -463,7 +478,7 @@ export async function extractWithSidecar(
         },
         {
           role: "user",
-          content: `Analyze this roleplay passage by calling all four tools: score_salience, extract_entities, extract_relationships, and extract_font_colors. Use empty arrays for tools with nothing to report.${entityHint}\n\n<passage>\n${content}\n</passage>`,
+          content: `Analyze the exact roleplay passage below. Call score_salience, extract_entities, extract_relationships, and extract_font_colors exactly once each. Use only the text below as evidence. Use empty arrays when nothing qualifies.${entityHint}\n\n<passage>\n${content}\n</passage>`,
         },
       ],
       parameters: { temperature: 0.1 },
@@ -495,7 +510,7 @@ export async function extractWithSidecar(
       emotionalTags: validateEmotionalTags(json.emotional_tones),
       narrativeFlags: validateNarrativeFlags(json.narrative_flags),
       statusChanges: validateStatusChanges(json.status_changes),
-      keyFacts: Array.isArray(json.key_facts) ? json.key_facts.filter((f: any) => typeof f === "string") : [],
+      keyFacts: validateKeyFacts(json.key_facts),
       entitiesPresent: fbEntities,
       relationshipsShown: fbRelationships,
       fontColors: validateFontColors(json.color_attributions),
@@ -654,16 +669,40 @@ function validateNarrativeFlags(raw: any): NarrativeFlag[] {
   return raw.filter((f) => VALID_NARRATIVE_FLAGS.has(f));
 }
 
+function validateKeyFacts(raw: any): string[] {
+  if (!Array.isArray(raw)) return [];
+
+  const seen = new Set<string>();
+  const facts: string[] = [];
+
+  for (const fact of raw) {
+    if (typeof fact !== "string") continue;
+    const cleaned = fact.replace(/\s+/g, " ").trim();
+    if (cleaned.length < 8 || cleaned.length > 220) continue;
+    if (!/[a-zA-Z]/.test(cleaned)) continue;
+    if (!cleaned.includes(" ")) continue;
+    if (/^[A-Z\s]+$/.test(cleaned)) continue;
+    if (/[:;,\-]$/.test(cleaned)) continue;
+
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    facts.push(cleaned);
+  }
+
+  return facts;
+}
+
 function validateStatusChanges(raw: any): StatusChange[] {
   if (!Array.isArray(raw)) return [];
   return raw.filter(
     (s: any) =>
       s && typeof s.entity === "string" && typeof s.change === "string",
   ).map((s: any) => ({
-    entity: s.entity,
+    entity: s.entity.trim(),
     change: s.change,
     detail: typeof s.detail === "string" ? s.detail : "",
-  }));
+  })).filter((s) => isValidEntityName(s.entity));
 }
 
 // ─── Entity Name Validation ───────────────────────────────────
@@ -827,13 +866,15 @@ function validateRelationships(raw: any): ExtractedRelationship[] {
         r &&
         typeof r.source === "string" &&
         typeof r.target === "string" &&
-        r.source !== r.target,
+        r.source.trim().toLowerCase() !== r.target.trim().toLowerCase() &&
+        isValidEntityName(r.source) &&
+        isValidEntityName(r.target),
     )
     .map((r: any) => ({
-      source: r.source,
-      target: r.target,
+      source: r.source.trim(),
+      target: r.target.trim(),
       type: VALID_RELATION_TYPES.has(r.type) ? r.type : "custom",
-      label: typeof r.label === "string" ? r.label : "",
+      label: typeof r.label === "string" ? r.label.trim() : "",
       sentiment: typeof r.sentiment === "number" ? Math.max(-1, Math.min(1, r.sentiment)) : 0,
     }));
 }
@@ -849,7 +890,8 @@ function validateFontColors(raw: any): SidecarFontColor[] {
         typeof c.hex_color === "string" &&
         typeof c.character_name === "string" &&
         c.character_name.length > 0 &&
-        !ENTITY_BLOCKLIST.has(c.character_name.toLowerCase().trim()),
+        !ENTITY_BLOCKLIST.has(c.character_name.toLowerCase().trim()) &&
+        isValidEntityName(c.character_name),
     )
     .map((c: any) => ({
       hexColor: c.hex_color.toLowerCase().trim(),
@@ -868,6 +910,8 @@ function validateDiscoveredAliases(raw: any): DiscoveredAlias[] {
         typeof a.alias === "string" &&
         a.canonical_name.trim().length > 0 &&
         a.alias.trim().length > 0 &&
+        isValidEntityName(a.canonical_name) &&
+        isValidEntityName(a.alias) &&
         // Alias must differ from canonical name
         a.canonical_name.trim().toLowerCase() !== a.alias.trim().toLowerCase(),
     )

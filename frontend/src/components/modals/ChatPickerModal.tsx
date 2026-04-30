@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { Check, MessageSquare, Plus, MoreHorizontal, Pencil, Download, Trash2 } from 'lucide-react'
+import { Check, MessageSquare, Plus, MoreHorizontal, Pencil, Download, Trash2, Sparkles } from 'lucide-react'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
@@ -52,11 +53,41 @@ export default function ChatPickerModal({
   const [items, setItems] = useState<ChatSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null)
+  const [activeMenuPos, setActiveMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<ChatSummary | null>(null)
 
   const renameInputRef = useRef<HTMLInputElement>(null)
+  const menuButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  const menuPopoverRef = useRef<HTMLDivElement>(null)
+
+  const updateActiveMenuPosition = useCallback((chatId: string) => {
+    const trigger = menuButtonRefs.current[chatId]
+    if (!trigger) {
+      setActiveMenuPos(null)
+      return
+    }
+
+    const rect = trigger.getBoundingClientRect()
+    const viewportPadding = 8
+    const dropdownWidth = menuPopoverRef.current?.offsetWidth ?? 140
+    const dropdownHeight = menuPopoverRef.current?.offsetHeight ?? 116
+    const spaceBelow = window.innerHeight - rect.bottom
+    const openUp = spaceBelow < dropdownHeight + viewportPadding && rect.top > spaceBelow
+    const left = Math.min(
+      Math.max(viewportPadding, rect.right - dropdownWidth),
+      window.innerWidth - dropdownWidth - viewportPadding,
+    )
+    const top = openUp
+      ? Math.max(viewportPadding, rect.top - dropdownHeight - 6)
+      : Math.min(window.innerHeight - dropdownHeight - viewportPadding, rect.bottom + 6)
+
+    setActiveMenuPos((prev) => {
+      if (prev?.top === top && prev?.left === left) return prev
+      return { top, left }
+    })
+  }, [])
 
   useEffect(() => {
     let mounted = true
@@ -83,6 +114,10 @@ export default function ChatPickerModal({
   }, [renamingId])
 
   useEffect(() => {
+    if (!activeMenuId) setActiveMenuPos(null)
+  }, [activeMenuId])
+
+  useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (renamingId) {
@@ -100,16 +135,58 @@ export default function ChatPickerModal({
         onDismiss()
       }
     }
-    const handleClickOutside = () => {
-      if (activeMenuId) setActiveMenuId(null)
-    }
     document.addEventListener('keydown', handleEscape)
-    document.addEventListener('click', handleClickOutside)
     return () => {
       document.removeEventListener('keydown', handleEscape)
-      document.removeEventListener('click', handleClickOutside)
     }
   }, [onDismiss, renamingId, activeMenuId, deleteTarget])
+
+  useEffect(() => {
+    if (!activeMenuId) return
+
+    const openedAt = performance.now()
+    const handlePointerDown = (e: PointerEvent) => {
+      if (!e.isTrusted) return
+      if (performance.now() - openedAt < 100) return
+
+      const target = e.target as Node | null
+      if (!target) return
+
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : []
+      const trigger = menuButtonRefs.current[activeMenuId]
+      const popover = menuPopoverRef.current
+      const inTrigger = !!trigger && (trigger.contains(target) || path.includes(trigger))
+      const inPopover = !!popover && (popover.contains(target) || path.includes(popover))
+
+      if (!inTrigger && !inPopover) setActiveMenuId(null)
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => document.removeEventListener('pointerdown', handlePointerDown)
+  }, [activeMenuId])
+
+  useLayoutEffect(() => {
+    if (!activeMenuId) return
+    updateActiveMenuPosition(activeMenuId)
+  }, [activeMenuId, updateActiveMenuPosition])
+
+  useLayoutEffect(() => {
+    if (!activeMenuId || !activeMenuPos || !menuPopoverRef.current) return
+    updateActiveMenuPosition(activeMenuId)
+  }, [activeMenuId, activeMenuPos, updateActiveMenuPosition])
+
+  useEffect(() => {
+    if (!activeMenuId) return
+
+    const handleReposition = () => updateActiveMenuPosition(activeMenuId)
+    window.addEventListener('resize', handleReposition)
+    window.addEventListener('scroll', handleReposition, true)
+
+    return () => {
+      window.removeEventListener('resize', handleReposition)
+      window.removeEventListener('scroll', handleReposition, true)
+    }
+  }, [activeMenuId, updateActiveMenuPosition])
 
   const handleConfirmRename = async (chatId: string) => {
     const trimmed = renameValue.trim()
@@ -159,10 +236,11 @@ export default function ChatPickerModal({
     setDeleteTarget(null)
   }
 
-  const handleNewChat = async () => {
+  const handleNewChat = async (options?: { memoryIsolation?: boolean }) => {
     try {
       setLoading(true)
-      const chat = await chatsApi.create({ character_id: characterId })
+      const metadata = options?.memoryIsolation ? { memory_isolation: true } : undefined
+      const chat = await chatsApi.create({ character_id: characterId, metadata })
       onSelect(chat.id)
     } catch (err) {
       console.error('[Lumiverse] Failed to create new chat:', err)
@@ -193,7 +271,7 @@ export default function ChatPickerModal({
           <button
             type="button"
             className={clsx(styles.card, styles.newChatCard)}
-            onClick={handleNewChat}
+            onClick={() => handleNewChat()}
             disabled={loading}
           >
             <div className={styles.newChatIcon}>
@@ -201,6 +279,23 @@ export default function ChatPickerModal({
             </div>
             <div className={styles.cardHeader}>
               <span className={styles.cardLabel}>Start New Chat</span>
+            </div>
+          </button>
+
+          {/* Action Card: Fresh Chat — no character-scoped long-term memory */}
+          <button
+            type="button"
+            className={clsx(styles.card, styles.freshChatCard)}
+            onClick={() => handleNewChat({ memoryIsolation: true })}
+            disabled={loading}
+            title="Starts a new chat that does not pull in documents or memory from this character's other chats. World books and personality still apply."
+          >
+            <div className={styles.freshChatIcon}>
+              <Sparkles size={14} strokeWidth={2.5} />
+            </div>
+            <div className={clsx(styles.cardHeader, styles.freshChatHeader)}>
+              <span className={styles.cardLabel}>Start Fresh Chat</span>
+              <span className={styles.freshChatSubtitle}>No long-term memories from prior chats</span>
             </div>
           </button>
 
@@ -252,6 +347,9 @@ export default function ChatPickerModal({
                   )}
 
                   <button
+                    ref={(node) => {
+                      menuButtonRefs.current[item.id] = node
+                    }}
                     type="button"
                     className={clsx(styles.menuBtn, isMenuOpen && styles.menuBtnActive)}
                     onClick={(e) => {
@@ -262,57 +360,6 @@ export default function ChatPickerModal({
                   >
                     <MoreHorizontal size={14} />
                   </button>
-
-                  <AnimatePresence>
-                    {isMenuOpen && (
-                      <motion.div
-                        className={styles.dropdown}
-                        initial={{ opacity: 0, scale: 0.95, y: -5 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95, y: -5 }}
-                        transition={{ duration: 0.15 }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <button
-                          type="button"
-                          className={styles.dropdownItem}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setRenamingId(item.id)
-                            setRenameValue(item.name || '')
-                            setActiveMenuId(null)
-                          }}
-                        >
-                          <Pencil size={14} />
-                          Rename
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.dropdownItem}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleExport(item.id, formatChatName(item))
-                            setActiveMenuId(null)
-                          }}
-                        >
-                          <Download size={14} />
-                          Export
-                        </button>
-                        <button
-                          type="button"
-                          className={clsx(styles.dropdownItem, styles.dropdownItemDanger)}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setDeleteTarget(item)
-                            setActiveMenuId(null)
-                          }}
-                        >
-                          <Trash2 size={14} />
-                          Delete
-                        </button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
                 </div>
 
                 <div className={styles.cardPreview}>
@@ -332,6 +379,66 @@ export default function ChatPickerModal({
           </AnimatePresence>
         </div>
       </ModalShell>
+
+      <AnimatePresence>
+        {activeMenuId && activeMenuPos && createPortal(
+          <motion.div
+            ref={menuPopoverRef}
+            className={clsx(styles.dropdown, styles.dropdownPortal)}
+            style={{ top: activeMenuPos.top, left: activeMenuPos.left }}
+            initial={{ opacity: 0, scale: 0.95, y: -5 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: -5 }}
+            transition={{ duration: 0.15 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className={styles.dropdownItem}
+              onClick={(e) => {
+                e.stopPropagation()
+                const item = items.find((chat) => chat.id === activeMenuId)
+                if (!item) return
+                setRenamingId(item.id)
+                setRenameValue(item.name || '')
+                setActiveMenuId(null)
+              }}
+            >
+              <Pencil size={14} />
+              Rename
+            </button>
+            <button
+              type="button"
+              className={styles.dropdownItem}
+              onClick={(e) => {
+                e.stopPropagation()
+                const item = items.find((chat) => chat.id === activeMenuId)
+                if (!item) return
+                handleExport(item.id, formatChatName(item))
+                setActiveMenuId(null)
+              }}
+            >
+              <Download size={14} />
+              Export
+            </button>
+            <button
+              type="button"
+              className={clsx(styles.dropdownItem, styles.dropdownItemDanger)}
+              onClick={(e) => {
+                e.stopPropagation()
+                const item = items.find((chat) => chat.id === activeMenuId)
+                if (!item) return
+                setDeleteTarget(item)
+                setActiveMenuId(null)
+              }}
+            >
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </motion.div>,
+          document.body,
+        )}
+      </AnimatePresence>
 
       <ConfirmationModal
         isOpen={deleteTarget !== null}

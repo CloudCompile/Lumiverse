@@ -6,9 +6,11 @@ import { useStore } from '@/store'
 import { spindleApi } from '@/api/spindle'
 import type { ExtensionInfo, SpindlePermission } from 'lumiverse-spindle-types'
 import SpindleUIControlPanel from '@/components/spindle/SpindleUIControlPanel'
+import SpindleSettings from './SpindleSettings'
 import { Spinner } from '@/components/shared/Spinner'
 import { Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { getSafeHttpsUrl } from '@/lib/navigationSafety'
 import { toast } from '@/lib/toast'
 import styles from './SpindlePanel.module.css'
 import clsx from 'clsx'
@@ -87,7 +89,11 @@ export default function SpindlePanel() {
     [loadingAction, extensionOperationStatus]
   )
 
+  // Extensions are also loaded on auth and resynced on WS events
+  // (see `useWebSocket.ts`), so if the store is already populated we skip
+  // the redundant mount-time fetch — the list is kept fresh by the WS layer.
   useEffect(() => {
+    if (useStore.getState().extensions.length > 0) return
     loadExtensions()
   }, [loadExtensions])
 
@@ -369,6 +375,8 @@ export default function SpindlePanel() {
 
       {importSummary && <div className={styles.importSummary}>{importSummary}</div>}
 
+      <SpindleSettings />
+
       <SpindleUIControlPanel />
 
       {/* Extensions list */}
@@ -531,10 +539,10 @@ export default function SpindlePanel() {
                     ? <Spinner size={14} fast />
                     : <RotateCw size={14} />}
                 />
-                {ext.github && (
+                {getSafeHttpsUrl(ext.github) && (
                   <a
                     className={styles.githubLink}
-                    href={ext.github}
+                    href={getSafeHttpsUrl(ext.github)!}
                     target="_blank"
                     rel="noopener noreferrer"
                     title="GitHub"

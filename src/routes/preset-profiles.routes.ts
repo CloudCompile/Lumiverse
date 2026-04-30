@@ -10,7 +10,10 @@ const app = new Hono();
 
 app.get("/defaults", (c) => {
   const userId = c.get("userId");
-  const defaults = svc.getDefaults(userId);
+  const presetId = c.req.query("preset_id");
+  if (!presetId) return c.json({ error: "preset_id query param is required" }, 400);
+
+  const defaults = svc.getDefaults(userId, presetId);
   if (!defaults) return c.json({ error: "No defaults captured" }, 404);
   return c.json(defaults);
 });
@@ -21,13 +24,21 @@ app.put("/defaults", async (c) => {
   if (!body.preset_id || !body.block_states) {
     return c.json({ error: "preset_id and block_states are required" }, 400);
   }
-  const binding = svc.captureDefaults(userId, body.preset_id, body.block_states);
-  return c.json(binding);
+  try {
+    const binding = svc.captureDefaults(userId, body.preset_id, body.block_states);
+    return c.json(binding);
+  } catch (e: any) {
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
+    throw e;
+  }
 });
 
 app.delete("/defaults", (c) => {
   const userId = c.get("userId");
-  if (!svc.deleteDefaults(userId)) return c.json({ error: "No defaults to delete" }, 404);
+  const presetId = c.req.query("preset_id");
+  if (!presetId) return c.json({ error: "preset_id query param is required" }, 400);
+
+  if (!svc.deleteDefaults(userId, presetId)) return c.json({ error: "No defaults to delete" }, 404);
   return c.json({ success: true });
 });
 
@@ -58,6 +69,7 @@ app.put("/character/:characterId", async (c) => {
     return c.json(binding);
   } catch (e: any) {
     if (e.message === "Character not found") return c.json({ error: e.message }, 404);
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
     throw e;
   }
 });
@@ -101,6 +113,7 @@ app.put("/chat/:chatId", async (c) => {
     return c.json(binding);
   } catch (e: any) {
     if (e.message === "Chat not found") return c.json({ error: e.message }, 404);
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
     throw e;
   }
 });
@@ -120,14 +133,15 @@ app.delete("/chat/:chatId", (c) => {
 app.get("/resolve/:chatId", (c) => {
   const userId = c.get("userId");
   const presetId = c.req.query("preset_id");
-  if (!presetId) return c.json({ error: "preset_id query param is required" }, 400);
 
   const chatId = c.req.param("chatId");
 
   const chat = chatsSvc.getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  const resolved = svc.resolveProfile(userId, presetId, chatId, chat.character_id);
+  const resolved = svc.resolveProfile(userId, presetId ?? null, chatId, chat.character_id, {
+    isGroup: chat.metadata?.group === true,
+  });
   return c.json(resolved);
 });
 

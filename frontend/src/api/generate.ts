@@ -1,4 +1,5 @@
 import { get, post, type RequestOptions } from './client'
+import { flushSettingsNow } from '@/store/slices/settings'
 
 /** Generation requests go through prompt assembly + council + embedding calls
  *  which can legitimately take longer than the default 30s client timeout. */
@@ -13,15 +14,20 @@ export interface GenerateRequest {
   connection_id?: string
   persona_id?: string
   preset_id?: string
+  force_preset_id?: boolean
   message_id?: string
   continue_from?: string
   force_name?: string
   generation_type?: GenerationType
   impersonate_mode?: ImpersonateMode
+  /** For impersonate: free-form text from the input box, appended to the impersonation prompt. */
+  impersonate_input?: string
   target_character_id?: string
   regen_feedback?: string
   regen_feedback_position?: 'system' | 'user'
   retain_council?: boolean
+  /** Dry-run only: reassemble as if this message were absent from history. */
+  exclude_message_id?: string
 }
 
 export interface GenerateResponse {
@@ -32,10 +38,24 @@ export interface QuietGenerateRequest {
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[]
   connection_id?: string
   parameters?: Record<string, any>
+  /**
+   * Optional chat id. When passed to the `/generate/summarize` endpoint, the
+   * server registers the job in its summarize-pool so frontends can recover
+   * in-flight state via `getSummarizeStatus` and the `SUMMARIZATION_*` WS
+   * events.
+   */
+  chat_id?: string
+}
+
+export interface SummarizeStatusResponse {
+  active: boolean
+  generationId?: string
+  startedAt?: number
 }
 
 export interface QuietGenerateResponse {
   content: string
+  reasoning?: string
   finish_reason: string
   usage?: {
     prompt_tokens: number
@@ -60,6 +80,10 @@ export interface AssemblyBreakdownEntry {
   role?: string
   content?: string
   blockId?: string
+  extensionId?: string
+  extensionName?: string
+  messageCount?: number
+  firstMessageIndex?: number
 }
 
 export interface DryRunResponse {
@@ -71,7 +95,14 @@ export interface DryRunResponse {
   provider: string
   tokenCount?: {
     total_tokens: number
-    breakdown: { name: string; type: string; tokens: number; role?: string }[]
+    breakdown: {
+      name: string
+      type: string
+      tokens: number
+      role?: string
+      extensionId?: string
+      extensionName?: string
+    }[]
     tokenizer_id: string | null
     tokenizer_name: string | null
   }
@@ -103,10 +134,45 @@ export interface DryRunResponse {
     queryPreview: string
     settingsSource: 'global' | 'per_chat'
   }
+  databankStats?: {
+    enabled: boolean
+    embeddingsEnabled: boolean
+    activeBankCount: number
+    activeDatabankIds: string[]
+    chunksRetrieved: number
+    injectionMethod: 'macro' | 'fallback' | 'none' | 'disabled'
+    retrievalState:
+      | 'cache_hit'
+      | 'awaited_prefetch'
+      | 'awaited_direct'
+      | 'skipped_no_active_banks'
+      | 'skipped_embeddings_disabled'
+    retrievedChunks: Array<{
+      score: number
+      tokenEstimate: number
+      documentName: string
+      databankId: string
+      preview: string
+    }>
+    queryPreview: string
+  }
+  contextClipStats?: import('@/types/ws-events').ContextClipStats
 }
 
 export interface BreakdownResponse {
-  entries: { name: string; type: string; tokens: number; role?: string; blockId?: string }[]
+  entries: {
+    name: string
+    type: string
+    tokens: number
+    role?: string
+    content?: string
+    blockId?: string
+    extensionId?: string
+    extensionName?: string
+    messageCount?: number
+    firstMessageIndex?: number
+  }[]
+  messages?: DryRunMessage[]
   totalTokens: number
   maxContext: number
   model: string
@@ -119,6 +185,20 @@ export interface GenerationStatusResponse {
   active: boolean
   generationId?: string
   status?: 'assembling' | 'council' | 'streaming' | 'completed' | 'stopped' | 'error'
+  councilRetryPending?: boolean
+  councilToolsFailure?: {
+    generationId: string
+    chatId: string
+    failedTools: {
+      memberId: string
+      memberName: string
+      toolName: string
+      toolDisplayName: string
+      error?: string
+    }[]
+    successCount: number
+    failedCount: number
+  }
   content?: string
   reasoning?: string
   tokenSeq?: number
@@ -148,7 +228,8 @@ export interface ActiveGenerationEntry {
 }
 
 export const generateApi = {
-  start(request: GenerateRequest) {
+  async start(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<GenerateResponse>('/generate', request, LONG)
   },
 
@@ -156,11 +237,13 @@ export const generateApi = {
     return post<void>('/generate/stop', generationId ? { generation_id: generationId } : {})
   },
 
-  regenerate(request: GenerateRequest) {
+  async regenerate(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<GenerateResponse>('/generate/regenerate', request, LONG)
   },
 
-  continueGeneration(request: GenerateRequest) {
+  async continueGeneration(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<GenerateResponse>('/generate/continue', request, LONG)
   },
 
@@ -176,7 +259,12 @@ export const generateApi = {
     return get<SummarizationPromptDefaults>('/generate/summarize/prompt-defaults')
   },
 
-  dryRun(request: GenerateRequest) {
+  getSummarizeStatus(chatId: string) {
+    return get<SummarizeStatusResponse>(`/generate/summarize/status/${chatId}`)
+  },
+
+  async dryRun(request: GenerateRequest) {
+    await flushSettingsNow()
     return post<DryRunResponse>('/generate/dry-run', request, LONG)
   },
 
@@ -193,7 +281,7 @@ export const generateApi = {
   },
 
   acknowledge(chatId: string) {
-    return post<{ acknowledged: boolean }>('/generate/acknowledge', { chatId })
+    return post<{ acknowledged: boolean; removed: number; generationIds: string[] }>('/generate/acknowledge', { chatId })
   },
 
   councilRetry(generationId: string, decision: 'continue' | 'retry') {

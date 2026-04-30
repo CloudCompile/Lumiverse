@@ -1,6 +1,6 @@
 import { connect, Index, rerankers, type Connection, type Table } from "@lancedb/lancedb";
-import { join } from "path";
-import { rmSync, existsSync } from "fs";
+import { dirname, join } from "path";
+import { mkdirSync, readdirSync, renameSync, rmSync, existsSync } from "fs";
 import { env } from "../env";
 import { getDb } from "../db/connection";
 import * as settingsSvc from "./settings.service";
@@ -9,7 +9,7 @@ import type {
   WorldBookEntry,
   WorldBookReindexProgress,
   WorldBookReindexResult,
-  WorldBookVectorIndexStatus,
+  WorldBookVectorIndexStatus
 } from "../types/world-book";
 import { embeddingCache, computeCacheKey, type ModelFingerprint } from "./embedding-cache";
 import {
@@ -17,24 +17,84 @@ import {
   getAccessToken,
   vertexHostForLocation,
 } from "../llm/providers/google-vertex";
+import { getProvider } from "../llm/registry";
 import { getFirstUserId } from "../auth/seed";
+import { sanitizeForVectorization } from "../utils/content-sanitizer";
+import { describeProviderError } from "../utils/provider-errors";
+import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../utils/lancedb-path";
+import { chunkDocument } from "./databank/document-chunker.service";
+import { loadWorldBookVectorSettings, type WorldBookVectorSettings } from "./world-book-vector-settings.service";
 
 const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
 const LANCEDB_PATH = join(env.dataDir, "lancedb");
+const LANCEDB_URI = resolveLanceDbConnectUri(LANCEDB_PATH);
 const EMBEDDINGS_TABLE = "embeddings";
-const WORLD_BOOK_VECTOR_VERSION = 2;
+const WORLD_BOOK_VECTOR_VERSION = 3;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
 /** Default safety timeout for embedding API requests. Prevents a hanging
  *  upstream server from stalling the entire generation pipeline.
  *  User-configurable via EmbeddingConfig.request_timeout (seconds). */
 const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS = 120_000; // 120 seconds
 
+function embeddingProviderSecretKey(provider: EmbeddingProvider): string {
+  return `${EMBEDDING_SECRET_KEY}_${provider}`;
+}
+
+async function getEmbeddingSecret(userId: string, provider: EmbeddingProvider): Promise<string | null> {
+  const scopedKey = embeddingProviderSecretKey(provider);
+  const scoped = await secretsSvc.getSecret(userId, scopedKey);
+  if (scoped && scoped.length > 0) return scoped;
+
+  const legacy = await secretsSvc.getSecret(userId, EMBEDDING_SECRET_KEY);
+  if (!legacy || legacy.length === 0) return null;
+
+  await secretsSvc.putSecret(userId, scopedKey, legacy);
+  secretsSvc.deleteSecret(userId, EMBEDDING_SECRET_KEY);
+  return legacy;
+}
+
+async function hasEmbeddingSecret(userId: string, provider: EmbeddingProvider): Promise<boolean> {
+  const secret = await getEmbeddingSecret(userId, provider);
+  return !!secret && secret.length > 0;
+}
+
+async function putEmbeddingSecret(userId: string, provider: EmbeddingProvider, value: string): Promise<void> {
+  await secretsSvc.putSecret(userId, embeddingProviderSecretKey(provider), value);
+  secretsSvc.deleteSecret(userId, EMBEDDING_SECRET_KEY);
+}
+
+function deleteEmbeddingSecret(userId: string, provider: EmbeddingProvider): void {
+  secretsSvc.deleteSecret(userId, embeddingProviderSecretKey(provider));
+  secretsSvc.deleteSecret(userId, EMBEDDING_SECRET_KEY);
+}
+
+/** Combine an optional external abort signal with an internal timeout into a
+ *  single signal. Used so callers (like an active generation) can cancel an
+ *  in-flight embedding request without waiting for its own timeout. */
+function linkTimeoutSignal(
+  external: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cleanup: () => void } {
+  const timeoutController = new AbortController();
+  const timer = timeoutMs > 0
+    ? setTimeout(() => timeoutController.abort(), timeoutMs)
+    : null;
+  const combined = external
+    ? AbortSignal.any([external, timeoutController.signal])
+    : timeoutController.signal;
+  return {
+    signal: combined,
+    cleanup: () => { if (timer) clearTimeout(timer); },
+  };
+}
+
 export type EmbeddingProvider =
   | "openai-compatible"
   | "openai"
   | "openrouter"
   | "electronhub"
+  | "bananabread"
   | "nanogpt"
   | "google_vertex";
 
@@ -71,6 +131,12 @@ export interface EmbeddingConfigWithStatus extends EmbeddingConfig {
   inherited?: boolean;
 }
 
+export interface EmbeddingModelsPreviewInput {
+  provider?: EmbeddingProvider;
+  api_url?: string;
+  api_key?: string;
+}
+
 export interface WorldBookEmbeddingMetadata {
   comment?: string;
   key?: string[];
@@ -78,6 +144,8 @@ export interface WorldBookEmbeddingMetadata {
   world_book_id?: string;
   search_text?: string;
   vector_version?: number;
+  chunk_index?: number;
+  chunk_count?: number;
 }
 
 export interface WorldBookSearchCandidate {
@@ -199,7 +267,7 @@ function clampFloat(v: unknown, min: number, max: number, fallback: number): num
  * Any chat whose stored hash doesn't match the current hash will get
  * its chunks rebuilt on the next generation.
  */
-export const LTCM_FORMAT_VERSION = 2;
+export const LTCM_FORMAT_VERSION = 3;
 
 /**
  * Compute a deterministic hash from the settings that affect how chunks
@@ -309,12 +377,15 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
   openai: "https://api.openai.com/v1/embeddings",
   openrouter: "https://openrouter.ai/api/v1/embeddings",
   electronhub: "https://api.electronhub.top/v1/embeddings",
+  bananabread: "http://localhost:8008/v1/embeddings",
   nanogpt: "https://nano-gpt.com/api/v1/embeddings",
   // Vertex derives its host from vertex_region — this is a cosmetic default.
   google_vertex: "https://aiplatform.googleapis.com",
 };
 
 let connPromise: Promise<Connection> | null = null;
+let connHandle: Connection | null = null;
+let connGeneration = 0;
 let vectorIndexReady = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
 const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
@@ -381,6 +452,159 @@ function invalidateTableHandle(): void {
   tableHandle = null;
 }
 
+function collectErrorMessages(err: unknown): string[] {
+  const messages: string[] = [];
+  let current: unknown = err;
+  let depth = 0;
+  while (current && depth < 8) {
+    if (current instanceof Error) {
+      messages.push(current.message);
+      current = (current as Error & { cause?: unknown }).cause;
+    } else if (typeof current === "object") {
+      const candidate = current as { message?: unknown; cause?: unknown };
+      if (typeof candidate.message === "string") messages.push(candidate.message);
+      else messages.push(String(current));
+      current = candidate.cause;
+    } else {
+      messages.push(String(current));
+      break;
+    }
+    depth += 1;
+  }
+  return messages.filter(Boolean);
+}
+
+function isIncompleteEmbeddingsTableError(err: unknown): boolean {
+  const text = collectErrorMessages(err).join(" | ").toLowerCase();
+  if (!text) return false;
+  if (!text.includes(`${EMBEDDINGS_TABLE}.lance`) && !text.includes(`table '${EMBEDDINGS_TABLE}' was not found`)) {
+    return false;
+  }
+  return (
+    text.includes("/_versions") ||
+    text.includes("\\_versions") ||
+    text.includes("dataset at path") ||
+    text.includes("table 'embeddings' was not found")
+  );
+}
+
+function resetInMemoryVectorStoreState(): void {
+  if (optimizeTimer) {
+    clearTimeout(optimizeTimer);
+    optimizeTimer = null;
+  }
+  optimizeQueuedAt = null;
+  stopIndexHealthMonitor();
+  embeddingCache.clear();
+
+  try {
+    tableHandle?.close();
+  } catch {}
+  try {
+    connHandle?.close();
+  } catch {}
+
+  connGeneration += 1;
+  connHandle = null;
+  connPromise = null;
+  invalidateTableHandle();
+  vectorIndexReady = false;
+  scalarIndexReady = false;
+  ftsIndexReady = false;
+  lastIndexRebuildAt = 0;
+  unindexedRowEstimate = 0;
+}
+
+function resetSqliteVectorizationState(): void {
+  try {
+    const db = getDb();
+    db.run(
+      `UPDATE world_book_entries
+       SET vector_index_status = CASE WHEN vectorized = 1 THEN 'pending' ELSE 'not_enabled' END,
+           vector_indexed_at = NULL,
+           vector_index_error = NULL`
+    );
+    db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
+    db.run(`DELETE FROM query_vector_cache`);
+    db.run(`DELETE FROM chat_memory_cache`);
+  } catch (err) {
+    console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
+  }
+}
+
+function performBrokenEmbeddingsTableRecovery(reason: string, err: unknown): void {
+  resetInMemoryVectorStoreState();
+
+  // This store only contains one shared table, so deleting just embeddings.lance
+  // can leave parent-level LanceDB metadata claiming the table still exists.
+  // Reset the entire store so the next operation can recreate it cleanly.
+  const deleted = existsSync(LANCEDB_PATH);
+  if (deleted) {
+    rmSync(LANCEDB_PATH, { recursive: true, force: true });
+  }
+  resetSqliteVectorizationState();
+  console.warn(`[embeddings] Recovered incomplete LanceDB table after ${reason}; deleted ${LANCEDB_PATH}`, err);
+}
+
+async function recoverBrokenEmbeddingsTable(reason: string, err: unknown, lockHeld = false): Promise<boolean> {
+  if (!isIncompleteEmbeddingsTableError(err)) return false;
+  if (lockHeld) {
+    performBrokenEmbeddingsTableRecovery(reason, err);
+    return true;
+  }
+  await withWriteLock(async () => {
+    performBrokenEmbeddingsTableRecovery(reason, err);
+  });
+  return true;
+}
+
+function isEmbeddingsTableSchemaDriftError(err: unknown): boolean {
+  const text = collectErrorMessages(err).join(" | ").toLowerCase();
+  if (!text) return false;
+  if (text.includes("vector not divisible by 8")) return true;
+
+  const mentionsVectorSchema =
+    text.includes("fixedsizelist") ||
+    text.includes("fixed_size_list") ||
+    text.includes("vector");
+  const mentionsShapeMismatch =
+    text.includes("dimension") ||
+    text.includes("dimensionality") ||
+    text.includes("length") ||
+    text.includes("schema") ||
+    (text.includes("expected") && text.includes("got"));
+
+  return mentionsVectorSchema && mentionsShapeMismatch;
+}
+
+async function retryAfterSchemaDriftReset<T>(reason: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isEmbeddingsTableSchemaDriftError(err)) throw err;
+    console.warn(`[embeddings] ${reason} hit schema drift; force-resetting LanceDB and retrying once`, err);
+    await forceResetLanceDB();
+    return await fn();
+  }
+}
+
+async function upsertEmbeddingRows(rows: EmbeddingRow[], reason: string): Promise<void> {
+  if (rows.length === 0) return;
+  await retryAfterSchemaDriftReset(reason, async () => {
+    await withWriteLock(async () => {
+      const table = await getOrCreateTable(rows, true);
+      await ensureVectorIndex(table);
+      await ensureScalarIndexes(table);
+      await ensureFtsIndex(table);
+      await table
+        .mergeInsert("id")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute(asLanceRows(rows));
+    });
+  });
+}
+
 const worldBookVectorVersionChecked = new Set<string>();
 
 // Periodically clear the version-check cache so it doesn't grow unbounded.
@@ -397,12 +621,17 @@ export function stopVersionCheckCleanup(): void {
 }
 
 function providerDefaultModel(provider: EmbeddingProvider): string {
+  if (provider === "bananabread") return "mixedbread-ai/mxbai-embed-large-v1";
   if (provider === "nanogpt") return "text-embedding-3-small";
   if (provider === "openrouter") return "text-embedding-3-small";
   if (provider === "electronhub") return "text-embedding-3-small";
   if (provider === "openai") return "text-embedding-3-small";
   if (provider === "google_vertex") return "gemini-embedding-001";
   return "text-embedding-3-small";
+}
+
+function providerAllowsCustomApiUrl(provider: EmbeddingProvider): boolean {
+  return provider === "openai-compatible" || provider === "bananabread";
 }
 
 function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): EmbeddingConfig {
@@ -429,7 +658,7 @@ function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): Embed
 }
 
 const VALID_EMBEDDING_PROVIDERS: EmbeddingProvider[] = [
-  "openai-compatible", "openai", "openrouter", "electronhub", "nanogpt", "google_vertex",
+  "openai-compatible", "openai", "openrouter", "electronhub", "bananabread", "nanogpt", "google_vertex",
 ];
 
 function normalizeConfig(input: any): EmbeddingConfig {
@@ -438,10 +667,13 @@ function normalizeConfig(input: any): EmbeddingConfig {
     ? rawProvider
     : "openai-compatible";
   const base = defaultConfig(provider);
+  const api_url = providerAllowsCustomApiUrl(provider)
+    ? (typeof input?.api_url === "string" && input.api_url.trim() ? input.api_url.trim() : base.api_url)
+    : base.api_url;
   return {
     enabled: input?.enabled !== undefined ? !!input.enabled : base.enabled,
     provider,
-    api_url: typeof input?.api_url === "string" && input.api_url.trim() ? input.api_url.trim() : base.api_url,
+    api_url,
     model: typeof input?.model === "string" && input.model.trim() ? input.model.trim() : base.model,
     dimensions: Number.isFinite(input?.dimensions) && input.dimensions > 0 ? Math.floor(input.dimensions) : null,
     send_dimensions: input?.send_dimensions !== undefined ? !!input.send_dimensions : base.send_dimensions,
@@ -533,6 +765,46 @@ function rowId(userId: string, sourceType: string, sourceId: string, chunkIndex:
   return `${userId}:${sourceType}:${sourceId}:${chunkIndex}`;
 }
 
+let termuxMirrorCleanupAttempted = false;
+
+function pruneEmptyAncestors(path: string, stopAt: string): void {
+  let current = dirname(path);
+  while (current.startsWith(stopAt) && current !== stopAt) {
+    try {
+      if (readdirSync(current).length > 0) break;
+      rmSync(current, { recursive: false, force: true });
+    } catch {
+      break;
+    }
+    current = dirname(current);
+  }
+}
+
+function cleanupBrokenTermuxLanceDbMirror(): void {
+  if (termuxMirrorCleanupAttempted) return;
+  termuxMirrorCleanupAttempted = true;
+
+  const brokenPath = resolveBrokenTermuxLanceDbMirrorPath(LANCEDB_PATH);
+  if (!brokenPath || brokenPath === LANCEDB_PATH || !existsSync(brokenPath)) return;
+
+  const workspaceRoot = process.cwd();
+  try {
+    if (existsSync(LANCEDB_PATH)) {
+      rmSync(brokenPath, { recursive: true, force: true });
+      pruneEmptyAncestors(brokenPath, workspaceRoot);
+      console.warn(`[embeddings] Removed broken Termux LanceDB mirror at ${brokenPath}`);
+      return;
+    }
+
+    mkdirSync(dirname(LANCEDB_PATH), { recursive: true });
+    renameSync(brokenPath, LANCEDB_PATH);
+    pruneEmptyAncestors(brokenPath, workspaceRoot);
+    console.warn(`[embeddings] Moved broken Termux LanceDB mirror into place: ${brokenPath} -> ${LANCEDB_PATH}`);
+  } catch (err) {
+    console.warn(`[embeddings] Failed to clean up broken Termux LanceDB mirror at ${brokenPath}`, err);
+  }
+}
+
 export function getChatMemoryParams(mode: "conservative" | "balanced" | "aggressive") {
   switch (mode) {
     case "conservative":
@@ -564,8 +836,22 @@ export function getChatMemoryParams(mode: "conservative" | "balanced" | "aggress
 }
 
 async function getConnection(): Promise<Connection> {
-  if (!connPromise) connPromise = connect(LANCEDB_PATH);
-  return connPromise;
+  if (connHandle) return connHandle;
+
+  const generation = connGeneration;
+  cleanupBrokenTermuxLanceDbMirror();
+  if (!connPromise) connPromise = connect(LANCEDB_URI);
+
+  const conn = await connPromise;
+  if (generation !== connGeneration) {
+    try {
+      conn.close();
+    } catch {}
+    return getConnection();
+  }
+
+  connHandle = conn;
+  return conn;
 }
 
 async function tableExists(conn: Connection, name: string): Promise<boolean> {
@@ -573,31 +859,54 @@ async function tableExists(conn: Connection, name: string): Promise<boolean> {
   return names.includes(name);
 }
 
-async function getTableIfExists(): Promise<Table | null> {
+async function getTableIfExists(lockHeld = false): Promise<Table | null> {
   if (tableHandle) return tableHandle;
   const conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
   if (!exists) return null;
-  tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+  try {
+    tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+  } catch (err) {
+    if (await recoverBrokenEmbeddingsTable("opening embeddings table", err, lockHeld)) {
+      return null;
+    }
+    throw err;
+  }
   return tableHandle;
 }
 
-async function getOrCreateTable(seedRows?: EmbeddingRow[]): Promise<Table> {
+async function getOrCreateTable(seedRows?: EmbeddingRow[], lockHeld = false): Promise<Table> {
   if (tableHandle) return tableHandle;
-  const conn = await getConnection();
+  let conn = await getConnection();
   const exists = await tableExists(conn, EMBEDDINGS_TABLE);
   if (exists) {
-    tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
-    return tableHandle;
+    try {
+      tableHandle = await conn.openTable(EMBEDDINGS_TABLE);
+      return tableHandle;
+    } catch (err) {
+      if (!(await recoverBrokenEmbeddingsTable("opening embeddings table before write", err, lockHeld))) {
+        throw err;
+      }
+      conn = await getConnection();
+    }
   }
   if (!seedRows || seedRows.length === 0) {
     throw new Error("Cannot create embeddings table without initial seed rows to infer schema.");
   }
-  tableHandle = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
+  try {
+    tableHandle = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
+  } catch (err) {
+    if (!(await recoverBrokenEmbeddingsTable("creating embeddings table", err, lockHeld))) {
+      throw err;
+    }
+    conn = await getConnection();
+    tableHandle = await conn.createTable(EMBEDDINGS_TABLE, asLanceRows(seedRows));
+  }
   return tableHandle;
 }
 
 const MIN_ROWS_FOR_VECTOR_INDEX = 5_000;
+const MIN_ROWS_FOR_PQ_VECTOR_INDEX = 65_536;
 let scalarIndexReady = false;
 let ftsIndexReady = false;
 const MAX_LANCE_SOURCE_FILTER_IDS = 250;
@@ -613,6 +922,34 @@ const INDEX_REBUILD_COOLDOWN_MS = 10 * 60_000; // Don't rebuild more than once p
 const UNINDEXED_ROW_THRESHOLD = 2_000; // Rebuild when this many rows are unindexed
 const INDEX_HEALTH_CHECK_INTERVAL_MS = 2 * 60_000; // Check index health every 2 min
 let indexHealthTimer: ReturnType<typeof setInterval> | null = null;
+
+function getVectorIndexPartitions(rowCount: number): number | null {
+  if (rowCount < MIN_ROWS_FOR_VECTOR_INDEX) return null;
+
+  // LanceDB's IVF_PQ training becomes noisy when partitions outpace the data.
+  // Keep at least 256 rows per partition to avoid empty-cluster warnings.
+  return Math.max(2, Math.min(
+    Math.floor(Math.sqrt(rowCount)),
+    Math.floor(rowCount / 256),
+  ));
+}
+
+function getVectorIndexConfig(rowCount: number): any | null {
+  const numPartitions = getVectorIndexPartitions(rowCount);
+  if (numPartitions === null) return null;
+
+  if (rowCount < MIN_ROWS_FOR_PQ_VECTOR_INDEX) {
+    return Index.ivfFlat({
+      distanceType: "cosine",
+      numPartitions,
+    } as any);
+  }
+
+  return Index.ivfPq({
+    distanceType: "cosine",
+    numPartitions,
+  } as any);
+}
 
 function getWorldBookVectorVersionCacheKey(userId: string): string {
   return `${userId}:${WORLD_BOOK_VECTOR_VERSION}`;
@@ -640,23 +977,62 @@ function uniqueNonEmpty(values: string[]): string[] {
 }
 
 export function buildWorldBookEntrySearchText(entry: WorldBookEntry): string {
+  const content = sanitizeForVectorization(entry.content || "");
+  if (!content) return "";
+  return normalizeVectorSearchText([
+    ...buildWorldBookChunkLead(entry),
+    `Content:\n${content}`,
+  ].join("\n\n"));
+}
+
+function buildWorldBookChunkLead(entry: WorldBookEntry): string[] {
   const primaryKeys = uniqueNonEmpty(entry.key || []);
   const secondaryKeys = uniqueNonEmpty(entry.keysecondary || []);
   const comment = (entry.comment || "").trim();
-  const content = (entry.content || "").trim();
   const sections: string[] = [];
 
   if (comment) sections.push(`Entry title: ${comment}`);
   if (primaryKeys.length > 0) sections.push(`Primary keys: ${primaryKeys.join(", ")}`);
   if (secondaryKeys.length > 0) sections.push(`Secondary keys: ${secondaryKeys.join(", ")}`);
-  if (content) sections.push(`Content:\n${content}`);
+  return sections;
+}
 
-  return normalizeVectorSearchText(sections.join("\n\n")) || content;
+function buildWorldBookEntryEmbeddingChunks(
+  entry: WorldBookEntry,
+  settings: WorldBookVectorSettings,
+): Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }> {
+  const content = sanitizeForVectorization(entry.content || "");
+  if (!content) return [];
+
+  const chunked = chunkDocument(content, {
+    targetTokens: settings.chunkTargetTokens,
+    maxTokens: settings.chunkMaxTokens,
+    overlapTokens: settings.chunkOverlapTokens,
+  });
+  const limited = (chunked.length > 0 ? chunked : [{ index: 0, content, tokenCount: 0, metadata: { startOffset: 0, endOffset: content.length } }])
+    .slice(0, settings.maxChunksPerEntry)
+    .filter((chunk) => chunk.content.trim().length > 0);
+  const leadSections = buildWorldBookChunkLead(entry);
+  const chunkCount = limited.length;
+
+  return limited.map((chunk, index) => {
+    const sections = [...leadSections];
+    if (chunkCount > 1) sections.push(`Chunk ${index + 1} of ${chunkCount}`);
+    sections.push(`Content:\n${chunk.content.trim()}`);
+    return {
+      chunkIndex: index,
+      content: chunk.content.trim(),
+      searchText: normalizeVectorSearchText(sections.join("\n\n")),
+      chunkCount,
+    };
+  });
 }
 
 function buildWorldBookEmbeddingMetadata(
   entry: WorldBookEntry,
   searchText: string,
+  chunkIndex: number,
+  chunkCount: number,
 ): WorldBookEmbeddingMetadata {
   return {
     comment: entry.comment,
@@ -665,6 +1041,8 @@ function buildWorldBookEmbeddingMetadata(
     world_book_id: entry.world_book_id,
     search_text: searchText,
     vector_version: WORLD_BOOK_VECTOR_VERSION,
+    chunk_index: chunkIndex,
+    chunk_count: chunkCount,
   };
 }
 
@@ -694,7 +1072,7 @@ async function ensureWorldBookVectorVersion(userId: string): Promise<void> {
 
   try {
     await withWriteLock(async () => {
-      const table = await getTableIfExists();
+      const table = await getTableIfExists(true);
       if (table) {
         await table.delete(
           `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry'`
@@ -726,25 +1104,15 @@ async function ensureVectorIndex(table: Table): Promise<void> {
   if (vectorIndexReady) return;
   try {
     const rowCount = await table.countRows();
-    if (rowCount < MIN_ROWS_FOR_VECTOR_INDEX) {
+    const indexConfig = getVectorIndexConfig(rowCount);
+    if (indexConfig === null) {
       // Brute-force search is fast enough for small tables and avoids
       // KMeans warnings about empty clusters when rows < num_partitions * 256.
       vectorIndexReady = true;
       return;
     }
-    // IVF_PQ handles metadata-filtered workloads (every query uses .where())
-    // much better than HNSW_PQ, which suffers latency fluctuation with filters.
-    // Cap partitions so KMeans has at least 256 rows per partition to avoid
-    // "more than 10% of clusters are empty" warnings and poor index quality.
-    const numPartitions = Math.max(2, Math.min(
-      Math.floor(Math.sqrt(rowCount)),
-      Math.floor(rowCount / 256),
-    ));
     await table.createIndex("vector", {
-      config: Index.ivfPq({
-        distanceType: "cosine",
-        numPartitions,
-      }),
+      config: indexConfig,
     } as any);
   } catch {
     // Index may already exist - that's fine
@@ -895,20 +1263,23 @@ async function checkAndRebuildIndexes(table: Table): Promise<void> {
     if (unindexed >= UNINDEXED_ROW_THRESHOLD) {
       console.info(`[embeddings] ${unindexed} unindexed rows detected, rebuilding vector index...`);
       await withWriteLock(async () => {
-        const t = await getTableIfExists();
+        const t = await getTableIfExists(true);
         if (!t) return;
         const rowCount = await t.countRows();
-        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+        const indexConfig = getVectorIndexConfig(rowCount);
+        if (indexConfig === null) {
+          vectorIndexReady = true;
+          unindexedRowEstimate = 0;
+          lastIndexRebuildAt = Date.now();
+          return;
+        }
         await t.createIndex("vector", {
-          config: Index.ivfPq({
-            distanceType: "cosine",
-            numPartitions,
-          }),
+          config: indexConfig,
           replace: true,
         } as any);
         lastIndexRebuildAt = Date.now();
         unindexedRowEstimate = 0;
-        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows, ${numPartitions} partitions)`);
+        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows)`);
       });
     }
   } catch (err) {
@@ -929,7 +1300,7 @@ export async function runStartupVectorMaintenance(): Promise<void> {
   if (!exists) return;
 
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
 
     let indices: any[];
@@ -960,20 +1331,17 @@ export async function runStartupVectorMaintenance(): Promise<void> {
 
     if (needsMigration) {
       const rowCount = await table.countRows();
-      if (rowCount >= MIN_ROWS_FOR_VECTOR_INDEX) {
-        console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF_PQ (${rowCount} rows)...`);
-        const numPartitions = Math.max(2, Math.floor(Math.sqrt(rowCount)));
+      const indexConfig = getVectorIndexConfig(rowCount);
+      if (indexConfig !== null) {
+        console.info(`[embeddings] Migrating vector index from HNSW_PQ → IVF (${rowCount} rows)...`);
         try {
           await table.createIndex("vector", {
-            config: Index.ivfPq({
-              distanceType: "cosine",
-              numPartitions,
-            }),
+            config: indexConfig,
             replace: true,
           } as any);
           vectorIndexReady = true;
           lastIndexRebuildAt = Date.now();
-          console.info(`[embeddings] Vector index migrated successfully (${numPartitions} partitions)`);
+          console.info("[embeddings] Vector index migrated successfully");
         } catch (err) {
           console.warn("[embeddings] Vector index migration failed (will retry on next query):", err);
         }
@@ -992,7 +1360,7 @@ export async function runStartupVectorMaintenance(): Promise<void> {
 
 export async function optimizeTable(): Promise<void> {
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
 
     // Use grace period to avoid deleting version manifests that in-flight reads
@@ -1051,7 +1419,7 @@ export async function getVectorStoreHealth(): Promise<{
     // that didn't complete its rebuild pass. Force-rebuild and retry.
     try {
       await withWriteLock(async () => {
-        const t = await getTableIfExists();
+        const t = await getTableIfExists(true);
         if (t) {
           await ensureScalarIndexes(t, true);
           await ensureFtsIndex(t, true);
@@ -1104,6 +1472,148 @@ export function getProviderDefaults(provider: EmbeddingProvider) {
   };
 }
 
+function normalizeEmbeddingApiUrlForModelListing(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+
+  try {
+    const parsed = new URL(trimmed);
+    let path = parsed.pathname.replace(/\/+$/, "");
+    if (/\/(embeddings|embed)$/.test(path)) {
+      path = path.replace(/\/(embeddings|embed)$/, "");
+    }
+    parsed.pathname = path || "/v1";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    const stripped = trimmed.replace(/\/(embeddings|embed)$/, "");
+    return stripped || trimmed;
+  }
+}
+
+function resolveNanoGptEmbeddingModelsUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) return "https://nano-gpt.com/api/v1/embedding-models";
+
+  try {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname.replace(/\/+$/, "");
+    if (/\/embedding-models$/.test(path)) {
+      return trimmed;
+    }
+    if (/\/(embeddings|embed)$/.test(path)) {
+      parsed.pathname = path.replace(/\/(embeddings|embed)$/, "/embedding-models");
+    } else if (!path || path === "/") {
+      parsed.pathname = "/api/v1/embedding-models";
+    } else {
+      parsed.pathname = `${path}/embedding-models`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    const stripped = trimmed.replace(/\/(embeddings|embed)$/, "");
+    return `${stripped || trimmed}/embedding-models`;
+  }
+}
+
+async function fetchNanoGptEmbeddingModels(
+  apiKey: string,
+  rawUrl: string,
+): Promise<{ models: string[]; model_labels?: Record<string, string> }> {
+  const url = resolveNanoGptEmbeddingModelsUrl(rawUrl);
+  const res = await fetch(url, {
+    headers: {
+      ...(apiKey.trim() ? { Authorization: `Bearer ${apiKey.trim().replace(/^Bearer\s+/i, "")}` } : {}),
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`NanoGPT model listing failed with ${res.status}`);
+  }
+
+  const payload = await res.json() as { data?: Array<{ id?: unknown; name?: unknown }> };
+  const labels: Record<string, string> = {};
+  const models = Array.isArray(payload?.data)
+    ? payload.data
+      .map((entry) => {
+        const id = typeof entry?.id === "string" ? entry.id.trim() : "";
+        const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+        if (id && name && name !== id) {
+          labels[id] = name;
+        }
+        return id;
+      })
+      .filter(Boolean)
+      .sort()
+    : [];
+
+  return {
+    models,
+    model_labels: Object.keys(labels).length > 0 ? labels : undefined,
+  };
+}
+
+export async function previewEmbeddingModels(
+  userId: string,
+  input: EmbeddingModelsPreviewInput,
+): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: EmbeddingProvider; error?: string }> {
+  const ctx = resolveEmbeddingUserContext(userId);
+  const base = readRawEmbeddingConfig(ctx.userId);
+  const provider = input.provider ?? base.provider;
+  const cfg = normalizeConfig({ ...base, ...input, provider });
+
+  let apiKey = input.api_key?.trim() || "";
+  if (!apiKey) {
+    apiKey = (await getEmbeddingSecret(ctx.userId, cfg.provider)) || "";
+  }
+
+  try {
+    if (cfg.provider === "nanogpt") {
+      const result = await fetchNanoGptEmbeddingModels(apiKey, cfg.api_url);
+      return { ...result, provider: cfg.provider };
+    }
+
+    if (cfg.provider === "openrouter") {
+      const providerImpl = getProvider("openrouter");
+      const { OpenRouterProvider } = await import("../llm/providers/openrouter");
+      if (providerImpl instanceof OpenRouterProvider) {
+        const richModels = await providerImpl.fetchModelsWithMetadata(apiKey, normalizeEmbeddingApiUrlForModelListing(cfg.api_url), {
+          outputModalities: "embeddings",
+        });
+        const models = richModels.map((m) => m.id).sort();
+        const model_labels: Record<string, string> = {};
+        for (const model of richModels) {
+          if (model.name && model.name !== model.id) model_labels[model.id] = model.name;
+        }
+        return {
+          models,
+          model_labels: Object.keys(model_labels).length > 0 ? model_labels : undefined,
+          provider: cfg.provider,
+        };
+      }
+    }
+
+    const providerName = cfg.provider === "openai-compatible" || cfg.provider === "bananabread"
+      ? "custom"
+      : cfg.provider;
+    const providerImpl = getProvider(providerName);
+    if (!providerImpl) {
+      return { models: [], provider: cfg.provider, error: `Unknown provider: ${cfg.provider}` };
+    }
+
+    const models = await providerImpl.listModels(apiKey, normalizeEmbeddingApiUrlForModelListing(cfg.api_url));
+    return { models, provider: cfg.provider };
+  } catch (err) {
+    return {
+      models: [],
+      provider: cfg.provider,
+      error: describeProviderError(err, "Failed to fetch embedding models"),
+    };
+  }
+}
+
 /** Raw per-user embedding config (no inheritance resolution). */
 function readRawEmbeddingConfig(userId: string): EmbeddingConfig {
   const setting = settingsSvc.getSetting(userId, EMBEDDING_SETTINGS_KEY);
@@ -1135,7 +1645,7 @@ function resolveEmbeddingUserContext(callerUserId: string): { userId: string; in
 export async function getEmbeddingConfig(userId: string): Promise<EmbeddingConfigWithStatus> {
   const ctx = resolveEmbeddingUserContext(userId);
   const cfg = readRawEmbeddingConfig(ctx.userId);
-  const has_api_key = await secretsSvc.validateSecret(ctx.userId, EMBEDDING_SECRET_KEY);
+  const has_api_key = await hasEmbeddingSecret(ctx.userId, cfg.provider);
   return ctx.inherited
     ? { ...cfg, has_api_key, inherited: true }
     : { ...cfg, has_api_key };
@@ -1164,9 +1674,9 @@ export async function updateEmbeddingConfig(
   if (input.api_key !== undefined) {
     const next = (input.api_key || "").trim();
     if (next) {
-      await secretsSvc.putSecret(userId, EMBEDDING_SECRET_KEY, next);
+      await putEmbeddingSecret(userId, merged.provider, next);
     } else {
-      secretsSvc.deleteSecret(userId, EMBEDDING_SECRET_KEY);
+      deleteEmbeddingSecret(userId, merged.provider);
     }
   }
 
@@ -1190,7 +1700,7 @@ export async function updateEmbeddingConfig(
     await invalidateAllVectors(userId);
   }
 
-  const has_api_key = await secretsSvc.validateSecret(userId, EMBEDDING_SECRET_KEY);
+  const has_api_key = await hasEmbeddingSecret(userId, merged.provider);
   return { ...merged, has_api_key };
 }
 
@@ -1198,6 +1708,18 @@ export async function updateEmbeddingConfig(
  * Parse embedding responses from OpenAI-compatible, Ollama /api/embed, and Ollama /api/embeddings formats.
  */
 function parseEmbeddingResponse(payload: any, expectedCount: number): number[][] {
+  // Some providers (notably OpenRouter) return HTTP 200 with an error envelope
+  // like `{ error: { message, code } }` when the request was shaped correctly
+  // but couldn't be served (unsupported model, no routing provider, etc.).
+  // Surface that instead of the generic "Unrecognized" error.
+  if (payload && typeof payload === "object" && payload.error) {
+    const err = payload.error;
+    const msg = typeof err === "string"
+      ? err
+      : (err.message || err.code || JSON.stringify(err));
+    throw new Error(`Embedding provider returned an error: ${msg}`);
+  }
+
   // OpenAI format: { data: [{ embedding: number[] }, ...] }
   if (Array.isArray(payload.data) && payload.data.length > 0 && payload.data[0].embedding) {
     const vectors = payload.data.map((d: any) => d.embedding || []);
@@ -1223,7 +1745,15 @@ function parseEmbeddingResponse(payload: any, expectedCount: number): number[][]
     return [payload.embedding];
   }
 
-  throw new Error("Unrecognized embedding response format");
+  const preview = (() => {
+    try {
+      const s = JSON.stringify(payload);
+      return s.length > 400 ? `${s.slice(0, 400)}…` : s;
+    } catch {
+      return String(payload);
+    }
+  })();
+  throw new Error(`Unrecognized embedding response format — payload: ${preview}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,7 +1778,7 @@ async function requestVertexEmbeddings(
   cfg: EmbeddingConfig,
   apiKey: string,
   texts: string[],
-  options?: { omitDimensions?: boolean }
+  options?: { omitDimensions?: boolean; signal?: AbortSignal }
 ): Promise<number[][]> {
   const sa = parseServiceAccount(apiKey);
   const accessToken = await getAccessToken(sa);
@@ -1272,6 +1802,7 @@ async function requestVertexEmbeddings(
   if (useEmbedContent) {
     const results: number[][] = [];
     for (const text of texts) {
+      if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
       const body: Record<string, any> = {
         content: { role: "user", parts: [{ text }] },
       };
@@ -1281,6 +1812,7 @@ async function requestVertexEmbeddings(
         accessToken,
         body,
         timeoutMs,
+        options?.signal,
       );
       const values = vec?.embedding?.values;
       if (!Array.isArray(values)) {
@@ -1301,6 +1833,7 @@ async function requestVertexEmbeddings(
     accessToken,
     body,
     timeoutMs,
+    options?.signal,
   );
   const preds = payload?.predictions;
   if (!Array.isArray(preds) || preds.length !== texts.length) {
@@ -1317,9 +1850,8 @@ async function requestVertexEmbeddings(
   });
 }
 
-async function postVertex<T>(url: string, accessToken: string, body: Record<string, any>, timeoutMs: number): Promise<T> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+async function postVertex<T>(url: string, accessToken: string, body: Record<string, any>, timeoutMs: number, externalSignal?: AbortSignal): Promise<T> {
+  const { signal, cleanup } = linkTimeoutSignal(externalSignal, timeoutMs);
   let res: Response;
   try {
     res = await fetch(url, {
@@ -1329,15 +1861,16 @@ async function postVertex<T>(url: string, accessToken: string, body: Record<stri
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal,
     });
   } catch (err: any) {
     if (err?.name === "AbortError") {
+      if (externalSignal?.aborted) throw err;
       throw new Error(`Vertex embedding request timed out after ${timeoutMs / 1000}s`);
     }
     throw err;
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
   if (!res.ok) {
     const msg = await res.text().catch(() => "Vertex embedding request failed");
@@ -1349,16 +1882,17 @@ async function postVertex<T>(url: string, accessToken: string, body: Record<stri
 async function requestEmbeddings(
   userId: string,
   texts: string[],
-  options?: { omitDimensions?: boolean }
+  options?: { omitDimensions?: boolean; signal?: AbortSignal }
 ): Promise<number[][]> {
   // Resolve which user's settings + API key actually drive this call. In gate
   // mode non-owners inherit the owner's config and use the owner's key.
   const ctx = resolveEmbeddingUserContext(userId);
   const cfg = readRawEmbeddingConfig(ctx.userId);
   if (!cfg.enabled) throw new Error("Embeddings are disabled for this user");
-  const apiKey = await secretsSvc.getSecret(ctx.userId, EMBEDDING_SECRET_KEY);
+  const apiKey = await getEmbeddingSecret(ctx.userId, cfg.provider);
   if (!apiKey) throw new Error("Embedding API key is not configured");
   if (!texts.length) return [];
+  if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
 
   if (cfg.provider === "google_vertex") {
     return requestVertexEmbeddings(cfg, apiKey, texts, options);
@@ -1396,8 +1930,7 @@ async function requestEmbeddings(
   const timeoutMs = cfg.request_timeout > 0
     ? cfg.request_timeout * 1000
     : DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const { signal, cleanup } = linkTimeoutSignal(options?.signal, timeoutMs);
   let res: Response;
   try {
     res = await fetch(url, {
@@ -1407,15 +1940,17 @@ async function requestEmbeddings(
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal,
     });
   } catch (err: any) {
     if (err?.name === "AbortError") {
+      // Distinguish external cancel (caller-initiated) from our own timeout.
+      if (options?.signal?.aborted) throw err;
       throw new Error(`Embedding request timed out after ${timeoutMs / 1000}s`);
     }
     throw err;
   } finally {
-    clearTimeout(timeout);
+    cleanup();
   }
 
   if (!res.ok) {
@@ -1428,8 +1963,12 @@ async function requestEmbeddings(
   return vectors;
 }
 
-export async function embedTexts(userId: string, texts: string[]): Promise<number[][]> {
-  return requestEmbeddings(userId, texts);
+export async function embedTexts(
+  userId: string,
+  texts: string[],
+  options?: { signal?: AbortSignal },
+): Promise<number[][]> {
+  return requestEmbeddings(userId, texts, options);
 }
 
 function getModelFingerprint(cfg: EmbeddingConfig): ModelFingerprint {
@@ -1443,10 +1982,23 @@ function getModelFingerprint(cfg: EmbeddingConfig): ModelFingerprint {
 }
 
 /**
- * In-flight dedup: prevents concurrent requestEmbeddings() calls for the
- * same text. Key = cache key (model-aware), Value = pending promise.
+ * In-flight dedup with ref-counted abort: prevents concurrent
+ * requestEmbeddings() calls for the same text AND lets the shared upstream
+ * fetch be torn down when every caller has aborted.
+ *
+ * - `controller` aborts the shared upstream fetch.
+ * - `liveJoiners` is the number of joiners that haven't aborted yet.
+ * - `hasUncancellableJoiner` pins the fetch as unabortable when at least
+ *   one joiner passed no signal — otherwise an aborting joiner could
+ *   starve a no-signal caller (e.g. a background vectorization batch).
  */
-const inflightEmbeddings = new Map<string, Promise<number[]>>();
+interface InflightEmbeddingEntry {
+  promise: Promise<number[]>;
+  controller: AbortController;
+  liveJoiners: number;
+  hasUncancellableJoiner: boolean;
+}
+const inflightEmbeddings = new Map<string, InflightEmbeddingEntry>();
 
 /**
  * Cache-aware embedding. Checks in-memory LRU cache first, batches only
@@ -1455,8 +2007,13 @@ const inflightEmbeddings = new Map<string, Promise<number[]>>();
  * Single-text calls are deduped: if another caller is already fetching the
  * same text, we share its promise instead of making a second API call.
  */
-export async function cachedEmbedTexts(userId: string, texts: string[]): Promise<number[][]> {
+export async function cachedEmbedTexts(
+  userId: string,
+  texts: string[],
+  options?: { signal?: AbortSignal },
+): Promise<number[][]> {
   if (!texts.length) return [];
+  if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
   const cfg = await getEmbeddingConfig(userId);
   const fingerprint = getModelFingerprint(cfg);
 
@@ -1466,21 +2023,8 @@ export async function cachedEmbedTexts(userId: string, texts: string[]): Promise
     const cached = embeddingCache.get(key);
     if (cached) return [cached];
 
-    // Join an in-flight request for the same text instead of making a duplicate API call
-    const inflight = inflightEmbeddings.get(key);
-    if (inflight) return [await inflight];
-
-    const promise = requestEmbeddings(userId, texts).then(vecs => {
-      const vec = vecs[0];
-      embeddingCache.set(key, vec);
-      inflightEmbeddings.delete(key);
-      return vec;
-    }, err => {
-      inflightEmbeddings.delete(key);
-      throw err;
-    });
-    inflightEmbeddings.set(key, promise);
-    return [await promise];
+    const vec = await joinOrStartInflight(userId, texts, key, options?.signal);
+    return [vec];
   }
 
   // Multi-text path: LRU cache check, batch uncached
@@ -1499,7 +2043,7 @@ export async function cachedEmbedTexts(userId: string, texts: string[]): Promise
 
   if (uncachedIndices.length > 0) {
     const uncachedTexts = uncachedIndices.map((i) => texts[i]);
-    const vectors = await requestEmbeddings(userId, uncachedTexts);
+    const vectors = await requestEmbeddings(userId, uncachedTexts, options);
     for (let j = 0; j < uncachedIndices.length; j++) {
       const idx = uncachedIndices[j];
       results[idx] = vectors[j];
@@ -1508,6 +2052,271 @@ export async function cachedEmbedTexts(userId: string, texts: string[]): Promise
   }
 
   return results as number[][];
+}
+
+/**
+ * llama.cpp's /v1/embeddings endpoint rejects requests whose cumulative token
+ * count exceeds the server's `n_ubatch` (physical batch size, default 512).
+ * The error surfaces as HTTP 500 "input is too large to process. increase the
+ * physical batch size" — not a timeout — so the caller's timeout-only retry
+ * never kicks in. Detect it (plus timeouts and a few other transient shapes)
+ * so callers can halve and retry down to size 1 without user intervention.
+ */
+function isRetryableBatchError(err: Error): boolean {
+  const m = err.message;
+  if (/timed out|abort/i.test(m)) return true;
+  if (/too large to process|physical batch size|increase.*batch.*size/i.test(m)) return true;
+  if (/exceeds.*context|context.*exceed/i.test(m)) return true;
+  if (/\(413\)|\(500\)|\(503\)/.test(m)) return true;
+  return false;
+}
+
+function looksLikePhysicalBatchLimit(err: Error): boolean {
+  return /too large to process|physical batch size|exceeds.*context/i.test(err.message);
+}
+
+/**
+ * Embed a list of items with automatic batch-halving on transient errors.
+ *
+ * For llama.cpp-style backends where the server's `n_ubatch` caps per-request
+ * token volume, the user can't know the right `batch_size` in advance — a
+ * batch that works for 256-token chunks will blow up on 2048-token ones. This
+ * wrapper starts at `initialBatchSize`, halves on retryable failures, and
+ * processes surviving sub-batches via `onBatchReady`. Items that still fail
+ * at size 1 are surfaced via `onItemFailed` so callers can record error state
+ * and move on rather than aborting the whole run.
+ */
+export async function embedWithAdaptiveBatching<T>(
+  userId: string,
+  items: T[],
+  initialBatchSize: number,
+  getText: (item: T) => string,
+  onBatchReady: (items: T[], texts: string[], vectors: number[][]) => Promise<void>,
+  onItemFailed: (items: T[], error: Error) => void,
+  options?: { signal?: AbortSignal; label?: string },
+): Promise<void> {
+  if (items.length === 0) return;
+  const bs = Math.max(1, Math.min(initialBatchSize, 200));
+  const label = options?.label ?? "embed";
+
+  const process = async (batch: T[], currentSize: number): Promise<void> => {
+    if (options?.signal?.aborted) {
+      onItemFailed(batch, options.signal.reason instanceof Error
+        ? options.signal.reason
+        : new Error("Aborted"));
+      return;
+    }
+    const texts = batch.map(getText);
+    try {
+      const vectors = await cachedEmbedTexts(userId, texts, { signal: options?.signal });
+      await onBatchReady(batch, texts, vectors);
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (isRetryableBatchError(e) && currentSize > 1) {
+        const half = Math.max(1, Math.floor(currentSize / 2));
+        console.warn(
+          `[embeddings] ${label}: batch of ${batch.length} failed (${e.message}); retrying in sub-batches of ${half}`,
+        );
+        for (let j = 0; j < batch.length; j += half) {
+          await process(batch.slice(j, j + half), half);
+        }
+        return;
+      }
+      if (currentSize === 1 && looksLikePhysicalBatchLimit(e)) {
+        onItemFailed(
+          batch,
+          new Error(
+            `${e.message} — a single input still exceeds the server's physical batch size. ` +
+            `For llama.cpp, restart llama-server with a larger --ubatch-size / -ub (and matching --batch-size / -b), ` +
+            `or reduce the source chunk size.`,
+          ),
+        );
+      } else {
+        onItemFailed(batch, e);
+      }
+    }
+  };
+
+  for (let i = 0; i < items.length; i += bs) {
+    await process(items.slice(i, i + bs), bs);
+  }
+}
+
+/**
+ * Attach to an in-flight shared fetch or start a new one. The shared fetch's
+ * own AbortController is aborted only when every cancellable joiner has
+ * aborted AND no uncancellable joiner is attached.
+ */
+function joinOrStartInflight(
+  userId: string,
+  texts: string[],
+  key: string,
+  signal: AbortSignal | undefined,
+): Promise<number[]> {
+  const existing = inflightEmbeddings.get(key);
+  if (existing) {
+    return attachJoiner(existing, signal);
+  }
+
+  const controller = new AbortController();
+  const entry: InflightEmbeddingEntry = {
+    promise: null as unknown as Promise<number[]>,
+    controller,
+    liveJoiners: 0,
+    hasUncancellableJoiner: false,
+  };
+
+  entry.promise = requestEmbeddings(userId, texts, { signal: controller.signal }).then(
+    (vecs) => {
+      const vec = vecs[0];
+      embeddingCache.set(key, vec);
+      inflightEmbeddings.delete(key);
+      return vec;
+    },
+    (err) => {
+      inflightEmbeddings.delete(key);
+      throw err;
+    },
+  );
+  inflightEmbeddings.set(key, entry);
+
+  return attachJoiner(entry, signal);
+}
+
+function attachJoiner(
+  entry: InflightEmbeddingEntry,
+  signal: AbortSignal | undefined,
+): Promise<number[]> {
+  if (!signal) {
+    entry.hasUncancellableJoiner = true;
+    return entry.promise;
+  }
+
+  entry.liveJoiners++;
+  const onAbort = () => {
+    entry.liveJoiners--;
+    // Tear down the shared upstream only when every cancellable joiner has
+    // aborted and no uncancellable joiner is waiting on the result.
+    if (!entry.hasUncancellableJoiner && entry.liveJoiners <= 0) {
+      entry.controller.abort();
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  // Wrap the shared promise so this caller's await rejects on their own abort
+  // without waiting for the shared work. The shared work may still continue
+  // for other joiners; refcount decides when to actually cancel upstream.
+  return new Promise<number[]>((resolve, reject) => {
+    const onLocalAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onLocalAbort, { once: true });
+    entry.promise.then(
+      (v) => {
+        signal.removeEventListener("abort", onLocalAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onLocalAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** Race a shared promise against an abort signal so the caller's await can
+ *  reject on cancel without killing the shared upstream request. */
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      v => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      e => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Query vector cache — read/write
+// ---------------------------------------------------------------------------
+
+const QUERY_CACHE_TTL_SECONDS = 300; // 5 minutes
+
+function computeQueryHash(queryText: string): string {
+  return Bun.hash(queryText).toString(36);
+}
+
+/**
+ * Look up a previously-cached query vector for a chat. Returns the vector if
+ * found and not expired, otherwise null.
+ */
+export async function getCachedQueryVector(
+  chatId: string,
+  queryText: string,
+): Promise<number[] | null> {
+  try {
+    const db = getDb();
+    const hash = computeQueryHash(queryText);
+    const now = Math.floor(Date.now() / 1000);
+
+    const row = db.query<{ vector_json: string }, [string, string, number]>(
+      `SELECT vector_json FROM query_vector_cache
+       WHERE chat_id = ? AND query_hash = ? AND expires_at > ?`
+    ).get(chatId, hash, now);
+
+    if (!row) return null;
+
+    // Update hit stats
+    db.query(
+      `UPDATE query_vector_cache
+       SET hit_count = hit_count + 1, last_used_at = ?
+       WHERE chat_id = ? AND query_hash = ?`
+    ).run(now, chatId, hash);
+
+    return JSON.parse(row.vector_json);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist a query vector so future generations for the same chat + query text
+ * can skip the embedding API call entirely.
+ */
+export function cacheQueryVector(
+  chatId: string,
+  queryText: string,
+  vector: number[],
+): void {
+  try {
+    const db = getDb();
+    const hash = computeQueryHash(queryText);
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + QUERY_CACHE_TTL_SECONDS;
+
+    db.query(
+      `INSERT INTO query_vector_cache
+       (id, chat_id, query_hash, query_text, vector_json, hit_count, created_at, last_used_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+       ON CONFLICT(chat_id, query_hash) DO UPDATE SET
+         vector_json = excluded.vector_json,
+         query_text = excluded.query_text,
+         last_used_at = excluded.last_used_at,
+         expires_at = excluded.expires_at`
+    ).run(
+      crypto.randomUUID(),
+      chatId,
+      hash,
+      queryText,
+      JSON.stringify(vector),
+      now,
+      now,
+      expiresAt,
+    );
+  } catch {
+    // Non-critical cache write failure — silently ignore
+  }
 }
 
 export async function testEmbeddingConfig(
@@ -1524,7 +2333,7 @@ export async function testEmbeddingConfig(
   const ctx = resolveEmbeddingUserContext(userId);
   if (ctx.inherited) {
     const ownerCfg = readRawEmbeddingConfig(ctx.userId);
-    const has_api_key = await secretsSvc.validateSecret(ctx.userId, EMBEDDING_SECRET_KEY);
+    const has_api_key = await hasEmbeddingSecret(ctx.userId, ownerCfg.provider);
     return {
       dimension: first.length,
       config: { ...ownerCfg, has_api_key, inherited: true },
@@ -1534,7 +2343,7 @@ export async function testEmbeddingConfig(
   const current = readRawEmbeddingConfig(userId);
   const updated = normalizeConfig({ ...current, dimensions: first.length });
   settingsSvc.putSetting(userId, EMBEDDING_SETTINGS_KEY, updated);
-  const has_api_key = await secretsSvc.validateSecret(userId, EMBEDDING_SECRET_KEY);
+  const has_api_key = await hasEmbeddingSecret(userId, updated.provider);
 
   return {
     dimension: first.length,
@@ -1547,13 +2356,30 @@ export async function testEmbeddingConfig(
 
 export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: string): Promise<void> {
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
-    await table.delete(
-      `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
-    );
+    await deleteWorldBookEntryRowsFromTable(table, userId, [entryId]);
   });
   scheduleOptimize();
+}
+
+async function deleteWorldBookEntryRowsFromTable(table: Table, userId: string, entryIds: string[]): Promise<void> {
+  if (entryIds.length === 0) return;
+  const sourceFilter = entryIds
+    .map((entryId) => `source_id = ${sqlValue(entryId)}`)
+    .join(" OR ");
+  await table.delete(
+    `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND (${sourceFilter})`
+  );
+}
+
+async function deleteWorldBookEntryEmbeddingsBatch(userId: string, entryIds: string[]): Promise<void> {
+  if (entryIds.length === 0) return;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists(true);
+    if (!table) return;
+    await deleteWorldBookEntryRowsFromTable(table, userId, entryIds);
+  });
 }
 
 function getDesiredWorldBookVectorStatus(entry: WorldBookEntry): WorldBookVectorIndexStatus {
@@ -1592,35 +2418,25 @@ function isEligibleWorldBookEntry(entry: WorldBookEntry): boolean {
   return entry.vectorized && !entry.disabled && (entry.content || "").trim().length > 0;
 }
 
-async function getExistingWorldBookVectorPayload(
+function buildWorldBookEmbeddingRows(
   userId: string,
-  entryId: string,
-): Promise<{ content: string; searchText: string; vectorVersion: number | null } | null> {
-  try {
-    const table = await getTableIfExists();
-    if (!table) return null;
-    const rows = await table
-      .query()
-      .where(
-        `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND source_id = ${sqlValue(entryId)}`
-      )
-      .select(["content", "metadata_json"])
-      .limit(1)
-      .toArray();
-    if (rows.length === 0) return null;
-
-    const row = rows[0] as any;
-    if (typeof row.content !== "string") return null;
-    const metadata = parseWorldBookEmbeddingMetadata(row.metadata_json);
-    return {
-      content: row.content,
-      searchText: typeof metadata.search_text === "string" ? metadata.search_text : "",
-      vectorVersion: typeof metadata.vector_version === "number" ? metadata.vector_version : null,
-    };
-  } catch {
-    // Table may not exist yet
-  }
-  return null;
+  entry: WorldBookEntry,
+  chunks: Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }>,
+  vectors: number[][],
+  now: number,
+): EmbeddingRow[] {
+  return chunks.map((chunk, idx) => ({
+    id: rowId(userId, "world_book_entry", entry.id, chunk.chunkIndex),
+    user_id: userId,
+    source_type: "world_book_entry",
+    source_id: entry.id,
+    owner_id: entry.world_book_id,
+    chunk_index: chunk.chunkIndex,
+    content: chunk.content,
+    vector: vectors[idx],
+    metadata_json: JSON.stringify(buildWorldBookEmbeddingMetadata(entry, chunk.searchText, chunk.chunkIndex, chunk.chunkCount)),
+    updated_at: now,
+  }));
 }
 
 export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBookEntry): Promise<void> {
@@ -1633,52 +2449,34 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
   }
 
   const cfg = await getEmbeddingConfig(userId);
-  const content = (entry.content || "").trim();
-  const searchText = buildWorldBookEntrySearchText(entry);
-  if (!cfg.enabled || !cfg.vectorize_world_books || entry.disabled || !content) {
+  const worldBookSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: cfg.retrieval_top_k,
+  });
+  const chunks = buildWorldBookEntryEmbeddingChunks(entry, worldBookSettings);
+  if (!cfg.enabled || !cfg.vectorize_world_books || entry.disabled || chunks.length === 0) {
     await deleteWorldBookEntryEmbeddings(userId, entry.id);
     updateWorldBookEntryVectorState(entry.id, "not_enabled", null, null);
     return;
   }
 
   try {
-    const existing = await getExistingWorldBookVectorPayload(userId, entry.id);
     const now = Math.floor(Date.now() / 1000);
+    const vectors = await cachedEmbedTexts(userId, chunks.map((chunk) => chunk.searchText));
+    const rows = buildWorldBookEmbeddingRows(userId, entry, chunks, vectors, now);
 
-    if (
-      existing &&
-      existing.content === content &&
-      existing.searchText === searchText &&
-      existing.vectorVersion === WORLD_BOOK_VECTOR_VERSION
-    ) {
-      updateWorldBookEntryVectorState(entry.id, "indexed", now, null);
-      return;
-    }
-
-    const [vector] = await cachedEmbedTexts(userId, [searchText]);
-    const row: EmbeddingRow = {
-      id: rowId(userId, "world_book_entry", entry.id, 0),
-      user_id: userId,
-      source_type: "world_book_entry",
-      source_id: entry.id,
-      owner_id: entry.world_book_id,
-      chunk_index: 0,
-      content,
-      vector,
-      metadata_json: JSON.stringify(buildWorldBookEmbeddingMetadata(entry, searchText)),
-      updated_at: now,
-    };
-
-    await withWriteLock(async () => {
-      const table = await getOrCreateTable([row]);
-      await ensureVectorIndex(table);
-      await ensureScalarIndexes(table);
-      await ensureFtsIndex(table);
-      await table
-        .mergeInsert("id")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute(asLanceRows([row]));
+    await retryAfterSchemaDriftReset("world-book entry sync", async () => {
+      await withWriteLock(async () => {
+        const table = await getOrCreateTable(rows, true);
+        await ensureVectorIndex(table);
+        await ensureScalarIndexes(table);
+        await ensureFtsIndex(table);
+        await deleteWorldBookEntryRowsFromTable(table, userId, [entry.id]);
+        await table
+          .mergeInsert("id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .execute(asLanceRows(rows));
+      });
     });
 
     updateWorldBookEntryVectorState(entry.id, "indexed", now, null);
@@ -1720,9 +2518,13 @@ export async function reindexWorldBookEntries(
   const toIndex: WorldBookEntry[] = [];
   const notEnabled: WorldBookEntry[] = [];
   const disabledOrEmpty: WorldBookEntry[] = [];
+  const alreadyIndexed: WorldBookEntry[] = [];
 
   for (const entry of entries) {
-    if (!entry.vectorized) {
+    if (entry.vector_index_status === "indexed") {
+      alreadyIndexed.push(entry);
+      progress.skipped_not_enabled += 1;
+    } else if (!entry.vectorized) {
       notEnabled.push(entry);
       progress.skipped_not_enabled += 1;
     } else if (!isEligibleWorldBookEntry(entry)) {
@@ -1750,6 +2552,11 @@ export async function reindexWorldBookEntries(
     emitProgress();
   }
 
+  for (const entry of alreadyIndexed) {
+    progress.current += 1;
+    emitProgress();
+  }
+
   const cfg = await getEmbeddingConfig(userId);
   if (!cfg.enabled || !cfg.vectorize_world_books) {
     for (const entry of toIndex) {
@@ -1763,74 +2570,94 @@ export async function reindexWorldBookEntries(
   }
 
   await ensureWorldBookVectorVersion(userId);
+  const worldBookSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: cfg.retrieval_top_k,
+  });
+  const allEntryGroups = toIndex.map((entry) => ({
+    entry,
+    chunks: buildWorldBookEntryEmbeddingChunks(entry, worldBookSettings),
+  }));
+  const entryGroups = allEntryGroups.filter((group) => group.chunks.length > 0);
+  const emptiedEntries = allEntryGroups.filter((group) => group.chunks.length === 0);
+  progress.eligible = entryGroups.length;
 
-  /** Process a batch of entries: embed, upsert into LanceDB, update state.
-   *  On timeout/abort failures, retries with halved batch size (min 1).
-   *  Returns the entries that permanently failed after all retries. */
-  const processBatch = async (batch: WorldBookEntry[], currentBatchSize: number): Promise<void> => {
+  for (const group of emptiedEntries) {
+    await deleteWorldBookEntryEmbeddings(userId, group.entry.id);
+    updateWorldBookEntryVectorState(group.entry.id, "not_enabled", null, null);
+    progress.removed += 1;
+    progress.current += 1;
+    emitProgress();
+  }
+
+  const processGroupBatch = async (
+    groups: Array<{ entry: WorldBookEntry; chunks: Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }> }>,
+    currentSize: number,
+  ): Promise<void> => {
+    if (groups.length === 0) return;
+      const payloads = groups.flatMap((group) => group.chunks.map((chunk) => ({ entry: group.entry, chunk })));
     try {
-      const searchTexts = batch.map((entry) => buildWorldBookEntrySearchText(entry));
-      const vectors = await cachedEmbedTexts(userId, searchTexts);
+      const vectors = await cachedEmbedTexts(userId, payloads.map((payload) => payload.chunk.searchText));
       const now = Math.floor(Date.now() / 1000);
+      const rows: EmbeddingRow[] = [];
+      const vectorSlices = new Map<string, number[][]>();
+      let offset = 0;
+      for (const group of groups) {
+        const slice = vectors.slice(offset, offset + group.chunks.length);
+        vectorSlices.set(group.entry.id, slice);
+        offset += group.chunks.length;
+      }
+      for (const group of groups) {
+        rows.push(...buildWorldBookEmbeddingRows(
+          userId,
+          group.entry,
+          group.chunks,
+          vectorSlices.get(group.entry.id) ?? [],
+          now,
+        ));
+      }
 
-      const rows: EmbeddingRow[] = batch.map((entry, idx) => ({
-        id: rowId(userId, "world_book_entry", entry.id, 0),
-        user_id: userId,
-        source_type: "world_book_entry",
-        source_id: entry.id,
-        owner_id: entry.world_book_id,
-        chunk_index: 0,
-        content: (entry.content || "").trim(),
-        vector: vectors[idx],
-        metadata_json: JSON.stringify(buildWorldBookEmbeddingMetadata(entry, searchTexts[idx])),
-        updated_at: now,
-      }));
-
-      await withWriteLock(async () => {
-        const table = await getOrCreateTable(rows);
-        await ensureVectorIndex(table);
-        await ensureScalarIndexes(table);
-        await ensureFtsIndex(table);
-        await table
-          .mergeInsert("id")
-          .whenMatchedUpdateAll()
-          .whenNotMatchedInsertAll()
-          .execute(asLanceRows(rows));
+      await retryAfterSchemaDriftReset("world-book reindex batch", async () => {
+        await withWriteLock(async () => {
+          const table = await getOrCreateTable(rows, true);
+          await ensureVectorIndex(table);
+          await ensureScalarIndexes(table);
+          await ensureFtsIndex(table);
+          await deleteWorldBookEntryRowsFromTable(table, userId, groups.map((group) => group.entry.id));
+          await table
+            .mergeInsert("id")
+            .whenMatchedUpdateAll()
+            .whenNotMatchedInsertAll()
+            .execute(asLanceRows(rows));
+        });
       });
 
-      updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "indexed", now, null);
-      progress.indexed += batch.length;
-      progress.current += batch.length;
+      updateWorldBookEntriesVectorState(groups.map((group) => group.entry.id), "indexed", now, null);
+      progress.indexed += groups.length;
+      progress.current += groups.length;
       emitProgress();
     } catch (err) {
-      const isTimeout = err instanceof Error && /timed out|abort/i.test(err.message);
-
-      // Retry with smaller batches if the failure looks like a timeout and
-      // we can still split further.
-      if (isTimeout && currentBatchSize > 1) {
-        const half = Math.max(1, Math.floor(currentBatchSize / 2));
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (isRetryableBatchError(error) && currentSize > 1) {
+        const half = Math.max(1, Math.floor(currentSize / 2));
         console.warn(
-          `[embeddings] Batch of ${batch.length} timed out, retrying in sub-batches of ${half}`
+          `[embeddings] WB reindex: batch of ${groups.length} failed (${error.message}); retrying in sub-batches of ${half}`,
         );
-        for (let j = 0; j < batch.length; j += half) {
-          await processBatch(batch.slice(j, j + half), half);
+        for (let i = 0; i < groups.length; i += half) {
+          await processGroupBatch(groups.slice(i, i + half), half);
         }
         return;
       }
-
-      // Permanent failure — mark entries as errored.
-      console.warn("[embeddings] Batch embedding failed:", err);
-      const message = err instanceof Error ? err.message : "Batch vector indexing failed";
-      updateWorldBookEntriesVectorState(batch.map((entry) => entry.id), "error", null, message);
-      progress.failed += batch.length;
-      progress.current += batch.length;
+      console.warn("[embeddings] Batch embedding failed:", error);
+      await deleteWorldBookEntryEmbeddingsBatch(userId, groups.map((group) => group.entry.id));
+      updateWorldBookEntriesVectorState(groups.map((group) => group.entry.id), "error", null, error.message);
+      progress.failed += groups.length;
+      progress.current += groups.length;
       emitProgress();
     }
   };
 
-  for (let i = 0; i < toIndex.length; i += batchSize) {
-    const batch = toIndex.slice(i, i + batchSize);
-    await processBatch(batch, batchSize);
+  for (let i = 0; i < entryGroups.length; i += batchSize) {
+    await processGroupBatch(entryGroups.slice(i, i + batchSize), batchSize);
   }
 
   // Compact all fragments into fewer files, prune old versions, and
@@ -1839,7 +2666,7 @@ export async function reindexWorldBookEntries(
     await optimizeTable();
     // After bulk reindex, force a vector index rebuild to absorb all new rows
     await withWriteLock(async () => {
-      const table = await getTableIfExists();
+      const table = await getTableIfExists(true);
       if (table) {
         vectorIndexReady = false;
         await ensureVectorIndex(table);
@@ -1881,9 +2708,11 @@ export async function searchWorldBookEntriesHybridWithVector(
   worldBookId: string,
   queryText: string,
   vector: number[],
-  limit = 8
+  limit = 8,
+  signal?: AbortSignal,
 ): Promise<WorldBookSearchCandidate[]> {
   await ensureWorldBookVectorVersion(userId);
+  if (signal?.aborted) return [];
   const table = await getTableIfExists();
   if (!table) {
     console.debug("[embeddings] WI vector search: no LanceDB table exists yet (entries may not be indexed)");
@@ -1893,16 +2722,17 @@ export async function searchWorldBookEntriesHybridWithVector(
   const trimmedQuery = queryText.trim();
   const filter = `user_id = ${sqlValue(userId)} AND source_type = 'world_book_entry' AND owner_id = ${sqlValue(worldBookId)}`;
   const effectiveLimit = Math.max(1, Math.min(limit, 100));
+  const rawLimit = Math.min(200, Math.max(effectiveLimit * 3, effectiveLimit));
 
   const query = table
     .query()
     .nearestTo(vector)
     .where(filter)
     .select(["source_id", "content", "_distance", "metadata_json"])
-    .limit(effectiveLimit) as any;
+    .limit(rawLimit) as any;
   // Refine with full vectors after PQ approximate search for better accuracy
   if (vectorIndexReady) query.refineFactor(5);
-  const vectorRows = await query.toArray();
+  const vectorRows = await raceWithSignal(query.toArray() as Promise<any[]>, signal);
 
   if (vectorRows.length === 0) {
     console.debug("[embeddings] WI vector search: 0 rows from LanceDB for book=%s (limit=%d)", worldBookId.slice(0, 8), effectiveLimit);
@@ -1912,25 +2742,33 @@ export async function searchWorldBookEntriesHybridWithVector(
 
   for (const row of vectorRows) {
     const metadata = parseWorldBookEmbeddingMetadata(row.metadata_json);
-    merged.set(String(row.source_id), {
-      entry_id: String(row.source_id),
-      distance: typeof row._distance === "number" ? row._distance : 0,
-      lexical_score: null,
-      content: String(row.content || ""),
-      searchTextPreview: typeof metadata.search_text === "string" ? metadata.search_text : "",
-      metadata,
-    });
+    const entryId = String(row.source_id);
+    const distance = typeof row._distance === "number" ? row._distance : 0;
+    const existing = merged.get(entryId);
+    if (!existing || distance < existing.distance) {
+      merged.set(entryId, {
+        entry_id: entryId,
+        distance,
+        lexical_score: existing?.lexical_score ?? null,
+        content: String(row.content || ""),
+        searchTextPreview: typeof metadata.search_text === "string" ? metadata.search_text : existing?.searchTextPreview || "",
+        metadata: { ...(existing?.metadata ?? {}), ...metadata },
+      });
+    }
   }
 
-  if (trimmedQuery) {
+  if (trimmedQuery && !signal?.aborted) {
     try {
-      const lexicalRows = await table
-        .query()
-        .fullTextSearch(trimmedQuery)
-        .where(filter)
-        .select(["source_id", "content", "_score", "metadata_json"])
-        .limit(effectiveLimit)
-        .toArray();
+      const lexicalRows = await raceWithSignal(
+        table
+          .query()
+          .fullTextSearch(trimmedQuery)
+          .where(filter)
+          .select(["source_id", "content", "_score", "metadata_json"])
+          .limit(rawLimit)
+          .toArray() as Promise<any[]>,
+        signal,
+      );
 
       for (const row of lexicalRows) {
         const entryId = String(row.source_id);
@@ -1939,7 +2777,9 @@ export async function searchWorldBookEntriesHybridWithVector(
         const existing = merged.get(entryId);
 
         if (existing) {
-          existing.lexical_score = lexicalScore;
+          if (lexicalScore !== null && (existing.lexical_score === null || lexicalScore > existing.lexical_score)) {
+            existing.lexical_score = lexicalScore;
+          }
           if (!existing.searchTextPreview && typeof metadata.search_text === "string") {
             existing.searchTextPreview = metadata.search_text;
           }
@@ -1965,7 +2805,12 @@ export async function searchWorldBookEntriesHybridWithVector(
     }
   }
 
-  return Array.from(merged.values());
+  return Array.from(merged.values())
+    .sort((a, b) => {
+      if (a.distance !== b.distance) return a.distance - b.distance;
+      return (b.lexical_score ?? Number.NEGATIVE_INFINITY) - (a.lexical_score ?? Number.NEGATIVE_INFINITY);
+    })
+    .slice(0, effectiveLimit);
 }
 
 /**
@@ -1995,7 +2840,7 @@ export async function invalidateAllVectors(userId: string): Promise<void> {
 
   try {
     await withWriteLock(async () => {
-      const table = await getTableIfExists();
+      const table = await getTableIfExists(true);
       if (table) {
         await table.delete(`user_id = ${sqlValue(userId)}`);
       }
@@ -2041,48 +2886,16 @@ export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: str
   // delete the directory. Without this, concurrent writes would panic trying
   // to access files that no longer exist.
   return withWriteLock(async () => {
-    // 1. Cancel any pending optimize and index health monitor
-    if (optimizeTimer) {
-      clearTimeout(optimizeTimer);
-      optimizeTimer = null;
-    }
-    optimizeQueuedAt = null;
-    stopIndexHealthMonitor();
+    resetInMemoryVectorStoreState();
 
-    // 2. Clear in-memory caches
-    embeddingCache.clear();
-
-    // 3. Reset connection + table state so next access creates fresh handles
-    connPromise = null;
-    tableHandle = null;
-    vectorIndexReady = false;
-    scalarIndexReady = false;
-    ftsIndexReady = false;
-    lastIndexRebuildAt = 0;
-    unindexedRowEstimate = 0;
-
-    // 4. Delete the entire LanceDB directory from disk
+    // Delete the entire LanceDB directory from disk
     const deleted = existsSync(LANCEDB_PATH);
     if (deleted) {
       rmSync(LANCEDB_PATH, { recursive: true, force: true });
       console.info(`[embeddings] Force-deleted LanceDB directory: ${LANCEDB_PATH}`);
     }
 
-    // 5. Reset world book index state in SQLite while preserving semantic opt-in
-    try {
-      const db = getDb();
-      db.run(
-        `UPDATE world_book_entries
-         SET vector_index_status = CASE WHEN vectorized = 1 THEN 'pending' ELSE 'not_enabled' END,
-             vector_indexed_at = NULL,
-             vector_index_error = NULL`
-      );
-      db.run(`UPDATE chat_chunks SET vectorized_at = NULL, vector_model = NULL`);
-      db.run(`DELETE FROM query_vector_cache`);
-      db.run(`DELETE FROM chat_memory_cache`);
-    } catch (err) {
-      console.warn("[embeddings] Failed to reset SQLite vectorization state:", err);
-    }
+    resetSqliteVectorizationState();
 
     console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
     return { deleted, path: LANCEDB_PATH };
@@ -2097,7 +2910,7 @@ export async function deleteChatChunkEmbeddings(userId: string, chatId: string, 
     filter += ` AND source_id = ${sqlValue(chunkId)}`;
   }
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
     await table.delete(filter);
   });
@@ -2140,17 +2953,7 @@ export async function syncChatChunkEmbedding(
     updated_at: now,
   };
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable([row]);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows([row]));
-  });
+  await upsertEmbeddingRows([row], "chat chunk sync");
 
   console.info(`[embeddings] Vectorized chat chunk ${chunkId} for chat ${chatId}`);
 
@@ -2182,17 +2985,7 @@ export async function batchUpsertChunkVectors(
     updated_at: now,
   }));
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable(rows);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows(rows));
-  });
+  await upsertEmbeddingRows(rows, "chat chunk batch upsert");
 
   console.info(`[embeddings] Batch-vectorized ${rows.length} chat chunk(s)`);
   scheduleOptimize();
@@ -2255,13 +3048,13 @@ export async function reindexChatMessages(
   }
 
   const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
-  for (let i = 0; i < chunksToUpsert.length; i += batchSize) {
-    const batch = chunksToUpsert.slice(i, i + batchSize);
-    try {
-      const texts = batch.map((c) => c.content.trim());
-      const vectors = await cachedEmbedTexts(userId, texts);
+  await embedWithAdaptiveBatching(
+    userId,
+    chunksToUpsert,
+    batchSize,
+    (c) => c.content.trim(),
+    async (batch, _texts, vectors) => {
       const now = Math.floor(Date.now() / 1000);
-
       const rows: EmbeddingRow[] = batch.map((c, idx) => ({
         id: rowId(userId, "chat_chunk", c.chunkId, 0),
         user_id: userId,
@@ -2275,21 +3068,13 @@ export async function reindexChatMessages(
         updated_at: now,
       }));
 
-      await withWriteLock(async () => {
-        const table = await getOrCreateTable(rows);
-        await ensureVectorIndex(table);
-        await ensureScalarIndexes(table);
-        await ensureFtsIndex(table);
-        await table
-          .mergeInsert("id")
-          .whenMatchedUpdateAll()
-          .whenNotMatchedInsertAll()
-          .execute(asLanceRows(rows));
-      });
-    } catch (err) {
+      await upsertEmbeddingRows(rows, "chat memory reindex batch");
+    },
+    (_batch, err) => {
       console.warn("[embeddings] Batch chat embedding failed:", err);
-    }
-  }
+    },
+    { label: "chat memory" },
+  );
 
   if (chunksToDelete.length > 0 || chunksToUpsert.length > 0) {
     console.info(`[embeddings] Synced chat memory for ${chatId.split('-')[0]}... (+${chunksToUpsert.length} updated, -${chunksToDelete.length} removed)`);
@@ -2307,7 +3092,9 @@ export async function searchChatChunks(
   queryText?: string,
   hybridWeightMode?: "keyword_first" | "balanced" | "vector_first",
   allowedChunkIds?: Set<string>,
+  signal?: AbortSignal,
 ): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+  if (signal?.aborted) return [];
   const table = await getTableIfExists();
   if (!table) return [];
 
@@ -2340,8 +3127,9 @@ export async function searchChatChunks(
         .rerank(reranker)
         .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json", "vector"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     } catch {
+      if (signal?.aborted) return [];
       // FTS index may not exist yet — fall back to vector-only
       const q = table
         .query()
@@ -2349,7 +3137,7 @@ export async function searchChatChunks(
         .where(filter)
         .select(["source_id", "content", "_distance", "metadata_json", "vector"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     }
   } else {
     const q = table
@@ -2358,7 +3146,7 @@ export async function searchChatChunks(
       .where(filter)
       .select(["source_id", "content", "_distance", "metadata_json", "vector"])
       .limit(fetchLimit);
-    rows = await applyRefineFactor(q).toArray();
+    rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
   }
 
   // Parse rows and collect metadata
@@ -2548,17 +3336,7 @@ export async function upsertChunkVector(
     updated_at: now,
   };
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable([row]);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows([row]));
-  });
+  await upsertEmbeddingRows([row], "chat chunk incremental upsert");
 
   scheduleOptimize();
 }
@@ -2568,11 +3346,204 @@ export async function upsertChunkVector(
  */
 export async function deleteChunkVector(userId: string, chunkId: string): Promise<void> {
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
     const id = rowId(userId, "chat_chunk", chunkId, 0);
     await table.delete(`id = ${sqlValue(id)}`);
   });
+}
+
+// ─── Vault Chunk Vector Operations ─────────────────────────────
+// Vaults are self-contained salience sources. Their embedding rows live in
+// the same LanceDB table with source_type='vault_chunk' and owner_id=vaultId.
+// Copy-from-chat reuses existing chat_chunk vectors (no re-embedding cost),
+// while rebuild-from-content handles recovery after forceResetLanceDB wipes
+// the table out from under us.
+
+/**
+ * Copy chat_chunk LanceDB rows into vault_chunk rows for a new vault.
+ * Reuses existing vectors — no re-embedding. `chunkIdMap` maps the source
+ * chat_chunk id → the newly-minted cortex_vault_chunks row id.
+ */
+export async function copyChunksToVault(
+  userId: string,
+  sourceChatId: string,
+  vaultId: string,
+  chunkIdMap: Map<string, string>,
+): Promise<{ copied: number }> {
+  if (chunkIdMap.size === 0) return { copied: 0 };
+
+  const table = await getTableIfExists();
+  if (!table) return { copied: 0 };
+
+  const sourceIds = [...chunkIdMap.keys()];
+  const now = Math.floor(Date.now() / 1000);
+  let copied = 0;
+
+  // Read source rows in batches to avoid blowing up the filter string.
+  for (let i = 0; i < sourceIds.length; i += 200) {
+    const batch = sourceIds.slice(i, i + 200);
+    const sourceIdFilter = batch.map((id) => sqlValue(id)).join(", ");
+    const filter = `user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(sourceChatId)} AND source_id IN (${sourceIdFilter})`;
+
+    const rows = await table
+      .query()
+      .where(filter)
+      .select(["source_id", "content", "vector", "metadata_json"])
+      .toArray();
+
+    const outRows: EmbeddingRow[] = [];
+    for (const row of rows as any[]) {
+      const sourceId = String(row.source_id);
+      const vaultChunkId = chunkIdMap.get(sourceId);
+      if (!vaultChunkId) continue;
+      const rawVec = row.vector;
+      const vector = rawVec instanceof Float32Array ? Array.from(rawVec) : (rawVec as number[] | null);
+      if (!vector || vector.length === 0) continue;
+
+      let meta: any = {};
+      const rawMeta = row.metadata_json;
+      try {
+        if (typeof rawMeta === "string") meta = JSON.parse(rawMeta);
+        else if (rawMeta && typeof rawMeta === "object") meta = rawMeta;
+      } catch { /* ignore — use empty metadata */ }
+
+      outRows.push({
+        id: rowId(userId, "vault_chunk", vaultChunkId, 0),
+        user_id: userId,
+        source_type: "vault_chunk",
+        source_id: vaultChunkId,
+        owner_id: vaultId,
+        chunk_index: 0,
+        content: String(row.content || ""),
+        vector,
+        metadata_json: JSON.stringify({ ...meta, sourceChatId, sourceChunkId: sourceId, vaultId }),
+        updated_at: now,
+      });
+    }
+
+    if (outRows.length === 0) continue;
+
+    await upsertEmbeddingRows(outRows, "vault chunk copy");
+    copied += outRows.length;
+  }
+
+  if (copied > 0) scheduleOptimize();
+  return { copied };
+}
+
+/**
+ * Re-embed vault chunks from their stored content. Used when LanceDB was
+ * reset (e.g. embedding config change) but the cortex_vault_chunks SQLite
+ * rows survived. Caller passes (vaultChunkId, content) pairs.
+ */
+export async function rebuildVaultEmbeddings(
+  userId: string,
+  vaultId: string,
+  chunks: Array<{ vaultChunkId: string; content: string }>,
+): Promise<{ embedded: number }> {
+  if (chunks.length === 0) return { embedded: 0 };
+
+  const cfg = await getEmbeddingConfig(userId);
+  if (!cfg.enabled) return { embedded: 0 };
+
+  const valid = chunks.filter((c) => c.content.trim().length > 0);
+  if (valid.length === 0) return { embedded: 0 };
+
+  const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
+  let embedded = 0;
+
+  await embedWithAdaptiveBatching(
+    userId,
+    valid,
+    batchSize,
+    (c) => c.content.trim(),
+    async (batch, _texts, vectors) => {
+      const now = Math.floor(Date.now() / 1000);
+      const rows: EmbeddingRow[] = batch.map((c, idx) => ({
+        id: rowId(userId, "vault_chunk", c.vaultChunkId, 0),
+        user_id: userId,
+        source_type: "vault_chunk",
+        source_id: c.vaultChunkId,
+        owner_id: vaultId,
+        chunk_index: 0,
+        content: c.content.trim(),
+        vector: vectors[idx],
+        metadata_json: JSON.stringify({ vaultId, rebuiltAt: now }),
+        updated_at: now,
+      }));
+
+      await upsertEmbeddingRows(rows, "vault rebuild batch");
+      embedded += rows.length;
+    },
+    (_batch, err) => {
+      console.warn("[embeddings] Batch vault rebuild failed:", err);
+    },
+    { label: "vault rebuild" },
+  );
+
+  if (embedded > 0) scheduleOptimize();
+  return { embedded };
+}
+
+/**
+ * Search vault chunks in LanceDB scoped to a single vault. Mirrors
+ * searchChatChunks but filters on source_type='vault_chunk' AND owner_id.
+ */
+export async function searchVaultChunks(
+  userId: string,
+  vaultId: string,
+  vector: number[],
+  limit = 8,
+  allowedChunkIds?: Set<string>,
+  signal?: AbortSignal,
+): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+  if (signal?.aborted) return [];
+  const table = await getTableIfExists();
+  if (!table) return [];
+
+  const baseFilter = `user_id = ${sqlValue(userId)} AND source_type = 'vault_chunk' AND owner_id = ${sqlValue(vaultId)}`;
+  const sourceFilter = buildAllowedChunkFilter(allowedChunkIds);
+  const filter = sourceFilter ? `${baseFilter} AND ${sourceFilter}` : baseFilter;
+
+  const applyRefineFactor = (q: any) => { if (vectorIndexReady) q.refineFactor(5); return q; };
+  const q = table
+    .query()
+    .nearestTo(vector)
+    .where(filter)
+    .select(["source_id", "content", "_distance", "metadata_json"])
+    .limit(Math.max(1, Math.min(limit * 3, 200)));
+
+  const rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
+
+  return (rows as any[]).map((row) => {
+    let meta: any = {};
+    try {
+      const raw = row.metadata_json;
+      if (typeof raw === "string") meta = JSON.parse(raw);
+      else if (raw && typeof raw === "object") meta = raw;
+    } catch { /* use empty */ }
+    return {
+      chunk_id: String(row.source_id),
+      score: typeof row._distance === "number" ? row._distance : 0,
+      content: String(row.content || ""),
+      metadata: meta,
+    };
+  });
+}
+
+/**
+ * Delete all LanceDB rows belonging to a vault. Called during vault deletion
+ * and before a reindex replaces the snapshot.
+ */
+export async function deleteVaultChunks(userId: string, vaultId: string): Promise<void> {
+  const filter = `user_id = ${sqlValue(userId)} AND source_type = 'vault_chunk' AND owner_id = ${sqlValue(vaultId)}`;
+  await withWriteLock(async () => {
+    const table = await getTableIfExists(true);
+    if (!table) return;
+    await table.delete(filter);
+  });
+  scheduleOptimize();
 }
 
 // ─── Databank Vector Operations ─────────────────────────────────
@@ -2601,17 +3572,7 @@ export async function batchUpsertDatabankVectors(
     updated_at: now,
   }));
 
-  await withWriteLock(async () => {
-    const table = await getOrCreateTable(rows);
-    await ensureVectorIndex(table);
-    await ensureScalarIndexes(table);
-    await ensureFtsIndex(table);
-    await table
-      .mergeInsert("id")
-      .whenMatchedUpdateAll()
-      .whenNotMatchedInsertAll()
-      .execute(asLanceRows(rows));
-  });
+  await upsertEmbeddingRows(rows, "databank batch upsert");
 
   console.info(`[embeddings] Batch-vectorized ${rows.length} databank chunk(s)`);
   scheduleOptimize();
@@ -2627,7 +3588,7 @@ export async function deleteDatabankEmbeddings(
   databankId: string,
 ): Promise<void> {
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
     const filter = `user_id = ${sqlValue(userId)} AND source_type = 'databank' AND owner_id = ${sqlValue(databankId)}`;
     await table.delete(filter);
@@ -2642,7 +3603,7 @@ export async function deleteDatabankEmbeddings(
 export async function deleteDatabankChunksByIds(userId: string, chunkIds: string[]): Promise<void> {
   if (chunkIds.length === 0) return;
   await withWriteLock(async () => {
-    const table = await getTableIfExists();
+    const table = await getTableIfExists(true);
     if (!table) return;
     // Delete in batches to avoid overly long filter expressions
     const BATCH = 100;
@@ -2666,8 +3627,10 @@ export async function searchDatabankChunks(
   vector: number[],
   limit = 4,
   queryText?: string,
+  signal?: AbortSignal,
 ): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
   if (databankIds.length === 0) return [];
+  if (signal?.aborted) return [];
 
   const table = await getTableIfExists();
   if (!table) return [];
@@ -2691,15 +3654,16 @@ export async function searchDatabankChunks(
         .rerank(reranker)
         .select(["source_id", "content", "_distance", "_relevance_score", "metadata_json"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     } catch {
+      if (signal?.aborted) return [];
       const q = table
         .query()
         .nearestTo(vector)
         .where(filter)
         .select(["source_id", "content", "_distance", "metadata_json"])
         .limit(fetchLimit);
-      rows = await applyRefineFactor(q).toArray();
+      rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
     }
   } else {
     const q = table
@@ -2708,7 +3672,7 @@ export async function searchDatabankChunks(
       .where(filter)
       .select(["source_id", "content", "_distance", "metadata_json"])
       .limit(fetchLimit);
-    rows = await applyRefineFactor(q).toArray();
+    rows = await raceWithSignal(applyRefineFactor(q).toArray() as Promise<any[]>, signal);
   }
 
   const results: Array<{ chunk_id: string; score: number; content: string; metadata: any }> = [];

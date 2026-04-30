@@ -42,17 +42,21 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
   }, [models, capabilities?.staticModels])
 
   const fetchModels = useCallback(async () => {
-    if (!profile?.id) return
     setModelsLoading(true)
     try {
-      const result = await imageGenConnectionsApi.models(profile.id)
+      const result = await imageGenConnectionsApi.previewModels({
+        connection_id: profile?.id,
+        provider,
+        api_url: apiUrl.trim() || undefined,
+        api_key: apiKey.trim() || undefined,
+      })
       if (result.models.length > 0) setModels(result.models)
     } catch {
       setModels([])
     } finally {
       setModelsLoading(false)
     }
-  }, [profile?.id])
+  }, [apiKey, apiUrl, profile?.id, provider])
 
   useEffect(() => {
     if (profile?.id && capabilities?.modelListStyle !== 'static') {
@@ -197,7 +201,7 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
         />
       </FormField>
 
-      <FormField label="Model" hint={!profile?.id && capabilities?.modelListStyle !== 'static' ? 'Save connection first to fetch model list' : undefined}>
+      <FormField label="Model" hint={capabilities?.modelListStyle !== 'static' ? 'Refresh uses the current form values, even before the connection is saved.' : undefined}>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           <Select
             value={model}
@@ -211,15 +215,15 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
             <button
               type="button"
               onClick={fetchModels}
-              disabled={modelsLoading || !profile?.id}
-              title={!profile?.id ? 'Save connection to fetch models' : 'Refresh models'}
+              disabled={modelsLoading}
+              title="Refresh models"
               style={{
                 padding: 6,
                 border: 'none',
                 background: 'transparent',
-                cursor: !profile?.id ? 'not-allowed' : 'pointer',
+                cursor: modelsLoading ? 'progress' : 'pointer',
                 color: 'var(--lumiverse-text-muted)',
-                opacity: !profile?.id ? 0.4 : 1,
+                opacity: modelsLoading ? 0.7 : 1,
               }}
             >
               {modelsLoading ? <Loader size={14} /> : <RefreshCw size={14} />}

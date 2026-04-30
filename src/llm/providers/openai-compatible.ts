@@ -1,6 +1,8 @@
 import type { LlmProvider } from "../provider";
 import type { ProviderCapabilities } from "../param-schema";
+import { createCooperativeYielder, readWithAbort } from "../stream-utils";
 import type { GenerationRequest, GenerationResponse, StreamChunk, ToolCallResult, LlmMessage, LlmMessagePart } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 /**
  * Abstract base class for providers that use the OpenAI-compatible
@@ -12,6 +14,36 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
   abstract readonly displayName: string;
   abstract readonly defaultUrl: string;
   abstract readonly capabilities: ProviderCapabilities;
+
+  protected splitMirroredReasoning(
+    content: unknown,
+    reasoning: unknown,
+  ): { content: string; reasoning?: string } {
+    const resolvedContent = typeof content === "string" ? content : "";
+    const resolvedReasoning =
+      typeof reasoning === "string" && reasoning.length > 0
+        ? reasoning
+        : undefined;
+
+    if (!resolvedReasoning || !resolvedContent) {
+      return { content: resolvedContent, reasoning: resolvedReasoning };
+    }
+
+    // Some OpenAI-compatible reasoning models mirror the active thinking delta
+    // into both `reasoning(_content)` and `content`. Treat exact/trim-equal
+    // mirrors as reasoning-only so the chat stream doesn't show duplicates.
+    if (resolvedContent === resolvedReasoning) {
+      return { content: "", reasoning: resolvedReasoning };
+    }
+
+    const trimmedContent = resolvedContent.trim();
+    const trimmedReasoning = resolvedReasoning.trim();
+    if (trimmedContent && trimmedContent === trimmedReasoning) {
+      return { content: "", reasoning: resolvedReasoning };
+    }
+
+    return { content: resolvedContent, reasoning: resolvedReasoning };
+  }
 
   protected baseUrl(apiUrl: string): string {
     let url = (apiUrl || this.defaultUrl).replace(/\/+$/, "");
@@ -72,9 +104,14 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
         }))
       : undefined;
 
+    const normalized = this.splitMirroredReasoning(
+      choice?.message?.content,
+      choice?.message?.reasoning || choice?.message?.reasoning_content,
+    );
+
     return {
-      content: choice?.message?.content || "",
-      reasoning: choice?.message?.reasoning || choice?.message?.reasoning_content || undefined,
+      content: normalized.content,
+      reasoning: normalized.reasoning,
       finish_reason: toolCalls ? "tool_calls" : (choice?.finish_reason || "stop"),
       tool_calls: toolCalls,
       usage: data.usage
@@ -95,11 +132,11 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     const url = `${this.baseUrl(apiUrl)}/chat/completions`;
     const body = this.buildBody(request, true);
 
+    // NOTE: signal intentionally NOT passed to fetch — see src/llm/stream-utils.ts.
     const res = await fetch(url, {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-      signal: request.signal,
     });
 
     if (!res.ok) {
@@ -110,6 +147,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
     // Auto-detect reasoning field: modern APIs use `reasoning`, legacy uses
     // `reasoning_content`. Lock to whichever key appears first so we don't
     // check both on every chunk.
@@ -120,7 +158,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
 
     try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithAbort(reader, request.signal);
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -128,6 +166,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       buffer = lines.pop() || "";
 
       for (const line of lines) {
+        await maybeYield();
         const trimmed = line.trim();
         if (!trimmed || !trimmed.startsWith("data: ")) continue;
         const data = trimmed.slice(6);
@@ -158,7 +197,9 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
             reasoningKey = "reasoning_content";
             reasoning = delta.reasoning_content;
           }
-          const content = delta?.content;
+          const normalized = this.splitMirroredReasoning(delta?.content, reasoning);
+          const content = normalized.content;
+          reasoning = normalized.reasoning;
 
           // Usage data arrives in the final chunk when stream_options.include_usage is true
           const usage = parsed.usage
@@ -176,7 +217,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
               : undefined;
             yield {
               token: content || "",
-              reasoning: reasoning || undefined,
+              reasoning,
               finish_reason: toolCalls ? "tool_calls" : finishReason,
               tool_calls: toolCalls,
               usage,
@@ -184,7 +225,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
           } else if (reasoning || content) {
             yield {
               token: content || "",
-              reasoning: reasoning || undefined,
+              reasoning,
               usage,
             };
           } else if (usage) {
@@ -205,23 +246,24 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       const res = await fetch(`${this.baseUrl(apiUrl)}/models`, {
         headers: this.headers(apiKey),
       });
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({
+        provider: this.displayName,
+        operation: "authentication",
+        detail: err instanceof Error ? err.message : "network request failed",
+        retryable: true,
+      });
     }
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<string[]> {
-    try {
-      const res = await fetch(`${this.baseUrl(apiUrl)}/models`, {
-        headers: this.headers(apiKey),
-      });
-      if (!res.ok) return [];
-      const data = (await res.json()) as any;
-      return this.filterModels(data);
-    } catch {
-      return [];
-    }
+    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${this.baseUrl(apiUrl)}/models`, {
+      headers: this.headers(apiKey),
+    });
+    return this.filterModels(data);
   }
 
   /** Override to customise model list extraction / filtering. */
@@ -295,6 +337,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
           name: t.name,
           description: t.description,
           parameters: t.parameters,
+          ...(t.strict !== undefined ? { strict: t.strict } : {}),
         },
       }));
     }

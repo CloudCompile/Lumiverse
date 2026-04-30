@@ -1,10 +1,11 @@
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getCharacterAvatarUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById, getPersonaAvatarUrlById } from '@/lib/avatarUrls'
 import { imagesApi } from '@/api/images'
 import type { Message } from '@/types/api'
+import type { GenerationMetrics } from '@/types/ws-events'
 
 /**
  * Strip thinking/reasoning tags from content and extract the thoughts.
@@ -37,12 +38,16 @@ function parseThinkingTags(content: string): { cleaned: string; thoughts: string
 
 export function useMessageCard(message: Message, chatId: string) {
   const navigate = useNavigate()
-  const [isEditing, setIsEditing] = useState(false)
+  const editingMessageId = useStore((s) => s.editingMessageId)
+  const setEditingMessageId = useStore((s) => s.setEditingMessageId)
+  const updateMessage = useStore((s) => s.updateMessage)
+  const addToast = useStore((s) => s.addToast)
+  const isEditing = editingMessageId === message.id
   const [editContent, setEditContent] = useState('')
   const [editReasoning, setEditReasoning] = useState('')
   const [showReasoningEditor, setShowReasoningEditor] = useState(false)
   const hadReasoningRef = useRef(false)
-  const updateMessage = useStore((s) => s.updateMessage)
+  const wasEditingRef = useRef(false)
   const removeMessage = useStore((s) => s.removeMessage)
   const openModal = useStore((s) => s.openModal)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -100,9 +105,7 @@ export function useMessageCard(message: Message, chatId: string) {
     ? (streamingReasoningStartedAt ?? undefined)
     : undefined
   const tokenCount = message.extra?.tokenCount as number | undefined
-  const generationMetrics = message.extra?.generationMetrics as
-    | { ttft?: number; tps?: number; durationMs: number; wasStreaming: boolean }
-    | undefined
+  const generationMetrics = message.extra?.generationMetrics as GenerationMetrics | undefined
 
   const isGroupChat = useStore((s) => s.isGroupChat)
 
@@ -169,7 +172,7 @@ export function useMessageCard(message: Message, chatId: string) {
     return firstUser?.name || fallback
   }, [messages, message.id, message.name, isUser, activePersona])
 
-  const handleEdit = useCallback(() => {
+  const initializeEdit = useCallback(() => {
     if (!message.is_user) {
       // For assistant messages, separate reasoning from content
       const apiReasoning = typeof message.extra?.reasoning === 'string' ? message.extra.reasoning : ''
@@ -187,36 +190,50 @@ export function useMessageCard(message: Message, chatId: string) {
       setShowReasoningEditor(false)
       hadReasoningRef.current = false
     }
-    setIsEditing(true)
   }, [message.content, message.is_user, message.extra])
+
+  // Populate edit fields on the false→true transition of isEditing,
+  // so externally-triggered edits (keyboard shortcut) seed the fields too.
+  useEffect(() => {
+    if (isEditing && !wasEditingRef.current) {
+      initializeEdit()
+    }
+    wasEditingRef.current = isEditing
+  }, [isEditing, initializeEdit])
+
+  const handleEdit = useCallback(() => {
+    setEditingMessageId(message.id)
+  }, [message.id, setEditingMessageId])
 
   const handleSaveEdit = useCallback(async () => {
     try {
       const trimmedReasoning = editReasoning.trim()
       const cleanContent = editContent.trim()
+      let updated: Message
 
       if (!message.is_user && hadReasoningRef.current) {
-        // Save clean content (no think tags) and reasoning in extra
+        // Let the WS MESSAGE_EDITED payload reconcile the final stored message so
+        // extension-postprocessed content is not overwritten by a late local merge.
         const extra = { ...(message.extra || {}), reasoning: trimmedReasoning || undefined }
-        await messagesApi.update(chatId, message.id, { content: cleanContent, extra })
-        updateMessage(message.id, { content: cleanContent, extra })
+        updated = await messagesApi.update(chatId, message.id, { content: cleanContent, extra })
       } else {
-        await messagesApi.update(chatId, message.id, { content: cleanContent })
-        updateMessage(message.id, { content: cleanContent })
+        updated = await messagesApi.update(chatId, message.id, { content: cleanContent })
       }
-      setIsEditing(false)
+      updateMessage(updated.id, updated)
+      setEditingMessageId(null)
     } catch (err) {
       console.error('[MessageCard] Failed to save edit:', err)
+      addToast({ type: 'error', message: 'Failed to save message edit' })
     }
-  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, updateMessage])
+  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, setEditingMessageId, updateMessage, addToast])
 
   const handleCancelEdit = useCallback(() => {
-    setIsEditing(false)
+    setEditingMessageId(null)
     setEditContent('')
     setEditReasoning('')
     setShowReasoningEditor(false)
     hadReasoningRef.current = false
-  }, [])
+  }, [setEditingMessageId])
 
   const doDeleteMessage = useCallback(async () => {
     try {
@@ -229,12 +246,11 @@ export function useMessageCard(message: Message, chatId: string) {
 
   const doDeleteSwipe = useCallback(async () => {
     try {
-      const updated = await messagesApi.deleteSwipe(chatId, message.id, message.swipe_id)
-      updateMessage(message.id, updated)
+      await messagesApi.deleteSwipe(chatId, message.id, message.swipe_id)
     } catch (err) {
       console.error('[MessageCard] Failed to delete swipe:', err)
     }
-  }, [chatId, message.id, message.swipe_id, updateMessage])
+  }, [chatId, message.id, message.swipe_id])
 
   const isHidden = message.extra?.hidden === true
 
@@ -243,8 +259,8 @@ export function useMessageCard(message: Message, chatId: string) {
       const newHidden = !message.extra?.hidden
       const extra = { ...(message.extra || {}), hidden: newHidden || undefined }
       if (!newHidden) delete extra.hidden
-      await messagesApi.update(chatId, message.id, { extra })
-      updateMessage(message.id, { extra })
+      const updated = await messagesApi.update(chatId, message.id, { extra })
+      updateMessage(updated.id, updated)
     } catch (err) {
       console.error('[MessageCard] Failed to toggle hidden:', err)
     }
