@@ -1071,28 +1071,14 @@ export async function assemblePrompt(
       vectorRetrievalDetails = detailed;
 
       if (detailed.blockerMessages.length > 0) {
-        // Only log actionable blockers. Suppress benign states where the user
-        // simply hasn't opted into vector search (embeddings disabled, no
-        // vector-enabled entries, etc.). Log when vectorized entries exist but
-        // can't be searched, or when config is incomplete (no API key, etc.).
-        const benignBlockers = new Set([
-          "Embeddings are disabled, so lorebooks will use keyword matching only.",
-          "World-book vectorization is disabled in embeddings settings.",
-          "This chat has no vector-enabled, non-disabled, non-empty lorebook entries to search.",
-        ]);
-        const hasActionableBlocker = detailed.blockerMessages.some(
-          (m) => !benignBlockers.has(m),
+        console.log(
+          "[prompt-assembly] Vector WI blocked: %s (eligible=%d, books=%d)",
+          detailed.blockerMessages.join("; "),
+          detailed.eligibleCount,
+          wiSources.worldBookIds.length,
         );
-        if (hasActionableBlocker || detailed.eligibleCount > 0) {
-          console.debug(
-            "[prompt-assembly] Vector WI blocked: %s (eligible=%d, books=%d)",
-            detailed.blockerMessages.join("; "),
-            detailed.eligibleCount,
-            wiSources.worldBookIds.length,
-          );
-        }
       } else {
-        console.debug(
+        console.log(
           "[prompt-assembly] Vector WI retrieval: eligible=%d, hits=%d, afterThreshold=%d, afterRerank=%d, shortlisted=%d (topK=%d)",
           detailed.eligibleCount,
           detailed.hitsBeforeThreshold,
@@ -4274,7 +4260,7 @@ export function mergeActivatedWorldInfoEntries(
       vectorSkippedGroup -
       vectorSkippedDedup -
       vectorSkippedBudgetSim;
-    console.debug(
+    console.log(
       "[WI merge] vector candidates=%d → accepted=%d, skipped: dedup=%d, minPriority=%d, group=%d, budgetCap=%d, budgetSim=%d",
       vectorEntries.length,
       accepted,

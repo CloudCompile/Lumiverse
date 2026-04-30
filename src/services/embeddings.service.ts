@@ -2715,7 +2715,7 @@ export async function searchWorldBookEntriesHybridWithVector(
   if (signal?.aborted) return [];
   const table = await getTableIfExists();
   if (!table) {
-    console.debug("[embeddings] WI vector search: no LanceDB table exists yet (entries may not be indexed)");
+    console.log("[embeddings] WI vector search: no LanceDB table exists yet (entries may not be indexed)");
     return [];
   }
 
@@ -2735,7 +2735,7 @@ export async function searchWorldBookEntriesHybridWithVector(
   const vectorRows = await raceWithSignal(query.toArray() as Promise<any[]>, signal);
 
   if (vectorRows.length === 0) {
-    console.debug("[embeddings] WI vector search: 0 rows from LanceDB for book=%s (limit=%d)", worldBookId.slice(0, 8), effectiveLimit);
+    console.log("[embeddings] WI vector search: 0 rows from LanceDB for book=%s (limit=%d)", worldBookId.slice(0, 8), effectiveLimit);
   }
 
   const merged = new Map<string, WorldBookSearchCandidate>();
