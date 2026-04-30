@@ -1,4 +1,5 @@
-import { getDb } from "../db/connection";
+import { getDatabasePath, getDb } from "../db/connection";
+import { healCorruptDatabase } from "../db/maintenance";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { getCharacter } from "./characters.service";
@@ -17,9 +18,39 @@ import { getReasoningStripOptions } from "../utils/reasoning-strip";
 
 // --- Chat helpers ---
 
+function parseMetadataObject(value: unknown): Record<string, any> {
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isGroupMetadata(metadata: Record<string, any>): boolean {
+  return metadata.group === true || metadata.group === 1;
+}
+
+function isSqliteCorruptionError(err: any): boolean {
+  return err?.errno === 11
+    || (typeof err?.code === "string" && err.code.startsWith("SQLITE_CORRUPT"))
+    || (typeof err?.message === "string" && /database disk image is malformed/i.test(err.message));
+}
+
+function withRecentChatRecovery<T>(label: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (err) {
+    if (!isSqliteCorruptionError(err)) throw err;
+    console.warn(`[chats] SQLite corruption reported while ${label}; attempting database recovery before retrying.`, err);
+    healCorruptDatabase(getDb(), getDatabasePath());
+    return fn();
+  }
+}
+
 function rowToChat(row: any): Chat {
-  let metadata: Record<string, unknown>;
-  try { metadata = JSON.parse(row.metadata); } catch { metadata = {}; }
+  const metadata = parseMetadataObject(row.metadata);
   return { ...row, metadata };
 }
 
@@ -44,7 +75,7 @@ function rowToMessage(row: any): Message {
 function rowToRecentChat(row: any): RecentChat {
   return {
     ...row,
-    metadata: JSON.parse(row.metadata),
+    metadata: parseMetadataObject(row.metadata),
     character_name: row.character_name || "",
     character_avatar_path: row.character_avatar_path || null,
     character_image_id: row.character_image_id || null,
@@ -73,92 +104,81 @@ export function listChats(userId: string, pagination: PaginationParams, characte
 }
 
 export function listRecentChats(userId: string, pagination: PaginationParams): PaginatedResult<RecentChat> {
-  return paginatedQuery(
-    `SELECT c.id, c.character_id, c.name, c.metadata, c.created_at, c.updated_at,
-       ch.name AS character_name, ch.avatar_path AS character_avatar_path, ch.image_id AS character_image_id
-     FROM chats c LEFT JOIN characters ch ON ch.id = c.character_id
-     WHERE c.user_id = ?
-     ORDER BY c.updated_at DESC`,
-    "SELECT COUNT(*) as count FROM chats WHERE user_id = ?",
-    [userId],
-    pagination,
-    rowToRecentChat
+  return withRecentChatRecovery("loading recent chats", () =>
+    paginatedQuery(
+      `SELECT c.id, c.character_id, c.name, c.metadata, c.created_at, c.updated_at,
+         ch.name AS character_name, ch.avatar_path AS character_avatar_path, ch.image_id AS character_image_id
+       FROM chats c LEFT JOIN characters ch ON ch.id = c.character_id
+       WHERE c.user_id = ?
+       ORDER BY c.updated_at DESC`,
+      "SELECT COUNT(*) as count FROM chats WHERE user_id = ?",
+      [userId],
+      pagination,
+      rowToRecentChat
+    )
   );
 }
 
 export function listRecentChatsGrouped(userId: string, pagination: PaginationParams): PaginatedResult<GroupedRecentChat> {
   const db = getDb();
 
-  // Count: (distinct characters from non-group chats) + (each group chat individually)
-  const countRow = db.query(`
-    SELECT (
-      (SELECT COUNT(DISTINCT character_id) FROM chats
-       WHERE user_id = ? AND COALESCE(json_extract(metadata, '$.group'), 0) != 1)
-      +
-      (SELECT COUNT(*) FROM chats
-       WHERE user_id = ? AND json_extract(metadata, '$.group') = 1)
-    ) as count
-  `).get(userId, userId) as { count: number } | null;
-  const total = countRow?.count ?? 0;
-
-  const rows = db.query(`
-    WITH solo_ranked AS (
+  // Parse metadata in JS so a single malformed row cannot make SQLite abort
+  // the landing-page recent-chat query while evaluating json_extract().
+  const rows = withRecentChatRecovery("loading grouped recent chats", () =>
+    db.query(`
       SELECT
         c.id,
         c.character_id,
         c.name,
         c.metadata,
         c.updated_at,
-        ROW_NUMBER() OVER (PARTITION BY c.character_id ORDER BY c.updated_at DESC) as rn,
-        COUNT(*) OVER (PARTITION BY c.character_id) as chat_count
+        ch.name AS character_name,
+        ch.avatar_path AS character_avatar_path,
+        ch.image_id AS character_image_id
       FROM chats c
-      WHERE c.user_id = ? AND COALESCE(json_extract(c.metadata, '$.group'), 0) != 1
-    ),
-    combined AS (
-      SELECT id, character_id, name, metadata, updated_at, chat_count
-      FROM solo_ranked WHERE rn = 1
-      UNION ALL
-      SELECT id, character_id, name, metadata, updated_at, 1 as chat_count
-      FROM chats
-      WHERE user_id = ? AND json_extract(metadata, '$.group') = 1
-    )
-    SELECT
-      combined.id as latest_chat_id,
-      combined.character_id,
-      combined.name as latest_chat_name,
-      combined.metadata,
-      combined.updated_at,
-      combined.chat_count,
-      ch.name AS character_name,
-      ch.avatar_path AS character_avatar_path,
-      ch.image_id AS character_image_id
-    FROM combined
-    LEFT JOIN characters ch ON ch.id = combined.character_id
-    ORDER BY combined.updated_at DESC
-    LIMIT ? OFFSET ?
-  `).all(userId, userId, pagination.limit, pagination.offset) as any[];
+      LEFT JOIN characters ch ON ch.id = c.character_id
+      WHERE c.user_id = ?
+      ORDER BY c.updated_at DESC
+    `).all(userId) as any[]
+  );
+
+  const soloCounts = new Map<string, number>();
+  const parsedRows = rows.map((row) => {
+    const metadata = parseMetadataObject(row.metadata);
+    const isGroup = isGroupMetadata(metadata);
+    if (!isGroup) soloCounts.set(row.character_id, (soloCounts.get(row.character_id) ?? 0) + 1);
+    return { ...row, metadata, isGroup };
+  });
+
+  const seenSoloCharacterIds = new Set<string>();
+  const groupedRows = parsedRows.filter((row) => {
+    if (row.isGroup) return true;
+    if (seenSoloCharacterIds.has(row.character_id)) return false;
+    seenSoloCharacterIds.add(row.character_id);
+    return true;
+  });
 
   return {
-    data: rows.map((row: any) => {
-      const metadata = JSON.parse(row.metadata || '{}');
-      const isGroup = metadata?.group === true;
+    data: groupedRows.slice(pagination.offset, pagination.offset + pagination.limit).map((row: any) => {
+      const metadata = row.metadata;
+      const isGroup = row.isGroup;
       return {
         character_id: row.character_id,
         character_name: row.character_name || '',
         character_avatar_path: row.character_avatar_path || null,
         character_image_id: row.character_image_id || null,
-        latest_chat_id: row.latest_chat_id,
-        latest_chat_name: row.latest_chat_name || '',
+        latest_chat_id: row.id,
+        latest_chat_name: row.name || '',
         updated_at: row.updated_at,
-        chat_count: row.chat_count,
+        chat_count: isGroup ? 1 : (soloCounts.get(row.character_id) ?? 1),
         is_group: isGroup,
-        ...(isGroup && metadata.character_ids ? {
+        ...(isGroup && Array.isArray(metadata.character_ids) ? {
           group_character_ids: metadata.character_ids,
-          group_name: row.latest_chat_name || undefined,
+          group_name: row.name || undefined,
         } : {}),
       };
     }),
-    total,
+    total: groupedRows.length,
     limit: pagination.limit,
     offset: pagination.offset,
   };
