@@ -119,11 +119,7 @@ function createWorkerTransport(opts: CreateRuntimeTransportOptions): RuntimeTran
 function buildRestrictedEnv(): Record<string, string | undefined> {
   const restricted: Record<string, string | undefined> = {};
   const strip = [
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "SSH_AUTH_SOCK",
-    "SSH_AGENT_LAUNCHER",
+    // Credentials / secrets
     "LUMIVERSE_OWNER_PASSWORD",
     "LUMIVERSE_AUTH_SECRET",
     "LUMIVERSE_ENCRYPTION_KEY",
@@ -133,6 +129,9 @@ function buildRestrictedEnv(): Record<string, string | undefined> {
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    // SSH agent socket (could be used for key exfil)
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_LAUNCHER",
   ];
   for (const key of Object.keys(process.env)) {
     if (strip.includes(key)) {
