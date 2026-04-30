@@ -90,7 +90,9 @@ import {
   isCouncilToolInlineCallable,
   type RuntimeCouncilToolDefinition,
   getCouncilToolArgsSchema,
+  normalizeToolJsonSchema,
 } from "./council/tool-runtime";
+import { toolRegistry } from "../spindle/tool-registry";
 import { executeHostCouncilTool } from "./council/host-tools";
 import * as packsSvc from "./packs.service";
 import {
@@ -429,19 +431,35 @@ async function executeInlineCouncilToolCalls(
   toolCalls: ToolCallResult[],
   timeoutMs: number,
   toolsByName: Map<string, RuntimeCouncilToolDefinition>,
-  membersByPrefix: Map<string, CouncilMember>,
+  membersByPrefix: Map<string, CouncilMember> | undefined,
   contextMessages: LlmMessage[],
 ): Promise<InlineCouncilToolResult[]> {
   const results: InlineCouncilToolResult[] = [];
 
   for (const toolCall of toolCalls) {
+    // Try Council-prefixed tool name first (memberIdPrefix_toolName)
     const parsedName = parseInlineToolCallName(toolCall.name);
-    if (!parsedName) continue;
+    let tool: RuntimeCouncilToolDefinition | undefined;
+    let member: CouncilMember | undefined;
+    let resolvedQualifiedName: string;
 
-    const { memberIdPrefix, qualifiedName } = parsedName;
-    const tool = toolsByName.get(qualifiedName);
-    const member = membersByPrefix.get(memberIdPrefix);
-    if (!tool || !member) continue;
+    if (parsedName) {
+      const { memberIdPrefix, qualifiedName } = parsedName;
+      tool = toolsByName.get(qualifiedName);
+      member = membersByPrefix?.get(memberIdPrefix);
+      resolvedQualifiedName = qualifiedName;
+    }
+
+    // Fall back to direct lookup — extension inline tools use the sanitized
+    // name directly (extensionId__toolName) without a member prefix.
+    if (!tool) {
+      tool = toolsByName.get(toolCall.name);
+      resolvedQualifiedName = toolCall.name;
+    }
+
+    if (!tool) continue;
+    // Council tools require a member match; extension inline tools do not
+    if (parsedName && !member && membersByPrefix?.size) continue;
 
     const execution = getCouncilToolExecution(userId, tool);
     if (execution === "llm") continue;
@@ -449,7 +467,7 @@ async function executeInlineCouncilToolCalls(
     let result = "";
 
     if (execution === "mcp") {
-      const mcpMatch = parseMcpToolName(userId, qualifiedName);
+      const mcpMatch = parseMcpToolName(userId, resolvedQualifiedName!);
       if (!mcpMatch) continue;
 
       result = await getMcpClientManager().callTool(
@@ -460,17 +478,23 @@ async function executeInlineCouncilToolCalls(
         timeoutMs,
       );
     } else if (execution === "extension") {
-      const extToolReg = getExtensionToolRegistration(qualifiedName);
+      // Resolve the extension tool registration. For extension inline tools,
+      // the qualified name uses __ instead of : (sanitized for LLM function names).
+      const extQualified = resolvedQualifiedName!.replace(/__/g, ":");
+      const extToolReg = getExtensionToolRegistration(extQualified);
       if (!extToolReg) continue;
 
-      let lumiaItem: ReturnType<typeof packsSvc.getLumiaItem> = null;
-      try {
-        lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
-      } catch {
-        // Pack/item may have been removed mid-generation.
+      let memberContext: import("lumiverse-spindle-types").CouncilMemberContext | undefined;
+      if (member) {
+        let lumiaItem: ReturnType<typeof packsSvc.getLumiaItem> = null;
+        try {
+          lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
+        } catch {
+          // Pack/item may have been removed mid-generation.
+        }
+        memberContext = buildCouncilMemberContext(member, lumiaItem);
       }
 
-      const memberContext = buildCouncilMemberContext(member, lumiaItem);
       const contextSummary = contextMessages
         .map((m) => {
           const prefix = m.role === "system" ? "" : `${m.role}: `;
@@ -491,6 +515,7 @@ async function executeInlineCouncilToolCalls(
         contextMessages,
       );
     } else if (execution === "host") {
+      if (!member) continue; // Host tools require a council member
       let lumiaItem: ReturnType<typeof packsSvc.getLumiaItem> = null;
       try {
         lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
@@ -511,10 +536,10 @@ async function executeInlineCouncilToolCalls(
 
     results.push({
       callId: toolCall.call_id,
-      qualifiedName,
+      qualifiedName: resolvedQualifiedName!,
       toolName: tool.name,
       toolDisplayName: tool.displayName,
-      memberName: member.itemName,
+      memberName: member?.itemName,
       result,
     });
   }
@@ -1728,6 +1753,52 @@ export async function startGeneration(
           }
         }
 
+        // ── Extension Inline Tools (independent of Council) ──────────────
+        // Extensions can register tools with `inline_available: true` to make
+        // them callable by the primary model via native function calling, even
+        // when no Council is configured. Gated by the same preset toggle.
+        const extensionInlineTools = toolRegistry.getInlineAvailableTools();
+        if (extensionInlineTools.length > 0) {
+          const presetId = input.preset_id || connection.preset_id;
+          const preset = presetId
+            ? presetsSvc.getPreset(input.userId, presetId)
+            : null;
+          const completionSettings = preset?.prompts?.completionSettings;
+          if (completionSettings?.enableFunctionCalling !== false) {
+            if (!inlineTools) inlineTools = [];
+            if (!inlineToolDefsByName)
+              inlineToolDefsByName = new Map<
+                string,
+                RuntimeCouncilToolDefinition
+              >();
+
+            for (const extTool of extensionInlineTools) {
+              const qualifiedName = toolRegistry.getQualifiedName(extTool);
+              // Sanitize the qualified name for LLM function calling —
+              // some providers reject colons in function names.
+              const safeName = qualifiedName.replace(/:/g, "__");
+
+              // Wrap as RuntimeCouncilToolDefinition for the dispatch lookup
+              const runtimeDef: RuntimeCouncilToolDefinition = {
+                name: qualifiedName,
+                displayName: extTool.display_name,
+                description: extTool.description,
+                category: "extension",
+                execution: "extension",
+                inputSchema: extTool.parameters,
+              };
+
+              const argsSchema = normalizeToolJsonSchema(extTool.parameters);
+              inlineToolDefsByName.set(safeName, runtimeDef);
+              inlineTools.push({
+                name: safeName,
+                description: extTool.description,
+                parameters: argsSchema,
+              });
+            }
+          }
+        }
+
         // Wire staged message into lifecycle so GENERATION_STARTED includes it as
         // targetMessageId and runGeneration knows to update instead of create.
         if (stagedMessageId) {
@@ -2504,9 +2575,7 @@ async function runGeneration(
       ];
 
       const inlineCouncilResults =
-        pendingToolCalls?.length &&
-        inlineToolDefsByName &&
-        inlineMembersByPrefix
+        pendingToolCalls?.length && inlineToolDefsByName
           ? await executeInlineCouncilToolCalls(
               userId,
               pendingToolCalls,
