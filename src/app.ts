@@ -57,14 +57,20 @@ import { bootstrapRoutes } from "./routes/bootstrap.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 import { rateLimit } from "./middleware/rate-limit";
-import { isHostAllowed, isOriginAllowed } from "./services/trusted-hosts.service";
+import {
+  isHostAllowed,
+  isOriginAllowed,
+} from "./services/trusted-hosts.service";
 import { authLockoutService } from "./services/auth-lockout.service";
 import { getClientIp } from "./utils/client-ip";
 
 const app = new Hono();
 const SIGN_IN_AUTH_PATTERN = /^\/api\/auth\/sign-in(?:\/|$)/;
 
-function applyLockoutHeaders(response: Response, retryAfterSeconds: number): Response {
+function applyLockoutHeaders(
+  response: Response,
+  retryAfterSeconds: number,
+): Response {
   response.headers.set("Retry-After", String(retryAfterSeconds));
   return response;
 }
@@ -97,7 +103,10 @@ app.use("/api/*", async (c, next) => {
     });
     return applyLockoutHeaders(
       c.json(
-        authLockoutService.buildPayload(lockout, "Too many authentication failures from this client. Try again later."),
+        authLockoutService.buildPayload(
+          lockout,
+          "Too many authentication failures from this client. Try again later.",
+        ),
         429,
       ),
       Math.max(1, Math.ceil(lockout.retryAfterMs / 1000)),
@@ -108,7 +117,9 @@ app.use("/api/*", async (c, next) => {
 
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  const isPublic = PUBLIC_POST_PREFIXES.some((p) => path === p || path.startsWith(p));
+  const isPublic = PUBLIC_POST_PREFIXES.some(
+    (p) => path === p || path.startsWith(p),
+  );
   if (!isPublic) return next();
   return bodyLimit({
     maxSize: 1 * 1024 * 1024,
@@ -118,7 +129,18 @@ app.use("/api/*", async (c, next) => {
 
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (path.startsWith("/api/v1/migrate/") || path === "/api/v1/characters/import-bulk" || path === "/api/v1/characters/import" || path.startsWith("/api/v1/world-books/import") || path === "/api/v1/images" || path === "/api/v1/theme-assets" || path.endsWith("/expressions/upload-zip") || path === "/api/v1/stt/transcribe" || path === "/api/v1/chats/import" || path === "/api/v1/chats/import-st") {
+  if (
+    path.startsWith("/api/v1/migrate/") ||
+    path === "/api/v1/characters/import-bulk" ||
+    path === "/api/v1/characters/import" ||
+    path.startsWith("/api/v1/world-books/import") ||
+    path === "/api/v1/images" ||
+    path === "/api/v1/theme-assets" ||
+    path.endsWith("/expressions/upload-zip") ||
+    path === "/api/v1/stt/transcribe" ||
+    path === "/api/v1/chats/import" ||
+    path === "/api/v1/chats/import-st"
+  ) {
     return next();
   }
   return bodyLimit({
@@ -143,7 +165,10 @@ app.use("/api/*", async (c, next) => {
     if (result.lockout) {
       return applyLockoutHeaders(
         c.json(
-          authLockoutService.buildPayload(result.lockout, "Too many invalid-origin requests. Try again later."),
+          authLockoutService.buildPayload(
+            result.lockout,
+            "Too many invalid-origin requests. Try again later.",
+          ),
           429,
         ),
         Math.max(1, Math.ceil(result.lockout.retryAfterMs / 1000)),
@@ -170,10 +195,10 @@ app.use(
   cors({
     origin: (origin) => {
       if (env.trustAnyOrigin) return origin;
-      return isOriginAllowed(origin) ? origin : '';
+      return isOriginAllowed(origin) ? origin : "";
     },
     credentials: true,
-  })
+  }),
 );
 
 // Rate-limit credential-touching auth endpoints to throttle scrypt-driven DoS
@@ -192,7 +217,8 @@ const authGeneralLimiter = rateLimit({
   windowMs: 60 * 1000, // 60 requests per minute per IP for non-credential auth ops
 });
 
-const SENSITIVE_AUTH_PATTERN = /\/api\/auth\/(sign-in|sign-up|forget-password|reset-password|change-password|update-password)/;
+const SENSITIVE_AUTH_PATTERN =
+  /\/api\/auth\/(sign-in|sign-up|forget-password|reset-password|change-password|update-password)/;
 
 app.use("/api/auth/*", async (c, next) => {
   if (SENSITIVE_AUTH_PATTERN.test(c.req.path)) {
@@ -228,7 +254,10 @@ app.use("/api/auth/*", async (c, next) => {
 
   c.res = applyLockoutHeaders(
     c.json(
-      authLockoutService.buildPayload(result.lockout, "Too many failed sign-in attempts. Try again later."),
+      authLockoutService.buildPayload(
+        result.lockout,
+        "Too many failed sign-in attempts. Try again later.",
+      ),
       429,
     ),
     Math.max(1, Math.ceil(result.lockout.retryAfterMs / 1000)),
@@ -252,6 +281,9 @@ app.use("*", async (c, next) => {
 // proxies (Cloudflare, nginx, HuggingFace Spaces) so BetterAuth generates
 // https:// callback URLs when served behind TLS termination.
 app.on(["POST", "GET"], "/api/auth/*", (c) => {
+  if (c.req.path === "/api/auth/sign-up/email") {
+    return c.json({ error: "Not found" }, 404);
+  }
   const host = c.req.header("x-forwarded-host") || c.req.header("host");
   const proto = c.req.header("x-forwarded-proto") || "http";
   if (host) {
@@ -412,10 +444,7 @@ if (env.frontendDir) {
     }
   });
 
-  app.use(
-    "*",
-    serveStatic({ root: env.frontendDir })
-  );
+  app.use("*", serveStatic({ root: env.frontendDir }));
 
   // SPA fallback: serve index.html for any non-API route not matched above
   app.use("*", serveStatic({ root: env.frontendDir, path: "index.html" }));

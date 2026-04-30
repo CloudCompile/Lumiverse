@@ -1,6 +1,7 @@
 import * as settingsSvc from "./settings.service";
 import * as chatsSvc from "./chats.service";
 import * as charactersSvc from "./characters.service";
+import * as presetsSvc from "./presets.service";
 import type { PresetProfileBinding, ResolvedPresetProfile } from "../types/preset-profile";
 import type { PromptBlock } from "../types/preset";
 
@@ -24,14 +25,15 @@ function chatKey(chatId: string): string {
 // ---------------------------------------------------------------------------
 
 export function getDefaults(userId: string, presetId: string): PresetProfileBinding | null {
-  const s = settingsSvc.getSetting(userId, defaultsKey(presetId));
-  if (s) return s.value as PresetProfileBinding;
+  const current = getValidBinding(userId, defaultsKey(presetId));
+  if (current) {
+    if (current.preset_id === presetId) return current;
+    settingsSvc.deleteSetting(userId, defaultsKey(presetId));
+  }
 
   // Legacy fallback: older builds stored a single shared defaults snapshot.
-  const legacy = settingsSvc.getSetting(userId, LEGACY_DEFAULTS_KEY);
-  if (!legacy) return null;
-  const value = legacy.value as PresetProfileBinding;
-  return value?.preset_id === presetId ? value : null;
+  const legacy = getValidBinding(userId, LEGACY_DEFAULTS_KEY);
+  return legacy?.preset_id === presetId ? legacy : null;
 }
 
 function getDefaultsForBinding(
@@ -52,6 +54,24 @@ function createBinding(
     captured_at: Math.floor(Date.now() / 1000),
     ...(linkedToDefaults ? { linked_to_defaults: true } : {}),
   };
+}
+
+function assertPresetExists(userId: string, presetId: string): void {
+  if (!presetsSvc.getPreset(userId, presetId)) throw new Error("Preset not found");
+}
+
+function getValidBinding(
+  userId: string,
+  key: string,
+): PresetProfileBinding | null {
+  const s = settingsSvc.getSetting(userId, key);
+  if (!s) return null;
+  const binding = s.value as PresetProfileBinding;
+  if (!binding?.preset_id || !presetsSvc.getPreset(userId, binding.preset_id)) {
+    settingsSvc.deleteSetting(userId, key);
+    return null;
+  }
+  return binding;
 }
 
 function resolveSpecificBinding(
@@ -79,6 +99,7 @@ export function captureDefaults(
   presetId: string,
   blockStates: Record<string, boolean>
 ): PresetProfileBinding {
+  assertPresetExists(userId, presetId);
   const binding = createBinding(presetId, blockStates);
   settingsSvc.putSetting(userId, defaultsKey(presetId), binding);
   return binding;
@@ -102,8 +123,7 @@ export function getCharacterBinding(
   userId: string,
   characterId: string
 ): PresetProfileBinding | null {
-  const s = settingsSvc.getSetting(userId, characterKey(characterId));
-  return s ? (s.value as PresetProfileBinding) : null;
+  return getValidBinding(userId, characterKey(characterId));
 }
 
 export function setCharacterBinding(
@@ -115,6 +135,7 @@ export function setCharacterBinding(
   // Validate character exists
   const character = charactersSvc.getCharacter(userId, characterId);
   if (!character) throw new Error("Character not found");
+  assertPresetExists(userId, presetId);
 
   const binding = createBinding(presetId, blockStates);
   settingsSvc.putSetting(userId, characterKey(characterId), binding);
@@ -136,8 +157,7 @@ export function getChatBinding(
   userId: string,
   chatId: string
 ): PresetProfileBinding | null {
-  const s = settingsSvc.getSetting(userId, chatKey(chatId));
-  return s ? (s.value as PresetProfileBinding) : null;
+  return getValidBinding(userId, chatKey(chatId));
 }
 
 export function setChatBinding(
@@ -150,6 +170,7 @@ export function setChatBinding(
   // Validate chat exists
   const chat = chatsSvc.getChat(userId, chatId);
   if (!chat) throw new Error("Chat not found");
+  assertPresetExists(userId, presetId);
 
   const binding = createBinding(presetId, blockStates ?? {}, linkedToDefaults);
   settingsSvc.putSetting(userId, chatKey(chatId), binding);

@@ -24,8 +24,13 @@ app.put("/defaults", async (c) => {
   if (!body.preset_id || !body.block_states) {
     return c.json({ error: "preset_id and block_states are required" }, 400);
   }
-  const binding = svc.captureDefaults(userId, body.preset_id, body.block_states);
-  return c.json(binding);
+  try {
+    const binding = svc.captureDefaults(userId, body.preset_id, body.block_states);
+    return c.json(binding);
+  } catch (e: any) {
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
+    throw e;
+  }
 });
 
 app.delete("/defaults", (c) => {
@@ -64,6 +69,7 @@ app.put("/character/:characterId", async (c) => {
     return c.json(binding);
   } catch (e: any) {
     if (e.message === "Character not found") return c.json({ error: e.message }, 404);
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
     throw e;
   }
 });
@@ -107,6 +113,7 @@ app.put("/chat/:chatId", async (c) => {
     return c.json(binding);
   } catch (e: any) {
     if (e.message === "Chat not found") return c.json({ error: e.message }, 404);
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
     throw e;
   }
 });
