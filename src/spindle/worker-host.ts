@@ -23,6 +23,8 @@ import type {
   SpindleCommandDTO,
   SpindleCommandContextDTO,
   CouncilMemberContext,
+  ImageDTO,
+  ImageUploadDTO,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
@@ -68,6 +70,7 @@ import * as promptAssemblySvc from "../services/prompt-assembly.service";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as tokenizerSvc from "../services/tokenizer.service";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
+import * as imagesSvc from "../services/images.service";
 import { spawnAsync } from "./spawn-async";
 import { getImageProvider, getImageProviderList } from "../image-gen/registry";
 import "../image-gen/index";
@@ -332,6 +335,11 @@ type RuntimeWorkerToHost =
   | { type: "databank_documents_delete"; requestId: string; documentId: string; userId?: string }
   | { type: "databank_documents_get_content"; requestId: string; documentId: string; userId?: string }
   | { type: "databank_documents_reprocess"; requestId: string; documentId: string; userId?: string }
+  | { type: "images_list"; requestId: string; limit?: number; offset?: number; userId?: string }
+  | { type: "images_get"; requestId: string; imageId: string; userId?: string }
+  | { type: "images_upload"; requestId: string; input: ImageUploadDTO; userId?: string }
+  | { type: "images_upload_from_data_url"; requestId: string; dataUrl: string; originalFilename?: string; userId?: string }
+  | { type: "images_delete"; requestId: string; imageId: string; userId?: string }
   | { type: "register_message_content_processor"; priority?: number }
   | {
       type: "message_content_processor_result";
@@ -2221,6 +2229,22 @@ export class WorkerHost {
         break;
       case "databank_documents_reprocess":
         this.handleDatabankDocumentsReprocess(msg.requestId, msg.documentId, msg.userId);
+        break;
+      // ─── Images (gated: "images") ──────────────────────────────────────
+      case "images_list":
+        this.handleImagesList(msg.requestId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "images_get":
+        this.handleImagesGet(msg.requestId, msg.imageId, msg.userId);
+        break;
+      case "images_upload":
+        this.handleImagesUpload(msg.requestId, msg.input, msg.userId);
+        break;
+      case "images_upload_from_data_url":
+        this.handleImagesUploadFromDataUrl(msg.requestId, msg.dataUrl, msg.originalFilename, msg.userId);
+        break;
+      case "images_delete":
+        this.handleImagesDelete(msg.requestId, msg.imageId, msg.userId);
         break;
       // ─── Personas (gated: "personas") ──────────────────────────────────
       case "personas_list":
@@ -5571,6 +5595,141 @@ export class WorkerHost {
       this.enforceScopedUser(resolvedUserId);
 
       const deleted = charactersSvc.deleteCharacter(resolvedUserId, characterId);
+      this.postToWorker({ type: "response", requestId, result: deleted });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Images CRUD (gated: "images") ─────────────────────────────────
+
+  private toImageDTO(img: any): ImageDTO {
+    return {
+      id: img.id,
+      original_filename: img.original_filename || "",
+      mime_type: img.mime_type || "",
+      width: img.width ?? null,
+      height: img.height ?? null,
+      has_thumbnail: !!img.has_thumbnail,
+      created_at: img.created_at,
+    };
+  }
+
+  private handleImagesList(requestId: string, limit?: number, offset?: number, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const result = imagesSvc.listImages(resolvedUserId, {
+        limit: Math.min(limit || 50, 200),
+        offset: offset || 0,
+      });
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          data: result.data.map((img) => this.toImageDTO(img)),
+          total: result.total,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleImagesGet(requestId: string, imageId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const img = imagesSvc.getImage(resolvedUserId, imageId);
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: img ? this.toImageDTO(img) : null,
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleImagesUpload(requestId: string, input: any, userId?: string): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        if (!(input?.data instanceof Uint8Array) || input.data.byteLength === 0) {
+          throw new Error("Image data must be a non-empty Uint8Array");
+        }
+
+        const mimeType = typeof input?.mime_type === "string" && input.mime_type.trim()
+          ? input.mime_type.trim()
+          : "image/png";
+        const filename = typeof input?.filename === "string" && input.filename.trim()
+          ? input.filename.trim()
+          : "image.png";
+
+        const imageBytes = Uint8Array.from(input.data);
+        const file = new File([imageBytes.buffer], filename, { type: mimeType });
+        const img = await imagesSvc.uploadImage(resolvedUserId, file);
+
+        this.postToWorker({ type: "response", requestId, result: this.toImageDTO(img) });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleImagesUploadFromDataUrl(
+    requestId: string,
+    dataUrl: string,
+    originalFilename?: string,
+    userId?: string
+  ): void {
+    (async () => {
+      try {
+        if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        if (typeof dataUrl !== "string" || !dataUrl.trim()) {
+          throw new Error("dataUrl is required");
+        }
+
+        const img = await imagesSvc.saveImageFromDataUrl(resolvedUserId, dataUrl, originalFilename);
+        this.postToWorker({ type: "response", requestId, result: this.toImageDTO(img) });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleImagesDelete(requestId: string, imageId: string, userId?: string): void {
+    try {
+      if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const deleted = imagesSvc.deleteImage(resolvedUserId, imageId);
       this.postToWorker({ type: "response", requestId, result: deleted });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });

@@ -154,7 +154,7 @@ export function appendPoolReasoning(generationId: string, text: string): number 
   return ++entry.tokenSeq;
 }
 
-export function completePool(generationId: string, messageId: string): void {
+export function completePool(generationId: string, messageId: string | undefined): void {
   const entry = pool.get(generationId);
   if (!entry) return;
   entry.status = "completed";

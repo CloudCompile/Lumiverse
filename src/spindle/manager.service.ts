@@ -276,6 +276,7 @@ export const PRIVILEGED_PERMISSIONS = new Set([
   "personas",
   "push_notification",
   "image_gen",
+  "images",
 ]);
 
 function grantRequestedPermissionsByDefault(

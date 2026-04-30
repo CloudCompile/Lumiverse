@@ -2703,7 +2703,7 @@ async function runGeneration(
         }
       }
 
-      let messageId: string;
+      let messageId: string | undefined;
 
       if (lifecycle.targetMessageId && lifecycle.targetSwipeIdx != null) {
         // Regenerate: fill in the blank swipe that was created at generation start
@@ -2796,7 +2796,7 @@ async function runGeneration(
         if (streamUsage) immediateExtra.usage = streamUsage;
         if (reasoningDurationMs > 0)
           immediateExtra.reasoningDuration = reasoningDurationMs;
-        if (Object.keys(immediateExtra).length > 0) {
+        if (messageId && Object.keys(immediateExtra).length > 0) {
           const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
           chatsSvc.patchMessageExtra(userId, messageId, {
             ...existing,
@@ -2893,7 +2893,7 @@ async function runGeneration(
           };
         }
 
-        if (resolvedTokenCount || generationMetrics) {
+        if (messageId && (resolvedTokenCount || generationMetrics)) {
           const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
           const metricsExtra: Record<string, any> = { ...existing };
           if (resolvedTokenCount) metricsExtra.tokenCount = resolvedTokenCount;
@@ -2934,12 +2934,14 @@ async function runGeneration(
               presetName: lifecycle.presetName,
               tokenizer_name: tokenResult.tokenizer_name,
             };
-            breakdownSvc.storeBreakdown(
-              userId,
-              messageId,
-              chatId,
-              breakdownPayload,
-            );
+            if (messageId) {
+              breakdownSvc.storeBreakdown(
+                userId,
+                messageId,
+                chatId,
+                breakdownPayload,
+              );
+            }
           } catch {
             // non-fatal
           }

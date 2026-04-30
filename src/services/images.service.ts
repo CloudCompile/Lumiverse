@@ -232,6 +232,27 @@ export function getImage(userId: string, id: string): Image | null {
   return row ? rowToImage(row) : null;
 }
 
+export function listImages(
+  userId: string,
+  options?: { limit?: number; offset?: number }
+): { data: Image[]; total: number } {
+  const limit = Math.min(options?.limit || 50, 200);
+  const offset = options?.offset || 0;
+
+  const rows = getDb()
+    .query("SELECT * FROM images WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
+    .all(userId, limit, offset) as any[];
+
+  const countRow = getDb()
+    .query("SELECT COUNT(*) as total FROM images WHERE user_id = ?")
+    .get(userId) as { total: number };
+
+  return {
+    data: rows.map(rowToImage),
+    total: countRow.total,
+  };
+}
+
 /**
  * Returns the file path for an image, with optional tiered thumbnail.
  * `tier` can be "sm" (small, ~300px) or "lg" (large, ~700px).
