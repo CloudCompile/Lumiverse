@@ -87,6 +87,7 @@ import { getCharacterDatabankIds } from "../utils/character-databanks";
 import { getSidecarSettings } from "./sidecar-settings.service";
 import { getChatBackgroundSignal } from "./chat-background.service";
 import { getDreamWeaverRuntimeBlocks } from "./dream-weaver/runtime-prompt";
+import * as regexScriptsSvc from "./regex-scripts.service";
 
 // ---------------------------------------------------------------------------
 // Chat history identity marker
@@ -239,6 +240,75 @@ function rtrimLastHistoryAssistant(result: LlmMessage[]): void {
       }
     }
     return;
+  }
+}
+
+async function applyPromptRegexScriptsBeforeClipping(
+  result: LlmMessage[],
+  ctx: AssemblyContext,
+  characterId: string,
+  macroEnv: MacroEnv,
+): Promise<void> {
+  const scripts = regexScriptsSvc.getActiveScripts(ctx.userId, {
+    characterId,
+    chatId: ctx.chatId,
+    target: "prompt",
+  });
+  if (scripts.length === 0) return;
+
+  const chatHistoryDepth = new Map<number, number>();
+  const chIndices: number[] = [];
+  for (let i = 0; i < result.length; i++) {
+    if (isChatHistoryMessage(result[i])) chIndices.push(i);
+  }
+  for (let pos = 0; pos < chIndices.length; pos++) {
+    chatHistoryDepth.set(chIndices[pos], chIndices.length - 1 - pos);
+  }
+
+  for (let i = 0; i < result.length; i++) {
+    if (i > 0 && (i & 15) === 0) await yieldAndCheckAbort(ctx.signal);
+
+    const msg = result[i];
+    const placement =
+      msg.role === "user"
+        ? ("user_input" as const)
+        : msg.role === "assistant"
+          ? ("ai_output" as const)
+          : ("world_info" as const);
+    const depth = chatHistoryDepth.get(i);
+
+    if (typeof msg.content === "string") {
+      result[i] = {
+        ...msg,
+        content: await regexScriptsSvc.applyRegexScripts(
+          msg.content,
+          scripts,
+          placement,
+          depth,
+          macroEnv,
+        ),
+      };
+      if (isChatHistoryMessage(msg)) markAsChatHistory(result[i]);
+    } else if (Array.isArray(msg.content)) {
+      const resolvedParts = await Promise.all(
+        msg.content.map(async (part: any) =>
+          part.type === "text"
+            ? {
+                ...part,
+                text: await regexScriptsSvc.applyRegexScripts(
+                  part.text,
+                  scripts,
+                  placement,
+                  depth,
+                  macroEnv,
+                ),
+              }
+            : part,
+        ),
+      );
+      result[i] = { ...msg, content: resolvedParts };
+      if (isChatHistoryMessage(msg)) markAsChatHistory(result[i]);
+    }
   }
 }
 
@@ -2358,6 +2428,16 @@ export async function assemblePrompt(
   if (completionSettings.includeUsage) {
     parameters._include_usage = true;
   }
+
+  // Prompt-target regex scripts can materially shrink or expand chat history;
+  // run them before the token-budget clipper so clipping uses final content.
+  await applyPromptRegexScriptsBeforeClipping(
+    result,
+    ctx,
+    characterId,
+    macroEnv,
+  );
+  stripEmptyTextParts(result);
 
   // ---- Context budget clipping ----
   // Drop oldest chat history messages until the assembly fits under the

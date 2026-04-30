@@ -913,8 +913,9 @@ async function runPromptPipeline(opts: {
     applyPostProcessing(messages, postProcessing.value);
   }
 
-  // Apply regex scripts (prompt target)
-  {
+  // Normal assembly applies prompt-target regexes before context clipping.
+  // Keep this fallback for raw/explicit message callers that bypass assembly.
+  if (opts.inputMessages) {
     const chatForRegex = chatsSvc.getChat(opts.userId, opts.chatId);
     const characterId = opts.targetCharacterId || chatForRegex?.character_id;
     const promptScripts = regexScriptsSvc.getActiveScripts(opts.userId, {
@@ -938,6 +939,8 @@ async function runPromptPipeline(opts: {
         chatHistoryDepth.set(chIndices[pos], chIndices.length - 1 - pos);
       }
 
+      const regexedChatHistoryMessages: LlmMessage[] = [];
+
       for (let i = 0; i < messages.length; i++) {
         // Cooperative cancellation: applyRegexScripts runs every enabled
         // prompt-target script against every message (N scripts × M messages
@@ -952,6 +955,7 @@ async function runPromptPipeline(opts: {
           }
         }
         const msg = messages[i];
+        const wasChatHistory = isChatHistoryMessage(msg);
         const placement =
           msg.role === "user"
             ? ("user_input" as const)
@@ -991,6 +995,18 @@ async function runPromptPipeline(opts: {
           );
           messages[i] = { ...msg, content: resolvedParts };
         }
+
+        if (wasChatHistory) {
+          regexedChatHistoryMessages.push(messages[i]);
+        }
+      }
+
+      if (regexedChatHistoryMessages.length > 0) {
+        chatHistoryMessages = regexedChatHistoryMessages;
+        const chatHistoryEntry = breakdown?.find(
+          (e) => e.type === "chat_history",
+        );
+        if (chatHistoryEntry) delete chatHistoryEntry.preCountedTokens;
       }
 
       if (interceptorBreakdown && interceptorBreakdown.length > 0) {
@@ -1015,11 +1031,15 @@ async function runPromptPipeline(opts: {
 
   // Filter out any messages that became entirely empty after interceptors/regex scripts.
   // Many providers and LLM proxies drop requests entirely or hang if they encounter empty messages.
-  messages = messages.filter((msg) => {
+  const hasNonEmptyContent = (msg: LlmMessage) => {
     if (typeof msg.content === "string") return msg.content.trim().length > 0;
     if (Array.isArray(msg.content)) return msg.content.length > 0;
     return true;
-  });
+  };
+  messages = messages.filter(hasNonEmptyContent);
+  if (chatHistoryMessages) {
+    chatHistoryMessages = chatHistoryMessages.filter(hasNonEmptyContent);
+  }
 
   breakdown = appendInterceptorBreakdownEntries(
     breakdown,
