@@ -295,9 +295,382 @@ marked.setOptions({
 
 const HTML_ISLAND_TOKEN = 'LUMIVERSE_HTML_ISLAND'
 const ISLAND_RE = new RegExp(`<!--${HTML_ISLAND_TOKEN}_(\\d+)-->`, 'g')
-const BLOCK_ELEMENT_RE = /^<(div|section|article|aside|nav|main|header|footer|form|fieldset|figure|details|html|body)\b/i
 const INLINE_STYLE_ATTR_RE = /\bstyle\s*=/gi
 const NO_ISLAND_ATTR_RE = /\bdata-no-island\b/i
+const ROOT_HTML_TAG_RE = /^<([a-z][\w:-]*)\b[^>]*>/i
+const VOID_HTML_TAGS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+])
+
+const ISLAND_BASE_CSS = `
+  :host {
+    display: block;
+    font-size: calc(14px * var(--lumiverse-font-scale, 1));
+    line-height: 1.65;
+    color: var(--lumiverse-text);
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  q {
+    quotes: none;
+  }
+
+  q::before,
+  q::after {
+    content: none;
+  }
+
+  p {
+    margin: 0 0 0.5em;
+  }
+
+  p:last-child {
+    margin-bottom: 0;
+  }
+
+  em,
+  .${styles.proseItalic} {
+    color: var(--lumiverse-prose-italic);
+    font-style: italic;
+  }
+
+  strong,
+  .${styles.proseBold} {
+    font-weight: 600;
+    color: var(--lumiverse-prose-bold);
+  }
+
+  .${styles.proseInlineEmphasis} {
+    font-weight: 600;
+    color: var(--lumiverse-prose-bold);
+  }
+
+  .${styles.proseDialogue} {
+    color: var(--lumiverse-prose-dialogue);
+  }
+
+  span[style*="color"] .${styles.proseDialogue},
+  span[style*="color"] em,
+  span[style*="color"] .${styles.proseItalic},
+  span[style*="color"] strong,
+  span[style*="color"] .${styles.proseBold},
+  span[style*="color"] .${styles.proseInlineEmphasis},
+  font .${styles.proseDialogue},
+  font em,
+  font .${styles.proseItalic},
+  font strong,
+  font .${styles.proseBold},
+  font .${styles.proseInlineEmphasis} {
+    color: inherit;
+  }
+
+  .${styles.proseDialogue} em,
+  .${styles.proseDialogue} .${styles.proseItalic},
+  .${styles.proseDialogue} strong,
+  .${styles.proseDialogue} .${styles.proseBold},
+  .${styles.proseDialogue} .${styles.proseInlineEmphasis} {
+    color: inherit;
+  }
+
+  code {
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--lumiverse-fill-subtle);
+    border: 1px solid var(--lcs-glass-border);
+    font-family: "SF Mono", "Fira Code", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.88em;
+    color: var(--lumiverse-primary-text);
+  }
+
+  .${styles.codeBlock} {
+    position: relative;
+    margin: 10px 0;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--lumiverse-fill-strong);
+    border: 1px solid var(--lumiverse-border);
+  }
+
+  .${styles.codeHeader} {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 14px;
+    background: var(--lumiverse-fill-subtle);
+    border-bottom: 1px solid var(--lumiverse-border);
+  }
+
+  .${styles.codeLang} {
+    font-family: "SF Mono", "Fira Code", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.72em;
+    font-weight: 500;
+    color: var(--lumiverse-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    user-select: none;
+  }
+
+  .${styles.codeCopy} {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--lumiverse-text-dim);
+    font-family: inherit;
+    font-size: 0.72em;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 150ms ease, color 150ms ease, background 150ms ease;
+  }
+
+  .${styles.codeBlock}:hover .${styles.codeCopy} {
+    opacity: 1;
+  }
+
+  .${styles.codeCopy}:hover {
+    color: var(--lumiverse-text);
+    background: var(--lumiverse-fill-subtle);
+  }
+
+  .${styles.codeCopied} {
+    opacity: 1 !important;
+    color: var(--lumiverse-success, #4ade80) !important;
+  }
+
+  .${styles.codeBlock} pre {
+    margin: 0;
+    padding: 14px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .${styles.codeBlock} pre code {
+    font-family: "SF Mono", "Fira Code", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.85em;
+    line-height: 1.6;
+    color: var(--lumiverse-text);
+    background: none;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    tab-size: 2;
+  }
+
+  pre {
+    padding: 14px;
+    border-radius: 10px;
+    background: var(--lumiverse-fill-strong);
+    border: 1px solid var(--lumiverse-border);
+    overflow-x: auto;
+    margin: 10px 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  pre code {
+    padding: 0;
+    background: none;
+    border: none;
+    font-size: 0.85em;
+    line-height: 1.6;
+    color: var(--lumiverse-text);
+    white-space: pre-wrap;
+  }
+
+  blockquote {
+    border-left: 2px solid var(--lumiverse-primary-020);
+    padding-left: 12px;
+    margin: 8px 0;
+    background: var(--lumiverse-primary-010);
+    border-radius: 0 var(--lcs-radius-xs) var(--lcs-radius-xs) 0;
+    padding: 6px 12px;
+    color: var(--lumiverse-prose-blockquote);
+    font-style: italic;
+  }
+
+  h1 { font-size: 1.35em; font-weight: 600; margin: 0.7em 0 0.35em; }
+  h2 { font-size: 1.2em; font-weight: 600; margin: 0.7em 0 0.35em; }
+  h3 { font-size: 1.1em; font-weight: 600; margin: 0.7em 0 0.35em; }
+  h4 { font-size: 1em; font-weight: 600; margin: 0.7em 0 0.35em; }
+  h5 { font-size: 0.95em; font-weight: 600; margin: 0.7em 0 0.35em; }
+  h6 { font-size: 0.9em; font-weight: 600; margin: 0.7em 0 0.35em; }
+
+  hr {
+    border: none;
+    border-top: 1px solid var(--lumiverse-border);
+    margin: 12px 0;
+  }
+
+  ul,
+  ol {
+    padding-left: 1.4em;
+    margin: 4px 0;
+    list-style-position: outside;
+  }
+
+  li {
+    margin: 2px 0;
+  }
+
+  ul li {
+    list-style: disc;
+  }
+
+  ol li {
+    list-style: decimal;
+  }
+
+  a,
+  .${styles.proseLink} {
+    color: var(--lumiverse-prose-link, var(--lumiverse-primary-text));
+    text-decoration: none;
+    transition: color var(--lumiverse-transition-fast), text-decoration var(--lumiverse-transition-fast);
+  }
+
+  a:hover,
+  .${styles.proseLink}:hover {
+    text-decoration: underline;
+    filter: brightness(1.15);
+  }
+
+  .${styles.proseImageWrap} {
+    display: inline-block;
+    margin: 8px 0;
+    max-width: var(--prose-image-max-width, 240px);
+    max-height: var(--prose-image-max-height, 240px);
+    overflow: hidden;
+    border-radius: var(--lcs-radius-sm);
+    border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.1));
+    background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04));
+    cursor: pointer;
+    transition: border-color var(--lumiverse-transition-fast), box-shadow var(--lumiverse-transition-fast), transform var(--lumiverse-transition-fast);
+  }
+
+  .${styles.proseImageWrap}:hover {
+    border-color: var(--lumiverse-primary-040, rgba(140, 130, 255, 0.4));
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    transform: scale(1.02);
+  }
+
+  .${styles.proseImage},
+  img {
+    display: block;
+    max-width: 100%;
+    max-height: var(--prose-image-max-height, 240px);
+    object-fit: contain;
+    border-radius: var(--lcs-radius-sm);
+    cursor: pointer;
+  }
+
+  .${styles.proseTable},
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    border: 1px solid var(--lumiverse-border);
+    border-radius: var(--lcs-radius-xs);
+    overflow: hidden;
+  }
+
+  .${styles.proseTableHead},
+  th {
+    font-weight: 600;
+    background: var(--lumiverse-primary-010);
+    border: 1px solid var(--lumiverse-border);
+    padding: 8px 12px;
+    text-align: left;
+    font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  }
+
+  .${styles.proseTableCell},
+  td {
+    padding: 8px 12px;
+    border: 1px solid var(--lumiverse-border);
+    font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  }
+
+  .${styles.proseTableRow}:nth-child(even) td,
+  tr:nth-child(even) td {
+    background: var(--lumiverse-bg-dark);
+  }
+
+  video,
+  audio {
+    max-width: 100%;
+    border-radius: var(--lcs-radius-sm);
+    margin: 8px 0;
+  }
+
+  iframe {
+    max-width: 100%;
+    max-height: 400px;
+    border-radius: var(--lcs-radius-sm);
+    border: 1px solid var(--lumiverse-border);
+    margin: 8px 0;
+  }
+
+  .spindle-message-tag-pending {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 22%, var(--lumiverse-border));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 8%, transparent);
+    color: var(--lumiverse-text-muted);
+    font-size: calc(12px * var(--lumiverse-font-scale, 1));
+    line-height: 1.2;
+    letter-spacing: 0.01em;
+  }
+
+  .spindle-message-tag-pending-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--lumiverse-primary, #8c82ff);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 45%, transparent);
+    animation: spindle-message-tag-pending-pulse 1.25s ease-in-out infinite;
+  }
+
+  @keyframes spindle-message-tag-pending-pulse {
+    0%,
+    100% {
+      opacity: 0.45;
+      transform: scale(0.9);
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 30%, transparent);
+    }
+
+    50% {
+      opacity: 1;
+      transform: scale(1);
+      box-shadow: 0 0 0 5px transparent;
+    }
+  }
+`
 
 /** Detect HTML blocks with enough inline styling to warrant island extraction. */
 function hasSignificantInlineStyles(html: string): boolean {
@@ -313,6 +686,34 @@ function hasBalancedStyleTags(html: string): boolean {
   const opens = (html.match(/<style[\s>]/gi) || []).length
   const closes = (html.match(/<\/style\s*>/gi) || []).length
   return opens === closes
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function getHtmlRootTag(line: string): { tag: string; isVoid: boolean } | null {
+  const match = line.match(ROOT_HTML_TAG_RE)
+  if (!match) return null
+
+  const tag = match[1].toLowerCase()
+  return {
+    tag,
+    isVoid: VOID_HTML_TAGS.has(tag) || /\/\s*>$/.test(match[0]),
+  }
+}
+
+function countTagDepthDelta(line: string, tag: string): number {
+  const matches = line.matchAll(new RegExp(`<\\/?${escapeRegexLiteral(tag)}\\b[^>]*>`, 'gi'))
+  let delta = 0
+
+  for (const match of matches) {
+    const token = match[0]
+    if (/^<\//.test(token)) delta -= 1
+    else if (!/\/\s*>$/.test(token) && !VOID_HTML_TAGS.has(tag)) delta += 1
+  }
+
+  return delta
 }
 
 function renderIslandMarkdownText(markdown: string): string {
@@ -378,20 +779,19 @@ function extractHtmlIslands(
     // <style> block or contain significant inline styling (e.g. phone screens,
     // UI mockups).
     // Collect the entire balanced tag tree, then check for isolation criteria.
-    const blockMatch = trimmed.match(BLOCK_ELEMENT_RE)
-    if (blockMatch) {
+    const rootTag = getHtmlRootTag(trimmed)
+    if (rootTag) {
       const blockLines: string[] = []
-      const tag = blockMatch[1].toLowerCase()
-      const openRe = new RegExp(`<${tag}\\b`, 'gi')
-      const closeRe = new RegExp(`</${tag}\\b`, 'gi')
+      const { tag, isVoid } = rootTag
       let depth = 0
 
       while (i < lines.length) {
         const line = lines[i]
         blockLines.push(line)
-        depth += (line.match(openRe) || []).length - (line.match(closeRe) || []).length
         i++
+        if (!isVoid) depth += countTagDepthDelta(line, tag)
         if (depth <= 0) break
+        if (isVoid) break
       }
 
       const blockContent = blockLines.join('\n')
@@ -404,7 +804,7 @@ function extractHtmlIslands(
       }
 
       const isIslandCandidate = /<style[\s>]/i.test(blockContent) || hasSignificantInlineStyles(blockContent)
-      const canRenderStreamingPreview = isStreaming && hasBalancedStyleTags(blockContent)
+      const canRenderStreamingPreview = isStreaming && !isVoid && hasBalancedStyleTags(blockContent)
 
       // While a styled HTML wrapper is still streaming, keep it inside a Shadow DOM
       // island as soon as its internal <style> tags are balanced. That preserves the
@@ -603,7 +1003,7 @@ function IsolatedHtml({ html }: { html: string }) {
     const el = ref.current
     if (!el) return
     const shadow = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
-    shadow.innerHTML = html
+    shadow.innerHTML = `<style>${ISLAND_BASE_CSS}</style>${html}`
     return attachCodeCopyHandler(shadow)
   }, [html])
 
