@@ -211,7 +211,14 @@ export default function PromptItemizerModal() {
   }, [data?.messages, ensureRawData, rawError, rawLoading, rawView, selectedChatHistoryMessages, selectedEntry])
 
   return (
-    <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 94vw, min(900px, var(--lumiverse-content-max-width, 900px)))" zIndex={10001} className={styles.modal}>
+    <ModalShell
+      isOpen={true}
+      onClose={closeModal}
+      maxWidth="clamp(340px, 94vw, min(900px, var(--lumiverse-content-max-width, 900px)))"
+      maxHeight="var(--prompt-itemizer-modal-max-height)"
+      zIndex={10001}
+      className={styles.modal}
+    >
           <div className={styles.header}>
             <h2 className={styles.title}>Prompt Breakdown</h2>
             {data && (

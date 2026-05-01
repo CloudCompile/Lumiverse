@@ -1,5 +1,7 @@
 .modal {
-  max-height: min(760px, calc(88vh / var(--lumiverse-ui-scale, 1)));
+  --prompt-itemizer-modal-max-height: min(760px, calc(88vh / var(--lumiverse-ui-scale, 1)));
+
+  max-height: var(--prompt-itemizer-modal-max-height);
 }
 
 .header {
@@ -34,10 +36,15 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.body > * {
+  flex-shrink: 0;
 }
 
 /* Stacked bar */
@@ -441,6 +448,10 @@
 }
 
 @media (max-width: 600px) {
+  .modal {
+    --prompt-itemizer-modal-max-height: calc(var(--app-scaled-viewport-height, 100dvh) - 24px);
+  }
+
   .entryRow,
   .entryInspectorHeader {
     align-items: flex-start;
