@@ -568,6 +568,22 @@ export interface CharacterGalleryItem {
   mime_type: string;
 }
 
+export interface TagLibraryImportResult {
+  tagDefinitions: number;
+  characterMappings: number;
+  matchedCharacters: number;
+  updatedCharacters: number;
+  unchangedCharacters: number;
+  unmatchedMappings: number;
+  addedTags: number;
+  matchedBy: {
+    source_filename: number;
+    image_original_filename: number;
+    normalized_name: number;
+  };
+  unmatchedFilenames: string[];
+}
+
 // ---- Image ----
 export interface Image {
   id: string;

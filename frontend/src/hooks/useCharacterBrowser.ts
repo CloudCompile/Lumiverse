@@ -181,6 +181,21 @@ export function useCharacterBrowser() {
     [charactersPerPage, currentPage, sortField, sortDirection, shuffleSeed, debouncedQuery, selectedTags, filterTab]
   )
 
+  const loadAllCharacters = useCallback(async () => {
+    const PAGE = 200
+    let all: Character[] = []
+    let offset = 0
+    let total = Infinity
+    while (offset < total) {
+      const result = await charactersApi.list({ limit: PAGE, offset })
+      all = all.concat(result.data)
+      total = result.total
+      offset += result.data.length
+      if (result.data.length < PAGE) break
+    }
+    setCharacters(all)
+  }, [setCharacters])
+
   // ─── Fetch current page from server ─────────────────────────────────────
   useEffect(() => {
     if (!settingsLoaded) return
@@ -210,27 +225,13 @@ export function useCharacterBrowser() {
   // ─── Load tags once ─────────────────────────────────────────────────────
   useEffect(() => {
     charactersApi.listTags().then(setAllTags).catch(() => {})
-  }, [])
+  }, [fetchVersion])
 
   // ─── Background: populate store with full characters (for other components) ──
   useEffect(() => {
     if (charactersLoaded) return
-    const loadAll = async () => {
-      const PAGE = 200
-      let all: Character[] = []
-      let offset = 0
-      let total = Infinity
-      while (offset < total) {
-        const result = await charactersApi.list({ limit: PAGE, offset })
-        all = all.concat(result.data)
-        total = result.total
-        offset += result.data.length
-        if (result.data.length < PAGE) break
-      }
-      setCharacters(all)
-    }
-    loadAll().catch((err) => console.error('[CharacterBrowser] Background load failed:', err))
-  }, [charactersLoaded, setCharacters])
+    loadAllCharacters().catch((err) => console.error('[CharacterBrowser] Background load failed:', err))
+  }, [charactersLoaded, loadAllCharacters])
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -620,6 +621,11 @@ export function useCharacterBrowser() {
     setFetchVersion((v) => v + 1)
   }, [])
 
+  const reloadAllCharacters = useCallback(async () => {
+    await loadAllCharacters()
+    setFetchVersion((v) => v + 1)
+  }, [loadAllCharacters])
+
   const handleToggleFavorite = useCallback(
     (id: string) => {
       const wasFavorite = favorites.includes(id)
@@ -750,6 +756,7 @@ export function useCharacterBrowser() {
     openChat,
     startNewChat,
     refreshBrowser,
+    reloadAllCharacters,
     clearImportError: () => setImportError(null),
     clearPendingLorebookImport: () => setPendingLorebookImport(null),
   }

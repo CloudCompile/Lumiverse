@@ -142,6 +142,41 @@
   padding: 4px 0;
 }
 
+.uploadCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--lumiverse-border);
+}
+
+.uploadHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.uploadHint {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  line-height: 1.45;
+}
+
+.fileInput {
+  padding: 8px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-bg);
+  color: var(--lumiverse-text);
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  font-family: inherit;
+}
+
+.uploadMeta {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+}
+
 .actions {
   display: flex;
   align-items: center;

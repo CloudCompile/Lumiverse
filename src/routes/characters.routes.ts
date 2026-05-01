@@ -7,6 +7,7 @@ import * as exportSvc from "../services/character-export.service";
 import * as gallerySvc from "../services/character-gallery.service";
 import * as regexSvc from "../services/regex-scripts.service";
 import * as exprSvc from "../services/expressions.service";
+import * as tagLibrarySvc from "../services/tag-library-import.service";
 import * as wbSvc from "../services/world-books.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
@@ -746,6 +747,23 @@ app.post("/import-bulk", async (c) => {
     return c.json({ results, summary: { total: files.length, imported, skipped, failed } }, 201);
   } catch (err: any) {
     return respondImportError(c, err, "Bulk import failed");
+  }
+});
+
+app.post("/import-tag-library", async (c) => {
+  const userId = c.get("userId");
+  const formData = await c.req.formData();
+  const file = formData.get("file");
+
+  if (!(file instanceof File) || file.size === 0) {
+    return c.json({ error: "TagLibrary backup file is required" }, 400);
+  }
+
+  try {
+    const result = await tagLibrarySvc.importTagLibraryBackup(userId, file);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Failed to import TagLibrary backup" }, 400);
   }
 });
 

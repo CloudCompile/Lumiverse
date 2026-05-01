@@ -2,8 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { CheckCircle, XCircle, ArrowRight, ArrowLeft, Play, RotateCcw } from 'lucide-react'
 import { Spinner } from '@/components/shared/Spinner'
 import { Toggle } from '@/components/shared/Toggle'
+import { toast } from '@/lib/toast'
+import { formatTagLibraryImportToastMessage } from '@/lib/tagLibraryImportToast'
 import { useStore } from '@/store'
 import { stMigrationApi, type ValidateResult, type ScanResult, type MigrationScope, type FileConnectionConfig } from '@/api/st-migration'
+import type { TagLibraryImportResult } from '@/types/api'
 import type { MigrationProgressPayload } from '@/types/ws-events'
 import type { AuthUser } from '@/types/store'
 import DirectoryBrowser from './DirectoryBrowser'
@@ -45,8 +48,13 @@ export default function MigrationSettings() {
   const [targetUserId, setTargetUserId] = useState(user?.id || '')
   const [users, setUsers] = useState<AuthUser[]>([])
   const [executing, setExecuting] = useState(false)
+  const [tagLibraryFile, setTagLibraryFile] = useState<File | null>(null)
+  const [tagLibraryImporting, setTagLibraryImporting] = useState(false)
+  const [tagLibraryResult, setTagLibraryResult] = useState<TagLibraryImportResult | null>(null)
+  const [tagLibraryError, setTagLibraryError] = useState<string | null>(null)
 
   const logPanelRef = useRef<HTMLDivElement>(null)
+  const tagLibraryImportKeyRef = useRef<string | null>(null)
 
   // If a migration is active, jump to progress
   useEffect(() => {
@@ -264,7 +272,40 @@ export default function MigrationSettings() {
     setStep('browse')
     setValidation(null)
     setScanResult(null)
+    setTagLibraryFile(null)
+    setTagLibraryImporting(false)
+    setTagLibraryResult(null)
+    setTagLibraryError(null)
+    tagLibraryImportKeyRef.current = null
   }
+
+  useEffect(() => {
+    if (!migrationResult || !migrationId || !tagLibraryFile || !targetUserId) return
+    if (tagLibraryImporting || tagLibraryResult || tagLibraryError) return
+
+    const importKey = [migrationId, targetUserId, tagLibraryFile.name, tagLibraryFile.lastModified].join(':')
+    if (tagLibraryImportKeyRef.current === importKey) return
+    tagLibraryImportKeyRef.current = importKey
+
+    setTagLibraryImporting(true)
+    setTagLibraryError(null)
+    void stMigrationApi.importTagLibrary(tagLibraryFile, targetUserId)
+      .then((result) => {
+        setTagLibraryResult(result)
+        toast.success(formatTagLibraryImportToastMessage(result), {
+          title: 'TagLibrary import complete',
+          duration: 7000,
+        })
+      })
+      .catch((err: any) => {
+        const message = err?.message || 'Failed to import TagLibrary backup'
+        setTagLibraryError(message)
+        toast.error(message, { title: 'TagLibrary import failed' })
+      })
+      .finally(() => {
+        setTagLibraryImporting(false)
+      })
+  }, [migrationError, migrationId, migrationResult, tagLibraryError, tagLibraryFile, tagLibraryImporting, tagLibraryResult, targetUserId])
 
   const canProceedFromBrowse = validation?.valid === true
   const canProceedFromStUser = validation?.layout === 'legacy' || !!selectedStUser
@@ -438,6 +479,32 @@ export default function MigrationSettings() {
               Characters will be auto-imported because chat history depends on them.
             </div>
           )}
+          <div className={styles.uploadCard}>
+            <div className={styles.uploadHeader}>
+              <span className={styles.selectLabel}>Optional: TagLibrary Backup</span>
+              <span className={styles.uploadHint}>
+                Upload a SillyTavern TagLibrary JSON backup to add tags after migration. Existing character tags are preserved.
+              </span>
+            </div>
+            <input
+              type="file"
+              accept="application/json,.json"
+              className={styles.fileInput}
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null
+                setTagLibraryFile(file)
+                setTagLibraryImporting(false)
+                setTagLibraryResult(null)
+                setTagLibraryError(null)
+                tagLibraryImportKeyRef.current = null
+              }}
+            />
+            {tagLibraryFile && (
+              <div className={styles.uploadMeta}>
+                Selected: <strong>{tagLibraryFile.name}</strong>
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         <div className={styles.validBad}>
@@ -539,6 +606,10 @@ export default function MigrationSettings() {
             <span className={styles.summaryLabel}>Target user</span>
             <span className={styles.summaryValue}>{targetLabel}</span>
           </div>
+          <div className={styles.summaryRow}>
+            <span className={styles.summaryLabel}>TagLibrary backup</span>
+            <span className={styles.summaryValue}>{tagLibraryFile ? tagLibraryFile.name : 'Not selected'}</span>
+          </div>
         </div>
         <p className={styles.subtitle}>
           Previously imported characters will be skipped automatically. This operation may take a while for large datasets.
@@ -630,7 +701,6 @@ export default function MigrationSettings() {
             ))}
           </div>
         )}
-
         {(migrationResult || migrationError) && (
           <div className={styles.actions}>
             <button type="button" className={styles.btn} onClick={handleReset}>

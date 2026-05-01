@@ -10,6 +10,7 @@ import type {
   ImportResult,
   BulkImportResult,
   BatchDeleteResult,
+  TagLibraryImportResult,
 } from '@/types/api'
 
 export interface SummaryParams {
@@ -97,6 +98,12 @@ export const charactersApi = {
       form.append('skip_duplicates', 'true')
     }
     return upload<BulkImportResult>('/characters/import-bulk', form)
+  },
+
+  importTagLibrary(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return upload<TagLibraryImportResult>('/characters/import-tag-library', form, { timeout: 0 })
   },
 
   batchDelete(ids: string[], keepChats = false) {
