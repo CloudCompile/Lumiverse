@@ -27,6 +27,11 @@ interface Props {
   characterId: string
 }
 
+function toExpressionLabel(fileName: string) {
+  const baseName = fileName.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_\- ]/g, '').trim()
+  return baseName || 'expression'
+}
+
 export default function ExpressionEditorTab({ characterId }: Props) {
   const [config, setConfig] = useState<ExpressionConfig | null>(null)
   const [groups, setGroups] = useState<ExpressionGroups | null>(null)
@@ -170,22 +175,36 @@ export default function ExpressionEditorTab({ characterId }: Props) {
 
   const handleDirectUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (!file) return
+      const files = Array.from(e.target.files ?? [])
+      if (files.length === 0 || !config) return
       e.target.value = ''
-      const baseName = file.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_\- ]/g, '').trim()
-      const label = baseName || 'expression'
       setUploading(true)
       try {
-        const image = await imagesApi.upload(file)
-        if (!config) return
-        const updated: ExpressionConfig = {
+        let updated: ExpressionConfig = {
           ...config,
-          enabled: true,
-          mappings: { ...config.mappings, [label]: image.id },
-          defaultExpression: config.defaultExpression || label,
+          mappings: { ...config.mappings },
         }
-        saveConfig(updated)
+        let hasChanges = false
+
+        for (const file of files) {
+          try {
+            const image = await imagesApi.upload(file)
+            const label = toExpressionLabel(file.name)
+            updated = {
+              ...updated,
+              enabled: true,
+              mappings: { ...updated.mappings, [label]: image.id },
+              defaultExpression: updated.defaultExpression || label,
+            }
+            hasChanges = true
+          } catch {
+            // Continue processing the rest of the selection.
+          }
+        }
+
+        if (hasChanges) {
+          saveConfig(updated)
+        }
       } catch {
         // silent
       } finally {
@@ -269,20 +288,42 @@ export default function ExpressionEditorTab({ characterId }: Props) {
 
   const handleGroupDirectUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (!file || !activeGroup) return
+      const files = Array.from(e.target.files ?? [])
+      if (files.length === 0 || !activeGroup || !groups || !groups[activeGroup]) return
       e.target.value = ''
-      const baseName = file.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_\- ]/g, '').trim()
-      const label = baseName || 'expression'
       setUploading(true)
       try {
-        const image = await imagesApi.upload(file)
-        const updated = await expressionsApi.addGroupLabel(characterId, activeGroup, label, image.id)
-        setGroups(updated)
+        let updated: ExpressionGroups = {
+          ...groups,
+          [activeGroup]: { ...groups[activeGroup] },
+        }
+        let hasChanges = false
+
+        for (const file of files) {
+          try {
+            const image = await imagesApi.upload(file)
+            const label = toExpressionLabel(file.name)
+            updated = {
+              ...updated,
+              [activeGroup]: {
+                ...updated[activeGroup],
+                [label]: image.id,
+              },
+            }
+            hasChanges = true
+          } catch {
+            // Continue processing the rest of the selection.
+          }
+        }
+
+        if (hasChanges) {
+          setGroups(updated)
+          await expressionsApi.putGroups(characterId, updated)
+        }
       } catch { /* silent */ }
       finally { setUploading(false) }
     },
-    [characterId, activeGroup]
+    [characterId, activeGroup, groups]
   )
 
   const handleGroupGalleryPick = useCallback(() => {
@@ -478,10 +519,10 @@ export default function ExpressionEditorTab({ characterId }: Props) {
                 <ImageIcon size={14} /> Add from Gallery
               </button>
               <button type="button" className={styles.controlBtn} onClick={() => groupUploadRef.current?.click()}>
-                <Plus size={14} /> Upload Image
+                <Plus size={14} /> Upload Images
               </button>
               <input ref={groupZipRef} type="file" accept=".zip" hidden onChange={handleGroupZipUpload} />
-              <input ref={groupUploadRef} type="file" accept="image/*" hidden onChange={handleGroupDirectUpload} />
+              <input ref={groupUploadRef} type="file" accept="image/*" multiple hidden onChange={handleGroupDirectUpload} />
             </div>
 
             {uploading && <div className={styles.uploading}>Uploading...</div>}
@@ -491,7 +532,7 @@ export default function ExpressionEditorTab({ characterId }: Props) {
                 <Ghost size={40} className={styles.emptyIcon} />
                 <div className={styles.emptyTitle}>No expressions yet</div>
                 <div className={styles.emptyHint}>
-                  Upload a ZIP of expression images, add from gallery, or upload one by one.
+                  Upload a ZIP of expression images, add from gallery, or upload one or many image files.
                 </div>
               </div>
             )}
@@ -679,13 +720,13 @@ export default function ExpressionEditorTab({ characterId }: Props) {
           <ImageIcon size={14} /> Add from Gallery
         </button>
         <button type="button" className={styles.controlBtn} onClick={() => uploadRef.current?.click()}>
-          <Plus size={14} /> Upload Image
+          <Plus size={14} /> Upload Images
         </button>
         <button type="button" className={styles.controlBtn} onClick={handleConvertToGroups}>
           <Users size={14} /> Multi-Character Mode
         </button>
         <input ref={zipRef} type="file" accept=".zip" hidden onChange={handleZipUpload} />
-        <input ref={uploadRef} type="file" accept="image/*" hidden onChange={handleDirectUpload} />
+        <input ref={uploadRef} type="file" accept="image/*" multiple hidden onChange={handleDirectUpload} />
       </div>
 
       {uploading && <div className={styles.uploading}>Uploading...</div>}
@@ -696,14 +737,14 @@ export default function ExpressionEditorTab({ characterId }: Props) {
           <div className={styles.emptyTitle}>No expressions yet</div>
           <div className={styles.emptyHint}>
             Upload a ZIP of expression images (filenames become labels),<br />
-            add images from the gallery, or upload them one by one.
+            add images from the gallery, or upload one or many image files.
           </div>
           <div className={styles.emptyActions}>
             <button type="button" className={styles.controlBtn} onClick={() => zipRef.current?.click()}>
               <Upload size={14} /> Import ZIP
             </button>
             <button type="button" className={styles.controlBtn} onClick={() => uploadRef.current?.click()}>
-              <Plus size={14} /> Upload Image
+              <Plus size={14} /> Upload Images
             </button>
           </div>
         </div>
