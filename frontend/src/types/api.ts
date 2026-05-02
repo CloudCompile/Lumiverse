@@ -524,6 +524,11 @@ export interface RenamePersonaFolderResponse {
   count: number;
 }
 
+export interface DeletePersonaFolderResponse {
+  updated: Persona[];
+  count: number;
+}
+
 // ---- Preset ----
 export interface Preset {
   id: string;

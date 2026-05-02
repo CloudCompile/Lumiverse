@@ -27,11 +27,13 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1;
+  min-width: 0;
   padding: 4px 4px;
   background: none;
   border: none;
   cursor: pointer;
-  width: 100%;
+  width: auto;
   text-align: left;
   border-radius: 6px;
   transition: background 0.15s ease;
@@ -52,6 +54,9 @@
 }
 
 .folderName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   text-transform: uppercase;
@@ -85,6 +90,10 @@
 .folderActionBtn:hover:not(:disabled) {
   background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04));
   color: var(--lumiverse-text);
+}
+
+.folderDeleteBtn:hover:not(:disabled) {
+  color: var(--lumiverse-danger, #ff5c7a);
 }
 
 .folderActionBtn:disabled {

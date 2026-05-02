@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef, type ReactNode } fro
 import { usePersonaBrowser } from '@/hooks/usePersonaBrowser'
 import { useFolders } from '@/hooks/useFolders'
 import { useStore } from '@/store'
-import { Check, ChevronRight, Pencil, X } from 'lucide-react'
+import { Check, ChevronRight, Pencil, Trash2, X } from 'lucide-react'
 import { toast } from '@/lib/toast'
 import PersonaToolbar from './persona-browser/PersonaToolbar'
 import PersonaCardGrid from './persona-browser/PersonaCardGrid'
@@ -15,11 +15,12 @@ import styles from './PersonaManager.module.css'
 export default function PersonaManager() {
   const browser = usePersonaBrowser()
   const openModal = useStore((s) => s.openModal)
-  const { createFolder, renameFolder: renameStoredFolder } = useFolders('personaFolders', browser.allPersonas)
+  const { createFolder, renameFolder: renameStoredFolder, deleteFolder: deleteStoredFolder } = useFolders('personaFolders', browser.allPersonas)
   const [creating, setCreating] = useState(false)
   const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
   const [renamingValue, setRenamingValue] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
+  const [deletingFolder, setDeletingFolder] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
   // Collapsed folders — start with all named folders collapsed, uncategorized open
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set())
@@ -95,6 +96,34 @@ export default function PersonaManager() {
       setRenameBusy(false)
     }
   }, [browser, renameStoredFolder, renamingFolder, renamingValue])
+
+  const handleDeleteFolder = useCallback(async (folder: string) => {
+    const name = folder.trim()
+    if (!name || deletingFolder) return
+    openModal('confirm', {
+      title: 'Delete Persona Folder',
+      message: `Delete folder "${name}"? Personas in this folder will move to Uncategorized.`,
+      variant: 'danger',
+      confirmText: 'Delete',
+      onConfirm: async () => {
+        setDeletingFolder(name)
+        try {
+          const result = await browser.deleteFolder(name)
+          deleteStoredFolder(name)
+          setCollapsedFolders((prev) => {
+            const next = new Set(prev)
+            next.delete(name)
+            return next
+          })
+          toast.success(`Deleted folder "${name}"${result.count > 0 ? ` and moved ${result.count} persona${result.count === 1 ? '' : 's'} to Uncategorized` : ''}`)
+        } catch (err: any) {
+          toast.error(err.body?.error || err.message || 'Failed to delete folder')
+        } finally {
+          setDeletingFolder(null)
+        }
+      },
+    })
+  }, [browser, deleteStoredFolder, deletingFolder, openModal])
 
   const handleCreate = useCallback(
     async (name: string, avatarFile?: File, originalFile?: File) => {
@@ -234,18 +263,34 @@ export default function PersonaManager() {
                         <span className={styles.folderCount}>{group.personas.length}</span>
                       </button>
                       {group.folder && (
-                        <button
-                          type="button"
-                          className={styles.folderActionBtn}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleStartRenameFolder(group.folder)
-                          }}
-                          title={`Rename ${group.folder}`}
-                          aria-label={`Rename ${group.folder}`}
-                        >
-                          <Pencil size={12} />
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className={styles.folderActionBtn}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleStartRenameFolder(group.folder)
+                            }}
+                            disabled={deletingFolder === group.folder}
+                            title={`Rename ${group.folder}`}
+                            aria-label={`Rename ${group.folder}`}
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            className={`${styles.folderActionBtn} ${styles.folderDeleteBtn}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleDeleteFolder(group.folder)
+                            }}
+                            disabled={deletingFolder === group.folder}
+                            title={`Delete ${group.folder}`}
+                            aria-label={`Delete ${group.folder}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </>
                       )}
                     </>
                   )}

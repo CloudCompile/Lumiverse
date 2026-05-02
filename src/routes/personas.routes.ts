@@ -36,6 +36,16 @@ app.post("/folders/rename", async (c) => {
   return c.json({ updated, count: updated.length });
 });
 
+app.post("/folders/delete", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ name?: string }>();
+  const name = body.name?.trim() || "";
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  const updated = svc.deletePersonaFolder(userId, name);
+  return c.json({ updated, count: updated.length });
+});
+
 app.get("/:id", (c) => {
   const userId = c.get("userId");
   const persona = svc.getPersona(userId, c.req.param("id"));

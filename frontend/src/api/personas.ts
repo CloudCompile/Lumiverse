@@ -1,5 +1,5 @@
 import { get, post, put, del, upload, BASE_URL } from './client'
-import type { Persona, CreatePersonaInput, UpdatePersonaInput, PaginatedResult, RenamePersonaFolderResponse } from '@/types/api'
+import type { Persona, CreatePersonaInput, UpdatePersonaInput, PaginatedResult, RenamePersonaFolderResponse, DeletePersonaFolderResponse } from '@/types/api'
 
 export const personasApi = {
   list(params?: { limit?: number; offset?: number }) {
@@ -19,6 +19,10 @@ export const personasApi = {
       old_name: oldName,
       new_name: newName,
     })
+  },
+
+  deleteFolder(name: string) {
+    return post<DeletePersonaFolderResponse>('/personas/folders/delete', { name })
   },
 
   update(id: string, input: UpdatePersonaInput) {
