@@ -20,6 +20,10 @@ const EMPTY_CHAR_SLOT: CharSlot = { for: null, binding: null }
 
 const SIDECAR_SAVE_DEBOUNCE_MS = 500
 
+function isSidecarObject(value: unknown): value is Partial<CouncilSidecarConfig> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 export function councilSourceToTarget(
   source: ResolvedCouncilProfile['source'],
   ctx: { chatId: string | null; characterId: string | null },
@@ -40,8 +44,8 @@ export function councilSourceToTarget(
 async function loadGlobalSidecar(): Promise<CouncilSidecarConfig> {
   try {
     const row = await settingsApi.get('sidecarSettings')
-    if (row?.value?.connectionProfileId) {
-      return { ...SIDECAR_DEFAULTS, ...(row.value as Partial<CouncilSidecarConfig>) }
+    if (isSidecarObject(row?.value)) {
+      return { ...SIDECAR_DEFAULTS, ...row.value }
     }
   } catch {
     // fall through to legacy/default handling
