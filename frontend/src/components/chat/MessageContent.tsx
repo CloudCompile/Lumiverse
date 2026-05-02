@@ -110,6 +110,10 @@ const BLOCK_CLOSE_RE = /^<\/(p|div|li|blockquote|h[1-6]|pre|table|tr|td|th)\b/i
 const SKIP_OPEN_RE = /^<(pre|code)\b/i
 const SKIP_CLOSE_RE = /^<\/(pre|code)\b/i
 
+function isFeetInchesQuote(text: string, quoteIndex: number): boolean {
+  return /\d'\d+$/.test(text.slice(0, quoteIndex))
+}
+
 function colorizeDialogue(html: string): string {
   const parts = html.split(/(<[^>]*>)/)
   let result = ''
@@ -148,6 +152,12 @@ function colorizeDialogue(html: string): string {
         && part[j + 5] === ';'
 
       if (isLiteral || isEntity) {
+        if (isFeetInchesQuote(part, j)) {
+          output += '&quot;'
+          if (isEntity) j += 5
+          continue
+        }
+
         if (!inQuote) {
           output += `<span class="${styles.proseDialogue}">&quot;`
           inQuote = true
