@@ -174,7 +174,10 @@ export default function PersonaAddonsModal() {
             {/* ── Section 1: Persona-Specific Add-Ons ── */}
             <div className={styles.sectionHeader}>
               <IconPlaylistAdd size={13} className={styles.sectionIconPersona} />
-              <span>Persona Add-Ons</span>
+              <span>Default Persona Add-Ons</span>
+            </div>
+            <div className={styles.sectionHint}>
+              These defaults are used when a chat has no binding or chat-specific override.
             </div>
 
             {addons.length === 0 && (

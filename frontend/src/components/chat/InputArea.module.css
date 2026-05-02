@@ -346,6 +346,56 @@
   padding: 2px 6px;
 }
 
+.addonPopoverHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.45));
+  padding: 2px 6px;
+}
+
+.addonCreateToggle {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04));
+  color: var(--lumiverse-primary, rgba(140, 130, 255, 0.9));
+  cursor: pointer;
+}
+
+.addonCreateForm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04));
+}
+
+.addonCreateInput,
+.addonCreateTextarea {
+  width: 100%;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  border-radius: 7px;
+  background: var(--lumiverse-bg, rgba(20, 18, 28, 0.7));
+  color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  padding: 6px 8px;
+  outline: none;
+}
+
+.addonCreateTextarea {
+  resize: vertical;
+  min-height: 58px;
+}
+
 .stopBtn {
   color: var(--lumiverse-danger, #ef4444);
 }

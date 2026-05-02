@@ -5,6 +5,7 @@
   min-height: var(--app-scaled-viewport-height, calc(100dvh / var(--lumiverse-ui-scale, 1)));
   overflow-x: hidden;
   overflow-y: auto;
+  scroll-padding-block: 24px calc(32px + var(--app-keyboard-inset-bottom, 0px));
   -webkit-overflow-scrolling: touch;
   background: var(--lumiverse-bg-deep, #0a0812);
 }
@@ -117,6 +118,7 @@
   justify-content: center;
   min-height: var(--app-scaled-viewport-height, calc(100dvh / var(--lumiverse-ui-scale, 1)));
   padding: 48px 24px;
+  padding-bottom: calc(48px + var(--app-keyboard-inset-bottom, 0px));
   box-sizing: border-box;
 }
 
@@ -201,6 +203,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  scroll-margin-block: 24px calc(32px + var(--app-keyboard-inset-bottom, 0px));
 }
 
 .label {
@@ -331,6 +334,7 @@
 @media (max-width: 480px) {
   .content {
     padding: 32px 20px;
+    padding-bottom: calc(32px + var(--app-keyboard-inset-bottom, 0px));
     /* Let content push taller than viewport when keyboard is open */
     justify-content: flex-start;
     padding-top: calc(18vh / var(--lumiverse-ui-scale, 1));
@@ -367,5 +371,6 @@
   .content {
     justify-content: flex-start;
     padding-top: 24px;
+    padding-bottom: calc(24px + var(--app-keyboard-inset-bottom, 0px));
   }
 }

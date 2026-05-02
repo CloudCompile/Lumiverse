@@ -13,7 +13,6 @@ import { charactersApi } from '@/api/characters'
 import { packsApi } from '@/api/packs'
 import { imagesApi } from '@/api/images'
 import { expressionsApi } from '@/api/expressions'
-import { personasApi } from '@/api/personas'
 import { resolveAutoPersonaBinding } from '@/store/slices/personas'
 import type { WallpaperRef } from '@/types/store'
 import useSwipeKeyboard from '@/hooks/useSwipeKeyboard'
@@ -287,33 +286,6 @@ export default function ChatView() {
             }
             autoSwitchedPersonaIdRef.current = resolvedBinding.personaId
 
-            // Apply bound addon states to the persona
-            if (resolvedBinding.addonStates && Object.keys(resolvedBinding.addonStates).length > 0) {
-              try {
-                const p = await personasApi.get(resolvedBinding.personaId)
-                const addons = Array.isArray(p.metadata?.addons) ? p.metadata.addons.map((a: any) => ({ ...a })) : []
-                const globalRefs = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons.map((r: any) => ({ ...r })) : []
-                let changed = false
-                for (const a of addons) {
-                  if (a.id in resolvedBinding.addonStates && a.enabled !== resolvedBinding.addonStates[a.id]) {
-                    a.enabled = resolvedBinding.addonStates[a.id]
-                    changed = true
-                  }
-                }
-                for (const r of globalRefs) {
-                  if (r.id in resolvedBinding.addonStates && r.enabled !== resolvedBinding.addonStates[r.id]) {
-                    r.enabled = resolvedBinding.addonStates[r.id]
-                    changed = true
-                  }
-                }
-                if (changed) {
-                  const updated = await personasApi.update(resolvedBinding.personaId, {
-                    metadata: { ...p.metadata, addons, attached_global_addons: globalRefs },
-                  })
-                  useStore.getState().updatePersona(resolvedBinding.personaId, updated)
-                }
-              } catch { /* addon state application is best-effort */ }
-            }
           } else {
             const shouldRestoreDefault =
               autoSwitchedPersonaIdRef.current !== null &&

@@ -13,6 +13,7 @@ export interface GenerateRequest {
   chat_id: string
   connection_id?: string
   persona_id?: string
+  persona_addon_states?: Record<string, boolean>
   preset_id?: string
   force_preset_id?: boolean
   message_id?: string

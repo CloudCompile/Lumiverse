@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect, type CSSProperties, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText, Braces, Globe } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText, Braces, Globe, Plus } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
@@ -12,7 +12,9 @@ import { personasApi } from '@/api/personas'
 import { globalAddonsApi } from '@/api/global-addons'
 import { imagesApi } from '@/api/images'
 import { getPersonaAvatarThumbUrlById, getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
+import { uuidv7 } from '@/lib/uuid'
 import { toast } from '@/lib/toast'
+import { resolveAutoPersonaBinding } from '@/store/slices/personas'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import useIsMobile from '@/hooks/useIsMobile'
 import type { MessageAttachment, PersonaAddon, GlobalAddon, AttachedGlobalAddon } from '@/types/api'
@@ -102,6 +104,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const guidedGenerations = useStore((s) => s.guidedGenerations)
   const quickReplySets = useStore((s) => s.quickReplySets)
   const personas = useStore((s) => s.personas)
+  const characterPersonaBindings = useStore((s) => s.characterPersonaBindings)
+  const personaTagBindings = useStore((s) => s.personaTagBindings)
   const messages = useStore((s) => s.messages)
   const addMessage = useStore((s) => s.addMessage)
   const beginStreaming = useStore((s) => s.beginStreaming)
@@ -188,7 +192,55 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [personaAddons, setPersonaAddons] = useState<PersonaAddon[]>([])
   // Track global add-ons attached to the active persona
   const [attachedGlobalAddons, setAttachedGlobalAddons] = useState<(GlobalAddon & { enabled: boolean })[]>([])
+  const [chatAddonStatesByPersona, setChatAddonStatesByPersona] = useState<Record<string, Record<string, boolean>>>({})
+  const [showCreateAddon, setShowCreateAddon] = useState(false)
+  const [newAddonLabel, setNewAddonLabel] = useState('')
+  const [newAddonContent, setNewAddonContent] = useState('')
+  const [creatingAddon, setCreatingAddon] = useState(false)
   const hasAddons = personaAddons.length > 0 || attachedGlobalAddons.length > 0
+
+  useEffect(() => {
+    if (!chatId) { setChatAddonStatesByPersona({}); return }
+    chatsApi.get(chatId, { messages: false })
+      .then((chat) => {
+        const states = chat.metadata?.persona_addon_states
+        setChatAddonStatesByPersona(states && typeof states === 'object' ? states : {})
+      })
+      .catch(() => setChatAddonStatesByPersona({}))
+  }, [chatId])
+
+  const activeCharacter = activeCharacterId ? characters.find((c) => c.id === activeCharacterId) : null
+  const resolvedPersonaBinding = useMemo(() => resolveAutoPersonaBinding({
+    characterId: activeCharacterId,
+    characterTags: activeCharacter?.tags ?? [],
+    personas,
+    characterPersonaBindings,
+    personaTagBindings,
+  }), [activeCharacterId, activeCharacter?.tags, personas, characterPersonaBindings, personaTagBindings])
+
+  const currentChatAddonOverrides = activePersonaId ? (chatAddonStatesByPersona[activePersonaId] ?? {}) : {}
+  const effectivePersonaAddonStates = useMemo(() => {
+    const states: Record<string, boolean> = {}
+    for (const addon of personaAddons) states[addon.id] = addon.enabled
+    for (const addon of attachedGlobalAddons) states[addon.id] = addon.enabled
+    if (activePersonaId && resolvedPersonaBinding.personaId === activePersonaId && resolvedPersonaBinding.addonStates) {
+      Object.assign(states, resolvedPersonaBinding.addonStates)
+    }
+    Object.assign(states, currentChatAddonOverrides)
+    return states
+  }, [activePersonaId, personaAddons, attachedGlobalAddons, resolvedPersonaBinding, currentChatAddonOverrides])
+  const effectivePersonaAddons = useMemo(
+    () => personaAddons.map((addon) => ({ ...addon, enabled: effectivePersonaAddonStates[addon.id] ?? addon.enabled })),
+    [personaAddons, effectivePersonaAddonStates],
+  )
+  const effectiveAttachedGlobalAddons = useMemo(
+    () => attachedGlobalAddons.map((addon) => ({ ...addon, enabled: effectivePersonaAddonStates[addon.id] ?? addon.enabled })),
+    [attachedGlobalAddons, effectivePersonaAddonStates],
+  )
+  const chatAddonOverrideCount = Object.keys(currentChatAddonOverrides).length
+  const activeGenerationAddonStates = activePersonaId && Object.keys(effectivePersonaAddonStates).length > 0
+    ? effectivePersonaAddonStates
+    : undefined
 
   useEffect(() => {
     if (!activePersonaId) { setPersonaAddons([]); setAttachedGlobalAddons([]); return }
@@ -235,38 +287,64 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
   }, [storePersonas, activePersonaId])
 
-  const handleToggleAddon = useCallback(async (addonId: string) => {
-    if (!activePersonaId) return
-    const next = personaAddons.map((a) => a.id === addonId ? { ...a, enabled: !a.enabled } : a)
-    setPersonaAddons(next)
-    try {
-      const p = await personasApi.get(activePersonaId)
-      const newMeta = { ...(p.metadata || {}), addons: next }
-      const updated = await personasApi.update(activePersonaId, { metadata: newMeta })
-      useStore.getState().updatePersona(activePersonaId, updated)
-    } catch {
-      // Revert on failure
-      setPersonaAddons(personaAddons)
-      toast.error('Failed to toggle add-on')
+  const persistChatAddonOverride = useCallback(async (addonId: string, enabled: boolean) => {
+    if (!activePersonaId) return false
+    const previous = chatAddonStatesByPersona
+    const nextByPersona = {
+      ...chatAddonStatesByPersona,
+      [activePersonaId]: {
+        ...(chatAddonStatesByPersona[activePersonaId] ?? {}),
+        [addonId]: enabled,
+      },
     }
-  }, [activePersonaId, personaAddons])
+    setChatAddonStatesByPersona(nextByPersona)
+    try {
+      await chatsApi.patchMetadata(chatId, { persona_addon_states: nextByPersona })
+      return true
+    } catch {
+      setChatAddonStatesByPersona(previous)
+      toast.error('Failed to save add-on state for this chat')
+      return false
+    }
+  }, [activePersonaId, chatId, chatAddonStatesByPersona])
 
-  const handleToggleGlobalAddon = useCallback(async (globalAddonId: string) => {
-    if (!activePersonaId) return
-    const nextAttached = attachedGlobalAddons.map((a) => a.id === globalAddonId ? { ...a, enabled: !a.enabled } : a)
-    setAttachedGlobalAddons(nextAttached)
+  const handleToggleAddonState = useCallback((addonId: string) => {
+    void persistChatAddonOverride(addonId, !(effectivePersonaAddonStates[addonId] ?? false))
+  }, [effectivePersonaAddonStates, persistChatAddonOverride])
+
+  const handleCreateChatAddon = useCallback(async () => {
+    if (!activePersonaId || creatingAddon) return
+    const label = newAddonLabel.trim()
+    const content = newAddonContent.trim()
+    if (!label && !content) return
+
+    setCreatingAddon(true)
     try {
       const p = await personasApi.get(activePersonaId)
-      const refs: AttachedGlobalAddon[] = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons : []
-      const nextRefs = refs.map((r) => r.id === globalAddonId ? { ...r, enabled: !r.enabled } : r)
-      const newMeta = { ...(p.metadata || {}), attached_global_addons: nextRefs }
-      const updated = await personasApi.update(activePersonaId, { metadata: newMeta })
+      const existing = Array.isArray(p.metadata?.addons) ? p.metadata.addons : []
+      const addon: PersonaAddon = {
+        id: uuidv7(),
+        label: label || 'Untitled add-on',
+        content,
+        enabled: false,
+        sort_order: existing.length,
+      }
+      const updated = await personasApi.update(activePersonaId, {
+        metadata: { ...(p.metadata || {}), addons: [...existing, addon] },
+      })
       useStore.getState().updatePersona(activePersonaId, updated)
+      setPersonaAddons(Array.isArray(updated.metadata?.addons) ? updated.metadata.addons : [])
+      const overrideSaved = await persistChatAddonOverride(addon.id, true)
+      setNewAddonLabel('')
+      setNewAddonContent('')
+      setShowCreateAddon(false)
+      toast.success(overrideSaved ? 'Add-on created for this chat' : 'Add-on created, but could not enable it for this chat')
     } catch {
-      setAttachedGlobalAddons(attachedGlobalAddons)
-      toast.error('Failed to toggle global add-on')
+      toast.error('Failed to create add-on')
+    } finally {
+      setCreatingAddon(false)
     }
-  }, [activePersonaId, attachedGlobalAddons])
+  }, [activePersonaId, creatingAddon, newAddonLabel, newAddonContent, persistChatAddonOverride])
 
   // iPhone-specific: match input bar bottom corners to device screen curvature
   const screenCornerRadius = useDeviceFrameRadius()
@@ -697,6 +775,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: effectivePersonaId || undefined,
+        persona_addon_states: effectivePersonaId === activePersonaId ? activeGenerationAddonStates : undefined,
         preset_id: getActivePresetForGeneration() || undefined,
         generation_type: 'normal' as const,
       }
@@ -743,6 +822,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
           opts: {
             connection_id: genOpts.connection_id,
             persona_id: genOpts.persona_id,
+            persona_addon_states: genOpts.persona_addon_states,
             preset_id: genOpts.preset_id,
           },
         })
@@ -794,7 +874,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages, isGroupChat, groupCharacterIds, mutedCharacterIds, characters, setMentionQueue, resizeTextarea])
+  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages, isGroupChat, groupCharacterIds, mutedCharacterIds, characters, setMentionQueue, resizeTextarea])
 
   const doRegenerate = useCallback(async (feedback?: string | null) => {
     if (isStreaming) return
@@ -844,6 +924,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
+        persona_addon_states: activeGenerationAddonStates,
         preset_id: getActivePresetForGeneration() || undefined,
         generation_type: 'normal',
         retain_council: retainCouncilForRegens || undefined,
@@ -865,7 +946,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setStreamingError(msg)
       toast.error(msg, { title: 'Regeneration Failed' })
     }
-  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, getActivePresetForGeneration, regenFeedback.position, retainCouncilForRegens, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, regenFeedback.position, retainCouncilForRegens, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleRegenerate = useCallback(() => {
     if (isStreaming) return
@@ -888,6 +969,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
+        persona_addon_states: activeGenerationAddonStates,
         preset_id: getActivePresetForGeneration() || undefined,
         retain_council: retainCouncilForRegens || undefined,
       })
@@ -901,7 +983,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setStreamingError(msg)
       toast.error(msg, { title: 'Continue Failed' })
     }
-  }, [chatId, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isStreaming, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleImpersonate = useCallback(async (mode: import('@/api/generate').ImpersonateMode) => {
     if (isStreaming) return
@@ -921,6 +1003,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
+        persona_addon_states: activeGenerationAddonStates,
         preset_id: forcedPresetId || getActivePresetForGeneration() || undefined,
         force_preset_id: !!forcedPresetId,
         generation_type: 'impersonate',
@@ -938,7 +1021,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setStreamingError(msg)
       toast.error(msg, { title: 'Impersonation Failed' })
     }
-  }, [chatId, isStreaming, text, activeProfileId, activePersonaId, impersonationPresetId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides, resizeTextarea])
+  }, [chatId, isStreaming, text, activeProfileId, activePersonaId, activeGenerationAddonStates, impersonationPresetId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides, resizeTextarea])
 
   const handleStop = useCallback(async () => {
     if (!isStreaming) return
@@ -1049,6 +1132,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
+        persona_addon_states: activeGenerationAddonStates,
         preset_id: presetId,
       })
       openModal('dryRun', result)
@@ -1059,7 +1143,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       setDryRunning(false)
     }
-  }, [chatId, dryRunning, isStreaming, activeProfileId, activePersonaId, getActivePresetForGeneration, openModal, setStreamingError])
+  }, [chatId, dryRunning, isStreaming, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, openModal, setStreamingError])
 
   const handleResolveMacros = useCallback(async () => {
     if (resolvingMacros || isStreaming) return
@@ -1412,12 +1496,16 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 </button>
               )
             })()}
-            {hasAddons && (
+            {activePersonaId && (
               <button
                 type="button"
-                className={clsx(styles.actionBtn, openPopover === 'addons' && styles.actionBtnActive)}
+                className={clsx(
+                  styles.actionBtn,
+                  openPopover === 'addons' && styles.actionBtnActive,
+                  chatAddonOverrideCount > 0 && styles.actionBtnHasSelection,
+                )}
                 onClick={() => setOpenPopover((p) => (p === 'addons' ? null : 'addons'))}
-                title="Persona add-ons"
+                title={chatAddonOverrideCount > 0 ? 'Persona add-ons — customized for this chat' : 'Persona add-ons'}
               >
                 <IconPlaylistAdd size={14} />
               </button>
@@ -1903,15 +1991,51 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
           {renderPopover === 'addons' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              {personaAddons.length > 0 && (
+              <div className={styles.addonPopoverHeader}>
+                <span>Persona Add-Ons</span>
+                <button
+                  type="button"
+                  className={styles.addonCreateToggle}
+                  onClick={() => setShowCreateAddon((v) => !v)}
+                  title="Create an add-on for this chat"
+                >
+                  <Plus size={12} />
+                </button>
+              </div>
+              {showCreateAddon && (
+                <div className={styles.addonCreateForm}>
+                  <input
+                    type="text"
+                    className={styles.addonCreateInput}
+                    value={newAddonLabel}
+                    onChange={(e) => setNewAddonLabel(e.target.value)}
+                    placeholder="Add-on name"
+                  />
+                  <textarea
+                    className={styles.addonCreateTextarea}
+                    value={newAddonContent}
+                    onChange={(e) => setNewAddonContent(e.target.value)}
+                    placeholder="Add-on content..."
+                    rows={3}
+                  />
+                  <button
+                    type="button"
+                    className={styles.popLink}
+                    onClick={handleCreateChatAddon}
+                    disabled={creatingAddon || (!newAddonLabel.trim() && !newAddonContent.trim())}
+                  >
+                    {creatingAddon ? 'Creating...' : 'Create for this chat'}
+                  </button>
+                </div>
+              )}
+              {effectivePersonaAddons.length > 0 && (
                 <>
-                  <div className={styles.quickSetName}>Persona Add-Ons</div>
-                  {personaAddons.map((addon) => (
+                  {effectivePersonaAddons.map((addon) => (
                     <button
                       key={addon.id}
                       type="button"
                       className={clsx(styles.popRowBtn, addon.enabled && styles.popRowBtnActive)}
-                      onClick={() => handleToggleAddon(addon.id)}
+                      onClick={() => handleToggleAddonState(addon.id)}
                     >
                       <span className={styles.personaMain}>
                         <IconPlaylistAdd size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-primary)' : undefined }} />
@@ -1922,16 +2046,16 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   ))}
                 </>
               )}
-              {attachedGlobalAddons.length > 0 && (
+              {effectiveAttachedGlobalAddons.length > 0 && (
                 <>
-                  {personaAddons.length > 0 && <div className={styles.popDivider} />}
+                  {effectivePersonaAddons.length > 0 && <div className={styles.popDivider} />}
                   <div className={styles.quickSetName}>Global Add-Ons</div>
-                  {attachedGlobalAddons.map((addon) => (
+                  {effectiveAttachedGlobalAddons.map((addon) => (
                     <button
                       key={addon.id}
                       type="button"
                       className={clsx(styles.popRowBtn, addon.enabled && styles.popRowBtnActive)}
-                      onClick={() => handleToggleGlobalAddon(addon.id)}
+                      onClick={() => handleToggleAddonState(addon.id)}
                     >
                       <span className={styles.personaMain}>
                         <Globe size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-info, #42a5f5)' : undefined }} />
@@ -1942,8 +2066,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   ))}
                 </>
               )}
-              {personaAddons.length === 0 && attachedGlobalAddons.length === 0 && (
-                <div className={styles.popEmpty}>No add-ons configured.</div>
+              {!hasAddons && !showCreateAddon && (
+                <div className={styles.popEmpty}>No add-ons configured. Use + to create one for this chat.</div>
               )}
             </div>
           )}

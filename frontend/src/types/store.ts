@@ -857,6 +857,7 @@ export interface LumiSlice {
 export interface MentionQueueOpts {
   connection_id?: string
   persona_id?: string
+  persona_addon_states?: Record<string, boolean>
   preset_id?: string
 }
 

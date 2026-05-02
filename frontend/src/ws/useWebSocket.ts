@@ -416,6 +416,7 @@ export function useWebSocket() {
                     chat_id: queue.chatId,
                     connection_id: queue.opts.connection_id,
                     persona_id: queue.opts.persona_id,
+                    persona_addon_states: queue.opts.persona_addon_states,
                     preset_id: queue.opts.preset_id,
                     target_character_id: nextId,
                     generation_type: 'normal',

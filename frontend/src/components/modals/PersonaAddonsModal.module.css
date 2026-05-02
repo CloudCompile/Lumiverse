@@ -101,6 +101,12 @@
   padding: 6px 4px;
 }
 
+.sectionHint {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  padding: 0 4px 2px;
+}
+
 .sectionDivider {
   height: 1px;
   background: var(--lumiverse-border);

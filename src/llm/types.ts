@@ -114,6 +114,8 @@ export interface AssemblyContext {
   forcePresetId?: boolean;
   generationType: GenerationType;
   personaId?: string;
+  /** Effective persona add-on states for this generation. Applied to a cloned persona only. */
+  personaAddonStates?: Record<string, boolean>;
   /** For impersonate: controls how much of the preset is included. */
   impersonateMode?: ImpersonateMode;
   /** For impersonate: free-form user text from the input box, appended to the impersonation prompt. */

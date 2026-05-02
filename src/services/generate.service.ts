@@ -115,6 +115,7 @@ interface GenerateInput {
   chat_id: string;
   connection_id?: string;
   persona_id?: string;
+  persona_addon_states?: Record<string, boolean>;
   preset_id?: string;
   force_preset_id?: boolean;
   message_id?: string;
@@ -785,6 +786,7 @@ async function runPromptPipeline(opts: {
   presetId?: string;
   forcePresetId?: boolean;
   personaId?: string;
+  personaAddonStates?: Record<string, boolean>;
   generationType: string;
   impersonateMode?: ImpersonateMode;
   impersonateInput?: string;
@@ -856,6 +858,7 @@ async function runPromptPipeline(opts: {
       presetId: opts.presetId,
       forcePresetId: opts.forcePresetId,
       personaId: opts.personaId,
+      personaAddonStates: opts.personaAddonStates,
       generationType: opts.generationType as GenerationType,
       excludeMessageId: opts.excludeMessageId,
       targetCharacterId: opts.targetCharacterId,
@@ -870,6 +873,7 @@ async function runPromptPipeline(opts: {
       presetId: opts.presetId,
       forcePresetId: opts.forcePresetId,
       personaId: opts.personaId,
+      personaAddonStates: opts.personaAddonStates,
       generationType: opts.generationType as GenerationType,
       impersonateMode: opts.impersonateMode,
       impersonateInput: opts.impersonateInput,
@@ -1918,6 +1922,7 @@ export async function startGeneration(
             presetId: input.preset_id,
             forcePresetId: input.force_preset_id,
             personaId: input.persona_id,
+            personaAddonStates: input.persona_addon_states,
             generationType: genType,
             impersonateMode:
               genType === "impersonate"
@@ -2166,6 +2171,7 @@ export async function dryRunGeneration(
     connectionId: input.connection_id,
     presetId: input.preset_id,
     personaId: input.persona_id,
+    personaAddonStates: input.persona_addon_states,
     generationType: genType,
     impersonateMode:
       genType === "impersonate"

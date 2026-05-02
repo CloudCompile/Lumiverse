@@ -35,13 +35,19 @@ export default function LoginPage() {
   // Scroll focused input into view on mobile virtual keyboard
   useEffect(() => {
     if (!focused) return
-    const timer = setTimeout(() => {
+    const scrollFocusedInput = () => {
       formRef.current?.querySelector(`#${focused}`)?.scrollIntoView({
         behavior: 'smooth',
         block: 'center',
       })
-    }, 300)
-    return () => clearTimeout(timer)
+    }
+    const timers = [100, 350, 650].map((delay) => setTimeout(scrollFocusedInput, delay))
+    window.visualViewport?.addEventListener('resize', scrollFocusedInput)
+
+    return () => {
+      timers.forEach((timer) => clearTimeout(timer))
+      window.visualViewport?.removeEventListener('resize', scrollFocusedInput)
+    }
   }, [focused])
 
   return (
@@ -112,6 +118,7 @@ export default function LoginPage() {
               <div className={clsx(styles.inputWrap, focused === 'username' && styles.inputWrapFocused)}>
                 <input
                   id="username"
+                  name="username"
                   className={styles.input}
                   type="text"
                   value={username}
@@ -119,7 +126,11 @@ export default function LoginPage() {
                   onFocus={() => setFocused('username')}
                   onBlur={() => setFocused(null)}
                   autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
                   autoFocus
+                  spellCheck={false}
+                  enterKeyHint="next"
                   placeholder="Enter your username"
                 />
               </div>
@@ -135,6 +146,7 @@ export default function LoginPage() {
               <div className={clsx(styles.inputWrap, focused === 'password' && styles.inputWrapFocused)}>
                 <input
                   id="password"
+                  name="password"
                   className={styles.input}
                   type="password"
                   value={password}
@@ -142,6 +154,8 @@ export default function LoginPage() {
                   onFocus={() => setFocused('password')}
                   onBlur={() => setFocused(null)}
                   autoComplete="current-password"
+                  autoCapitalize="none"
+                  enterKeyHint="done"
                   placeholder="Enter your password"
                 />
               </div>

@@ -68,6 +68,7 @@ import {
 import * as charactersSvc from "./characters.service";
 import * as personasSvc from "./personas.service";
 import * as globalAddonsSvc from "./global-addons.service";
+import { applyPersonaAddonStates } from "./persona-addon-states";
 import * as connectionsSvc from "./connections.service";
 import * as presetsSvc from "./presets.service";
 import * as worldBooksSvc from "./world-books.service";
@@ -771,6 +772,7 @@ export async function assemblePrompt(
     pf?.persona !== undefined
       ? pf.persona
       : personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+  if (!pf) persona = applyPersonaAddonStates(persona, ctx.personaAddonStates);
 
   // Resolve attached global add-ons for non-prefetched path
   if (persona && !pf) {

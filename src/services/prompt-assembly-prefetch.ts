@@ -17,6 +17,7 @@ import * as settingsSvc from "./settings.service";
 import * as worldBooksSvc from "./world-books.service";
 import * as embeddingsSvc from "./embeddings.service";
 import * as globalAddonsSvc from "./global-addons.service";
+import { applyPersonaAddonStates } from "./persona-addon-states";
 import { normalizeCortexConfig, DEFAULT_CORTEX_CONFIG } from "./memory-cortex/config";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import type { BookSource } from "./prompt-assembly.service";
@@ -85,7 +86,10 @@ export async function prefetchAssemblyData(ctx: AssemblyContext): Promise<Prefet
   const character = charactersSvc.getCharacter(ctx.userId, characterId);
   if (!character) throw new Error("Character not found");
 
-  let persona = personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId);
+  let persona = applyPersonaAddonStates(
+    personasSvc.resolvePersonaOrDefault(ctx.userId, ctx.personaId),
+    ctx.personaAddonStates,
+  );
 
   // Resolve attached global add-ons for the persona
   if (persona) {
