@@ -827,6 +827,12 @@ function WorldInfoSettingsForm({
   settings: WorldInfoSettings
   onChange: (patch: Partial<WorldInfoSettings>) => void
 }) {
+  const globalScanDepth = settings.globalScanDepth && settings.globalScanDepth > 0 ? settings.globalScanDepth : null
+  const maxRecursionPasses = Number.isFinite(settings.maxRecursionPasses) ? Math.max(0, Math.floor(settings.maxRecursionPasses)) : 3
+  const maxActivatedEntries = Number.isFinite(settings.maxActivatedEntries) ? Math.max(0, Math.floor(settings.maxActivatedEntries)) : 0
+  const maxTokenBudget = Number.isFinite(settings.maxTokenBudget) ? Math.max(0, Math.floor(settings.maxTokenBudget)) : 0
+  const minPriority = Number.isFinite(settings.minPriority) ? Math.max(0, Math.floor(settings.minPriority)) : 0
+
   return (
     <div className={styles.wiSettingsBody}>
       <div className={styles.wiField}>
@@ -840,14 +846,14 @@ function WorldInfoSettingsForm({
             min={0}
             max={200}
             placeholder="Unlimited"
-            value={settings.globalScanDepth ?? null}
+            value={globalScanDepth}
             integer
             allowEmpty
             onChange={(value) => {
-              onChange({ globalScanDepth: value == null ? null : Math.max(0, value) })
+              onChange({ globalScanDepth: value == null || value <= 0 ? null : Math.floor(value) })
             }}
           />
-          {settings.globalScanDepth != null && (
+          {globalScanDepth != null && (
             <button type="button" className={styles.wiFieldClear} onClick={() => onChange({ globalScanDepth: null })}>
               <X size={10} />
             </button>
@@ -866,10 +872,10 @@ function WorldInfoSettingsForm({
             className={styles.wiRange}
             min={0}
             max={10}
-            value={settings.maxRecursionPasses}
-            onChange={(e) => onChange({ maxRecursionPasses: parseInt(e.target.value, 10) })}
+            value={maxRecursionPasses}
+            onChange={(e) => onChange({ maxRecursionPasses: Math.max(0, parseInt(e.target.value, 10) || 0) })}
           />
-          <span className={styles.wiRangeValue}>{settings.maxRecursionPasses}</span>
+          <span className={styles.wiRangeValue}>{maxRecursionPasses}</span>
         </div>
       </div>
 
@@ -883,9 +889,9 @@ function WorldInfoSettingsForm({
           min={0}
           max={500}
           placeholder="Unlimited"
-          value={settings.maxActivatedEntries || null}
+          value={maxActivatedEntries || null}
           integer
-          onChange={(value) => onChange({ maxActivatedEntries: Math.max(0, value ?? 0) })}
+          onChange={(value) => onChange({ maxActivatedEntries: Math.max(0, Math.floor(value ?? 0)) })}
         />
       </div>
 
@@ -900,9 +906,9 @@ function WorldInfoSettingsForm({
           max={50000}
           step={100}
           placeholder="Unlimited"
-          value={settings.maxTokenBudget || null}
+          value={maxTokenBudget || null}
           integer
-          onChange={(value) => onChange({ maxTokenBudget: Math.max(0, value ?? 0) })}
+          onChange={(value) => onChange({ maxTokenBudget: Math.max(0, Math.floor(value ?? 0)) })}
         />
       </div>
 
@@ -917,10 +923,10 @@ function WorldInfoSettingsForm({
             className={styles.wiRange}
             min={0}
             max={100}
-            value={settings.minPriority}
-            onChange={(e) => onChange({ minPriority: parseInt(e.target.value, 10) })}
+            value={minPriority}
+            onChange={(e) => onChange({ minPriority: Math.max(0, parseInt(e.target.value, 10) || 0) })}
           />
-          <span className={styles.wiRangeValue}>{settings.minPriority}</span>
+          <span className={styles.wiRangeValue}>{minPriority}</span>
         </div>
       </div>
     </div>

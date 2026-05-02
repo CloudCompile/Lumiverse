@@ -14,7 +14,7 @@ import {
   applyVectorPriorityBoost,
 } from "../services/prompt-assembly.service";
 import { deduplicateWorldInfoEntries } from "../services/world-info-dedup.service";
-import { activateWorldInfo, finalizeActivatedWorldInfoEntries, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
+import { activateWorldInfo, finalizeActivatedWorldInfoEntries, normalizeWorldInfoSettings, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
 import type { WorldBookEntry } from "../types/world-book";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
@@ -184,14 +184,7 @@ function traceDiagnosticVectorHitOutcomes(
   vectorEntries: VectorHitEntry[],
   settingsInput?: Partial<WorldInfoSettings>,
 ): Map<string, DiagnosticVectorHitOutcome> {
-  const settings: WorldInfoSettings = {
-    globalScanDepth: null,
-    maxRecursionPasses: 0,
-    maxActivatedEntries: 50,
-    maxTokenBudget: 0,
-    minPriority: 0,
-    ...settingsInput,
-  };
+  const settings = normalizeWorldInfoSettings(settingsInput);
   const mergedEntries: WorldBookEntry[] = [];
   const sources = new Map<string, { source: "keyword" | "vector"; score?: number }>();
   const seen = new Set<string>();

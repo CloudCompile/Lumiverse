@@ -47,7 +47,7 @@ import {
   type WiState,
   type WorldInfoSettings,
   type FinalizedWorldInfoEntries,
-  DEFAULT_WORLD_INFO_SETTINGS,
+  normalizeWorldInfoSettings,
 } from "./world-info-activation.service";
 import * as chatsSvc from "./chats.service";
 import { stripReasoningTags } from "./chats.service";
@@ -4180,10 +4180,7 @@ export function mergeActivatedWorldInfoEntries(
   settingsInput?: Partial<WorldInfoSettings>,
   bookSourceMap?: Map<string, BookSource>,
 ): MergedWorldInfoEntriesResult {
-  const settings: WorldInfoSettings = {
-    ...DEFAULT_WORLD_INFO_SETTINGS,
-    ...settingsInput,
-  };
+  const settings = normalizeWorldInfoSettings(settingsInput);
   const mergedEntries: WorldBookEntryModel[] = [];
   const sources = new Map<
     string,

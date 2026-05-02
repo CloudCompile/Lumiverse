@@ -43,6 +43,43 @@ export const DEFAULT_WORLD_INFO_SETTINGS: WorldInfoSettings = {
   minPriority: 0,
 };
 
+function nonNegativeInteger(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
+export function normalizeWorldInfoSettings(
+  settingsInput?: Partial<WorldInfoSettings>,
+): WorldInfoSettings {
+  const input = settingsInput ?? {};
+  const defaultScanDepth = DEFAULT_WORLD_INFO_SETTINGS.globalScanDepth;
+  const rawScanDepth = input.globalScanDepth;
+  const globalScanDepth =
+    typeof rawScanDepth === "number" && Number.isFinite(rawScanDepth) && rawScanDepth > 0
+      ? Math.floor(rawScanDepth)
+      : defaultScanDepth;
+
+  return {
+    globalScanDepth,
+    maxRecursionPasses: nonNegativeInteger(
+      input.maxRecursionPasses,
+      DEFAULT_WORLD_INFO_SETTINGS.maxRecursionPasses,
+    ),
+    maxActivatedEntries: nonNegativeInteger(
+      input.maxActivatedEntries,
+      DEFAULT_WORLD_INFO_SETTINGS.maxActivatedEntries,
+    ),
+    maxTokenBudget: nonNegativeInteger(
+      input.maxTokenBudget,
+      DEFAULT_WORLD_INFO_SETTINGS.maxTokenBudget,
+    ),
+    minPriority: nonNegativeInteger(
+      input.minPriority,
+      DEFAULT_WORLD_INFO_SETTINGS.minPriority,
+    ),
+  };
+}
+
 export interface ActivationInput {
   entries: WorldBookEntry[];
   messages: Message[];
@@ -173,7 +210,7 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
   if (cached) return cached;
 
   const { entries, messages, wiState } = input;
-  const settings: WorldInfoSettings = { ...DEFAULT_WORLD_INFO_SETTINGS, ...input.settings };
+  const settings = normalizeWorldInfoSettings(input.settings);
 
   // 0. Cleanup wiState: Remove any keys that are no longer in the candidates list.
   // This prevents hidden sticky/active entries from persisting after a lorebook is removed.
@@ -225,7 +262,7 @@ export function activateWorldInfo(input: ActivationInput): ActivationResult {
     activatedUids.add(entry.uid);
   }
 
-  const maxPasses = Math.max(0, settings.maxRecursionPasses);
+  const maxPasses = settings.maxRecursionPasses;
   const recursionPassesUsed = runAhoCorasickPasses({
     conditional, constants, messages, settings, wiState,
     activated, activatedUids, blockedByCooldown, matchedThisTurn, delayIncremented,
@@ -283,7 +320,7 @@ export function finalizeActivatedWorldInfoEntries(
   settingsInput?: Partial<WorldInfoSettings>,
   options: FinalizeWorldInfoOptions = {},
 ): FinalizedWorldInfoEntries {
-  const settings: WorldInfoSettings = { ...DEFAULT_WORLD_INFO_SETTINGS, ...settingsInput };
+  const settings = normalizeWorldInfoSettings(settingsInput);
 
   const afterGroups = options.skipGroupLogic
     ? [...entries]
@@ -427,15 +464,10 @@ function runAhoCorasickPasses(args: AhoCorasickPassArgs): number {
     matcher.scanChunk(text, state, scope);
   }
 
-  // Constants' content is visible to all entries on pass 0, unless the
-  // constant is marked "Prevent Further Recursion" — that flag means the
-  // entry's content should not be scanned as a source for activating others.
-  for (const c of constants) {
-    if (c.content && !c.prevent_recursion) matcher.scanChunk(c.content, state);
-  }
-
   let recursionPassesUsed = 0;
-  let newContent: string[] = [];
+  let newContent = constants
+    .filter((entry) => entry.content && !entry.prevent_recursion)
+    .map((entry) => entry.content);
 
   for (let pass = 0; pass <= maxPasses; pass++) {
     if (pass > 0) {
@@ -483,8 +515,8 @@ function runAhoCorasickPasses(args: AhoCorasickPassArgs): number {
       if (entry.content && !entry.prevent_recursion) newContent.push(entry.content);
     }
 
-    if (!activatedThisPass) break;
-    recursionPassesUsed = pass + 1;
+    if (activatedThisPass && pass > 0) recursionPassesUsed = pass;
+    if (!activatedThisPass && (pass > 0 || newContent.length === 0 || pass >= maxPasses)) break;
   }
 
   return recursionPassesUsed;

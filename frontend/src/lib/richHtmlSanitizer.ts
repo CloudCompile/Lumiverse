@@ -5,6 +5,7 @@ const BASE_FORBID_TAGS = ['script', 'iframe', 'frame', 'object', 'embed', 'meta'
 const BASE_FORBID_ATTR = ['srcdoc', 'formaction']
 const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|apng|jpeg|jpg|gif|webp|avif|bmp);/i
 const DOCUMENT_HTML_RE = /<(?:!doctype\b|html\b|head\b|body\b)/i
+const STYLE_TAG_RE = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi
 
 function isAllowedCustomAttributeName(attrName: string): boolean {
   const normalized = attrName.toLowerCase()
@@ -81,16 +82,36 @@ function sanitizeNavigableElements(root: ParentNode): void {
   }
 }
 
+function sanitizeIslandCss(css: string): string {
+  return css
+    .replace(/<\/style/gi, '<\\/style')
+    .replace(/@import\b[^;]*(?:;|$)/gi, '')
+    .replace(/url\(\s*(['"]?)\s*javascript:[\s\S]*?\)/gi, 'url($1about:blank)')
+    .replace(/\bexpression\s*\(/gi, 'x-expression(')
+    .replace(/\b(?:behavior|-moz-binding)\s*:/gi, 'x-blocked-property:')
+}
+
+function extractStyleBlocks(html: string): { htmlWithoutStyles: string; styles: string[] } {
+  const styles: string[] = []
+  STYLE_TAG_RE.lastIndex = 0
+  const htmlWithoutStyles = html.replace(STYLE_TAG_RE, (_match, css: string) => {
+    const sanitizedCss = sanitizeIslandCss(css)
+    if (sanitizedCss.trim()) styles.push(sanitizedCss)
+    return ''
+  })
+  return { htmlWithoutStyles, styles }
+}
+
 function sanitizeHtml(html: string, allowStyleTag: boolean): string {
   const normalizedHtml = normalizeDocumentHtml(html, allowStyleTag)
-  const sanitized = DOMPurify.sanitize(normalizedHtml, {
-    ADD_TAGS: allowStyleTag ? ['style'] : [],
+  const styleExtraction = allowStyleTag
+    ? extractStyleBlocks(normalizedHtml)
+    : { htmlWithoutStyles: normalizedHtml, styles: [] }
+  const sanitized = DOMPurify.sanitize(styleExtraction.htmlWithoutStyles, {
     ADD_ATTR: (attrName) => isAllowedCustomAttributeName(attrName),
     ALLOW_DATA_ATTR: true,
     ALLOW_ARIA_ATTR: true,
-    FORBID_TAGS: allowStyleTag
-      ? [...BASE_FORBID_TAGS, 'form']
-      : [...BASE_FORBID_TAGS, 'style', 'form'],
+    FORBID_TAGS: [...BASE_FORBID_TAGS, 'style', 'form'],
     FORBID_ATTR: BASE_FORBID_ATTR,
     RETURN_DOM_FRAGMENT: true,
   }) as DocumentFragment
@@ -109,6 +130,11 @@ function sanitizeHtml(html: string, allowStyleTag: boolean): string {
   }
 
   const wrapper = document.createElement('div')
+  for (const css of styleExtraction.styles) {
+    const style = document.createElement('style')
+    style.textContent = css
+    wrapper.appendChild(style)
+  }
   wrapper.appendChild(sanitized)
   return wrapper.innerHTML
 }
