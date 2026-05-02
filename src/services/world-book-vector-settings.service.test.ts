@@ -66,4 +66,13 @@ describe("normalizeWorldBookVectorSettings", () => {
     expect(settings.chunkOverlapTokens).toBe(96);
     expect(settings.maxChunksPerEntry).toBe(10);
   });
+
+  it("does not cap retrieval top K", () => {
+    const settings = normalizeWorldBookVectorSettings({
+      presetMode: "custom",
+      retrievalTopK: 250,
+    });
+
+    expect(settings.retrievalTopK).toBe(250);
+  });
 });

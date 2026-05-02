@@ -60,7 +60,7 @@ export function normalizeWorldBookVectorSettings(
         chunkTargetTokens: clampInt(input?.chunkTargetTokens, 120, 2000, base.chunkTargetTokens),
         chunkMaxTokens: clampInt(input?.chunkMaxTokens, 160, 4000, Math.max(base.chunkMaxTokens, base.chunkTargetTokens)),
         chunkOverlapTokens: clampInt(input?.chunkOverlapTokens, 0, 500, base.chunkOverlapTokens),
-        retrievalTopK: clampInt(input?.retrievalTopK, 1, 20, base.retrievalTopK),
+        retrievalTopK: clampInt(input?.retrievalTopK, 1, Infinity, base.retrievalTopK),
         maxChunksPerEntry: clampInt(input?.maxChunksPerEntry, 1, 24, base.maxChunksPerEntry),
       }
     : WORLD_BOOK_VECTOR_PRESETS[presetMode];
@@ -76,7 +76,7 @@ export function normalizeWorldBookVectorSettings(
     chunkTargetTokens,
     chunkMaxTokens,
     chunkOverlapTokens: clampInt(input?.chunkOverlapTokens, 0, 500, presetValues.chunkOverlapTokens),
-    retrievalTopK: clampInt(input?.retrievalTopK, 1, 20, presetValues.retrievalTopK),
+    retrievalTopK: clampInt(input?.retrievalTopK, 1, Infinity, presetValues.retrievalTopK),
     maxChunksPerEntry: clampInt(input?.maxChunksPerEntry, 1, 24, presetValues.maxChunksPerEntry),
   };
 }

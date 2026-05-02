@@ -1422,7 +1422,7 @@ function EmbeddingsSettings() {
       chunkTargetTokens: target,
       chunkMaxTokens: max,
       chunkOverlapTokens: Math.min(500, Math.max(0, Math.floor((raw.chunkOverlapTokens ?? preset?.chunkOverlapTokens ?? base.chunkOverlapTokens)))),
-      retrievalTopK: Math.min(20, Math.max(1, Math.floor((raw.retrievalTopK ?? preset?.retrievalTopK ?? base.retrievalTopK)))),
+      retrievalTopK: Math.max(1, Math.floor((raw.retrievalTopK ?? preset?.retrievalTopK ?? base.retrievalTopK))),
       maxChunksPerEntry: Math.min(24, Math.max(1, Math.floor((raw.maxChunksPerEntry ?? preset?.maxChunksPerEntry ?? base.maxChunksPerEntry)))),
     }
   }
@@ -1888,7 +1888,6 @@ function EmbeddingsSettings() {
               <NumericInput
                 className={styles.numberInput}
                 min={1}
-                max={20}
                 value={worldBookSettings.retrievalTopK}
                 disabled={worldBookSettingsLoading}
                 integer
