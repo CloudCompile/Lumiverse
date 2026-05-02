@@ -111,7 +111,10 @@ const SKIP_OPEN_RE = /^<(pre|code)\b/i
 const SKIP_CLOSE_RE = /^<\/(pre|code)\b/i
 
 function isFeetInchesQuote(text: string, quoteIndex: number): boolean {
-  return /\d'\d+$/.test(text.slice(0, quoteIndex))
+  const beforeQuote = text.slice(0, quoteIndex)
+    .replace(/&#(?:0*39|x0*27);|&apos;/gi, "'")
+
+  return /\d'\d+$/.test(beforeQuote)
 }
 
 function colorizeDialogue(html: string): string {
