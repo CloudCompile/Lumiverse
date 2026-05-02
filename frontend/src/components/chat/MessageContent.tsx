@@ -683,39 +683,139 @@ function hasSignificantInlineStyles(html: string): boolean {
   return false
 }
 
-function hasBalancedStyleTags(html: string): boolean {
-  const opens = (html.match(/<style[\s>]/gi) || []).length
-  const closes = (html.match(/<\/style\s*>/gi) || []).length
-  return opens === closes
-}
-
 function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function getHtmlRootTag(line: string): { tag: string; isVoid: boolean } | null {
-  const match = line.match(ROOT_HTML_TAG_RE)
-  if (!match) return null
-
-  const tag = match[1].toLowerCase()
-  return {
-    tag,
-    isVoid: VOID_HTML_TAGS.has(tag) || /\/\s*>$/.test(match[0]),
-  }
+interface HtmlElementMatch {
+  openingTag: string
+  end: number
 }
 
-function countTagDepthDelta(line: string, tag: string): number {
-  const e = escapeRegexLiteral(tag)
-  let delta = 0
-  if (!VOID_HTML_TAGS.has(tag)) {
-    const openRe = new RegExp(`<${e}(?=[\\s>/])`, 'gi')
-    delta += (line.match(openRe) || []).length
-    const selfCloseRe = new RegExp(`<${e}\\b[^>]*\\/\\s*>`, 'gi')
-    delta -= (line.match(selfCloseRe) || []).length
+function findStyleBlockEnd(raw: string, start: number): number | null {
+  const open = raw.slice(start).match(/^<style(?=[\s>])[^>]*>/i)
+  if (!open) return null
+
+  const closeRe = /<\/style\s*>/gi
+  closeRe.lastIndex = start + open[0].length
+  const close = closeRe.exec(raw)
+  return close ? close.index + close[0].length : null
+}
+
+function parseHtmlElementAt(raw: string, start: number): HtmlElementMatch | null {
+  const open = raw.slice(start).match(ROOT_HTML_TAG_RE)
+  if (!open) return null
+
+  const tag = open[1].toLowerCase()
+  const openingTag = open[0]
+  const openingEnd = start + openingTag.length
+
+  if (tag === 'style') {
+    const end = findStyleBlockEnd(raw, start)
+    return end == null ? null : { openingTag, end }
   }
-  const closeRe = new RegExp(`</${e}(?=[\\s>])`, 'gi')
-  delta -= (line.match(closeRe) || []).length
-  return delta
+
+  if (VOID_HTML_TAGS.has(tag) || /\/\s*>$/.test(openingTag)) {
+    return { openingTag, end: openingEnd }
+  }
+
+  const tagRe = new RegExp(`</?${escapeRegexLiteral(tag)}(?=[\\s>/])[^>]*>`, 'gi')
+  tagRe.lastIndex = start
+
+  let depth = 0
+  let match: RegExpExecArray | null
+  while ((match = tagRe.exec(raw)) !== null) {
+    const token = match[0]
+    if (/^<\//.test(token)) {
+      depth -= 1
+    } else if (!/\/\s*>$/.test(token)) {
+      depth += 1
+    }
+
+    if (depth <= 0) {
+      return { openingTag, end: match.index + token.length }
+    }
+  }
+
+  return null
+}
+
+function skipWhitespace(raw: string, start: number): number {
+  let i = start
+  while (i < raw.length && /\s/.test(raw[i])) i++
+  return i
+}
+
+function extendThroughAdjacentHtmlSiblings(raw: string, start: number): number {
+  let end = start
+  let pos = start
+
+  while (pos < raw.length) {
+    const next = skipWhitespace(raw, pos)
+    const element = parseHtmlElementAt(raw, next)
+    if (!element || NO_ISLAND_ATTR_RE.test(element.openingTag)) break
+
+    end = element.end
+    pos = element.end
+  }
+
+  return end
+}
+
+function getMarkdownFenceRanges(raw: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = []
+  const lines = raw.match(/.*(?:\n|$)/g) || []
+  let offset = 0
+  let openFence: MarkdownFence | null = null
+  let openStart = 0
+
+  for (const line of lines) {
+    if (!line && offset >= raw.length) break
+
+    if (!openFence) {
+      const fence = getMarkdownFence(line)
+      if (fence) {
+        openFence = fence
+        openStart = offset
+      }
+    } else if (isMarkdownFenceClose(line, openFence)) {
+      ranges.push([openStart, offset + line.length])
+      openFence = null
+    }
+
+    offset += line.length
+  }
+
+  if (openFence) ranges.push([openStart, raw.length])
+  return ranges
+}
+
+function getFenceRangeContaining(ranges: Array<[number, number]>, pos: number, startIndex: number): number {
+  for (let i = startIndex; i < ranges.length; i++) {
+    const [start, end] = ranges[i]
+    if (pos < start) return -1
+    if (pos >= start && pos < end) return i
+  }
+  return -1
+}
+
+function getIslandEndAt(raw: string, start: number, isStreaming: boolean): number | null {
+  const styleEnd = findStyleBlockEnd(raw, start)
+  if (styleEnd != null) {
+    return extendThroughAdjacentHtmlSiblings(raw, styleEnd)
+  }
+
+  if (isStreaming && /^<style(?=[\s>])/i.test(raw.slice(start))) return null
+
+  const element = parseHtmlElementAt(raw, start)
+  if (!element || NO_ISLAND_ATTR_RE.test(element.openingTag)) return null
+
+  const fragment = raw.slice(start, element.end)
+  if (/<style[\s>]/i.test(fragment) || hasSignificantInlineStyles(fragment)) {
+    return element.end
+  }
+
+  return null
 }
 
 function renderIslandMarkdownText(markdown: string): string {
@@ -752,140 +852,50 @@ function extractHtmlIslands(
   }
 
   const islands: string[] = []
-  const lines = raw.split('\n')
-  const output: string[] = []
-  let i = 0
+  const fences = getMarkdownFenceRanges(raw)
+  let fenceIdx = 0
+  let content = ''
+  let pos = 0
 
-  while (i < lines.length) {
-    const trimmed = lines[i].trim()
-
-    // Fenced markdown code blocks are literal content and must not be scanned
-    // for extractable HTML islands.
-    const fence = getMarkdownFence(lines[i])
-    if (fence) {
-      output.push(lines[i])
-      i++
-
-      while (i < lines.length) {
-        output.push(lines[i])
-        if (isMarkdownFenceClose(lines[i], fence)) {
-          i++
-          break
-        }
-        i++
-      }
+  while (pos < raw.length) {
+    const containingFence = getFenceRangeContaining(fences, pos, fenceIdx)
+    if (containingFence >= 0) {
+      const [, end] = fences[containingFence]
+      content += raw.slice(pos, end)
+      pos = end
+      fenceIdx = containingFence + 1
       continue
     }
 
-    // Strategy 1: Standalone <style> block plus following sibling HTML. This
-    // must run before generic root-tag handling so the style and the markup it
-    // styles stay in the same Shadow DOM island.
-    if (/^\s*<style[\s>]/i.test(trimmed)) {
-      const buf: string[] = []
+    const nextTag = raw.indexOf('<', pos)
+    if (nextTag < 0) {
+      content += raw.slice(pos)
+      break
+    }
 
-      while (i < lines.length) {
-        buf.push(lines[i])
-        if (/<\/style\s*>/i.test(lines[i])) { i++; break }
-        i++
-      }
+    const nextFence = fences[fenceIdx]
+    if (nextFence && nextTag >= nextFence[0]) {
+      content += raw.slice(pos, nextFence[1])
+      pos = nextFence[1]
+      fenceIdx++
+      continue
+    }
 
-      // During streaming, don't extract an incomplete <style> block as an island.
-      // Let it fall through to prose sanitization until the closing tag arrives.
-      const styleBlock = buf.join('\n')
-      if (isStreaming && !hasBalancedStyleTags(styleBlock)) {
-        output.push(...buf)
-        continue
-      }
+    content += raw.slice(pos, nextTag)
 
-      let depth = 0
-      let blanks = 0
-      while (i < lines.length) {
-        const t = lines[i].trim()
-        if (!t) {
-          blanks++
-          if (depth <= 0 && blanks >= 2) break
-          buf.push(lines[i])
-          i++
-          continue
-        }
-        blanks = 0
-
-        const oCount = (t.match(/<(?:div|span|section|form|details|article|aside|nav|fieldset|figure|main|header|footer|table|ul|ol|dl|html|head|body)\b/gi) || []).length
-        const cCount = (t.match(/<\/(?:div|span|section|form|details|article|aside|nav|fieldset|figure|main|header|footer|table|ul|ol|dl|html|head|body)\b/gi) || []).length
-        depth += oCount - cCount
-
-        if (/^<[a-zA-Z\/!]/.test(t) || depth > 0) {
-          buf.push(lines[i])
-          i++
-          if (depth <= 0) {
-            let p = i
-            while (p < lines.length && !lines[p].trim()) p++
-            if (p >= lines.length || !/^<[a-zA-Z\/!]/.test(lines[p].trim())) break
-          }
-        } else {
-          break
-        }
-      }
-
-      while (buf.length && !buf[buf.length - 1].trim()) buf.pop()
-
+    const islandEnd = getIslandEndAt(raw, nextTag, isStreaming)
+    if (islandEnd != null && islandEnd > nextTag) {
       const idx = islands.length
-      islands.push(buf.join('\n'))
-      output.push('', `<!--${HTML_ISLAND_TOKEN}_${idx}-->`, '')
-      continue
+      islands.push(raw.slice(nextTag, islandEnd))
+      content += `<!--${HTML_ISLAND_TOKEN}_${idx}-->`
+      pos = islandEnd
+    } else {
+      content += raw[nextTag]
+      pos = nextTag + 1
     }
-
-    // Strategy 2: Block-level element or full HTML document that might wrap a
-    // <style> block or contain significant inline styling (e.g. phone screens,
-    // UI mockups).
-    // Collect the entire balanced tag tree, then check for isolation criteria.
-    const rootTag = getHtmlRootTag(trimmed)
-    if (rootTag) {
-      const blockLines: string[] = []
-      const { tag, isVoid } = rootTag
-      let depth = 0
-
-      while (i < lines.length) {
-        const line = lines[i]
-        blockLines.push(line)
-        i++
-        if (!isVoid) depth += countTagDepthDelta(line, tag)
-        if (depth <= 0) break
-        if (isVoid) break
-      }
-
-      const blockContent = blockLines.join('\n')
-
-      const openingTagEnd = blockContent.indexOf('>')
-      const openingTag = openingTagEnd >= 0 ? blockContent.slice(0, openingTagEnd) : blockContent
-      if (NO_ISLAND_ATTR_RE.test(openingTag)) {
-        output.push(...blockLines)
-        continue
-      }
-
-      const isIslandCandidate = /<style[\s>]/i.test(blockContent) || hasSignificantInlineStyles(blockContent)
-      const canRenderStreamingPreview = isStreaming && !isVoid && hasBalancedStyleTags(blockContent)
-
-      // While a styled HTML wrapper is still streaming, keep it inside a Shadow DOM
-      // island as soon as its internal <style> tags are balanced. That preserves the
-      // authored presentation instead of falling back to prose sanitization until the
-      // outer wrapper finally closes.
-      if (isIslandCandidate && (depth <= 0 || canRenderStreamingPreview)) {
-        const idx = islands.length
-        islands.push(blockContent)
-        output.push('', `<!--${HTML_ISLAND_TOKEN}_${idx}-->`, '')
-      } else {
-        // Not an island — pass through for normal markdown processing
-        output.push(...blockLines)
-      }
-      continue
-    }
-
-    output.push(lines[i])
-    i++
   }
 
-  return { content: output.join('\n'), islands }
+  return { content, islands }
 }
 
 /**
