@@ -776,7 +776,65 @@ function extractHtmlIslands(
       continue
     }
 
-    // Strategy 1: Block-level element or full HTML document that might wrap a
+    // Strategy 1: Standalone <style> block plus following sibling HTML. This
+    // must run before generic root-tag handling so the style and the markup it
+    // styles stay in the same Shadow DOM island.
+    if (/^\s*<style[\s>]/i.test(trimmed)) {
+      const buf: string[] = []
+
+      while (i < lines.length) {
+        buf.push(lines[i])
+        if (/<\/style\s*>/i.test(lines[i])) { i++; break }
+        i++
+      }
+
+      // During streaming, don't extract an incomplete <style> block as an island.
+      // Let it fall through to prose sanitization until the closing tag arrives.
+      const styleBlock = buf.join('\n')
+      if (isStreaming && !hasBalancedStyleTags(styleBlock)) {
+        output.push(...buf)
+        continue
+      }
+
+      let depth = 0
+      let blanks = 0
+      while (i < lines.length) {
+        const t = lines[i].trim()
+        if (!t) {
+          blanks++
+          if (depth <= 0 && blanks >= 2) break
+          buf.push(lines[i])
+          i++
+          continue
+        }
+        blanks = 0
+
+        const oCount = (t.match(/<(?:div|span|section|form|details|article|aside|nav|fieldset|figure|main|header|footer|table|ul|ol|dl|html|head|body)\b/gi) || []).length
+        const cCount = (t.match(/<\/(?:div|span|section|form|details|article|aside|nav|fieldset|figure|main|header|footer|table|ul|ol|dl|html|head|body)\b/gi) || []).length
+        depth += oCount - cCount
+
+        if (/^<[a-zA-Z\/!]/.test(t) || depth > 0) {
+          buf.push(lines[i])
+          i++
+          if (depth <= 0) {
+            let p = i
+            while (p < lines.length && !lines[p].trim()) p++
+            if (p >= lines.length || !/^<[a-zA-Z\/!]/.test(lines[p].trim())) break
+          }
+        } else {
+          break
+        }
+      }
+
+      while (buf.length && !buf[buf.length - 1].trim()) buf.pop()
+
+      const idx = islands.length
+      islands.push(buf.join('\n'))
+      output.push('', `<!--${HTML_ISLAND_TOKEN}_${idx}-->`, '')
+      continue
+    }
+
+    // Strategy 2: Block-level element or full HTML document that might wrap a
     // <style> block or contain significant inline styling (e.g. phone screens,
     // UI mockups).
     // Collect the entire balanced tag tree, then check for isolation criteria.
@@ -819,63 +877,6 @@ function extractHtmlIslands(
         // Not an island — pass through for normal markdown processing
         output.push(...blockLines)
       }
-      continue
-    }
-
-    // Strategy 2: Standalone <style> block not inside a wrapper element.
-    // Collect the style block + any subsequent sibling HTML.
-    if (/^\s*<style[\s>]/i.test(trimmed)) {
-      const buf: string[] = []
-
-      while (i < lines.length) {
-        buf.push(lines[i])
-        if (/<\/style\s*>/i.test(lines[i])) { i++; break }
-        i++
-      }
-
-      // During streaming, don't extract an incomplete <style> block as an island.
-      // Let it fall through to prose sanitization until the closing tag arrives.
-      const styleBlock = buf.join('\n')
-      if (isStreaming && !hasBalancedStyleTags(styleBlock)) {
-        output.push(...buf)
-        continue
-      }
-
-      let depth = 0
-      let blanks = 0
-      while (i < lines.length) {
-        const t = lines[i].trim()
-        if (!t) {
-          blanks++
-          if (depth <= 0 && blanks >= 2) break
-          buf.push(lines[i])
-          i++
-          continue
-        }
-        blanks = 0
-
-        const oCount = (t.match(/<(?:div|section|form|details|article|aside|nav|fieldset|figure|main|header|footer|table|ul|ol|dl|html|head|body)\b/gi) || []).length
-        const cCount = (t.match(/<\/(?:div|section|form|details|article|aside|nav|fieldset|figure|main|header|footer|table|ul|ol|dl|html|head|body)\b/gi) || []).length
-        depth += oCount - cCount
-
-        if (/^<[a-zA-Z\/!]/.test(t) || depth > 0) {
-          buf.push(lines[i])
-          i++
-          if (depth <= 0) {
-            let p = i
-            while (p < lines.length && !lines[p].trim()) p++
-            if (p >= lines.length || !/^<[a-zA-Z\/!]/.test(lines[p].trim())) break
-          }
-        } else {
-          break
-        }
-      }
-
-      while (buf.length && !buf[buf.length - 1].trim()) buf.pop()
-
-      const idx = islands.length
-      islands.push(buf.join('\n'))
-      output.push('', `<!--${HTML_ISLAND_TOKEN}_${idx}-->`, '')
       continue
     }
 

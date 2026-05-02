@@ -449,7 +449,14 @@
 
 @media (max-width: 600px) {
   .modal {
-    --prompt-itemizer-modal-max-height: calc(var(--app-scaled-viewport-height, 100dvh) - 24px);
+    --prompt-itemizer-modal-max-height: calc(
+      var(--app-scaled-viewport-height, 100dvh)
+      - max(
+        40px,
+        calc((env(safe-area-inset-top, 0px) * 2) + 24px),
+        calc((env(safe-area-inset-bottom, 0px) * 2) + 24px)
+      )
+    );
   }
 
   .entryRow,
