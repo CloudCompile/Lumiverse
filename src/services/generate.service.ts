@@ -701,6 +701,67 @@ type ReasoningSettingsSnapshot = {
   thinkingDisplay?: string;
 } | null;
 
+type CouncilResultCache = CachedCouncilResult & {
+  fingerprint?: string;
+};
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`)
+    .join(",")}}`;
+}
+
+function buildCouncilCacheFingerprint(
+  councilSettings: import("lumiverse-spindle-types").CouncilSettings,
+  sidecarSettings: import("lumiverse-spindle-types").SidecarConfig,
+): string {
+  return stableJson({
+    version: 1,
+    members: councilSettings.members.map((member) => ({
+      id: member.id,
+      itemId: member.itemId,
+      role: member.role,
+      chance: member.chance,
+      tools: member.tools,
+    })),
+    toolsSettings: {
+      mode: councilSettings.toolsSettings.mode,
+      timeoutMs: councilSettings.toolsSettings.timeoutMs,
+      sidecarContextWindow: councilSettings.toolsSettings.sidecarContextWindow,
+      includeUserPersona: councilSettings.toolsSettings.includeUserPersona,
+      includeCharacterInfo: councilSettings.toolsSettings.includeCharacterInfo,
+      includeWorldInfo: councilSettings.toolsSettings.includeWorldInfo,
+      allowUserControl: councilSettings.toolsSettings.allowUserControl,
+      maxWordsPerTool: councilSettings.toolsSettings.maxWordsPerTool,
+    },
+    sidecar: {
+      connectionProfileId: sidecarSettings.connectionProfileId,
+      model: sidecarSettings.model,
+      temperature: sidecarSettings.temperature,
+      topP: sidecarSettings.topP,
+      maxTokens: sidecarSettings.maxTokens,
+    },
+  });
+}
+
+function isReusableCouncilCache(
+  cached: CouncilResultCache | undefined,
+  fingerprint: string,
+): boolean {
+  if (!cached?.results?.length) return false;
+  if (cached.results.some((result) => !result.success)) return false;
+  return cached.fingerprint === fingerprint;
+}
+
 function getEffectiveReasoningSettings(
   userId: string,
   connection?: { metadata?: Record<string, any> | null } | null,
@@ -1529,13 +1590,17 @@ export async function startGeneration(
                 genType === "swipe" ||
                 genType === "continue" ||
                 input.retain_council);
+            const councilCacheFingerprint = buildCouncilCacheFingerprint(
+              councilSettings,
+              resolvedCouncilProfile.sidecar_settings,
+            );
             const cached = shouldRetain
               ? (chat?.metadata?.last_council_results as
-                  | CachedCouncilResult
+                  | CouncilResultCache
                   | undefined)
               : undefined;
 
-            if (cached?.results?.length) {
+            if (cached && isReusableCouncilCache(cached, councilCacheFingerprint)) {
               // Reuse cached council results — skip execution entirely
               console.debug(
                 "[council] Reusing cached results for %s (cachedAt=%d, results=%d)",
@@ -1549,6 +1614,16 @@ export async function startGeneration(
                 totalDurationMs: 0,
               };
             } else {
+              if (cached?.results?.length) {
+                console.debug(
+                  "[council] Ignoring stale cached results for %s (cachedAt=%d, results=%d, fingerprint=%s)",
+                  genType,
+                  cached.cachedAt,
+                  cached.results.length,
+                  cached.fingerprint ? "mismatch" : "missing",
+                );
+              }
+
               // Sidecar mode: stage an empty assistant message BEFORE council execution
               // so the frontend has a real message bubble to stream tokens into. Without
               // this, the HTTP response (and thus startStreaming) arrives after council
@@ -1675,11 +1750,12 @@ export async function startGeneration(
                 const failedResults = councilResult.results.filter(
                   (r) => !r.success,
                 );
-                if (
-                  failedResults.length > 0 &&
-                  failedResults.length < councilResult.results.length
-                ) {
-                  // Partial failure — emit event and wait for user decision
+                if (failedResults.length > 0) {
+                  // Failure — emit event and wait for user decision. This covers
+                  // both partial failures and all-tool failures (for example, a
+                  // temporary sidecar/provider ban). The user must be able to
+                  // retry after recovery instead of silently continuing with a
+                  // failed council run.
                   eventBus.emit(
                     EventType.COUNCIL_TOOLS_FAILED,
                     {
@@ -1880,15 +1956,24 @@ export async function startGeneration(
             }
           }
 
-          // Persist council results to chat metadata for potential reuse on regens/swipes.
+          // Persist fully successful council results for potential reuse on regens/swipes.
           // Only cache when results were freshly executed (totalDurationMs > 0 distinguishes
-          // a live execution from a cache hit which sets totalDurationMs to 0).
-          if (councilResult.totalDurationMs > 0) {
-            const cachedResult: CachedCouncilResult = {
+          // a live execution from a cache hit which sets totalDurationMs to 0). Failed
+          // results are intentionally not cached; otherwise one bad sidecar/tool call can
+          // poison later regens and prevent council tools from re-firing.
+          if (
+            councilResult.totalDurationMs > 0 &&
+            councilResult.results.every((result) => result.success)
+          ) {
+            const cachedResult: CouncilResultCache = {
               results: councilResult.results,
               deliberationBlock: councilResult.deliberationBlock,
               namedResults: councilNamedResults,
               cachedAt: Date.now(),
+              fingerprint: buildCouncilCacheFingerprint(
+                councilSettings,
+                resolvedCouncilProfile.sidecar_settings,
+              ),
             };
             try {
               // Atomic merge so we don't clobber concurrent user edits to chat
