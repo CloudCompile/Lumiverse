@@ -20,6 +20,10 @@ function isRelativePath(path: string): boolean {
   return !!path && path !== "." && !isAbsolute(path);
 }
 
+function isBrokenRootRelativeTermuxPath(path: string): boolean {
+  return path.startsWith("data/data/com.termux/");
+}
+
 export function resolveLanceDbConnectUri(
   dbPath: string,
   options: ResolveLanceDbConnectUriOptions = {},
@@ -35,6 +39,10 @@ export function resolveLanceDbConnectUri(
   if (!runningInTermux) return dbPath;
 
   const relativePath = relative(cwd, dbPath);
+  // If CWD is /, path.relative() turns /data/data/... into data/data/...
+  // which is exactly the broken shape LanceDB/Rust reports on Termux. In that
+  // case keep the absolute path rather than creating the bad URI ourselves.
+  if (isBrokenRootRelativeTermuxPath(relativePath)) return dbPath;
   return isRelativePath(relativePath) ? relativePath : dbPath;
 }
 

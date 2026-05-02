@@ -5,6 +5,7 @@ set -euo pipefail
 # Usage:
 #   ./start.sh                  Start backend, serve pre-built frontend (default)
 #   ./start.sh -b|--build       Rebuild frontend before starting backend
+#   ./start.sh -a|--auto-open   Open the default browser after the backend starts
 #   ./start.sh --build-only     Build frontend only, don't start backend
 #   ./start.sh --backend-only   Start backend only, skip frontend serving
 #   ./start.sh --dev            Start backend in watch mode (no frontend build)
@@ -95,9 +96,11 @@ _proot_bun() {
 MODE="all"  # all | build-only | backend-only | dev | setup | reset-password | migrate-st | kill-pkgs
 USE_RUNNER=true
 FORCE_BUILD=false
+AUTO_OPEN=false
 for arg in "$@"; do
   case "$arg" in
     --build|-b)     FORCE_BUILD=true ;;
+    --auto-open|-a) AUTO_OPEN=true ;;
     --build-only)   MODE="build-only" ;;
     --backend-only) MODE="backend-only" ;;
     --dev)          MODE="dev" ;;
@@ -107,7 +110,7 @@ for arg in "$@"; do
     --kill-pkgs|-k) MODE="kill-pkgs" ;;
     --no-runner)    USE_RUNNER=false ;;
     --help|-h)
-      sed -n '3,15p' "$0" | sed 's/^# \?//'
+      sed -n '3,16p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *) err "Unknown argument: $arg"; exit 1 ;;
@@ -439,6 +442,22 @@ run_migrate_st() {
   (cd "$BACKEND_DIR" && _bun run migrate:st)
 }
 
+open_browser() {
+  local url="$1"
+
+  if [[ "$OSTYPE" == "darwin"* ]] && command -v open &>/dev/null; then
+    open "$url" &>/dev/null &
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "$url" &>/dev/null &
+  elif command -v termux-open-url &>/dev/null; then
+    termux-open-url "$url" &>/dev/null &
+  elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+    cmd /c start "" "$url" &>/dev/null &
+  else
+    warn "Could not find a browser opener for $url"
+  fi
+}
+
 # ─── Kill packages (nuke + reinstall) ──────────────────────────────────────
 
 kill_pkgs() {
@@ -541,11 +560,17 @@ start_backend() {
   # Decide: visual runner or plain process
   if [[ "$USE_RUNNER" == true ]] && [[ -t 1 ]]; then
     # Interactive terminal — use the visual runner (fall back to plain if it crashes)
-    local runner_args=""
-    if [[ "$MODE" == "dev" ]]; then
-      runner_args="-- --dev"
+    local runner_args=()
+    if [[ "$MODE" == "dev" || "$AUTO_OPEN" == true ]]; then
+      runner_args+=("--")
     fi
-    (cd "$BACKEND_DIR" && _bun run scripts/runner.ts $runner_args) || {
+    if [[ "$MODE" == "dev" ]]; then
+      runner_args+=("--dev")
+    fi
+    if [[ "$AUTO_OPEN" == true ]]; then
+      runner_args+=("--auto-open")
+    fi
+    (cd "$BACKEND_DIR" && _bun run scripts/runner.ts "${runner_args[@]}") || {
       warn "Visual runner failed — falling back to plain mode..."
       USE_RUNNER=false
     }
@@ -556,6 +581,12 @@ start_backend() {
     echo ""
     echo -e "${BOLD}Starting Lumiverse Backend on port ${PORT:-7860}...${NC}"
     echo ""
+
+    if [[ "$AUTO_OPEN" == true ]]; then
+      local url="http://localhost:${PORT:-7860}"
+      info "Opening $url..."
+      (sleep 2; open_browser "$url") &
+    fi
 
     if [[ "$MODE" == "dev" ]]; then
       (cd "$BACKEND_DIR" && _bun run dev)

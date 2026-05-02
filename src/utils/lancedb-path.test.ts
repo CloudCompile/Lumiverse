@@ -16,6 +16,13 @@ describe("resolveLanceDbConnectUri", () => {
     })).toBe("data/lancedb");
   });
 
+  test("does not manufacture a stripped Termux path when cwd is root", () => {
+    expect(resolveLanceDbConnectUri("/data/data/com.termux/files/home/Lumiverse/data/lancedb", {
+      cwd: "/",
+      env: { PREFIX: "/data/data/com.termux/files/usr" },
+    })).toBe("/data/data/com.termux/files/home/Lumiverse/data/lancedb");
+  });
+
   test("uses a parent-relative path when the database is outside the cwd", () => {
     expect(resolveLanceDbConnectUri("/data/data/com.termux/files/home/shared/lancedb", {
       cwd: "/data/data/com.termux/files/home/Lumiverse",

@@ -30,6 +30,13 @@ const EMBEDDING_SECRET_KEY = "embedding_api_key";
 const LANCEDB_PATH = join(env.dataDir, "lancedb");
 const LANCEDB_URI = resolveLanceDbConnectUri(LANCEDB_PATH);
 const EMBEDDINGS_TABLE = "embeddings";
+const TERMUX_PATH_PREFIX = "/data/data/com.termux/";
+const LANCEDB_TERMUX_LIKE = Boolean(process.env.TERMUX_VERSION)
+  || process.env.LUMIVERSE_IS_TERMUX === "true"
+  || process.env.LUMIVERSE_IS_PROOT === "true"
+  || process.env.PREFIX?.startsWith(TERMUX_PATH_PREFIX) === true
+  || process.env.HOME?.startsWith(`${TERMUX_PATH_PREFIX}files/home`) === true
+  || LANCEDB_PATH.startsWith(TERMUX_PATH_PREFIX);
 const WORLD_BOOK_VECTOR_VERSION = 3;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
 /** Default safety timeout for embedding API requests. Prevents a hanging
@@ -391,6 +398,7 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
 let connPromise: Promise<Connection> | null = null;
 let connHandle: Connection | null = null;
 let connGeneration = 0;
+let lancedbPathDiagnosticsLogged = false;
 let vectorIndexReady = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
 const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
@@ -455,6 +463,19 @@ let tableHandle: Table | null = null;
 
 function invalidateTableHandle(): void {
   tableHandle = null;
+}
+
+function logLanceDbPathDiagnostics(): void {
+  if (lancedbPathDiagnosticsLogged || !LANCEDB_TERMUX_LIKE) return;
+  lancedbPathDiagnosticsLogged = true;
+  console.info(
+    `[embeddings] LanceDB path config: path=${LANCEDB_PATH}; uri=${LANCEDB_URI}; cwd=${process.cwd()}; tmpdir=${process.env.TMPDIR || "(unset)"}`,
+  );
+  if (process.cwd() === "/") {
+    console.warn(
+      "[embeddings] Process cwd is / on Termux; keeping LanceDB URI absolute to avoid generating data/data/com.termux/...",
+    );
+  }
 }
 
 function collectErrorMessages(err: unknown): string[] {
@@ -844,6 +865,7 @@ async function getConnection(): Promise<Connection> {
   if (connHandle) return connHandle;
 
   const generation = connGeneration;
+  logLanceDbPathDiagnostics();
   cleanupBrokenTermuxLanceDbMirror();
   if (!connPromise) connPromise = connect(LANCEDB_URI);
 
