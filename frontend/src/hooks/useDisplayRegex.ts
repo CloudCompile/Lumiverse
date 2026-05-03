@@ -212,11 +212,20 @@ export function useDisplayRegex(
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
   const activePersonaId = useStore((s) => s.activePersonaId)
+  const messageIndex = useStore((s) => {
+    if (!preprocessOpts?.messageId) return -1
+    return s.messages.findIndex((m) => m.id === preprocessOpts.messageId)
+  })
   const cacheVersion = useSyncExternalStore(
     subscribeDisplayRegexCache,
     getDisplayRegexCacheVersion,
     getDisplayRegexCacheVersion,
   )
+
+  const dynamicMacros = useMemo(() => {
+    if (messageIndex < 0) return undefined
+    return { chat_index: String(messageIndex) }
+  }, [messageIndex])
 
   const content = useDisplayPreprocessed(rawContent, activeChatId, preprocessOpts)
 
@@ -359,9 +368,10 @@ export function useDisplayRegex(
         macroCtx,
         resolvedFindPatterns: resolvedTemplates.resolvedFindPatterns,
         resolvedReplacements: resolvedTemplates.resolvedReplacements,
+        dynamicMacros,
       })
     },
-    [content, displayScripts, isUser, depth, macroCtx, resolvedTemplates],
+    [content, displayScripts, isUser, depth, macroCtx, resolvedTemplates, dynamicMacros],
   )
 
   const hasRawMacroScripts = useMemo(
@@ -391,6 +401,7 @@ export function useDisplayRegex(
       charName: macroCtx?.charName ?? null,
       content,
       resolvedTemplateKey,
+      dynamicMacros: dynamicMacros ?? null,
       scripts: displayScripts.map((s) => [
         s.id,
         s.updated_at,
@@ -416,6 +427,7 @@ export function useDisplayRegex(
     macroCtx,
     content,
     resolvedTemplateKey,
+    dynamicMacros,
   ])
 
   const cachedResolvedContent = contentCacheKey ? displayRegexContentCache.get(contentCacheKey)?.value : undefined
@@ -450,6 +462,7 @@ export function useDisplayRegex(
           macroCtx,
           resolvedFindPatterns: resolvedTemplates.resolvedFindPatterns,
           resolvedReplacements: resolvedTemplates.resolvedReplacements,
+          dynamicMacros,
         },
         (templates) => resolveMacrosBatchChunked(templates, {
           chat_id: activeChatId ?? undefined,
@@ -486,6 +499,7 @@ export function useDisplayRegex(
     activeCharacterId,
     activePersonaId,
     contentCacheKey,
+    dynamicMacros,
   ])
 
   // Carry the previous resolved value forward across cv-bumps and per-chunk
