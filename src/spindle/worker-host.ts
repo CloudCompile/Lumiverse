@@ -44,6 +44,11 @@ import {
   type MacroInterceptorCtx,
   type MacroInterceptorResult,
 } from "./macro-interceptor";
+import {
+  worldInfoInterceptorChain,
+  type WorldInfoInterceptorCtxDTO,
+  type WorldInfoInterceptorResultDTO,
+} from "./world-info-interceptor";
 import { toolRegistry } from "./tool-registry";
 import * as managerSvc from "./manager.service";
 import * as generateSvc from "../services/generate.service";
@@ -396,6 +401,12 @@ type RuntimeWorkerToHost =
       requestId: string;
       result: unknown;
     }
+  | { type: "register_world_info_interceptor"; priority?: number }
+  | {
+      type: "world_info_interceptor_result";
+      requestId: string;
+      result: unknown;
+    }
   | {
       type: "frontend_process_spawn";
       requestId: string;
@@ -479,6 +490,11 @@ type RuntimeHostToWorker =
       type: "macro_interceptor_request";
       requestId: string;
       ctx: MacroInterceptorCtx;
+    }
+  | {
+      type: "world_info_interceptor_request";
+      requestId: string;
+      ctx: WorldInfoInterceptorCtxDTO;
     }
   | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
   | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
@@ -754,6 +770,7 @@ export class WorkerHost {
   private contextHandlerUnregister: (() => void) | null = null;
   private messageContentProcessorUnregister: (() => void) | null = null;
   private macroInterceptorUnregister: (() => void) | null = null;
+  private worldInfoInterceptorUnregister: (() => void) | null = null;
   private registeredMacroNames = new Set<string>();
   private macroValueCache = new Map<string, string>();
   private toastTimestamps: number[] = [];
@@ -1534,6 +1551,9 @@ export class WorkerHost {
     this.macroInterceptorUnregister?.();
     this.macroInterceptorUnregister = null;
 
+    this.worldInfoInterceptorUnregister?.();
+    this.worldInfoInterceptorUnregister = null;
+
     // Unregister all tools for this extension
     toolRegistry.unregisterByExtension(this.extensionId);
 
@@ -1559,6 +1579,7 @@ export class WorkerHost {
     contextHandlerChain.unregisterByExtension(this.extensionId);
     messageContentProcessorChain.unregisterByExtension(this.extensionId);
     macroInterceptorChain.unregisterByExtension(this.extensionId);
+    worldInfoInterceptorChain.unregisterByExtension(this.extensionId);
     unregisterSharedRpcEndpointsByOwner(this.manifest.identifier);
 
     // Reject pending requests
@@ -2105,6 +2126,12 @@ export class WorkerHost {
         this.handleRegisterMacroInterceptor(msg.priority);
         break;
       case "macro_interceptor_result":
+        this.resolveRequest(msg.requestId, msg.result);
+        break;
+      case "register_world_info_interceptor":
+        this.handleRegisterWorldInfoInterceptor(msg.priority);
+        break;
+      case "world_info_interceptor_result":
         this.resolveRequest(msg.requestId, msg.result);
         break;
       case "tool_invocation_result":
@@ -5297,6 +5324,58 @@ export class WorkerHost {
             resolve: (val) => {
               clearTimeout(timeout);
               resolve(val as MacroInterceptorResult | undefined);
+            },
+            reject: (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            },
+          });
+        });
+      },
+    });
+  }
+
+  private handleRegisterWorldInfoInterceptor(priority?: number): void {
+    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+      console.warn(
+        `[Spindle:${this.manifest.identifier}] generation permission not granted for registerWorldInfoInterceptor`
+      );
+      this.postToWorker({
+        type: "permission_denied",
+        permission: "generation",
+        operation: "registerWorldInfoInterceptor",
+      });
+      return;
+    }
+
+    this.worldInfoInterceptorUnregister?.();
+    this.worldInfoInterceptorUnregister = worldInfoInterceptorChain.register({
+      extensionId: this.extensionId,
+      userId: this.getScopedUserId(),
+      priority: priority ?? 100,
+      handler: async (ctx: WorldInfoInterceptorCtxDTO) => {
+        const requestId = crypto.randomUUID();
+
+        this.postToWorker({
+          type: "world_info_interceptor_request",
+          requestId,
+          ctx,
+        });
+
+        return new Promise<WorldInfoInterceptorResultDTO | void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            this.pendingRequests.delete(requestId);
+            reject(
+              new Error(
+                `World-info interceptor timeout from ${this.manifest.identifier}`
+              )
+            );
+          }, 10_000);
+
+          this.pendingRequests.set(requestId, {
+            resolve: (val) => {
+              clearTimeout(timeout);
+              resolve(val as WorldInfoInterceptorResultDTO | undefined);
             },
             reject: (err) => {
               clearTimeout(timeout);
