@@ -85,7 +85,7 @@ function buildEnvFromContext(userId: string, ctx: DisplayRegexContext): MacroEnv
     }
   }
 
-  const persona = personasSvc.getDefaultPersona(userId);
+  const persona = personasSvc.resolvePersonaOrDefault(userId, ctx.persona_id);
   const connection = connectionsSvc.getDefaultConnection(userId);
   return {
     commit: true,
