@@ -360,7 +360,7 @@ type RuntimeSpindleAPI = SpindleAPI & {
       messageId?: string;
       content: string;
       extra?: Record<string, unknown>;
-      origin: "create" | "update" | "swipe_add" | "swipe_update";
+      origin: "create" | "update" | "swipe_add" | "swipe_update" | "render";
       swipeIndex?: number;
     }) => Promise<{ content?: string; extra?: Record<string, unknown> } | void>,
     priority?: number
