@@ -44,6 +44,8 @@ export interface EnvConfig {
   stForceNewMigration: boolean;
   /** Optional Pollinations BYOP app key (publishable pk_...) */
   pollinationsAppKey: string;
+  /** Enable public signup (self-registration) */
+  allowPublicSignup: boolean;
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
@@ -134,6 +136,9 @@ export function loadEnv(): EnvConfig {
   // Publishable BYOP app key default used when no per-instance override is set.
   const pollinationsAppKey = process.env.POLLINATIONS_APP_KEY || "pk_Y3z2ooD6zSWfLdL3";
 
+  // Enable public signup (self-registration) — default: false
+  const allowPublicSignup = process.env.AUTH_PUBLIC_SIGNUP === "true";
+
   return {
     port,
     encryptionKey,
@@ -155,6 +160,7 @@ export function loadEnv(): EnvConfig {
     stMigrationTarget,
     stForceNewMigration,
     pollinationsAppKey,
+    allowPublicSignup,
   };
 }
 
