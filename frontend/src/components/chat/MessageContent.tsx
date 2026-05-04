@@ -308,6 +308,7 @@ marked.setOptions({
 // phone screens, etc.) and isolating their styles.
 
 const HTML_ISLAND_TOKEN = 'LUMIVERSE_HTML_ISLAND'
+const MESSAGE_CONTENT_LAYOUT_EVENT = 'lumiverse:message-content-layout'
 const ISLAND_RE = new RegExp(`<!--${HTML_ISLAND_TOKEN}_(\\d+)-->`, 'g')
 const INLINE_STYLE_ATTR_RE = /\bstyle\s*=/gi
 const NO_ISLAND_ATTR_RE = /\bdata-no-island(?=[\s=>"'/]|$)/i
@@ -1031,6 +1032,18 @@ function attachCodeCopyHandler(root: HTMLElement | ShadowRoot): () => void {
   return () => root.removeEventListener('click', handleClick)
 }
 
+function notifyMessageContentLayout(el: HTMLElement): void {
+  const dispatch = () => {
+    el.dispatchEvent(new CustomEvent(MESSAGE_CONTENT_LAYOUT_EVENT, { bubbles: true }))
+  }
+
+  dispatch()
+  requestAnimationFrame(() => {
+    dispatch()
+    requestAnimationFrame(dispatch)
+  })
+}
+
 function IsolatedHtml({ html }: { html: string }) {
   const ref = useRef<HTMLDivElement>(null)
 
@@ -1046,6 +1059,7 @@ function IsolatedHtml({ html }: { html: string }) {
     ) {
       shadow.querySelector('style[data-lumi-island-base]')?.remove()
     }
+    notifyMessageContentLayout(el)
     return attachCodeCopyHandler(shadow)
   }, [html])
 
@@ -1077,16 +1091,19 @@ function ProseHtml({ html, className }: { html: string; className?: string }) {
     el.innerHTML = html
     lastHtmlRef.current = html
 
-    if (stableImgs.size === 0) return
-    for (const newImg of el.querySelectorAll<HTMLImageElement>('img[src]')) {
-      const src = newImg.getAttribute('src')
-      if (!src) continue
-      const preserved = stableImgs.get(src)
-      if (preserved && newImg.parentNode) {
-        newImg.replaceWith(preserved)
-        stableImgs.delete(src)
+    if (stableImgs.size > 0) {
+      for (const newImg of el.querySelectorAll<HTMLImageElement>('img[src]')) {
+        const src = newImg.getAttribute('src')
+        if (!src) continue
+        const preserved = stableImgs.get(src)
+        if (preserved && newImg.parentNode) {
+          newImg.replaceWith(preserved)
+          stableImgs.delete(src)
+        }
       }
     }
+
+    notifyMessageContentLayout(el)
   }, [html])
 
   return <div ref={ref} className={className} />

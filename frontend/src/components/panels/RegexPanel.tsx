@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
-import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X } from 'lucide-react'
+import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X, Link, Unlink } from 'lucide-react'
 import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
@@ -54,6 +54,7 @@ export default function RegexPanel() {
   const toggleRegexScript = useStore((s) => s.toggleRegexScript)
   const openModal = useStore((s) => s.openModal)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const activeLoomPresetId = useStore((s) => s.activeLoomPresetId)
 
   const [scopeFilter, setScopeFilter] = useState<ScopeFilterValue>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -190,6 +191,39 @@ export default function RegexPanel() {
       toast.error(err.body?.error || err.message)
     }
   }, [toggleRegexScript])
+
+  const handleBindToPreset = useCallback(async (script: RegexScript, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!activeLoomPresetId) {
+      toast.error('Select a Loom preset before binding regex scripts')
+      return
+    }
+    const nextPresetId = script.preset_id === activeLoomPresetId ? null : activeLoomPresetId
+    try {
+      await updateRegexScript(script.id, { preset_id: nextPresetId })
+      toast.success(nextPresetId ? 'Regex bound to active preset' : 'Regex unbound from preset')
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message)
+    }
+  }, [activeLoomPresetId, updateRegexScript])
+
+  const handleBindFolderToPreset = useCallback(async (scripts: RegexScript[], folderLabel: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!activeLoomPresetId) {
+      toast.error('Select a Loom preset before binding regex folders')
+      return
+    }
+    const allBound = scripts.length > 0 && scripts.every((s) => s.preset_id === activeLoomPresetId)
+    const nextPresetId = allBound ? null : activeLoomPresetId
+    try {
+      await Promise.all(scripts.map((script) => updateRegexScript(script.id, { preset_id: nextPresetId })))
+      toast.success(nextPresetId
+        ? `Bound "${folderLabel}" to active preset`
+        : `Unbound "${folderLabel}" from active preset`)
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message)
+    }
+  }, [activeLoomPresetId, updateRegexScript])
 
   const handleExport = useCallback(async () => {
     try {
@@ -365,6 +399,20 @@ export default function RegexPanel() {
                   <span className={styles.folderCount}>{group.scripts.length}</span>
                   {group.folder && (
                     <>
+                      {activeLoomPresetId && (
+                        <button
+                          className={styles.folderDeleteBtn}
+                          onClick={(e) => handleBindFolderToPreset(group.scripts, folderLabel, e)}
+                          title={group.scripts.every((s) => s.preset_id === activeLoomPresetId)
+                            ? `Unbind "${folderLabel}" from active preset`
+                            : `Bind "${folderLabel}" to active preset`}
+                          aria-label={group.scripts.every((s) => s.preset_id === activeLoomPresetId)
+                            ? `Unbind ${folderLabel} from active preset`
+                            : `Bind ${folderLabel} to active preset`}
+                        >
+                          {group.scripts.every((s) => s.preset_id === activeLoomPresetId) ? <Unlink size={12} /> : <Link size={12} />}
+                        </button>
+                      )}
                       <button
                         className={styles.folderDeleteBtn}
                         onClick={(e) => handleExportFolder(group.folder, e)}
@@ -393,12 +441,14 @@ export default function RegexPanel() {
                       onToggleExpand={() => setExpandedId(expandedId === script.id ? null : script.id)}
                       onDelete={(e) => handleDelete(script.id, e)}
                       onToggle={(disabled, e) => handleToggle(script.id, disabled, e)}
+                      onBindPreset={(e) => handleBindToPreset(script, e)}
                       onUpdate={(updates) => updateRegexScript(script.id, updates)}
                       onOpenModal={() => openModal('regexEditor', { scriptId: script.id })}
                       targetBadge={targetBadge(script.target)}
                       scopeIcon={scopeIcon(script.scope)}
                       folders={folders}
                       onCreateFolder={createFolder}
+                      activePresetId={activeLoomPresetId}
                     />
                   ))}
               </div>
@@ -413,12 +463,14 @@ export default function RegexPanel() {
               onToggleExpand={() => setExpandedId(expandedId === script.id ? null : script.id)}
               onDelete={(e) => handleDelete(script.id, e)}
               onToggle={(disabled, e) => handleToggle(script.id, disabled, e)}
+              onBindPreset={(e) => handleBindToPreset(script, e)}
               onUpdate={(updates) => updateRegexScript(script.id, updates)}
               onOpenModal={() => openModal('regexEditor', { scriptId: script.id })}
               targetBadge={targetBadge(script.target)}
               scopeIcon={scopeIcon(script.scope)}
               folders={folders}
               onCreateFolder={createFolder}
+              activePresetId={activeLoomPresetId}
             />
           ))
         )}
@@ -433,24 +485,28 @@ function ScriptRow({
   onToggleExpand,
   onDelete,
   onToggle,
+  onBindPreset,
   onUpdate,
   onOpenModal,
   targetBadge,
   scopeIcon,
   folders,
   onCreateFolder,
+  activePresetId,
 }: {
   script: RegexScript
   expanded: boolean
   onToggleExpand: () => void
   onDelete: (e: React.MouseEvent) => void
   onToggle: (disabled: boolean, e: React.MouseEvent) => void
+  onBindPreset: (e: React.MouseEvent) => void
   onUpdate: (updates: Record<string, any>) => void
   onOpenModal: () => void
   targetBadge: React.ReactNode
   scopeIcon: React.ReactNode
   folders: string[]
   onCreateFolder: (name: string) => void
+  activePresetId: string | null
 }) {
   const replaceRef = useRef<HTMLTextAreaElement>(null)
 
@@ -471,6 +527,17 @@ function ScriptRow({
             onChange={(v) => onToggle(!v, { stopPropagation: () => {} } as React.MouseEvent)}
           />
         </div>
+        {activePresetId && (
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            className={styles.deleteBtn}
+            onClick={onBindPreset}
+            title={script.preset_id === activePresetId ? 'Unbind from active preset' : 'Bind to active preset'}
+          >
+            {script.preset_id === activePresetId ? <Unlink size={13} /> : <Link size={13} />}
+          </Button>
+        )}
         <Button size="icon-sm" variant="danger-ghost" className={styles.deleteBtn} onClick={onDelete} title="Delete">
           <Trash2 size={13} />
         </Button>

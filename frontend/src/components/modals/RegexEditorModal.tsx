@@ -166,7 +166,14 @@ export default function RegexEditorModal() {
   }
 
   return (
-    <ModalShell isOpen={true} onClose={closeModal} maxWidth={720} zIndex={10001} className={styles.modal}>
+    <ModalShell
+      isOpen={true}
+      onClose={closeModal}
+      maxWidth={720}
+      maxHeight="calc(88vh / var(--lumiverse-ui-scale, 1))"
+      zIndex={10001}
+      className={styles.modal}
+    >
         <div className={styles.header}>
           <h2 className={styles.title}>Edit Regex Script</h2>
           <CloseButton onClick={closeModal} size="sm" />

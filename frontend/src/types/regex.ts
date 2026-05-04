@@ -50,6 +50,8 @@ export interface CreateRegexScriptInput {
   sort_order?: number
   description?: string
   folder?: string
+  preset_id?: string | null
+  character_id?: string | null
   metadata?: Record<string, any>
 }
 

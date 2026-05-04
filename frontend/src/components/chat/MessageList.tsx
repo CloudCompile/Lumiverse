@@ -27,6 +27,7 @@ interface MessageListProps {
 
 const TOP_LOAD_THRESHOLD = 96
 const CHAT_SCROLL_TO_BOTTOM_EVENT = 'lumiverse:chat-scroll-bottom'
+const MESSAGE_CONTENT_LAYOUT_EVENT = 'lumiverse:message-content-layout'
 const MIN_MEASURED_ROW_HEIGHT = 32
 const MAX_ESTIMATED_ROW_HEIGHT = 900
 const MOBILE_MOMENTUM_SETTLE_MS = 260
@@ -39,6 +40,11 @@ function getTopLoadThreshold(clientHeight: number, isCoarsePointer: boolean) {
 
 function clampEstimate(value: number) {
   return Math.max(MIN_MEASURED_ROW_HEIGHT, Math.min(MAX_ESTIMATED_ROW_HEIGHT, value))
+}
+
+function clampMeasuredRowHeight(value: number) {
+  if (!Number.isFinite(value)) return MIN_MEASURED_ROW_HEIGHT
+  return Math.max(MIN_MEASURED_ROW_HEIGHT, value)
 }
 
 export default function MessageList({ messages, chatId, isStreaming }: MessageListProps) {
@@ -292,7 +298,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     useAnimationFrameWithResizeObserver: true,
     measureElement: (element, entry) => {
       const size = entry?.borderBoxSize?.[0]?.blockSize
-      const measured = size ?? element.getBoundingClientRect().height
+      const measured = clampMeasuredRowHeight(size ?? element.getBoundingClientRect().height)
       const messageId = element.getAttribute('data-message-id')
       if (messageId && measured >= MIN_MEASURED_ROW_HEIGHT) {
         measuredRowHeightsRef.current.set(messageId, measured)
@@ -350,6 +356,37 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
 
   const BOTTOM_REPIN_EPSILON = 6
 
+  const recoverTailVoid = useCallback(() => {
+    const el = scrollRef.current
+    if (!el || visibleMessages.length === 0) return false
+
+    const items = rowVirtualizer.getVirtualItems()
+    const lastItem = items[items.length - 1]
+    const lastIndex = visibleMessages.length - 1
+    if (!lastItem || lastItem.index !== lastIndex) return false
+
+    const lastRow = el.querySelector<HTMLElement>(`[data-index="${lastIndex}"]`)
+    if (!lastRow) return false
+
+    const rowRect = lastRow.getBoundingClientRect()
+    const scrollRect = el.getBoundingClientRect()
+    const actualContentBottom = el.scrollTop + (rowRect.bottom - scrollRect.top)
+    const viewportBottom = el.scrollTop + el.clientHeight
+    const voidThreshold = Math.max(180, el.clientHeight * 0.55)
+
+    if (viewportBottom <= actualContentBottom + voidThreshold) return false
+
+    rowVirtualizer.measure()
+
+    const nextScrollTop = Math.max(0, actualContentBottom - el.clientHeight)
+    isProgrammaticScrollRef.current = true
+    el.scrollTop = nextScrollTop
+    lastScrollTopRef.current = el.scrollTop
+    lastScrollHeightRef.current = el.scrollHeight
+    isPinnedRef.current = true
+    return true
+  }, [rowVirtualizer, visibleMessages.length])
+
   const updatePinState = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
     const distance = scrollHeight - scrollTop - clientHeight
     isPinnedRef.current = distance <= BOTTOM_REPIN_EPSILON
@@ -360,6 +397,8 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+
+    if (recoverTailVoid()) return
 
     const deltaTop = el.scrollTop - lastScrollTopRef.current
     lastScrollTopRef.current = el.scrollTop
@@ -393,7 +432,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       topLoadArmedRef.current = false
       loadMore()
     }
-  }, [hasMore, isCoarsePointer, loadingOlder, loadMore, setPrependVisualOffset])
+  }, [hasMore, isCoarsePointer, loadingOlder, loadMore, recoverTailVoid, setPrependVisualOffset])
 
   const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
     if (event.deltaY < -30) {
@@ -501,6 +540,8 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       lastSH = newSH
       lastST = newST
 
+      if (recoverTailVoid()) return
+
       if (heightDelta === 0) return
 
       // If scrollTop already moved by roughly the height change, something
@@ -529,7 +570,7 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
       mo.disconnect()
       if (pendingRaf) cancelAnimationFrame(pendingRaf)
     }
-  }, [isCoarsePointer, rowVirtualizer])
+  }, [isCoarsePointer, recoverTailVoid, rowVirtualizer])
 
   // Re-pin to bottom when the input safe-zone changes — keyboard opening on
   // mobile/iOS PWA grows --lcs-input-safe-zone. Without this, the last
@@ -600,6 +641,40 @@ export default function MessageList({ messages, chatId, isStreaming }: MessageLi
     window.addEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollToBottom)
     return () => window.removeEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollToBottom)
   }, [scrollToHistoryBottom])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+
+    let pendingRaf = 0
+
+    const handleMessageContentLayout = (event: Event) => {
+      if (pendingRaf) return
+      pendingRaf = requestAnimationFrame(() => {
+        pendingRaf = 0
+        const target = event.target
+        if (target instanceof Element) {
+          const row = target.closest('[data-message-id]')
+          if (row) rowVirtualizer.measureElement(row)
+        }
+
+        if (recoverTailVoid()) return
+
+        const latest = scrollRef.current
+        if (!latest || !isPinnedRef.current) return
+        isProgrammaticScrollRef.current = true
+        latest.scrollTop = latest.scrollHeight - latest.clientHeight
+        lastScrollTopRef.current = latest.scrollTop
+        lastScrollHeightRef.current = latest.scrollHeight
+      })
+    }
+
+    el.addEventListener(MESSAGE_CONTENT_LAYOUT_EVENT, handleMessageContentLayout)
+    return () => {
+      el.removeEventListener(MESSAGE_CONTENT_LAYOUT_EVENT, handleMessageContentLayout)
+      if (pendingRaf) cancelAnimationFrame(pendingRaf)
+    }
+  }, [recoverTailVoid, rowVirtualizer])
 
   return (
     <div

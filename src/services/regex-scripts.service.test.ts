@@ -7,6 +7,7 @@ import {
   getRegexScript,
   switchPresetBoundRegexScripts,
   toggleRegexScript,
+  updateRegexScript,
 } from "./regex-scripts.service";
 
 const USER_ID = "u1";
@@ -67,6 +68,29 @@ beforeEach(() => {
 });
 
 describe("regex export", () => {
+  test("can bind and unbind an existing regex script to a preset", () => {
+    const created = createRegexScript(USER_ID, {
+      name: "Bindable",
+      find_regex: "one",
+      disabled: false,
+    });
+
+    expect(typeof created).not.toBe("string");
+    const id = (created as Exclude<typeof created, string>).id;
+
+    const bound = updateRegexScript(USER_ID, id, { preset_id: "preset-1" }, { activePresetId: "preset-1" });
+    expect(typeof bound).not.toBe("string");
+    expect(bound && typeof bound !== "string" ? bound.preset_id : null).toBe("preset-1");
+
+    const out = exportRegexScripts(USER_ID, { presetId: "preset-1" });
+    expect(out.scripts.map((s) => s.name)).toEqual(["Bindable"]);
+    expect(out.scripts[0].disabled).toBe(false);
+
+    const unbound = updateRegexScript(USER_ID, id, { preset_id: null }, { activePresetId: "preset-1" });
+    expect(unbound && typeof unbound !== "string" ? unbound.preset_id : "missing").toBeNull();
+    expect(exportRegexScripts(USER_ID, { presetId: "preset-1" }).scripts).toHaveLength(0);
+  });
+
   test("can export only scripts bound to a preset without ownership ids", () => {
     createRegexScript(USER_ID, {
       name: "Preset Script",

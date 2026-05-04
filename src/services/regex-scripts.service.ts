@@ -394,11 +394,16 @@ export function updateRegexScript(
 
   const activePresetId = normalizeOptionalId(context?.activePresetId);
   const isPresetBound = !!existing.preset_id;
-  const mayPersistPresetEnablement = !!existing.preset_id && existing.preset_id === activePresetId;
   const nextInput: UpdateRegexScriptInput = { ...input };
+  const hasPresetIdUpdate = Object.prototype.hasOwnProperty.call(nextInput, "preset_id");
+  const nextPresetId = hasPresetIdUpdate ? normalizeOptionalId(nextInput.preset_id) : existing.preset_id;
+  const mayPersistPresetEnablement = !!nextPresetId && nextPresetId === activePresetId;
 
-  if (isPresetBound && nextInput.disabled !== undefined && !mayPersistPresetEnablement) {
+  if (isPresetBound && nextInput.disabled !== undefined && nextPresetId && !mayPersistPresetEnablement) {
     delete nextInput.disabled;
+  }
+  if (nextPresetId && nextPresetId !== activePresetId && hasPresetIdUpdate) {
+    nextInput.disabled = true;
   }
 
   // If updating regex or flags, validate together
@@ -434,6 +439,7 @@ export function updateRegexScript(
   if (nextInput.sort_order !== undefined) { fields.push("sort_order = ?"); values.push(nextInput.sort_order); }
   if (nextInput.description !== undefined) { fields.push("description = ?"); values.push(nextInput.description); }
   if (nextInput.folder !== undefined) { fields.push("folder = ?"); values.push(nextInput.folder); }
+  if (hasPresetIdUpdate) { fields.push("preset_id = ?"); values.push(nextPresetId); }
   if (nextInput.metadata !== undefined) { fields.push("metadata = ?"); values.push(JSON.stringify(nextInput.metadata)); }
 
   if (fields.length === 0) return existing;
@@ -446,7 +452,10 @@ export function updateRegexScript(
   getDb().query(`UPDATE regex_scripts SET ${fields.join(", ")} WHERE id = ? AND user_id = ?`).run(...values);
 
   const updated = getRegexScript(userId, id)!;
-  if (updated.preset_id && mayPersistPresetEnablement && nextInput.disabled !== undefined) {
+  if (existing.preset_id && existing.preset_id !== updated.preset_id) {
+    setPresetBoundScriptEnabledInRestoreList(userId, existing.preset_id, updated.id, false);
+  }
+  if (updated.preset_id && (hasPresetIdUpdate || (mayPersistPresetEnablement && nextInput.disabled !== undefined))) {
     setPresetBoundScriptEnabledInRestoreList(userId, updated.preset_id, updated.id, !updated.disabled);
   }
   eventBus.emit(EventType.REGEX_SCRIPT_CHANGED, { id, script: updated }, userId);
