@@ -10,6 +10,16 @@ function sanitizeAddonStates(addonStates?: PersonaAddonStateMap): PersonaAddonSt
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+export function getChatPersonaAddonStates(
+  metadata: Record<string, any> | null | undefined,
+  personaId: string | null | undefined,
+): PersonaAddonStateMap | undefined {
+  if (!personaId) return undefined;
+  const statesByPersona = metadata?.persona_addon_states;
+  if (!statesByPersona || typeof statesByPersona !== "object") return undefined;
+  return sanitizeAddonStates(statesByPersona[personaId]);
+}
+
 export function applyPersonaAddonStates(
   persona: Persona | null,
   addonStates?: PersonaAddonStateMap,
