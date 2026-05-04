@@ -6192,9 +6192,7 @@ export function applyProviderReasoningOffSwitch(
     if (nextOutputConfig) params.output_config = nextOutputConfig;
     else delete params.output_config;
 
-    if (modelName && /claude-(opus|sonnet)-4[-.](6|7)/i.test(modelName)) {
-      params.thinking = { type: "disabled" };
-    }
+    params.thinking = { type: "disabled" };
     return;
   }
 

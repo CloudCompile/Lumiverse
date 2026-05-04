@@ -19,14 +19,14 @@ describe("applyProviderReasoningOffSwitch", () => {
     expect(params.temperature).toBe(0.8);
   });
 
-  test("preserves non-reasoning Anthropic output config while disabling thinking", () => {
+  test("always sends Anthropic's explicit disabled thinking config", () => {
     const params: Record<string, any> = {
       thinking: { type: "adaptive", display: "summarized" },
       output_config: { effort: "max", other_flag: true },
       temperature: 0.7,
     };
 
-    applyProviderReasoningOffSwitch(params, "anthropic", "claude-sonnet-4.7");
+    applyProviderReasoningOffSwitch(params, "anthropic", "claude-3-7-sonnet");
 
     expect(params.thinking).toEqual({ type: "disabled" });
     expect(params.output_config).toEqual({ other_flag: true });

@@ -70,6 +70,22 @@ export class AnthropicProvider implements LlmProvider {
     );
   }
 
+  private normalizeThinkingConfig(thinking: unknown):
+    | Record<string, unknown>
+    | undefined {
+    if (!thinking || typeof thinking !== "object" || Array.isArray(thinking)) {
+      return undefined;
+    }
+
+    if ((thinking as any).type === "disabled") {
+      // Anthropic treats `display` as invalid when thinking is disabled, so send
+      // the minimal explicit off-switch only.
+      return { type: "disabled" };
+    }
+
+    return { ...(thinking as Record<string, unknown>) };
+  }
+
   private normalizeOutputConfig(
     outputConfig: unknown,
     thinking: unknown,
@@ -520,15 +536,16 @@ export class AnthropicProvider implements LlmProvider {
     if (params.stop) body.stop_sequences = params.stop;
 
     // Extended/adaptive thinking
-    if (params.thinking) {
-      body.thinking = params.thinking;
+    const normalizedThinking = this.normalizeThinkingConfig(params.thinking);
+    if (normalizedThinking) {
+      body.thinking = normalizedThinking;
     }
     // Anthropic uses `output_config` for both structured output (`format`) and
     // reasoning effort. Preserve non-reasoning keys even when thinking is off,
     // but never leak `effort` alongside `thinking: disabled`.
     const normalizedOutputConfig = this.normalizeOutputConfig(
       params.output_config,
-      body.thinking,
+      normalizedThinking,
     );
     if (normalizedOutputConfig) {
       body.output_config = normalizedOutputConfig;
