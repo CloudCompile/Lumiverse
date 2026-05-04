@@ -923,6 +923,7 @@ export function exportRegexScripts(userId: string, options?: string[] | RegexScr
   const db = getDb();
   let rows: any[];
   const ids = Array.isArray(options) ? options : options?.ids;
+  const presetIdFilter = !Array.isArray(options) ? normalizeOptionalId(options?.presetId) : null;
 
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ");
@@ -933,10 +934,9 @@ export function exportRegexScripts(userId: string, options?: string[] | RegexScr
     const conditions = ["user_id = ?"];
     const params: any[] = [userId];
     if (!Array.isArray(options)) {
-      const presetId = normalizeOptionalId(options?.presetId);
-      if (presetId) {
+      if (presetIdFilter) {
         conditions.push("preset_id = ?");
-        params.push(presetId);
+        params.push(presetIdFilter);
       }
       if (typeof options?.folder === "string") {
         conditions.push("folder = ?");
@@ -948,7 +948,16 @@ export function exportRegexScripts(userId: string, options?: string[] | RegexScr
       .all(...params) as any[];
   }
 
-  const scripts = rows.map(rowToRegexScript).map((s) => {
+  let normalizedRows = rows.map(rowToRegexScript);
+  if (presetIdFilter) {
+    const stored = readStoredPresetRegexIdsRecord(userId, presetIdFilter);
+    if (stored.exists) {
+      const enabledIds = new Set(stored.ids);
+      normalizedRows = normalizedRows.map((s) => ({ ...s, disabled: !enabledIds.has(s.id) }));
+    }
+  }
+
+  const scripts = normalizedRows.map((s) => {
     const { id, user_id, created_at, updated_at, pack_id, preset_id, character_id, ...rest } = s;
     return rest;
   });

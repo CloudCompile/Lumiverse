@@ -89,6 +89,33 @@ describe("regex export", () => {
     expect("preset_id" in out.scripts[0]).toBe(false);
   });
 
+  test("preset export uses saved enablement even when preset is inactive", () => {
+    const enabled = createRegexScript(USER_ID, {
+      name: "Enabled In Preset",
+      find_regex: "one",
+      preset_id: "preset-1",
+      disabled: false,
+    }, { activePresetId: "preset-1" });
+    const disabled = createRegexScript(USER_ID, {
+      name: "Disabled In Preset",
+      find_regex: "two",
+      preset_id: "preset-1",
+      disabled: true,
+    }, { activePresetId: "preset-1" });
+
+    expect(typeof enabled).not.toBe("string");
+    expect(typeof disabled).not.toBe("string");
+
+    switchPresetBoundRegexScripts(USER_ID, { previousPresetId: "preset-1", presetId: null });
+    expect(mustGetScript((enabled as Exclude<typeof enabled, string>).id).disabled).toBe(true);
+    expect(mustGetScript((disabled as Exclude<typeof disabled, string>).id).disabled).toBe(true);
+
+    const out = exportRegexScripts(USER_ID, { presetId: "preset-1" });
+    expect(out.scripts).toHaveLength(2);
+    expect(out.scripts.find((s) => s.name === "Enabled In Preset")?.disabled).toBe(false);
+    expect(out.scripts.find((s) => s.name === "Disabled In Preset")?.disabled).toBe(true);
+  });
+
   test("can export only scripts in a folder", () => {
     createRegexScript(USER_ID, { name: "In Folder", find_regex: "one", folder: "Folder A" });
     createRegexScript(USER_ID, { name: "Elsewhere", find_regex: "two", folder: "Folder B" });
