@@ -136,6 +136,9 @@ export function appendPoolContent(generationId: string, text: string): number {
   }
   if (!entry.firstTokenAt) entry.firstTokenAt = now;
   if (!entry.firstContentTokenAt) entry.firstContentTokenAt = now;
+  if (entry.status === "assembling" || entry.status === "council") {
+    setPoolStatus(generationId, "streaming");
+  }
   entry.content += text;
   return ++entry.tokenSeq;
 }
@@ -150,6 +153,9 @@ export function appendPoolReasoning(generationId: string, text: string): number 
   const now = Date.now();
   if (!entry.reasoningStartedAt) entry.reasoningStartedAt = now;
   if (!entry.firstTokenAt) entry.firstTokenAt = now;
+  if (entry.status === "assembling" || entry.status === "council") {
+    setPoolStatus(generationId, "streaming");
+  }
   entry.reasoning += text;
   return ++entry.tokenSeq;
 }

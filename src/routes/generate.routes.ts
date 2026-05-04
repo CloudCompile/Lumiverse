@@ -60,7 +60,7 @@ app.get("/active", (c) => {
   return c.json(entries.map((e) => ({
     generationId: e.generationId,
     chatId: e.chatId,
-    status: e.status,
+    status: e.status === "streaming" && e.reasoning.length > 0 && e.content.length === 0 ? "reasoning" : e.status,
     generationType: e.generationType,
     characterName: e.characterName,
     characterId: e.characterId,
@@ -87,10 +87,11 @@ app.get("/status/:chatId", (c) => {
   const entry = poolSvc.getPoolForChat(userId, chatId);
   if (!entry) return c.json({ active: false });
   const active = entry.status === "assembling" || entry.status === "council" || entry.status === "streaming";
+  const effectiveStatus = entry.status === "streaming" && entry.reasoning.length > 0 && entry.content.length === 0 ? "reasoning" : entry.status;
   return c.json({
     active,
     generationId: entry.generationId,
-    status: entry.status,
+    status: effectiveStatus,
     councilRetryPending: entry.councilRetryPending || false,
     councilToolsFailure: entry.councilToolsFailure,
     content: entry.content,

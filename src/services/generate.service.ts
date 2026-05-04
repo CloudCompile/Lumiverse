@@ -2369,7 +2369,8 @@ async function runGeneration(
   // GENERATION_STARTED was already emitted when the pool entry was created
   // (before assembly). Once the provider stream is live, emit a lighter
   // progress event with the resolved breakdown metadata.
-  pool.setPoolStatus(generationId, "streaming");
+  // Pool status transitions to 'streaming' when the first actual token arrives
+  // so that reconnecting clients see 'assembling' while waiting for TTFT.
 
   type PendingStreamSegment = {
     token: string;

@@ -259,7 +259,6 @@ export function useWebSocket() {
         }
 
         state.updateChatHead(payload.generationId, {
-          status: 'streaming',
           ...(payload.model ? { model: payload.model } : {}),
           ...(payload.characterName ? { characterName: payload.characterName } : {}),
           ...(payload.characterId ? { characterId: payload.characterId } : {}),
