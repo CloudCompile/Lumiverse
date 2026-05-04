@@ -54,6 +54,7 @@ import { globalAddonsRoutes } from "./routes/global-addons.routes";
 import { webSearchRoutes } from "./routes/web-search.routes";
 import { themeAssetsRoutes } from "./routes/theme-assets.routes";
 import { bootstrapRoutes } from "./routes/bootstrap.routes";
+import { signupRoutes } from "./routes/signup.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 import { rateLimit } from "./middleware/rate-limit";
@@ -219,8 +220,13 @@ const authGeneralLimiter = rateLimit({
 
 const SENSITIVE_AUTH_PATTERN =
   /\/api\/auth\/(sign-in|sign-up|forget-password|reset-password|change-password|update-password)/;
+const SIGNUP_PATTERN = /\/api\/auth\/signup\//;
 
 app.use("/api/auth/*", async (c, next) => {
+  // Skip rate limiting for signup routes (they have their own limiters)
+  if (SIGNUP_PATTERN.test(c.req.path)) {
+    return next();
+  }
   if (SENSITIVE_AUTH_PATTERN.test(c.req.path)) {
     return authSensitiveLimiter(c, next);
   }
@@ -273,6 +279,9 @@ app.use("*", async (c, next) => {
   c.res.headers.set("X-Frame-Options", "DENY");
   c.res.headers.set("Content-Security-Policy", "frame-ancestors 'none';");
 });
+
+// Public signup routes — BEFORE BetterAuth handler
+app.route("/api/auth/signup", signupRoutes);
 
 // BetterAuth handler — BEFORE auth middleware
 // Rewrite the request URL to use the actual Host header so BetterAuth

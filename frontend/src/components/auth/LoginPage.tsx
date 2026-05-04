@@ -191,6 +191,20 @@ export default function LoginPage() {
                 'Sign In'
               )}
             </motion.button>
+
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.4, delay: 0.6 }}
+              style={{ textAlign: 'center', marginTop: '12px' }}
+            >
+              <p style={{ fontSize: 'calc(13px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-hint)', margin: 0 }}>
+                New to Lumiverse?{' '}
+                <a href="/signup" style={{ color: 'var(--lumiverse-primary-500)', textDecoration: 'none' }}>
+                  Create an account
+                </a>
+              </p>
+            </motion.div>
           </form>
         </motion.div>
 

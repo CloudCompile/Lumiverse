@@ -76,9 +76,23 @@ export const auth = betterAuth({
       create: {
         before: async (_user, ctx) => {
           const expectedNonce = ctx?.headers?.get(CREATION_NONCE_HEADER) ?? null;
-          if (!consumeNonce(expectedNonce)) {
-            return false;
+          const isPublicSignup = env.allowPublicSignup === true;
+
+          // Path 1: Nonce-based signup (operator invites)
+          if (expectedNonce) {
+            if (!consumeNonce(expectedNonce)) {
+              return false;
+            }
+            return true;
           }
+
+          // Path 2: Public signup (self-registration)
+          if (isPublicSignup) {
+            return true;
+          }
+
+          // Path 3: Signup disabled
+          return false;
         },
         after: async (user) => {
           // BetterAuth swallows hook exceptions, so a failed directory

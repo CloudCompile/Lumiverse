@@ -5,11 +5,21 @@ import ChatView from './components/chat/ChatView'
 import CharacterBrowser from './components/panels/CharacterBrowser'
 import CharacterProfile from './components/panels/CharacterProfile'
 import LoginPage from './components/auth/LoginPage'
+import SignupPage from './components/auth/SignupPage'
+import VerifyEmailPage from './components/auth/VerifyEmailPage'
 
 export const router = createBrowserRouter([
   {
     path: '/login',
     element: <LoginPage />,
+  },
+  {
+    path: '/signup',
+    element: <SignupPage />,
+  },
+  {
+    path: '/verify-email',
+    element: <VerifyEmailPage />,
   },
   {
     path: '/',
