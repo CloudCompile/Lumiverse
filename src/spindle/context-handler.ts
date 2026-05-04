@@ -24,33 +24,54 @@ class ContextHandlerChain {
     );
   }
 
-  async run(context: unknown, userId?: string | null): Promise<unknown> {
+  async run(
+    context: unknown,
+    userId?: string | null,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     let result = context;
 
     for (const handler of this.handlers) {
       if (handler.userId && handler.userId !== userId) {
         continue;
       }
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let abortHandler: (() => void) | undefined;
       try {
         result = await Promise.race([
           handler.handler(result),
-          new Promise<never>((_, reject) =>
-            setTimeout(
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
               () =>
                 reject(
                   new Error(
                     `Context handler from ${handler.extensionId} timed out (10s)`
                   )
                 ),
-              10_000
-            )
-          ),
+              10_000,
+            );
+            if (signal) {
+              abortHandler = () =>
+                reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+              signal.addEventListener("abort", abortHandler, { once: true });
+            }
+          }),
         ]);
       } catch (err) {
+        if (signal?.aborted) throw err;
         console.error(
           `[Spindle] Context handler error from ${handler.extensionId}:`,
           err
         );
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        if (signal && abortHandler) {
+          signal.removeEventListener("abort", abortHandler);
+        }
       }
     }
 

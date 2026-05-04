@@ -29,6 +29,8 @@ export interface MessageContentProcessor {
   ) => Promise<MessageContentProcessorResult | void>;
 }
 
+const MESSAGE_CONTENT_PROCESSOR_TIMEOUT_MS = 2_000;
+
 class MessageContentProcessorChain {
   private handlers: MessageContentProcessor[] = [];
 
@@ -50,7 +52,8 @@ class MessageContentProcessorChain {
 
   async run(
     ctx: MessageContentProcessorCtx,
-    userId?: string | null
+    userId?: string | null,
+    signal?: AbortSignal,
   ): Promise<MessageContentProcessorCtx> {
     let result = ctx;
 
@@ -58,20 +61,31 @@ class MessageContentProcessorChain {
       if (handler.userId && handler.userId !== userId) {
         continue;
       }
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let abortHandler: (() => void) | undefined;
       try {
         const patch = await Promise.race([
           handler.handler(result),
-          new Promise<never>((_, reject) =>
-            setTimeout(
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
               () =>
                 reject(
                   new Error(
-                    `Message content processor from ${handler.extensionId} timed out (10s)`
+                    `Message content processor from ${handler.extensionId} timed out (${Math.round(MESSAGE_CONTENT_PROCESSOR_TIMEOUT_MS / 1000)}s)`
                   )
                 ),
-              10_000
-            )
-          ),
+              MESSAGE_CONTENT_PROCESSOR_TIMEOUT_MS,
+            );
+            if (signal) {
+              abortHandler = () =>
+                reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+              signal.addEventListener("abort", abortHandler, { once: true });
+            }
+          }),
         ]);
         if (patch) {
           const nextExtra =
@@ -85,10 +99,16 @@ class MessageContentProcessorChain {
           };
         }
       } catch (err) {
+        if (signal?.aborted) throw err;
         console.error(
           `[Spindle] Message content processor error from ${handler.extensionId}:`,
           err
         );
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        if (signal && abortHandler) {
+          signal.removeEventListener("abort", abortHandler);
+        }
       }
     }
 

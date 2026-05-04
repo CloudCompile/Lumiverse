@@ -12,10 +12,11 @@ import {
 
 async function runMessageContentProcessors(
   ctx: MessageContentProcessorCtx,
-  userId: string
+  userId: string,
+  signal?: AbortSignal,
 ): Promise<MessageContentProcessorCtx> {
   if (messageContentProcessorChain.count === 0) return ctx;
-  return messageContentProcessorChain.run(ctx, userId);
+  return messageContentProcessorChain.run(ctx, userId, signal);
 }
 
 // Auto-greetings are inserted by service-layer createMessage calls that
@@ -487,7 +488,8 @@ app.post("/:chatId/messages", async (c) => {
 
   const processed = await runMessageContentProcessors(
     { chatId, content: body.content, extra: body.extra, origin: "create", userId },
-    userId
+    userId,
+    c.req.raw.signal,
   );
   body.content = processed.content;
   if (processed.extra !== undefined) body.extra = processed.extra;
@@ -512,7 +514,8 @@ app.put("/:chatId/messages/:id", async (c) => {
         origin: "update",
         userId,
       },
-      userId
+      userId,
+      c.req.raw.signal,
     );
     body.content = processed.content;
     if (processed.extra !== undefined) body.extra = processed.extra;
@@ -548,7 +551,8 @@ app.post("/:chatId/messages/:id/swipe", async (c) => {
         origin: "swipe_add",
         userId,
       },
-      userId
+      userId,
+      c.req.raw.signal,
     );
     msg = svc.addSwipe(userId, messageId, processed.content);
   } else {
@@ -576,7 +580,8 @@ app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
       swipeIndex: idx,
       userId,
     },
-    userId
+    userId,
+    c.req.raw.signal,
   );
 
   const msg = svc.updateSwipe(userId, messageId, idx, processed.content);
@@ -618,7 +623,7 @@ app.post("/:chatId/display-preprocess", async (c) => {
       ...(typeof body.messageIndex === "number" ? { messageIndex: body.messageIndex } : {}),
       ...(role ? { role, is_user: role === "user" } : {}),
     },
-  }, userId);
+  }, userId, c.req.raw.signal);
   return c.json({ content: processed.content ?? body.rawContent });
 });
 

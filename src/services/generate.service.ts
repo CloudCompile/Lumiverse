@@ -887,6 +887,7 @@ async function runPromptPipeline(opts: {
     spindleContext = (await contextHandlerChain.run(
       spindleContext,
       opts.userId,
+      opts.signal,
     )) as SpindleContext;
   }
 
