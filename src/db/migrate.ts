@@ -132,6 +132,20 @@ function cleanupOldMigrations(migrationsDir: string, db: Database): void {
   }
 }
 
+function repairDreamWeaverBaselineDrift(db: Database): void {
+  const table = db
+    .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dream_weaver_sessions'")
+    .get();
+  if (!table) return;
+
+  const columns = db.query("PRAGMA table_info('dream_weaver_sessions')").all() as Array<{ name: string }>;
+  const hasModel = columns.some((column) => column.name === "model");
+  if (hasModel) return;
+
+  console.log("[db] Repairing Dream Weaver baseline schema drift: adding missing model column.");
+  db.run("ALTER TABLE dream_weaver_sessions ADD COLUMN model TEXT");
+}
+
 export async function runMigrations(db: Database, migrationsDir?: string): Promise<void> {
   const dir = migrationsDir || join(import.meta.dir, "migrations");
 
@@ -206,6 +220,10 @@ export async function runMigrations(db: Database, migrationsDir?: string): Promi
       console.log(`Skipping renumbered migration: ${file} (already applied)`);
       db.run("INSERT INTO _migrations (name) VALUES (?)", [file]);
       continue;
+    }
+
+    if (file === "068_migrate_dream_weaver_from_1_0.sql") {
+      repairDreamWeaverBaselineDrift(db);
     }
 
     const sql = await Bun.file(join(dir, file)).text();

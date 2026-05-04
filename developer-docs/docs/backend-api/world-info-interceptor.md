@@ -53,11 +53,28 @@ interface WorldInfoInterceptorEntry {
   probability: number
   use_probability: boolean
   content: string
+  automation_id: string | null
+  selective: boolean
+  selective_logic: number
+  match_whole_words: boolean
+  case_sensitive: boolean
+  use_regex: boolean
+  prevent_recursion: boolean
+  exclude_recursion: boolean
+  delay_until_recursion: boolean
+  scan_depth: number | null
+  order_value: number
 }
 
 interface WorldInfoInterceptorMessage {
+  id: string
   role: "system" | "user" | "assistant"
   content: string
+  is_user: boolean
+  is_greeting: boolean
+  greeting_index?: number
+  swipe_id: number
+  index_in_chat: number
 }
 ```
 

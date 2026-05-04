@@ -259,6 +259,7 @@ CREATE TABLE dream_weaver_sessions (
   dislikes TEXT,
   persona_id TEXT,
   connection_id TEXT,
+  model TEXT,
 
   draft TEXT,
 
