@@ -3,6 +3,7 @@ import { closeDatabase, getDb, initDatabase } from "../db/connection";
 import {
   activatePresetBoundRegexScripts,
   createRegexScript,
+  exportRegexScripts,
   getRegexScript,
   switchPresetBoundRegexScripts,
   toggleRegexScript,
@@ -63,6 +64,38 @@ beforeEach(() => {
   const db = getDb();
   db.query("DELETE FROM regex_scripts").run();
   db.query("DELETE FROM settings").run();
+});
+
+describe("regex export", () => {
+  test("can export only scripts bound to a preset without ownership ids", () => {
+    createRegexScript(USER_ID, {
+      name: "Preset Script",
+      find_regex: "one",
+      preset_id: "preset-1",
+      folder: "Preset Folder",
+    }, { activePresetId: "preset-1" });
+    createRegexScript(USER_ID, {
+      name: "Other Script",
+      find_regex: "two",
+      preset_id: "preset-2",
+      folder: "Preset Folder",
+    }, { activePresetId: "preset-2" });
+
+    const out = exportRegexScripts(USER_ID, { presetId: "preset-1" });
+    expect(out.scripts).toHaveLength(1);
+    expect(out.scripts[0].name).toBe("Preset Script");
+    expect("id" in out.scripts[0]).toBe(false);
+    expect("user_id" in out.scripts[0]).toBe(false);
+    expect("preset_id" in out.scripts[0]).toBe(false);
+  });
+
+  test("can export only scripts in a folder", () => {
+    createRegexScript(USER_ID, { name: "In Folder", find_regex: "one", folder: "Folder A" });
+    createRegexScript(USER_ID, { name: "Elsewhere", find_regex: "two", folder: "Folder B" });
+
+    const out = exportRegexScripts(USER_ID, { folder: "Folder A" });
+    expect(out.scripts.map((s) => s.name)).toEqual(["In Folder"]);
+  });
 });
 
 describe("preset-bound regex activation", () => {

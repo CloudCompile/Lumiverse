@@ -83,6 +83,7 @@ import { groupBreakdownEntries as __groupBreakdownEntries } from '@/lib/prompt-b
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import { Toggle } from '@/components/shared/Toggle'
 import { Button } from '@/components/shared/FormComponents'
+import { toast } from '@/lib/toast'
 import s from './LoomBuilder.module.css'
 
 // ============================================================================
@@ -1561,16 +1562,20 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     await deletePreset(activePresetId)
   }, [activePresetId, deletePreset])
 
-  const handleExport = useCallback(() => {
-    const data = exportInternal()
-    if (!data) return
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${data.name || 'loom-preset'}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+  const handleExport = useCallback(async () => {
+    try {
+      const data = await exportInternal()
+      if (!data) return
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${data.name || 'loom-preset'}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || 'Failed to export preset')
+    }
   }, [exportInternal])
 
   const handleExportLegacy = useCallback(() => {

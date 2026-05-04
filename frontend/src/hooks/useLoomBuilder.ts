@@ -28,7 +28,6 @@ import {
   toggleBlockWithCategoryRules,
   coerceImportedLoomPreset,
   detectImportedPresetKind,
-  looksLikeLegacyPresetData,
 } from '@/lib/loom/service'
 
 const PENDING_LOOM_PRESETS_KEY = '__lumiverse_pending_loom_presets'
@@ -489,18 +488,18 @@ export function useLoomBuilder() {
       setActiveLoomPreset(created.id)
       setActivePreset(newLoom)
 
-      // Legacy presets can embed regex scripts, so import them alongside the
-      // preset creation on the dedicated legacy path.
-      const embeddedRegex = looksLikeLegacyPresetData(payload)
-        ? payload.extensions?.regex_scripts
-        : null
+      const embeddedRegex = Array.isArray(payload?.extensions?.regex_scripts)
+        ? payload.extensions.regex_scripts
+        : Array.isArray(payload?.regex_scripts)
+          ? payload.regex_scripts
+          : null
       if (Array.isArray(embeddedRegex) && embeddedRegex.length > 0) {
         try {
           const regexResult = await enqueuePresetRegexOperation(() => regexApi.importScripts({
             scripts: embeddedRegex,
             folder: loom.name,
             preset_id: created.id,
-            active_preset_id: useStore.getState().activeLoomPresetId,
+            active_preset_id: created.id,
           }))
           if (regexResult.imported > 0) {
             const { loadRegexScripts } = useStore.getState() as any
@@ -541,8 +540,17 @@ export function useLoomBuilder() {
   }, [persistImportedPreset])
 
   // Export internal JSON
-  const exportInternal = useCallback(() => {
-    return activePreset
+  const exportInternal = useCallback(async () => {
+    if (!activePreset) return null
+    const regexExport = await regexApi.exportScripts(undefined, { preset_id: activePreset.id })
+    if (regexExport.scripts.length === 0) return activePreset
+    return {
+      ...activePreset,
+      extensions: {
+        ...((activePreset as any).extensions || {}),
+        regex_scripts: regexExport.scripts,
+      },
+    }
   }, [activePreset])
 
   // Export as legacy (SillyTavern) JSON

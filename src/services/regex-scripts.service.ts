@@ -913,9 +913,16 @@ export async function testRegex(
 
 // ── Import / Export ──────────────────────────────────────────────────────────
 
-export function exportRegexScripts(userId: string, ids?: string[]): RegexScriptExport {
+export interface RegexScriptExportOptions {
+  ids?: string[];
+  presetId?: string | null;
+  folder?: string | null;
+}
+
+export function exportRegexScripts(userId: string, options?: string[] | RegexScriptExportOptions): RegexScriptExport {
   const db = getDb();
   let rows: any[];
+  const ids = Array.isArray(options) ? options : options?.ids;
 
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ");
@@ -923,9 +930,22 @@ export function exportRegexScripts(userId: string, ids?: string[]): RegexScriptE
       .query(`SELECT * FROM regex_scripts WHERE user_id = ? AND id IN (${placeholders}) ORDER BY sort_order ASC, created_at ASC`)
       .all(userId, ...ids) as any[];
   } else {
+    const conditions = ["user_id = ?"];
+    const params: any[] = [userId];
+    if (!Array.isArray(options)) {
+      const presetId = normalizeOptionalId(options?.presetId);
+      if (presetId) {
+        conditions.push("preset_id = ?");
+        params.push(presetId);
+      }
+      if (typeof options?.folder === "string") {
+        conditions.push("folder = ?");
+        params.push(options.folder.trim());
+      }
+    }
     rows = db
-      .query("SELECT * FROM regex_scripts WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC")
-      .all(userId) as any[];
+      .query(`SELECT * FROM regex_scripts WHERE ${conditions.join(" AND ")} ORDER BY sort_order ASC, created_at ASC`)
+      .all(...params) as any[];
   }
 
   const scripts = rows.map(rowToRegexScript).map((s) => {

@@ -201,7 +201,11 @@ app.post("/test", async (c) => {
 app.post("/export", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json().catch(() => ({}));
-  return c.json(svc.exportRegexScripts(userId, body?.ids));
+  return c.json(svc.exportRegexScripts(userId, {
+    ids: body?.ids,
+    presetId: body?.preset_id,
+    folder: body?.folder,
+  }));
 });
 
 // POST /import — import scripts
