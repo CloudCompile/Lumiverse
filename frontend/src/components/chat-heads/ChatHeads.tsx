@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router'
-import { X, EyeOff, Columns2, Rows2, Wrench, AlertTriangle } from 'lucide-react'
+import { X, EyeOff, Columns2, Rows2, Wrench, AlertTriangle, Volume2, VolumeX } from 'lucide-react'
 import { useStore } from '@/store'
 import { generateApi } from '@/api/generate'
 import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
@@ -36,6 +36,7 @@ export default function ChatHeads() {
   const headSize = useStore((s) => s.chatHeadsSize)
   const direction = useStore((s) => s.chatHeadsDirection)
   const opacity = useStore((s) => s.chatHeadsOpacity)
+  const completionSoundEnabled = useStore((s) => s.chatHeadsCompletionSoundEnabled)
   const setSetting = useStore((s) => s.setSetting)
   const navigate = useNavigate()
 
@@ -383,12 +384,20 @@ export default function ChatHeads() {
     },
     { key: 'div-3', type: 'divider' as const },
     {
+      key: 'completion-sound',
+      label: 'Completion sound',
+      icon: completionSoundEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />,
+      active: completionSoundEnabled,
+      onClick: () => setSetting('chatHeadsCompletionSoundEnabled', !completionSoundEnabled),
+    },
+    { key: 'div-4', type: 'divider' as const },
+    {
       key: 'hide',
       label: 'Hide chat heads',
       icon: <EyeOff size={14} />,
       onClick: () => setSetting('chatHeadsEnabled', false),
     },
-  ], [direction, headSize, opacity, setSetting])
+  ], [direction, headSize, opacity, completionSoundEnabled, setSetting])
 
   if (!enabled || displayed.length === 0) return null
 

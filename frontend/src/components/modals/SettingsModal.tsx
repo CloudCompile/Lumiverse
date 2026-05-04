@@ -163,6 +163,7 @@ function DisplaySettings() {
   const chatHeadsSize = useStore((s) => s.chatHeadsSize)
   const chatHeadsDirection = useStore((s) => s.chatHeadsDirection)
   const chatHeadsOpacity = useStore((s) => s.chatHeadsOpacity)
+  const chatHeadsCompletionSoundEnabled = useStore((s) => s.chatHeadsCompletionSoundEnabled)
   const setSetting = useStore((s) => s.setSetting)
 
   const updateDrawer = (patch: Partial<DrawerSettings>) => {
@@ -351,6 +352,13 @@ function DisplaySettings() {
         hint="Display floating indicators for background generations"
       />
 
+      <Toggle.Checkbox
+        checked={chatHeadsCompletionSoundEnabled}
+        onChange={(checked) => setSetting('chatHeadsCompletionSoundEnabled', checked)}
+        label="Completion sound"
+        hint="Play a ding when a background chat head finishes generating"
+      />
+
       {chatHeadsEnabled && (
         <>
           <div className={styles.field}>
@@ -398,6 +406,7 @@ function DisplaySettings() {
               />
             </div>
           </div>
+
         </>
       )}
 

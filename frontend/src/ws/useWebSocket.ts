@@ -474,7 +474,7 @@ export function useWebSocket() {
               status: payload.error ? 'error' : 'completed',
             })
             // Ping when a backgrounded chat finishes successfully
-            if (!payload.error) {
+            if (!payload.error && state.chatHeadsEnabled && state.chatHeadsCompletionSoundEnabled) {
               playNotificationPing()
             }
           }

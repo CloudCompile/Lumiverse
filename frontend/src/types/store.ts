@@ -405,6 +405,7 @@ export interface SettingsSlice {
   chatHeadsSize: number
   chatHeadsDirection: 'column' | 'row'
   chatHeadsOpacity: number
+  chatHeadsCompletionSoundEnabled: boolean
   customCSS: CustomCSSSettings
   componentOverrides: Record<string, import('@/lib/componentOverrides').ComponentOverride>
   spindleSettings: SpindleSettings
