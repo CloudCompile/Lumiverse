@@ -60,8 +60,8 @@ export const regexApi = {
     return get<RegexScript[]>('/regex-scripts/active', params)
   },
 
-  exportScripts(ids?: string[]) {
-    return post<RegexScriptExport>('/regex-scripts/export', { ids })
+  exportScripts(ids?: string[], filters?: { preset_id?: string | null; folder?: string | null }) {
+    return post<RegexScriptExport>('/regex-scripts/export', { ids, ...filters })
   },
 
   importScripts(payload: any & { active_preset_id?: string | null }) {

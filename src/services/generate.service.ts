@@ -94,6 +94,10 @@ import {
 } from "./council/tool-runtime";
 import { toolRegistry } from "../spindle/tool-registry";
 import { executeHostCouncilTool } from "./council/host-tools";
+import {
+  applyPersonaAddonStates,
+  getChatPersonaAddonStates,
+} from "./persona-addon-states";
 import * as packsSvc from "./packs.service";
 import {
   GuidedReasoningStreamParser,
@@ -1349,9 +1353,19 @@ export async function startGeneration(
 
     // Resolve target message EARLY (before council) so we can visually clear the
     // message on the frontend before council tools start executing.
-    const resolvedPersona = personasSvc.resolvePersonaOrDefault(
+    let resolvedPersona = personasSvc.resolvePersonaOrDefault(
       input.userId,
       input.persona_id,
+    );
+    if (!input.persona_addon_states) {
+      input.persona_addon_states = getChatPersonaAddonStates(
+        chat?.metadata,
+        resolvedPersona?.id,
+      );
+    }
+    resolvedPersona = applyPersonaAddonStates(
+      resolvedPersona,
+      input.persona_addon_states,
     );
 
     const lifecycle: GenerationLifecycle = {

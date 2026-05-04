@@ -206,6 +206,22 @@ export default function RegexPanel() {
     }
   }, [])
 
+  const handleExportFolder = useCallback(async (folder: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    try {
+      const data = await regexApi.exportScripts(undefined, { folder })
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${folder || 'uncategorized'}-regex-scripts.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message)
+    }
+  }, [])
+
   const handleImport = useCallback(() => {
     openModal('regexImport')
   }, [openModal])
@@ -348,14 +364,24 @@ export default function RegexPanel() {
                   </span>
                   <span className={styles.folderCount}>{group.scripts.length}</span>
                   {group.folder && (
-                    <button
-                      className={styles.folderDeleteBtn}
-                      onClick={(e) => handleDeleteFolder(group.scripts, folderLabel, e)}
-                      title={`Delete all scripts in "${folderLabel}"`}
-                      aria-label={`Delete all scripts in ${folderLabel}`}
-                    >
-                      <Trash2 size={12} />
-                    </button>
+                    <>
+                      <button
+                        className={styles.folderDeleteBtn}
+                        onClick={(e) => handleExportFolder(group.folder, e)}
+                        title={`Export scripts in "${folderLabel}"`}
+                        aria-label={`Export scripts in ${folderLabel}`}
+                      >
+                        <Download size={12} />
+                      </button>
+                      <button
+                        className={styles.folderDeleteBtn}
+                        onClick={(e) => handleDeleteFolder(group.scripts, folderLabel, e)}
+                        title={`Delete all scripts in "${folderLabel}"`}
+                        aria-label={`Delete all scripts in ${folderLabel}`}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </>
                   )}
                 </div>
                 {!isCollapsed &&
