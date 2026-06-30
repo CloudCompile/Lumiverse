@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import Fuse from 'fuse.js'
 import { personasApi } from '@/api/personas'
-import { imagesApi } from '@/api/images'
 import { useStore } from '@/store'
+import { personaToastName, resolveAutoPersonaBinding } from '@/store/slices/personas'
 import { toast } from '@/lib/toast'
 import type { Persona, CreatePersonaInput, UpdatePersonaInput } from '@/types/api'
 
 const SEARCH_DEBOUNCE_MS = 150
 
 export function usePersonaBrowser() {
+  const { t } = useTranslation('panels', { keyPrefix: 'personaManager.toast' })
   const [currentPage, setCurrentPage] = useState(1)
   const personasPerPage = useStore((s) => s.personasPerPage)
   const setSetting = useStore((s) => s.setSetting)
@@ -225,23 +227,7 @@ export function usePersonaBrowser() {
 
   const uploadAvatar = useCallback(
     async (id: string, croppedFile: File, originalFile?: File) => {
-      // Upload original (full) version if provided
-      let originalImageId: string | undefined
-      if (originalFile) {
-        const img = await imagesApi.upload(originalFile)
-        originalImageId = img.id
-      }
-
-      // Upload cropped as avatar — backend cleans up old images (including old original)
-      let updated = await personasApi.uploadAvatar(id, croppedFile)
-
-      // Store original_image_id in metadata if we uploaded an original
-      if (originalImageId) {
-        updated = await personasApi.update(id, {
-          metadata: { ...updated.metadata, original_image_id: originalImageId },
-        })
-      }
-
+      const updated = await personasApi.uploadAvatar(id, croppedFile, originalFile)
       updatePersonaInStore(id, updated)
       return updated
     },
@@ -262,8 +248,30 @@ export function usePersonaBrowser() {
         }
       }
       updatePersonaInStore(id, updated)
+
+      // Promote the new default into the active slot when nothing else is
+      // claiming it: no active persona, or no character/tag binding is
+      // already overriding the current chat. If a binding exists, leave the
+      // bound persona in place so the user's contextual choice wins.
+      if (newDefault && activePersonaId !== id) {
+        const state = useStore.getState()
+        const character = state.activeCharacterId
+          ? state.characters.find((c) => c.id === state.activeCharacterId)
+          : null
+        const resolved = resolveAutoPersonaBinding({
+          characterId: state.activeCharacterId,
+          characterTags: character?.tags ?? [],
+          personas: state.personas,
+          characterPersonaBindings: state.characterPersonaBindings,
+          personaTagBindings: state.personaTagBindings,
+        })
+        if (!resolved.personaId) {
+          setActivePersona(id)
+          toast.info(t('switchedToPersona', { name: personaToastName(updated) }))
+        }
+      }
     },
-    [personas, updatePersonaInStore]
+    [personas, updatePersonaInStore, activePersonaId, setActivePersona, t]
   )
 
   const setLorebook = useCallback(
@@ -282,15 +290,15 @@ export function usePersonaBrowser() {
       const deactivating = activePersonaId === id
       setActivePersona(deactivating ? null : id)
       if (deactivating) {
-        toast.info('Persona deactivated')
+        toast.info(t('personaDeactivated'))
       } else {
         const persona = personas.find((p) => p.id === id)
         if (persona) {
-          toast.info(`Switched to persona: ${persona.name}`)
+          toast.info(t('switchedToPersona', { name: personaToastName(persona) }))
         }
       }
     },
-    [activePersonaId, setActivePersona, personas]
+    [activePersonaId, setActivePersona, personas, t]
   )
 
   const refresh = useCallback(async () => {

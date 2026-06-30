@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import styles from './AccentPicker.module.css'
 import clsx from 'clsx'
 
@@ -12,6 +13,7 @@ interface AccentPickerProps {
 const SWATCHES = [0, 30, 60, 120, 152, 200, 220, 263, 290, 340]
 
 export default function AccentPicker({ hue, saturation, luminance, onChange }: AccentPickerProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'themePanel.accent' })
   const [customOpen, setCustomOpen] = useState(false)
   const [localHue, setLocalHue] = useState(hue)
   const [localSat, setLocalSat] = useState(saturation)
@@ -99,14 +101,14 @@ export default function AccentPicker({ hue, saturation, luminance, onChange }: A
           className={clsx(styles.customBtn, (customOpen || isCustom) && styles.customBtnActive)}
           onClick={() => setCustomOpen(!customOpen)}
         >
-          Custom
+          {t('custom')}
         </button>
       </div>
 
       {(customOpen || isCustom) && (
         <div className={styles.sliders}>
           <label className={styles.sliderRow}>
-            <span className={styles.sliderLabel}>Hue</span>
+            <span className={styles.sliderLabel}>{t('hue')}</span>
             <input
               type="range"
               min={0}
@@ -118,7 +120,7 @@ export default function AccentPicker({ hue, saturation, luminance, onChange }: A
             <span className={styles.sliderValue}>{localHue}</span>
           </label>
           <label className={styles.sliderRow}>
-            <span className={styles.sliderLabel}>Saturation</span>
+            <span className={styles.sliderLabel}>{t('saturation')}</span>
             <input
               type="range"
               min={10}
@@ -130,7 +132,7 @@ export default function AccentPicker({ hue, saturation, luminance, onChange }: A
             <span className={styles.sliderValue}>{localSat}%</span>
           </label>
           <label className={styles.sliderRow}>
-            <span className={styles.sliderLabel}>Luminance</span>
+            <span className={styles.sliderLabel}>{t('luminance')}</span>
             <input
               type="range"
               min={30}

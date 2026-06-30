@@ -8,8 +8,9 @@
  * Resolution order during prompt assembly:
  *   1. Chat binding   (presetProfile:chat:{chatId})
  *   2. Character binding (presetProfile:character:{characterId})
- *   3. Default snapshot   (presetProfileDefaults:{presetId})
- *   4. Raw preset block states (no override)
+ *   3. Connection binding (presetProfile:connection:{connectionId})
+ *   4. Default snapshot   (presetProfileDefaults:{presetId})
+ *   5. Raw preset block states (no override)
  */
 export interface PresetProfileBinding {
   /** Which preset this snapshot was taken from */
@@ -32,5 +33,5 @@ export interface ResolvedPresetProfile {
   /** The binding that was applied, or null if none matched */
   binding: PresetProfileBinding | null;
   /** Where the binding came from */
-  source: "chat" | "character" | "defaults" | "none";
+  source: "chat" | "character" | "connection" | "defaults" | "none";
 }

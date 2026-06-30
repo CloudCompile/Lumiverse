@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Plus, FileUp, Link, UserPlus, Tags } from 'lucide-react'
 import styles from './ImportMenu.module.css'
 
@@ -21,26 +22,32 @@ export default function ImportMenu({
   importLoading,
   tagLibraryImporting = false,
 }: ImportMenuProps) {
+  const { t } = useTranslation('panels')
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const tagLibraryInputRef = useRef<HTMLInputElement>(null)
 
-  // Close on outside click
+  // Close on outside click — pointerdown + guard required on Android
   useEffect(() => {
     if (!open) return
-    const handler = (e: MouseEvent) => {
+    const openedAt = Date.now()
+    const handler = (e: PointerEvent) => {
+      if (e.timeStamp < openedAt + 100) return
       if (ref.current && !ref.current.contains(e.target as Node)) {
         setOpen(false)
       }
     }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    document.addEventListener('pointerdown', handler)
+    return () => document.removeEventListener('pointerdown', handler)
   }, [open])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
     if (files.length > 0) {
+      // Ask the mobile layout recovery shim to re-sync the viewport after the
+      // system file picker closes, before the modal opens.
+      window.dispatchEvent(new CustomEvent('lumiverse:recover-mobile-layout'))
       onImportFile(files)
     }
     setOpen(false)
@@ -63,7 +70,7 @@ export default function ImportMenu({
         type="button"
         className={styles.trigger}
         onClick={() => setOpen(!open)}
-        title="Add character"
+        title={t('characterBrowser.addCharacter')}
         disabled={importLoading || tagLibraryImporting}
       >
         <Plus size={14} />
@@ -79,7 +86,7 @@ export default function ImportMenu({
             }}
           >
             <UserPlus size={14} />
-            <span>Create New</span>
+            <span>{t('characterBrowser.createNew')}</span>
           </button>
           <button
             type="button"
@@ -88,7 +95,7 @@ export default function ImportMenu({
             disabled={tagLibraryImporting}
           >
             <FileUp size={14} />
-            <span>Import File</span>
+            <span>{t('characterBrowser.importFile')}</span>
           </button>
           <button
             type="button"
@@ -97,7 +104,7 @@ export default function ImportMenu({
             disabled={tagLibraryImporting}
           >
             <Tags size={14} />
-            <span>{tagLibraryImporting ? 'Importing Tags...' : 'Import TagLibrary JSON'}</span>
+            <span>{tagLibraryImporting ? t('characterBrowser.importingTags') : t('characterBrowser.importTagLibrary')}</span>
           </button>
           <button
             type="button"
@@ -108,7 +115,7 @@ export default function ImportMenu({
             }}
           >
             <Link size={14} />
-            <span>Import URL</span>
+            <span>{t('characterBrowser.importUrl')}</span>
           </button>
         </div>
       )}

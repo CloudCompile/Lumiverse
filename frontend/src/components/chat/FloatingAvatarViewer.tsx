@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { useStore } from '@/store'
@@ -18,6 +19,7 @@ const getViewportMax = () => ({
 })
 
 export default function FloatingAvatarViewer() {
+  const { t } = useTranslation('chat')
   const floatingAvatar = useStore((s) => s.floatingAvatar)
   const updateFloatingAvatar = useStore((s) => s.updateFloatingAvatar)
   const closeFloatingAvatar = useStore((s) => s.closeFloatingAvatar)
@@ -232,7 +234,7 @@ export default function FloatingAvatarViewer() {
         onPointerUp={handlePointerUp}
       >
         <span className={styles.handleName}>{floatingAvatar.displayName}</span>
-        <button type="button" className={styles.handleBtn} onClick={(e) => { e.stopPropagation(); closeFloatingAvatar() }}>
+        <button type="button" className={styles.handleBtn} onClick={(e) => { e.stopPropagation(); closeFloatingAvatar() }} aria-label={t('floatingAvatar.close')}>
           <X size={12} />
         </button>
       </div>

@@ -18,10 +18,11 @@ interface DetectExpressionInput {
   labels: string[];
   recentMessages: LlmMessage[];
   connectionId?: string;
+  modelOverride?: string;
 }
 
 /**
- * Lightweight sidecar call to detect the appropriate character expression
+ * Lightweight sidecar call to detect the appropriate character sprite state
  * from the most recent messages. Returns the matched label or null.
  */
 export async function detectExpression(input: DetectExpressionInput, generateFn: RawGenerateFn): Promise<string | null> {
@@ -32,30 +33,37 @@ export async function detectExpression(input: DetectExpressionInput, generateFn:
   const sidecar = getSidecarSettings(userId);
 
   let connectionId = input.connectionId || sidecar.connectionProfileId;
-  let model: string | undefined = sidecar.model || undefined;
+  let model: string | undefined = input.modelOverride || sidecar.model || undefined;
   let temperature = sidecar.temperature ?? 0.3;
   let maxTokens = Math.min(sidecar.maxTokens ?? 50, 100);
 
   if (!connectionId) {
-    const defaultConn = connectionsSvc.getDefaultConnection(userId);
+    const defaultConn = connectionsSvc.resolveConnection(userId);
     if (!defaultConn) return null;
     connectionId = defaultConn.id;
     model = model || defaultConn.model || undefined;
   }
 
-  const conn = connectionsSvc.getConnection(userId, connectionId);
+  const conn = connectionsSvc.resolveConnection(userId, connectionId);
   if (!conn) return null;
+  connectionId = conn.id;
 
-  const systemPrompt = `You are a character expression analyst. Based on the recent conversation, determine which facial expression best represents the character's current emotional state.
+  const systemPrompt = `Select a character sprite image. Read the LAST assistant message and choose the single available label that best matches the character's visible state in that moment.
+
+Rules:
+- Base your choice ONLY on the last assistant message, not the overall conversation.
+- Treat labels as full sprite states, not just facial emotions. Outfit, pose, action, body position, and facial expression can all matter.
+- Prefer the most specific matching label. Only choose a generic "neutral" or "default" state if no specific action/pose/expression label fits.
+- Look for cues in dialogue tone, actions, body language, and narration.
 
 Available expressions: ${labels.join(", ")}
 
-Respond with ONLY one of the listed expression labels, exactly as written. Nothing else.`;
+Reply with ONLY one label from the list above, exactly as written.`;
 
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },
     ...recentMessages.slice(-5),
-    { role: "user", content: "Based on the conversation above, which expression label best matches the character's current emotional state? Respond with only the label." },
+    { role: "user", content: "Which expression matches the character in the last message?" },
   ];
 
   const response = await generateFn(userId, {
@@ -69,27 +77,73 @@ Respond with ONLY one of the listed expression labels, exactly as written. Nothi
     },
   });
 
-  const raw = (response.content || "").trim().toLowerCase();
-  if (!raw) return null;
+  return resolveDetectedExpressionLabel(response.content || "", labels);
+}
 
-  // Exact match first
-  const exactMatch = labels.find((l) => l.toLowerCase() === raw);
+function cleanDetectionResponse(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```(?:\w+)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim()
+    .replace(/^[`'"“”‘’]+|[`'"“”‘’]+$/g, "")
+    .trim();
+}
+
+function normalizeExpressionLabel(value: string): string {
+  return cleanDetectionResponse(value)
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_");
+}
+
+function mostSpecificLabel(labels: string[]): string | null {
+  return labels
+    .slice()
+    .sort((a, b) => b.length - a.length || a.localeCompare(b))[0] ?? null;
+}
+
+export function resolveDetectedExpressionLabel(rawResponse: string, labels: string[]): string | null {
+  const cleaned = cleanDetectionResponse(rawResponse);
+  if (!cleaned) return null;
+
+  const rawLower = cleaned.toLowerCase();
+
+  // Exact match first.
+  const exactMatch = labels.find((l) => l.toLowerCase() === rawLower);
   if (exactMatch) return exactMatch;
 
-  // Fuzzy: check if the response contains a label
-  const containsMatch = labels.find((l) => raw.includes(l.toLowerCase()));
+  // Normalized exact match handles quotes, code fences, spaces, hyphens, and file extensions.
+  const normalizedRaw = normalizeExpressionLabel(cleaned);
+  const normalizedExact = labels.find((l) => normalizeExpressionLabel(l) === normalizedRaw);
+  if (normalizedExact) return normalizedExact;
+
+  // Fuzzy response contains label: prefer the most specific matching label, not insertion order.
+  const containsMatches = labels.filter((l) => rawLower.includes(l.toLowerCase()));
+  const containsMatch = mostSpecificLabel(containsMatches);
   if (containsMatch) return containsMatch;
 
-  // Reverse fuzzy: check if any label contains the response
-  const reverseMatch = labels.find((l) => l.toLowerCase().includes(raw));
+  const normalizedContainsMatches = labels.filter((l) => normalizedRaw.includes(normalizeExpressionLabel(l)));
+  const normalizedContainsMatch = mostSpecificLabel(normalizedContainsMatches);
+  if (normalizedContainsMatch) return normalizedContainsMatch;
+
+  // Reverse fuzzy handles partial sidecar answers like "name_apron_action".
+  // Prefer longer labels so outfit-only partials do not always collapse to the first neutral image.
+  const reverseMatches = labels.filter((l) => l.toLowerCase().includes(rawLower));
+  const reverseMatch = mostSpecificLabel(reverseMatches);
   if (reverseMatch) return reverseMatch;
 
-  return null;
+  const normalizedReverseMatches = labels.filter((l) => normalizeExpressionLabel(l).includes(normalizedRaw));
+  return mostSpecificLabel(normalizedReverseMatches);
 }
 
 export interface ExpressionDetectionSettings {
   mode: "auto" | "council" | "off";
   contextWindow: number;
+  connectionProfileId?: string;
+  model?: string;
 }
 
 export function getExpressionDetectionSettings(userId: string): ExpressionDetectionSettings {
@@ -99,6 +153,8 @@ export function getExpressionDetectionSettings(userId: string): ExpressionDetect
   return {
     mode: val.mode ?? "auto",
     contextWindow: val.contextWindow ?? 5,
+    connectionProfileId: val.connectionProfileId,
+    model: val.model,
   };
 }
 
@@ -113,6 +169,7 @@ interface DetectMultiCharExpressionInput {
   groups: ExpressionGroups;
   recentMessages: LlmMessage[];
   connectionId?: string;
+  modelOverride?: string;
 }
 
 export interface MultiCharExpressionResult {
@@ -157,7 +214,7 @@ export async function detectMultiCharacterExpression(
   // LLM fallback when heuristic is inconclusive (no names found in text)
   if (!targetCharacter) {
     targetCharacter = await identifyCharacterLLM(
-      userId, characterNames, recentMessages, generateFn, input.connectionId,
+      userId, characterNames, recentMessages, generateFn, input.connectionId, input.modelOverride,
     );
   }
 
@@ -217,21 +274,23 @@ async function identifyCharacterLLM(
   recentMessages: LlmMessage[],
   generateFn: RawGenerateFn,
   connectionIdOverride?: string,
+  modelOverride?: string,
 ): Promise<string | null> {
   const sidecar = getSidecarSettings(userId);
 
   let connectionId = connectionIdOverride || sidecar.connectionProfileId;
-  let model: string | undefined = sidecar.model || undefined;
+  let model: string | undefined = modelOverride || sidecar.model || undefined;
 
   if (!connectionId) {
-    const defaultConn = connectionsSvc.getDefaultConnection(userId);
+    const defaultConn = connectionsSvc.resolveConnection(userId);
     if (!defaultConn) return null;
     connectionId = defaultConn.id;
     model = model || defaultConn.model || undefined;
   }
 
-  const conn = connectionsSvc.getConnection(userId, connectionId);
+  const conn = connectionsSvc.resolveConnection(userId, connectionId);
   if (!conn) return null;
+  connectionId = conn.id;
 
   const systemPrompt = `You are analyzing a roleplay conversation. Identify which character is the primary focus of the most recent response (the one speaking, acting, or being described).
 

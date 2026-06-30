@@ -127,12 +127,53 @@ app.delete("/chat/:chatId", (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Connection profile bindings
+// ---------------------------------------------------------------------------
+
+app.get("/connection/:connectionId", (c) => {
+  const userId = c.get("userId");
+  const binding = svc.getConnectionBinding(userId, c.req.param("connectionId"));
+  if (!binding) return c.json({ error: "No binding for this connection" }, 404);
+  return c.json(binding);
+});
+
+app.put("/connection/:connectionId", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+  if (!body.preset_id || !body.block_states) {
+    return c.json({ error: "preset_id and block_states are required" }, 400);
+  }
+  try {
+    const binding = svc.setConnectionBinding(
+      userId,
+      c.req.param("connectionId"),
+      body.preset_id,
+      body.block_states
+    );
+    return c.json(binding);
+  } catch (e: any) {
+    if (e.message === "Connection not found") return c.json({ error: e.message }, 404);
+    if (e.message === "Preset not found") return c.json({ error: e.message }, 404);
+    throw e;
+  }
+});
+
+app.delete("/connection/:connectionId", (c) => {
+  const userId = c.get("userId");
+  if (!svc.deleteConnectionBinding(userId, c.req.param("connectionId"))) {
+    return c.json({ error: "No binding for this connection" }, 404);
+  }
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
 // Resolution — resolve the effective binding for a chat context
 // ---------------------------------------------------------------------------
 
 app.get("/resolve/:chatId", (c) => {
   const userId = c.get("userId");
   const presetId = c.req.query("preset_id");
+  const connectionId = c.req.query("connection_id") || null;
 
   const chatId = c.req.param("chatId");
 
@@ -141,6 +182,7 @@ app.get("/resolve/:chatId", (c) => {
 
   const resolved = svc.resolveProfile(userId, presetId ?? null, chatId, chat.character_id, {
     isGroup: chat.metadata?.group === true,
+    connectionId,
   });
   return c.json(resolved);
 });

@@ -1,8 +1,10 @@
 import type { StateCreator } from 'zustand'
-import type { SettingsSlice, StartupSettings, ThemeConfig, ReasoningSettings } from '@/types/store'
+import type { AppStore, SettingsSlice, StartupSettings, ThemeConfig, ReasoningSettings } from '@/types/store'
 import { settingsApi } from '@/api/settings'
+import { themeAssetsApi } from '@/api/theme-assets'
 import { BASE_URL } from '@/api/client'
 import { generateUUID } from '@/lib/uuid'
+import { DEFAULT_THEME, normalizeTheme } from '@/theme/presets'
 
 /** Default reasoning settings — used as initial state and for restore-on-unbind. */
 export const REASONING_DEFAULTS: ReasoningSettings = {
@@ -26,6 +28,8 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'bubbleUserAlign',
   'bubbleDisableHover',
   'bubbleHideAvatarBg',
+  'bubbleUseFullAvatar',
+  'bubbleOpacity',
   'chatSheldEnterToSend',
   'saveDraftInput',
   'chatWidthMode',
@@ -53,6 +57,7 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'sortField',
   'sortDirection',
   'filterTab',
+  'favoritesBarCollapsed',
   // Persona browser preferences
   'personaViewMode',
   'personaSortField',
@@ -78,18 +83,21 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   // World info activation settings (budget, scan depth, recursion)
   'worldInfoSettings',
   'worldBookEntryViewPrefs',
+  'worldBookListSortDir',
   // Image generation settings
   'imageGeneration',
   // Summarization settings
   'summarization',
   // Wallpaper settings
   'wallpaper',
+  'useCharacterBackground',
   // Reasoning / CoT settings
   'reasoningSettings',
   'promptBias',
   'regenFeedback',
   'swipeGesturesEnabled',
   'showMessageTokenCount',
+  'messageContextMenuEnabled',
   'guidedGenerations',
   'quickReplySets',
   'toastPosition',
@@ -104,11 +112,14 @@ const DATA_KEYS: ReadonlySet<string> = new Set([
   'pushNotificationPreferences',
   'customCSS',
   'componentOverrides',
+  // Saved theme library (My Themes)
+  'savedThemes',
   'chatHeadsEnabled',
   'chatHeadsSize',
   'chatHeadsDirection',
   'chatHeadsOpacity',
   'chatHeadsCompletionSoundEnabled',
+  'chatHeadsCustomCompletionSound',
   'spindleSettings',
   'voiceSettings',
 ])
@@ -243,7 +254,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', flushSettings)
 }
 
-export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
+export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> = (set, get) => ({
   settingsLoaded: false,
   landingPageChatsDisplayed: 12,
   landingPageLayoutMode: 'cards',
@@ -254,6 +265,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   bubbleUserAlign: 'right',
   bubbleDisableHover: false,
   bubbleHideAvatarBg: false,
+  bubbleUseFullAvatar: false,
+  bubbleOpacity: 1,
   chatSheldEnterToSend: true,
   saveDraftInput: false,
   chatWidthMode: 'full',
@@ -269,8 +282,9 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     tabSize: 'large',
     panelWidthMode: 'default',
     customPanelWidth: 35,
-    showTabLabels: false,
+    showTabLabels: true,
     hiddenTabIds: [],
+    tabOrder: [],
   },
   oocEnabled: true,
   lumiaOOCStyle: 'social',
@@ -296,6 +310,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   },
   swipeGesturesEnabled: true,
   showMessageTokenCount: true,
+  messageContextMenuEnabled: true,
+  favoritesBarCollapsed: false,
   globalWorldBooks: [],
   worldInfoSettings: {
     globalScanDepth: null,
@@ -305,6 +321,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     minPriority: 0,
   },
   worldBookEntryViewPrefs: {},
+  worldBookListSortDir: 'asc',
   promptBias: '',
   guidedGenerations: [],
   quickReplySets: [],
@@ -313,7 +330,9 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     global: null,
     opacity: 0.3,
     fit: 'cover',
+    blur: 0,
   },
+  useCharacterBackground: false,
 
   thumbnailSettings: { smallSize: 300, largeSize: 700 },
   pushNotificationPreferences: { enabled: true, events: { generation_ended: true, generation_error: false } },
@@ -322,8 +341,10 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   chatHeadsDirection: 'column' as const,
   chatHeadsOpacity: 1,
   chatHeadsCompletionSoundEnabled: true,
+  chatHeadsCustomCompletionSound: null,
   customCSS: { css: '', enabled: false, revision: 0, bundleId: null },
   componentOverrides: {},
+  savedThemes: [],
   spindleSettings: {
     interceptorTimeoutMs: 10_000,
     dockPanelDesktopSide: 'right',
@@ -333,6 +354,8 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     sttLanguage: 'en-US',
     sttContinuous: false,
     sttInterimResults: true,
+    sttAutoSubmitOnSilence: false,
+    sttShowMicButton: true,
     sttConnectionId: null,
     ttsEnabled: false,
     ttsConnectionId: null,
@@ -344,6 +367,7 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       quoted: 'speech' as const,
       undecorated: 'narration' as const,
     },
+    narrationVoice: null,
   },
 
   hydrateStartupSettings: (settings: StartupSettings) => {
@@ -355,7 +379,20 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     if (settings.sortDirection) patch.sortDirection = settings.sortDirection
     if (settings.viewMode) patch.viewMode = settings.viewMode
     if (typeof settings.charactersPerPage === 'number') patch.charactersPerPage = settings.charactersPerPage
-    if ('theme' in settings) patch.theme = settings.theme
+    if (typeof settings.favoritesBarCollapsed === 'boolean') patch.favoritesBarCollapsed = settings.favoritesBarCollapsed
+    if ('theme' in settings) patch.theme = normalizeTheme(settings.theme)
+    if (typeof settings.landingPageChatsDisplayed === 'number' && Number.isFinite(settings.landingPageChatsDisplayed)) {
+      patch.landingPageChatsDisplayed = settings.landingPageChatsDisplayed
+    }
+    if (settings.landingPageLayoutMode === 'cards' || settings.landingPageLayoutMode === 'compact') {
+      patch.landingPageLayoutMode = settings.landingPageLayoutMode
+    }
+    if (settings.wallpaper && typeof settings.wallpaper === 'object') {
+      patch.wallpaper = { ...settings.wallpaper }
+    }
+    if (settings.drawerSettings && typeof settings.drawerSettings === 'object') {
+      patch.drawerSettings = { ...get().drawerSettings, ...settings.drawerSettings }
+    }
 
     set(patch as any)
   },
@@ -363,6 +400,9 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   setVoiceSettings: (partial) =>
     set((state) => {
       const voiceSettings = { ...state.voiceSettings, ...partial }
+      if (partial.sttProvider === 'webspeech') {
+        voiceSettings.sttConnectionId = null
+      }
       if (partial.speechDetectionRules) {
         voiceSettings.speechDetectionRules = { ...state.voiceSettings.speechDetectionRules, ...partial.speechDetectionRules }
       }
@@ -385,8 +425,11 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   },
 
   setTheme: (theme) => {
-    set({ theme })
-    persistKey('theme', theme)
+    // Normalize every write so a partial/legacy theme (e.g. from an applied
+    // saved-theme snapshot) can never land in the store without an accent.
+    const next = theme == null ? null : normalizeTheme(theme)
+    set({ theme: next })
+    persistKey('theme', next)
   },
 
   setCharacterThemeOverlay: (characterThemeOverlay) => {
@@ -462,10 +505,12 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
   applyThemePack: (pack) => {
     const patch: Record<string, any> = {}
 
-    // Layer 1: Theme config
-    if (pack.theme) {
-      patch.theme = pack.theme
-      persistKey('theme', pack.theme)
+    // Layer 1: Theme config — normalize so an imported pack whose theme lost
+    // its accent can't crash the app on the next load.
+    const packTheme = normalizeTheme(pack.theme)
+    if (packTheme) {
+      patch.theme = packTheme
+      persistKey('theme', packTheme)
     }
 
     // Layer 2: Global CSS
@@ -487,6 +532,76 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
     persistKey('componentOverrides', componentOverrides)
 
     set(patch as any)
+  },
+
+  addSavedTheme: (input) => {
+    const entry = {
+      ...input,
+      id: generateUUID(),
+      createdAt: Math.floor(Date.now() / 1000),
+    } as import('@/types/store').SavedTheme
+    const savedThemes = [...get().savedThemes, entry]
+    set({ savedThemes })
+    persistKey('savedThemes', savedThemes)
+    return entry
+  },
+
+  renameSavedTheme: (id, name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const savedThemes = get().savedThemes.map((entry) =>
+      entry.id === id ? { ...entry, name: trimmed.slice(0, 200) } : entry
+    )
+    set({ savedThemes })
+    persistKey('savedThemes', savedThemes)
+  },
+
+  deleteSavedTheme: async (id) => {
+    const entry = get().savedThemes.find((e) => e.id === id)
+    if (!entry) return
+    const savedThemes = get().savedThemes.filter((e) => e.id !== id)
+    set({ savedThemes })
+    persistKey('savedThemes', savedThemes)
+    // Clean up bundle assets for pack entries, unless the bundle is still the
+    // active customCSS bundle (i.e. the user is currently using it).
+    if (entry.kind === 'pack') {
+      const activeBundleId = get().customCSS.bundleId
+      const packBundleId = entry.pack.bundleId
+      if (packBundleId && packBundleId !== activeBundleId) {
+        try {
+          const assets = await themeAssetsApi.list(packBundleId)
+          await Promise.all(assets.map((a) => themeAssetsApi.delete(a.id).catch(() => {})))
+        } catch {
+          // Swallow — orphaned assets are non-fatal; the user can prune manually.
+        }
+      }
+    }
+  },
+
+  applySavedTheme: (id) => {
+    const entry = get().savedThemes.find((e) => e.id === id)
+    if (!entry) return
+    if (entry.kind === 'config') {
+      get().setTheme(entry.theme)
+    } else {
+      get().applyThemePack(entry.pack)
+    }
+  },
+
+  updateSavedTheme: (id) => {
+    const currentTheme = get().theme ?? DEFAULT_THEME
+    const savedThemes = get().savedThemes.map((entry) => {
+      if (entry.id !== id) return entry
+      if (entry.kind === 'config') {
+        return { ...entry, theme: currentTheme } as typeof entry
+      }
+      return {
+        ...entry,
+        pack: { ...entry.pack, theme: currentTheme },
+      } as typeof entry
+    })
+    set({ savedThemes })
+    persistKey('savedThemes', savedThemes)
   },
 
   loadSettings: async () => {
@@ -527,6 +642,12 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       if (patch.theme && 'baseColors' in patch.theme && !('accent' in patch.theme)) {
         patch.theme = null
       }
+      // Backfill any surviving non-null theme against DEFAULT_THEME so a missing
+      // `accent` (partial write, imported pack, hand-edited value) can't throw in
+      // generateThemeVariables / ThemePanel and white-screen the app on load.
+      if (patch.theme) {
+        patch.theme = normalizeTheme(patch.theme)
+      }
       if (patch.filterTab === 'all') {
         patch.filterTab = 'characters'
         migratedCharacterFilterTab = true
@@ -534,6 +655,19 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set, get) => ({
       if (pendingKeys?.filterTab === 'all') {
         pendingKeys.filterTab = 'characters'
         migratedCharacterFilterTab = true
+      }
+
+      if (patch.imageGeneration) {
+        const profiles = get().imageGenProfiles
+        const savedConnectionId = patch.imageGeneration.activeImageGenConnectionId ?? null
+        const activeImageGenConnectionId = savedConnectionId && profiles.some((profile) => profile.id === savedConnectionId)
+          ? savedConnectionId
+          : profiles.find((profile) => profile.is_default)?.id ?? null
+        patch.activeImageGenConnectionId = activeImageGenConnectionId
+        if (activeImageGenConnectionId !== savedConnectionId) {
+          patch.imageGeneration = { ...patch.imageGeneration, activeImageGenConnectionId }
+          settingsApi.put('imageGeneration', patch.imageGeneration).catch(() => {})
+        }
       }
       if (Object.keys(patch).length > 0) {
         set(patch as any)

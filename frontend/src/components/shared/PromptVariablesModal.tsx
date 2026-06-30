@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, RotateCcw, Sliders } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import NumberStepper from '@/components/shared/NumberStepper'
+import SearchableSelect, { type SearchableSelectOption } from '@/components/shared/SearchableSelect'
+import { Toggle } from '@/components/shared/Toggle'
 import type { PromptBlock, PromptVariableDef, PromptVariableValue, PromptVariableValues } from '@/lib/loom/types'
 import css from './PromptVariablesModal.module.css'
 
@@ -29,10 +32,34 @@ function collectEligibleBlocks(blocks: PromptBlock[]): EligibleBlock[] {
 }
 
 function resolveInitialValue(def: PromptVariableDef, stored: PromptVariableValue | undefined): PromptVariableValue {
-  if (stored === undefined || stored === null) return def.defaultValue
+  if (stored === undefined || stored === null) {
+    // Clone arrays so a defaultValue-derived selection isn't shared across blocks.
+    if (def.type === 'multiselect') return Array.isArray(def.defaultValue) ? def.defaultValue.slice() : []
+    return def.defaultValue
+  }
   if (def.type === 'number' || def.type === 'slider') {
     const n = Number(stored)
     return Number.isFinite(n) ? n : (def.defaultValue as number)
+  }
+  if (def.type === 'switch') {
+    if (typeof stored === 'number') return stored === 1 ? 1 : 0
+    if (typeof stored === 'boolean') return stored ? 1 : 0
+    const s = String(stored).trim().toLowerCase()
+    return s === '1' || s === 'true' || s === 'on' || s === 'yes' ? 1 : 0
+  }
+  if (def.type === 'select') {
+    const validIds = new Set(def.options.map((o) => o.id))
+    const candidate = String(stored)
+    return validIds.has(candidate) ? candidate : def.defaultValue
+  }
+  if (def.type === 'multiselect') {
+    const validIds = new Set(def.options.map((o) => o.id))
+    const list = Array.isArray(stored)
+      ? stored.map(String)
+      : typeof stored === 'string' && stored.length
+      ? stored.split(',').map((s) => s.trim()).filter(Boolean)
+      : []
+    return list.filter((id) => validIds.has(id))
   }
   return String(stored)
 }
@@ -52,6 +79,8 @@ export function PromptVariablesModal({
   onSave,
   onClose,
 }: PromptVariablesModalProps) {
+  const { t } = useTranslation('shared', { keyPrefix: 'promptVariables' })
+  const { t: tc } = useTranslation('common')
   const eligible = useMemo(() => collectEligibleBlocks(blocks), [blocks])
 
   // Local draft keyed by blockId → varName. Seeded from stored values on open.
@@ -106,6 +135,17 @@ export function PromptVariablesModal({
         if (def.type === 'number' || def.type === 'slider') {
           const n = Number(raw)
           bucket[def.name] = clampNumeric(def, Number.isFinite(n) ? n : (def.defaultValue as number))
+        } else if (def.type === 'switch') {
+          const n = typeof raw === 'number' ? raw : Number(raw)
+          bucket[def.name] = n === 1 ? 1 : 0
+        } else if (def.type === 'multiselect') {
+          const validIds = new Set(def.options.map((o) => o.id))
+          const list = Array.isArray(raw) ? raw : [raw]
+          bucket[def.name] = list.map(String).filter((id) => validIds.has(id))
+        } else if (def.type === 'select') {
+          const validIds = new Set(def.options.map((o) => o.id))
+          const candidate = String(raw)
+          bucket[def.name] = validIds.has(candidate) ? candidate : def.defaultValue
         } else {
           bucket[def.name] = String(raw)
         }
@@ -143,9 +183,9 @@ export function PromptVariablesModal({
       <div className={css.header}>
         <Sliders size={18} />
         <div>
-          <h3 className={css.title}>Configure Prompt Variables</h3>
+          <h3 className={css.title}>{t('title')}</h3>
           <p className={css.subtitle}>
-            Values set here are substituted into preset blocks via <code>{'{{var::name}}'}</code>.
+            {t('subtitle', { token: t('tokenExample') })}
           </p>
         </div>
       </div>
@@ -153,7 +193,7 @@ export function PromptVariablesModal({
       <div className={css.body}>
         {eligible.length === 0 ? (
           <div className={css.empty}>
-            No enabled blocks define any prompt variables. Add some in the block editor to configure them here.
+            {t('empty')}
           </div>
         ) : (
           eligible.map(({ block, variables }) => {
@@ -162,9 +202,9 @@ export function PromptVariablesModal({
               <div key={block.id} className={css.blockSection}>
                 <div className={css.blockHeader} onClick={() => toggleBlockCollapsed(block.id)}>
                   {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                  <span className={css.blockHeaderLabel}>{block.name || 'Untitled block'}</span>
+                  <span className={css.blockHeaderLabel}>{block.name || t('untitledBlock')}</span>
                   <span className={css.blockHeaderCount}>
-                    {variables.length} variable{variables.length === 1 ? '' : 's'}
+                    {t('variableCount', { count: variables.length })}
                   </span>
                 </div>
                 {!isCollapsed && (
@@ -193,7 +233,7 @@ export function PromptVariablesModal({
             className={`${css.btn} ${css.btnGhost} ${css.footerLeft}`}
             onClick={resetAll}
           >
-            Reset all
+            {t('resetAll')}
           </button>
         )}
         <button
@@ -201,7 +241,7 @@ export function PromptVariablesModal({
           className={`${css.btn} ${css.btnCancel}`}
           onClick={onClose}
         >
-          Cancel
+          {tc('actions.cancel')}
         </button>
         <button
           type="button"
@@ -209,7 +249,7 @@ export function PromptVariablesModal({
           onClick={handleSave}
           disabled={saving || eligible.length === 0}
         >
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? t('saving') : tc('actions.save')}
         </button>
       </div>
     </ModalShell>
@@ -224,6 +264,7 @@ interface VariableControlProps {
 }
 
 function VariableControl({ def, value, onChange, onReset }: VariableControlProps) {
+  const { t } = useTranslation('shared', { keyPrefix: 'promptVariables' })
   return (
     <div className={css.variableRow}>
       <div className={css.variableLabel}>
@@ -233,8 +274,8 @@ function VariableControl({ def, value, onChange, onReset }: VariableControlProps
           type="button"
           className={css.resetBtn}
           onClick={onReset}
-          title="Reset to default"
-          aria-label="Reset to default"
+          title={t('resetToDefault')}
+          aria-label={t('resetToDefault')}
         >
           <RotateCcw size={12} />
         </button>
@@ -256,7 +297,7 @@ function renderControl(
         <input
           type="text"
           className={css.textInput}
-          value={String(value ?? '')}
+          value={typeof value === 'string' ? value : String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
         />
       )
@@ -265,7 +306,7 @@ function renderControl(
         <textarea
           className={css.textArea}
           rows={def.rows ?? 4}
-          value={String(value ?? '')}
+          value={typeof value === 'string' ? value : String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
         />
       )
@@ -302,5 +343,68 @@ function renderControl(
         </>
       )
     }
+    case 'select': {
+      if (def.options.length === 0) {
+        return <div className={css.multiselectEmpty}>No options defined for this variable.</div>
+      }
+      const validIds = new Set(def.options.map((o) => o.id))
+      const current = typeof value === 'string' && validIds.has(value) ? value : def.defaultValue
+      const opts: SearchableSelectOption[] = def.options.map((opt) => ({
+        value: opt.id,
+        label: opt.label || opt.id,
+        sublabel: opt.value ? truncateForSublabel(opt.value) : undefined,
+      }))
+      return (
+        <SearchableSelect
+          options={opts}
+          value={current}
+          onChange={(v) => onChange(v)}
+          ariaLabel={def.label || def.name}
+          portal
+        />
+      )
+    }
+    case 'switch': {
+      const on = typeof value === 'number' ? value === 1 : value === '1' || value === 'true'
+      return (
+        <div className={css.switchRow}>
+          <Toggle.Switch checked={on} onChange={(next) => onChange(next ? 1 : 0)} />
+          <span className={css.switchStateLabel}>{on ? 'On' : 'Off'}</span>
+        </div>
+      )
+    }
+    case 'multiselect': {
+      if (def.options.length === 0) {
+        return <div className={css.multiselectEmpty}>No options defined for this variable.</div>
+      }
+      const validIds = new Set(def.options.map((o) => o.id))
+      const selectedIds = Array.isArray(value)
+        ? value.filter((id): id is string => typeof id === 'string' && validIds.has(id))
+        : []
+      const opts: SearchableSelectOption[] = def.options.map((opt) => ({
+        value: opt.id,
+        label: opt.label || opt.id,
+        sublabel: opt.value ? truncateForSublabel(opt.value) : undefined,
+      }))
+      return (
+        <SearchableSelect
+          multi
+          options={opts}
+          value={selectedIds}
+          // Re-sort to option-declaration order so the persisted/joined output is stable.
+          onChange={(next) =>
+            onChange(def.options.filter((o) => next.includes(o.id)).map((o) => o.id))
+          }
+          ariaLabel={def.label || def.name}
+          placeholder="None selected"
+          portal
+        />
+      )
+    }
   }
+}
+
+function truncateForSublabel(value: string): string {
+  const collapsed = value.replace(/\s+/g, ' ').trim()
+  return collapsed.length > 60 ? `${collapsed.slice(0, 57)}…` : collapsed
 }

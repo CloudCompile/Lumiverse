@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { PanelsLeftRight, Timer } from 'lucide-react'
 import { useStore } from '@/store'
 import { toast } from '@/lib/toast'
@@ -14,6 +15,7 @@ function clamp(n: number): number {
 }
 
 export default function SpindleSettings() {
+  const { t } = useTranslation('panels', { keyPrefix: 'spindlePanel.settings' })
   const spindleSettings = useStore((s) => s.spindleSettings)
   const setSetting = useStore((s) => s.setSetting)
   const [draft, setDraft] = useState<string>(String(DEFAULT_SECONDS))
@@ -32,8 +34,8 @@ export default function SpindleSettings() {
       ...spindleSettings,
       interceptorTimeoutMs: parsed * 1000,
     })
-    toast.success(`Extension interceptor timeout set to ${parsed}s`, { title: 'Spindle' })
-  }, [draft, spindleSettings, setSetting])
+    toast.success(t('toastTimeout', { seconds: parsed }), { title: t('brand') })
+  }, [draft, spindleSettings, setSetting, t])
 
   const updateDockSide = useCallback((dockPanelDesktopSide: 'left' | 'right') => {
     if (spindleSettings.dockPanelDesktopSide === dockPanelDesktopSide) return
@@ -41,18 +43,20 @@ export default function SpindleSettings() {
       ...spindleSettings,
       dockPanelDesktopSide,
     })
-    toast.success(`Extension dock panels will open on the ${dockPanelDesktopSide}`, { title: 'Spindle' })
-  }, [spindleSettings, setSetting])
+    toast.success(t('toastDock', { side: t(dockPanelDesktopSide) }), { title: t('brand') })
+  }, [spindleSettings, setSetting, t])
 
   return (
     <div className={styles.card}>
       <div className={styles.headerRow}>
         <span className={styles.label}>
-          <Timer size={12} /> Interceptor timeout
+          <Timer size={12} /> {t('interceptorTimeout')}
         </span>
         <div className={styles.inputGroup}>
           <input
             type="number"
+            name="spindle-interceptor-timeout"
+            aria-label={t('interceptorTimeoutAria')}
             min={MIN_SECONDS}
             max={MAX_SECONDS}
             step={1}
@@ -67,19 +71,16 @@ export default function SpindleSettings() {
               }
             }}
           />
-          <span className={styles.suffix}>seconds</span>
+          <span className={styles.suffix}>{t('seconds')}</span>
         </div>
       </div>
       <p className={styles.hint}>
-        How long to wait for an extension's pre-generation interceptor to finish. Higher values let
-        extensions do heavier retrieval or context assembly before the LLM call at the cost of a
-        longer delay before generation starts. Range {MIN_SECONDS}–{MAX_SECONDS}s (default {DEFAULT_SECONDS}s). Individual
-        extensions can override this via their manifest.
+        {t('interceptorHint', { min: MIN_SECONDS, max: MAX_SECONDS, default: DEFAULT_SECONDS })}
       </p>
 
       <div className={styles.headerRow}>
         <span className={styles.label}>
-          <PanelsLeftRight size={12} /> Dock panel side
+          <PanelsLeftRight size={12} /> {t('dockPanelSide')}
         </span>
         <div className={styles.segmented}>
           <button
@@ -88,7 +89,7 @@ export default function SpindleSettings() {
             data-active={spindleSettings.dockPanelDesktopSide === 'left'}
             onClick={() => updateDockSide('left')}
           >
-            Left
+            {t('left')}
           </button>
           <button
             type="button"
@@ -96,13 +97,12 @@ export default function SpindleSettings() {
             data-active={spindleSettings.dockPanelDesktopSide === 'right'}
             onClick={() => updateDockSide('right')}
           >
-            Right
+            {t('right')}
           </button>
         </div>
       </div>
       <p className={styles.hint}>
-        Side-mounted extension dock panels follow this desktop preference. On mobile, those same dock
-        panels always collapse into a top sheet so they do not compete with the chat input area.
+        {t('dockHint')}
       </p>
     </div>
   )

@@ -14,13 +14,18 @@ import {
   injectReasoningParams,
   collectVectorActivatedWorldInfo,
   mergeActivatedWorldInfoEntries,
+  getSourceMessageId,
   isChatHistoryMessage,
+  shouldPreserveDisplayReasoningDelimiters,
   type VectorActivatedEntry,
 } from "./prompt-assembly.service";
 import * as charactersSvc from "./characters.service";
 import { getEffectiveCharacterName } from "../types/character";
+import { isNoPresetChatMetadata, isTemporaryChatMetadata } from "../types/chat";
 import {
+  describeContentForDisplay,
   getTextContent,
+  type DisplayContentPartSummary,
   type LlmMessage,
   type GenerationParameters,
   type GenerationRequest,
@@ -32,7 +37,14 @@ import {
   type ActivatedWorldInfoEntry,
   type ToolDefinition,
   type ToolCallResult,
+  type LlmThinkingBlock,
 } from "../llm/types";
+import {
+  buildInlineToolContinuation,
+  type InlineCouncilToolResult,
+} from "./inline-tool-continuation";
+import type { Message } from "../types/message";
+import type { ConnectionProfile } from "../types/connection-profile";
 import {
   interceptorPipeline,
   type InterceptorBreakdownEntry,
@@ -40,15 +52,17 @@ import {
 import { contextHandlerChain } from "../spindle/context-handler";
 import {
   executeCouncil,
+  appendCouncilDeliberationHistory,
   collectWorldInfoForCouncil,
   formatDeliberation,
   type CouncilEnrichment,
+  type CouncilExecutionResultWithHistory,
 } from "./council/council-execution.service";
 import { activateWorldInfo } from "./world-info-activation.service";
 import type {
-  CouncilExecutionResult,
   CachedCouncilResult,
   CouncilMember,
+  GenerationReasoningOverrideDTO,
 } from "lumiverse-spindle-types";
 import {
   getCouncilSettings,
@@ -61,9 +75,14 @@ import * as regexScriptsSvc from "./regex-scripts.service";
 import * as pool from "./generation-pool.service";
 import * as summarizePool from "./summarize-pool.service";
 import {
+  getSummarizationPromptDefaults,
+  buildSummarizationPrompt,
+} from "./summarization-prompts.service";
+import {
   detectExpression,
   detectMultiCharacterExpression,
   getExpressionDetectionSettings,
+  resolveDetectedExpressionLabel,
 } from "./expression-detection.service";
 import {
   hasExpressions,
@@ -94,6 +113,7 @@ import {
 } from "./council/tool-runtime";
 import { toolRegistry } from "../spindle/tool-registry";
 import { executeHostCouncilTool } from "./council/host-tools";
+import { applyPromptCaching } from "./caching";
 import {
   applyPersonaAddonStates,
   getChatPersonaAddonStates,
@@ -117,6 +137,9 @@ import {
   assemblePromptInWorker,
   canUsePromptAssemblyWorker,
 } from "./prompt-assembly-worker-client";
+import { isPromptRegexChatOwned } from "../spindle/prompt-regex-ownership";
+import { isRunning as isExtensionRunning } from "../spindle/lifecycle";
+import { clampErrorMessage, describeProviderError, ProviderRequestError } from "../utils/provider-errors";
 
 interface GenerateInput {
   userId: string;
@@ -154,6 +177,11 @@ interface GenerationLifecycle {
   targetMessageId?: string;
   /** For regenerate: index of the blank swipe to fill with generated content */
   targetSwipeIdx?: number;
+  /** Index of the swipe being streamed into, surfaced to clients (GENERATION_STARTED /
+   *  IN_PROGRESS / status) so they can gate the streaming buffer to that swipe and
+   *  let the user navigate other swipes mid-generation. Set for all generation types
+   *  (regenerate = blank swipe, normal = 0, continue = current swipe). */
+  streamingSwipeId?: number;
   /** For sidecar council: pre-created empty message to fill with generated content */
   stagedMessageId?: string;
   /** For continue: append to this message's content */
@@ -205,6 +233,175 @@ function collectTrailingUserMessageIds(userId: string, chatId: string): string[]
   return trailing;
 }
 
+function injectConnectionMetadataFlags(
+  connection: { provider: string; metadata?: Record<string, any> },
+  params: GenerationParameters,
+): void {
+  if (connection.metadata?.use_responses_api) {
+    params.use_responses_api = true;
+  }
+
+  if (
+    connection.provider === "openrouter" &&
+    connection.metadata?.openrouter
+  ) {
+    params._openrouter = connection.metadata.openrouter;
+  }
+}
+
+function omitChatHistoryBreakdownEntries<
+  T extends { type: string },
+>(entries: T[]): T[] {
+  return entries.filter((entry) => entry.type !== "chat_history");
+}
+
+function sumChatHistoryBreakdownTokens(
+  entries: Array<{ type: string; tokens: number }>,
+): number {
+  return entries.reduce(
+    (sum, entry) => sum + (entry.type === "chat_history" ? entry.tokens : 0),
+    0,
+  );
+}
+
+function omitChatHistoryTokenBreakdown(
+  tokenCount: DryRunResult["tokenCount"],
+): DryRunResult["tokenCount"] {
+  if (!tokenCount) return tokenCount;
+  return {
+    ...tokenCount,
+    breakdown: omitChatHistoryBreakdownEntries(tokenCount.breakdown),
+  };
+}
+
+function normalizeReasoningText(reasoning: unknown): string | undefined {
+  return typeof reasoning === "string" && reasoning.trim().length > 0
+    ? reasoning
+    : undefined;
+}
+
+function extractThinkingBlockText(
+  blocks: LlmThinkingBlock[] | undefined,
+): string | undefined {
+  if (!Array.isArray(blocks) || blocks.length === 0) return undefined;
+  const combined = blocks
+    .map((block) =>
+      block.type === "thinking" && typeof block.thinking === "string"
+        ? block.thinking
+        : "",
+    )
+    .filter((text) => text.trim().length > 0)
+    .join("\n");
+  return combined.trim().length > 0 ? combined : undefined;
+}
+
+function extractReasoningDetailsText(
+  details: Record<string, unknown>[] | undefined,
+): string | undefined {
+  if (!Array.isArray(details) || details.length === 0) return undefined;
+  const combined = details
+    .map((detail) => {
+      if (!detail || typeof detail !== "object") return "";
+      if (typeof detail.text === "string") return detail.text;
+      if (typeof detail.summary === "string") return detail.summary;
+      return "";
+    })
+    .filter((text) => text.trim().length > 0)
+    .join("\n");
+  return combined.trim().length > 0 ? combined : undefined;
+}
+
+function resolveDryRunMessageReasoning(
+  message: LlmMessage,
+  sourceMessage?: Message,
+): string | undefined {
+  return (
+    normalizeReasoningText(sourceMessage?.extra?.reasoning) ??
+    normalizeReasoningText(message.reasoning_content) ??
+    extractThinkingBlockText(message.thinking_blocks) ??
+    extractReasoningDetailsText(message.reasoning_details)
+  );
+}
+
+function shouldExtractDisplayReasoningFromContent(message: LlmMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    isChatHistoryMessage(message) &&
+    !shouldPreserveDisplayReasoningDelimiters(message)
+  );
+}
+
+function buildDryRunDisplayMessages(
+  messages: LlmMessage[],
+  sourceMessagesById?: Map<string, Message>,
+  reasoningSettings?: {
+    prefix?: string;
+    suffix?: string;
+    keepInHistory?: number;
+  } | null,
+): DryRunDisplayMessage[] {
+  const delimiters = resolveReasoningDelimiters(reasoningSettings);
+
+  const displayMessages = messages.map((message) => {
+    const described = describeContentForDisplay(message.content);
+    const extractedReasoning = shouldExtractDisplayReasoningFromContent(message)
+      ? extractDelimitedReasoning(described.text, delimiters)
+      : { cleaned: described.text, reasoning: "" };
+    const sourceMessageId = getSourceMessageId(message);
+    const sourceMessage = sourceMessageId
+      ? sourceMessagesById?.get(sourceMessageId)
+      : undefined;
+    const reasoning =
+      normalizeReasoningText(extractedReasoning.reasoning) ??
+      resolveDryRunMessageReasoning(message, sourceMessage);
+
+    const displayMessage: DryRunDisplayMessage = {
+      ...(message as any),
+      content: extractedReasoning.cleaned,
+    };
+    if (described.contentParts.length > 0) {
+      displayMessage.contentParts = described.contentParts;
+    }
+
+    if (
+      reasoning &&
+      extractedReasoning.cleaned.trim() !== reasoning.trim()
+    ) {
+      displayMessage.reasoning = reasoning;
+    }
+
+    return displayMessage;
+  });
+
+  const keepInHistory = reasoningSettings?.keepInHistory ?? -1;
+  if (keepInHistory !== -1) {
+    let keptReasoningMessages = 0;
+    for (let i = displayMessages.length - 1; i >= 0; i--) {
+      if (!isChatHistoryMessage(messages[i]) || messages[i].role !== "assistant") {
+        continue;
+      }
+      if (!displayMessages[i].reasoning) continue;
+      keptReasoningMessages++;
+      if (keptReasoningMessages > keepInHistory) {
+        delete displayMessages[i].reasoning;
+      }
+    }
+  }
+
+  return displayMessages;
+}
+
+export const __test__ = {
+  buildDryRunDisplayMessages,
+  extractReasoningDetailsText,
+  extractThinkingBlockText,
+  injectConnectionMetadataFlags,
+  omitChatHistoryBreakdownEntries,
+  omitChatHistoryTokenBreakdown,
+  resolveDryRunMessageReasoning,
+  sumChatHistoryBreakdownTokens,
+};
+
 export interface RawGenerateInput {
   provider: string;
   model: string;
@@ -217,6 +414,12 @@ export interface RawGenerateInput {
   api_key?: string;
   /** Optional tool/function definitions for inline function calling. */
   tools?: ToolDefinition[];
+  /**
+   * Optional per-request reasoning override. When omitted (or `source: "inherit"`),
+   * the connection's bound reasoning settings are applied, falling back to
+   * the user's global `reasoningSettings`. See `GenerationReasoningOverrideDTO`.
+   */
+  reasoning?: GenerationReasoningOverrideDTO;
 }
 
 export interface QuietGenerateInput {
@@ -233,10 +436,38 @@ export interface QuietGenerateInput {
    * chat-switch. Ignored by `quietGenerate`.
    */
   chat_id?: string;
+  /**
+   * Optional per-request reasoning override. When omitted (or `source: "inherit"`),
+   * the connection's bound reasoning settings are applied, falling back to
+   * the user's global `reasoningSettings`. See `GenerationReasoningOverrideDTO`.
+   */
+  reasoning?: GenerationReasoningOverrideDTO;
+}
+
+/** Input for the /summarize endpoint — backend fetches messages and builds the prompt. */
+export interface SummarizeGenerateInput {
+  /** Chat ID to summarize. */
+  chat_id: string;
+  /** Number of recent messages to include in the prompt. */
+  message_context: number;
+  /** Previously stored summary text (may be empty). */
+  existingSummary?: string;
+  /** Active persona / user name. */
+  userName: string;
+  /** Active character name. */
+  characterName: string;
+  /** Optional custom system prompt template (falls back to backend default). */
+  systemPromptOverride?: string | null;
+  /** Optional custom user prompt template (falls back to backend default). */
+  userPromptOverride?: string | null;
+  /** Connection profile ID for the LLM call. */
+  connection_id?: string;
+  /** Optional abort signal. */
+  signal?: AbortSignal;
 }
 
 export interface DryRunResult {
-  messages: LlmMessage[];
+  messages: DryRunDisplayMessage[];
   breakdown: AssemblyBreakdownEntry[];
   parameters: Record<string, any>;
   assistantPrefill?: string;
@@ -255,6 +486,7 @@ export interface DryRunResult {
     tokenizer_id: string | null;
     tokenizer_name: string | null;
   };
+  chatHistoryTokens?: number;
   worldInfoStats?: {
     totalCandidates: number;
     activatedBeforeBudget: number;
@@ -276,11 +508,29 @@ export interface DryRunResult {
       rerankRejected: number;
       topK: number;
       blockerMessages: string[];
+      timingsMs?: {
+        queryBuild: number;
+        queryEmbed: number;
+        search: number;
+        ranking: number;
+        merge: number;
+        total: number;
+      };
     };
   };
   memoryStats?: import("../llm/types").MemoryStats;
   databankStats?: import("../llm/types").DatabankStats;
   contextClipStats?: import("../llm/types").ContextClipStats;
+}
+
+export interface DryRunDisplayMessage
+  extends Omit<LlmMessage, "content"> {
+  content: string;
+  reasoning?: string;
+  contentParts?: DisplayContentPartSummary[];
+  __chatHistorySource?: boolean;
+  __sourceMessageId?: string;
+  __sourceIndexInChat?: number;
 }
 
 export interface BatchGenerateInput {
@@ -341,15 +591,6 @@ interface PromptPipelineResult {
   macroEnv?: import("../macros/types").MacroEnv;
   /** Snapshot of the macro environment before chat-history evaluation mutates it. */
   macroEnvSeed?: import("../macros/types").MacroEnv;
-}
-
-interface InlineCouncilToolResult {
-  callId: string;
-  qualifiedName: string;
-  toolName: string;
-  toolDisplayName: string;
-  memberName?: string;
-  result: string;
 }
 
 /**
@@ -435,17 +676,19 @@ function wrapDelimitedReasoningForUser(
  * objects gracefully.
  */
 function errorMessage(err: unknown): string {
+  const described = describeProviderError(err, "");
+  if (described) return clampErrorMessage(described);
   if (err == null) return "Unknown error";
-  if (typeof err === "string") return err;
+  if (typeof err === "string") return clampErrorMessage(err);
   if (
     typeof err === "object" &&
     "message" in err &&
     typeof (err as any).message === "string"
   ) {
-    return (err as any).message;
+    return clampErrorMessage((err as any).message);
   }
   try {
-    return String(err);
+    return clampErrorMessage(String(err));
   } catch {
     return "Unknown error";
   }
@@ -534,7 +777,10 @@ async function executeInlineCouncilToolCalls(
       const contextSummary = contextMessages
         .map((m) => {
           const prefix = m.role === "system" ? "" : `${m.role}: `;
-          return `${prefix}${typeof m.content === "string" ? m.content : ""}`;
+          // getTextContent handles both string and multipart (tool_use/
+          // tool_result) message content so structured interleaved-thinking
+          // continuations still render a readable context for extension tools.
+          return `${prefix}${getTextContent(m)}`;
         })
         .join("\n\n");
 
@@ -583,26 +829,6 @@ async function executeInlineCouncilToolCalls(
   return results;
 }
 
-function formatInlineCouncilToolResults(
-  results: InlineCouncilToolResult[],
-): string {
-  const lines = [
-    "## Inline Council Tool Results",
-    "The model requested council tool calls during generation. Use these results to continue the reply naturally.",
-    "",
-  ];
-
-  for (const result of results) {
-    lines.push(
-      `### ${result.memberName ? `${result.memberName} - ` : ""}${result.toolDisplayName}`,
-    );
-    lines.push(result.result || "(empty result)");
-    lines.push("");
-  }
-
-  return lines.join("\n");
-}
-
 /**
  * Race a promise against an AbortSignal. If the signal fires before the
  * promise settles, rejects with the signal's reason (or a standard AbortError).
@@ -636,6 +862,56 @@ function raceWithSignal<T>(
   });
 }
 
+// ── Pre-token transient retry ────────────────────────────────────────────────
+// A momentary provider 429/5xx/529 otherwise fails the whole generation. We
+// retry establishing the upstream stream a few times with full-jitter backoff,
+// but ONLY before the first chunk is emitted — once tokens flow, mid-stream
+// failures propagate unchanged (retrying then would duplicate output).
+const GENERATION_MAX_RETRIES = (() => {
+  const raw = Number(process.env.LUMIVERSE_GENERATION_MAX_RETRIES);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 3;
+})();
+const GENERATION_RETRY_BASE_MS = 500;
+const GENERATION_RETRY_MAX_MS = 8_000;
+
+// Max inline tool-call rounds within a single generation (model → tools →
+// model → …). Interleaved-thinking agents can chain many tool calls, so this
+// is tunable; defaults to 3 to preserve historical behaviour.
+const INLINE_TOOL_MAX_ROUNDS = (() => {
+  const raw = Number(process.env.LUMIVERSE_INLINE_TOOL_MAX_ROUNDS);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
+})();
+
+function computeBackoffMs(attempt: number, retryAfterMs?: number): number {
+  // Honor a server Retry-After hint when present, clamped to our ceiling.
+  if (retryAfterMs != null && retryAfterMs > 0) {
+    return Math.min(retryAfterMs, GENERATION_RETRY_MAX_MS);
+  }
+  // Full jitter: random in [0, min(cap, base * 2^attempt)].
+  const ceil = Math.min(GENERATION_RETRY_MAX_MS, GENERATION_RETRY_BASE_MS * 2 ** attempt);
+  return Math.floor(Math.random() * ceil);
+}
+
+/** Sleep that rejects immediately if the signal aborts (e.g. user hits Stop). */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 // Track active generations for stop support
 const activeGenerations = new Map<
   string,
@@ -644,6 +920,15 @@ const activeGenerations = new Map<
     userId: string;
     chatId: string;
     startedAt: number;
+    /** Resolves when the generation's streaming continuation finishes
+     *  (success, error, or abort). Used by the per-chat lock to wait for
+     *  teardown before starting a replacement generation — this prevents
+     *  two HTTP operations (the old cancel and the new connect) from
+     *  overlapping on Bun's HTTPThread, which has a known null-callback
+     *  race on concurrent cancel+start.
+     *  Created up-front as a deferred promise so it's always present — even
+     *  during the setup phase before the streaming IIFE starts. */
+    completion: Promise<void>;
   }
 >();
 
@@ -694,13 +979,21 @@ export function resolveCouncilRetry(
 
 /** Resolve connection profile by ID or fall back to the user's default. */
 function resolveConnection(userId: string, connectionId?: string) {
-  const connection = connectionId
-    ? connectionsSvc.getConnection(userId, connectionId)
-    : connectionsSvc.getDefaultConnection(userId);
+  const connection = connectionsSvc.resolveConnection(userId, connectionId);
   if (!connection) {
     throw new Error("No connection profile found. Create one first.");
   }
   return connection;
+}
+
+function resolveActivePresetId(userId: string): string | undefined {
+  const activePresetSetting = settingsSvc.getSetting(
+    userId,
+    "activeLoomPresetId",
+  );
+  return typeof activePresetSetting?.value === "string"
+    ? activePresetSetting.value
+    : undefined;
 }
 
 type ReasoningSettingsSnapshot = {
@@ -711,6 +1004,11 @@ type ReasoningSettingsSnapshot = {
 
 type CouncilResultCache = CachedCouncilResult & {
   fingerprint?: string;
+  historicalDeliberationBlock?: string;
+  /** Set when the council was active but no member survived their dice roll, so
+   *  the run produced no results. Retained so a regen/swipe with retain enabled
+   *  reuses the "stayed silent" outcome instead of re-rolling. */
+  emptyRoll?: boolean;
 };
 
 function stableJson(value: unknown): string {
@@ -728,18 +1026,39 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
+// Hash the council's view of the chat — the (id, content) pairs of the last
+// `contextWindow` messages, the same slice council members consume in
+// buildContextMessages. Mixed into the cache fingerprint so that editing or
+// deleting any in-window message invalidates a stale deliberation block.
+function hashCouncilContextMessages(
+  messages: Message[],
+  contextWindow: number,
+): string {
+  const window = messages.slice(-contextWindow);
+  const hasher = new Bun.CryptoHasher("sha256");
+  for (const m of window) {
+    hasher.update(m.id);
+    hasher.update("\0");
+    hasher.update(m.content);
+    hasher.update("\0");
+  }
+  return hasher.digest("hex");
+}
+
 function buildCouncilCacheFingerprint(
   councilSettings: import("lumiverse-spindle-types").CouncilSettings,
   sidecarSettings: import("lumiverse-spindle-types").SidecarConfig,
+  contextHash: string,
 ): string {
   return stableJson({
-    version: 1,
+    version: 2,
     members: councilSettings.members.map((member) => ({
       id: member.id,
       itemId: member.itemId,
       role: member.role,
       chance: member.chance,
       tools: member.tools,
+      toolHistoryRetention: (member as any).toolHistoryRetention ?? {},
     })),
     toolsSettings: {
       mode: councilSettings.toolsSettings.mode,
@@ -758,6 +1077,7 @@ function buildCouncilCacheFingerprint(
       topP: sidecarSettings.topP,
       maxTokens: sidecarSettings.maxTokens,
     },
+    context: contextHash,
   });
 }
 
@@ -765,9 +1085,18 @@ function isReusableCouncilCache(
   cached: CouncilResultCache | undefined,
   fingerprint: string,
 ): boolean {
-  if (!cached?.results?.length) return false;
+  if (!cached) return false;
+  if (cached.fingerprint !== fingerprint) return false;
+  // An empty-roll outcome (council was active but no member survived the dice
+  // roll) is a valid result to retain — freezing "the council stayed silent"
+  // keeps regens/swipes deterministic instead of re-rolling into a different
+  // (or suddenly non-empty) outcome.
+  if (cached.emptyRoll) return true;
+  if (!cached.results?.length) return false;
+  // Non-empty caches only ever store successful results (failures are dropped
+  // at write time), so the run is reusable once the fingerprint matches.
   if (cached.results.some((result) => !result.success)) return false;
-  return cached.fingerprint === fingerprint;
+  return true;
 }
 
 function getEffectiveReasoningSettings(
@@ -783,14 +1112,41 @@ function getEffectiveReasoningSettings(
   return (reasoningSetting?.value as ReasoningSettingsSnapshot | undefined) ?? null;
 }
 
+/**
+ * Resolve a per-request reasoning override down to a `ReasoningSettingsSnapshot`
+ * that the existing inject/off-switch helpers can consume. Returns `undefined`
+ * to mean "no override — use the inherited settings".
+ */
+function resolveReasoningOverride(
+  override: GenerationReasoningOverrideDTO | undefined,
+): ReasoningSettingsSnapshot | undefined {
+  if (!override) return undefined;
+  const source = override.source ?? "inherit";
+  if (source === "inherit") return undefined;
+  if (source === "off") {
+    return { apiReasoning: false };
+  }
+  // source === "custom"
+  return {
+    apiReasoning: override.apiReasoning ?? true,
+    reasoningEffort: override.effort ?? "auto",
+    thinkingDisplay: override.thinkingDisplay ?? "auto",
+  };
+}
+
 function applyEffectiveReasoningSettings(
   userId: string,
   connection: { metadata?: Record<string, any> | null },
   providerName: string,
   modelName: string | undefined,
   params: GenerationParameters,
+  override?: GenerationReasoningOverrideDTO,
 ): void {
-  const reasoningSettings = getEffectiveReasoningSettings(userId, connection);
+  const resolvedOverride = resolveReasoningOverride(override);
+  const reasoningSettings =
+    resolvedOverride !== undefined
+      ? resolvedOverride
+      : getEffectiveReasoningSettings(userId, connection);
 
   if (reasoningSettings?.apiReasoning) {
     const effort = reasoningSettings.reasoningEffort || "auto";
@@ -816,8 +1172,8 @@ function applyEffectiveReasoningSettings(
 async function resolveProviderAndKey(
   userId: string,
   connectionId: string,
-): Promise<{ provider: LlmProvider; apiKey: string; apiUrl: string }> {
-  const connection = connectionsSvc.getConnection(userId, connectionId);
+): Promise<{ provider: LlmProvider; apiKey: string; apiUrl: string; connection: ConnectionProfile }> {
+  const connection = connectionsSvc.resolveConnection(userId, connectionId);
   if (!connection) {
     throw new Error(`Connection not found: ${connectionId}`);
   }
@@ -829,7 +1185,7 @@ async function resolveProviderAndKey(
 
   const apiKey = await secretsSvc.getSecret(
     userId,
-    connectionsSvc.connectionSecretKey(connectionId),
+    connectionsSvc.connectionSecretKey(connection.id),
   );
   if (!apiKey && provider.capabilities.apiKeyRequired) {
     throw new Error(
@@ -841,6 +1197,7 @@ async function resolveProviderAndKey(
     provider,
     apiKey: apiKey || "",
     apiUrl: connectionsSvc.resolveEffectiveApiUrl(connection),
+    connection,
   };
 }
 
@@ -862,9 +1219,11 @@ async function runPromptPipeline(opts: {
   inputMessages?: LlmMessage[];
   inputParameters?: GenerationParameters;
   excludeMessageId?: string;
+  rejectedSwipe?: string;
   targetCharacterId?: string;
   councilToolResults?: any[];
   councilNamedResults?: Record<string, string>;
+  councilHistoricalDeliberationBlock?: string;
   precomputedVectorEntries?: VectorActivatedEntry[];
   regenFeedback?: string;
   regenFeedbackPosition?: "system" | "user";
@@ -928,12 +1287,15 @@ async function runPromptPipeline(opts: {
       impersonateMode: opts.impersonateMode,
       impersonateInput: opts.impersonateInput,
       excludeMessageId: opts.excludeMessageId,
+      rejectedSwipe: opts.rejectedSwipe,
       targetCharacterId: opts.targetCharacterId,
       councilToolResults: opts.councilToolResults,
       councilNamedResults: opts.councilNamedResults,
+      councilHistoricalDeliberationBlock: opts.councilHistoricalDeliberationBlock,
       precomputedVectorEntries: opts.precomputedVectorEntries,
       regenFeedback: opts.regenFeedback,
       regenFeedbackPosition: opts.regenFeedbackPosition,
+      skipPromptRegex: isPromptRegexChatOwned(opts.chatId, isExtensionRunning),
       signal: opts.signal,
     };
 
@@ -1023,9 +1385,13 @@ async function runPromptPipeline(opts: {
 
   // Normal assembly applies prompt-target regexes before context clipping.
   // Keep this fallback for raw/explicit message callers that bypass assembly.
-  if (opts.inputMessages) {
+  // When an extension owns this chat's prompt-regex it has already applied the
+  // rules inline via the interceptor pipeline above; running this fallback too
+  // would double-apply (non-idempotent rules compound). Mirror the assembly
+  // pass's skip in prompt-assembly.service.ts (applyPromptRegexScriptsBeforeClipping).
+  if (opts.inputMessages && !isPromptRegexChatOwned(opts.chatId, isExtensionRunning)) {
     const chatForRegex = chatsSvc.getChat(opts.userId, opts.chatId);
-    const characterId = opts.targetCharacterId || chatForRegex?.character_id;
+    const characterId = opts.targetCharacterId || chatForRegex?.character_id || undefined;
     const promptScripts = regexScriptsSvc.getActiveScripts(opts.userId, {
       characterId,
       chatId: opts.chatId,
@@ -1082,6 +1448,8 @@ async function runPromptPipeline(opts: {
               placement,
               depth,
               macroEnv,
+              undefined,
+              { source: "prompt_backend" },
             ),
           };
         } else if (Array.isArray(msg.content)) {
@@ -1096,6 +1464,8 @@ async function runPromptPipeline(opts: {
                       placement,
                       depth,
                       macroEnv,
+                      undefined,
+                      { source: "prompt_backend" },
                     ),
                   }
                 : part,
@@ -1131,6 +1501,8 @@ async function runPromptPipeline(opts: {
             placement,
             undefined,
             macroEnv,
+            undefined,
+            { source: "prompt_backend" },
           );
         }
       }
@@ -1194,7 +1566,7 @@ async function runPromptPipeline(opts: {
 async function resolveRawProviderAndKey(
   userId: string,
   input: RawGenerateInput,
-): Promise<{ provider: LlmProvider; apiKey: string; apiUrl: string }> {
+): Promise<{ provider: LlmProvider; apiKey: string; apiUrl: string; connection: ConnectionProfile | null }> {
   // If a connection_id is provided, use per-connection key
   if (input.connection_id) {
     return resolveProviderAndKey(userId, input.connection_id);
@@ -1204,7 +1576,7 @@ async function resolveRawProviderAndKey(
   if (input.api_key) {
     const provider = getProvider(input.provider);
     if (!provider) throw new Error(`Unknown provider: ${input.provider}`);
-    return { provider, apiKey: input.api_key, apiUrl: input.api_url || "" };
+    return { provider, apiKey: input.api_key, apiUrl: input.api_url || "", connection: null };
   }
 
   // Fallback: look up provider by name, but there's no global key anymore.
@@ -1218,7 +1590,7 @@ async function resolveRawProviderAndKey(
     );
   }
 
-  return { provider, apiKey: "", apiUrl: input.api_url || "" };
+  return { provider, apiKey: "", apiUrl: input.api_url || "", connection: null };
 }
 
 export async function startGeneration(
@@ -1235,7 +1607,7 @@ export async function startGeneration(
   // Skip this check when an explicit message_id is provided — the frontend
   // already validated the target.
   if (
-    (genType === "regenerate" || genType === "continue") &&
+    (genType === "regenerate" || genType === "swipe" || genType === "continue") &&
     !input.message_id
   ) {
     const lastMessage = chatsSvc.getLastMessage(input.userId, input.chat_id);
@@ -1258,6 +1630,15 @@ export async function startGeneration(
         input.chat_id,
       );
       existing.controller.abort();
+      // Wait for the previous generation's streaming teardown to complete
+      // before starting the new one. This serializes the HTTP abort+connect
+      // sequence, preventing two fetch operations from overlapping on Bun's
+      // HTTPThread which has a known race on concurrent cancel+start. Bounded
+      // at 2s so a hung generation can't deadlock regeneration permanently.
+      await Promise.race([
+        existing.completion,
+        new Promise<void>((r) => setTimeout(r, 2000)),
+      ]);
     }
     activeGenerations.delete(existingGenId);
     activeChatGenerations.delete(chatKey);
@@ -1267,15 +1648,24 @@ export async function startGeneration(
   // databank retrieval) left over from prior generations on this chat.
   // Successful completions don't abort their own controllers, so without
   // this, slow embedding APIs can accumulate orphan tasks across sends.
-  abortChatBackground(input.userId, input.chat_id);
+  // Await teardown so background fetch reader.cancel() completes before
+  // the new generation starts its own fetches — overlapping cancel+start
+  // on Bun's HTTPThread triggers a null-callback segfault.
+  await abortChatBackground(input.userId, input.chat_id);
 
-  // Register this generation early (before council) so it can be tracked and aborted
+  // Register this generation early (before council) so it can be tracked and aborted.
+  // The completion promise is created up-front (deferred) so a replacement
+  // generation can always await teardown — even if it arrives during the setup
+  // phase before the streaming IIFE has started.
   const abortController = new AbortController();
+  let resolveCompletion!: () => void;
+  const completion = new Promise<void>((r) => { resolveCompletion = r; });
   activeGenerations.set(generationId, {
     controller: abortController,
     userId: input.userId,
     chatId: input.chat_id,
     startedAt: Date.now(),
+    completion,
   });
   activeChatGenerations.set(chatKey, generationId);
 
@@ -1297,36 +1687,67 @@ export async function startGeneration(
 
   try {
     const connection = resolveConnection(input.userId, input.connection_id);
-    if (
-      input.force_preset_id &&
-      genType === "impersonate" &&
-      input.impersonate_mode === "oneliner" &&
-      input.preset_id &&
-      !presetsSvc.getPreset(input.userId, input.preset_id)
-    ) {
-      console.warn(
-        "[generate] Clearing stale chat impersonation preset override %s for chat %s",
-        input.preset_id,
-        input.chat_id,
-      );
-      chatsSvc.mergeChatMetadata(input.userId, input.chat_id, {
-        impersonation_preset_id: undefined,
-      });
+    input.connection_id = connection.id;
+    // Loaded before preset resolution: no-preset temp chats bypass the preset
+    // requirement entirely (assertUsablePreset would otherwise reject them).
+    const chat = chatsSvc.getChat(input.userId, input.chat_id);
+    const isNoPresetChat = isNoPresetChatMetadata(chat?.metadata);
+    if (isNoPresetChat) {
       input.preset_id = undefined;
       input.force_preset_id = false;
+    } else {
+      if (!input.preset_id) {
+        input.preset_id = resolveActivePresetId(input.userId);
+      }
+      if (
+        input.force_preset_id &&
+        genType === "impersonate" &&
+        input.impersonate_mode === "oneliner" &&
+        input.preset_id &&
+        !presetsSvc.getPreset(input.userId, input.preset_id)
+      ) {
+        console.warn(
+          "[generate] Clearing stale chat impersonation preset override %s for chat %s",
+          input.preset_id,
+          input.chat_id,
+        );
+        chatsSvc.mergeChatMetadata(input.userId, input.chat_id, {
+          impersonation_preset_id: undefined,
+        });
+        input.preset_id = undefined;
+        input.force_preset_id = false;
+      }
+      presetsSvc.assertUsablePreset(
+        input.userId,
+        input.preset_id,
+        connection.preset_id,
+      );
     }
-    presetsSvc.assertUsablePreset(
-      input.userId,
-      input.preset_id,
-      connection.preset_id,
-    );
     const { provider, apiKey, apiUrl } = await resolveProviderAndKey(
       input.userId,
       connection.id,
     );
 
-    // Resolve character name for saved messages — prefer target_character_id for group chats
-    const chat = chatsSvc.getChat(input.userId, input.chat_id);
+    // Resolve the assistant message being modified before choosing a character.
+    // Group retries/continues are tied to the message's speaker, not the chat's
+    // primary/greeting character.
+    const isGroupChat = chat?.metadata?.group === true;
+    const groupCharacterIds =
+      isGroupChat && Array.isArray(chat?.metadata?.character_ids)
+        ? (chat.metadata.character_ids as string[])
+        : [];
+    let targetAssistantMessage: Message | null = null;
+    if (genType === "regenerate" || genType === "swipe") {
+      targetAssistantMessage = input.message_id
+        ? chatsSvc.getMessage(input.userId, input.message_id)
+        : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+    } else if (genType === "continue") {
+      targetAssistantMessage = input.message_id
+        ? chatsSvc.getMessage(input.userId, input.message_id)
+        : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+    }
+    if (targetAssistantMessage?.is_user) targetAssistantMessage = null;
+
     if (genType === "normal") {
       const lastMessage = chatsSvc.getLastMessage(input.userId, input.chat_id);
       const attachments = Array.isArray(lastMessage?.extra?.attachments)
@@ -1342,15 +1763,40 @@ export async function startGeneration(
       }
     }
     let characterName = "Assistant";
-    const targetCharId = input.target_character_id || chat?.character_id;
+    const requestedTargetCharId =
+      input.target_character_id &&
+      (!isGroupChat || groupCharacterIds.includes(input.target_character_id))
+        ? input.target_character_id
+        : undefined;
+    const messageTargetCharId =
+      typeof targetAssistantMessage?.extra?.character_id === "string"
+        ? targetAssistantMessage.extra.character_id
+        : undefined;
+    const inferredGroupTargetCharId =
+      isGroupChat &&
+      messageTargetCharId &&
+      groupCharacterIds.includes(messageTargetCharId)
+        ? messageTargetCharId
+        : undefined;
+    const targetExistingAssistant =
+      genType === "regenerate" || genType === "swipe" || genType === "continue";
+    const resolvedTargetCharId = targetExistingAssistant
+      ? inferredGroupTargetCharId || requestedTargetCharId
+      : requestedTargetCharId || inferredGroupTargetCharId;
+    const targetCharId = resolvedTargetCharId || chat?.character_id || undefined;
+    const pipelineTargetCharId = resolvedTargetCharId;
     if (targetCharId) {
       const character = charactersSvc.getCharacter(input.userId, targetCharId);
       if (character) characterName = getEffectiveCharacterName(character);
     }
 
+    // Temporary chats are persona-less by contract — never fall back to the
+    // active/default persona for them.
+    const isTemporaryChat = isTemporaryChatMetadata(chat?.metadata);
+
     // Resolve persona_id from settings if not provided by the frontend, so the
     // persona's attached world book is always included regardless of UI state.
-    if (!input.persona_id) {
+    if (!input.persona_id && !isTemporaryChat) {
       const activePersonaSetting = settingsSvc.getSetting(
         input.userId,
         "activePersonaId",
@@ -1365,10 +1811,9 @@ export async function startGeneration(
 
     // Resolve target message EARLY (before council) so we can visually clear the
     // message on the frontend before council tools start executing.
-    let resolvedPersona = personasSvc.resolvePersonaOrDefault(
-      input.userId,
-      input.persona_id,
-    );
+    let resolvedPersona = isTemporaryChat
+      ? null
+      : personasSvc.resolvePersonaOrDefault(input.userId, input.persona_id);
     if (!input.persona_addon_states) {
       input.persona_addon_states = getChatPersonaAddonStates(
         chat?.metadata,
@@ -1396,18 +1841,25 @@ export async function startGeneration(
     }
 
     let excludeMessageId: string | undefined;
+    let rejectedSwipe: string | undefined;
+    // Index of the swipe this generation streams into. Sent to the frontend so
+    // it can gate the streaming buffer to the correct swipe — letting the user
+    // navigate to other (already-saved) swipes mid-generation without smearing
+    // live tokens onto them. Distinct from lifecycle.targetSwipeIdx (which also
+    // routes the completion write) so we don't perturb normal/continue saving.
+    let targetSwipeId: number | undefined;
 
-    if (genType === "regenerate") {
-      const targetMsg = input.message_id
-        ? chatsSvc.getMessage(input.userId, input.message_id)
-        : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+    if (genType === "regenerate" || genType === "swipe") {
+      const targetMsg = targetAssistantMessage;
       if (targetMsg) {
         lifecycle.targetMessageId = targetMsg.id;
         excludeMessageId = targetMsg.id;
+        rejectedSwipe = targetMsg.content;
         // Add a blank swipe immediately so the frontend shows cleared content
         // before council/assembly begins (MESSAGE_SWIPED event fires now).
         const withBlank = chatsSvc.addSwipe(input.userId, targetMsg.id, "");
         lifecycle.targetSwipeIdx = withBlank ? withBlank.swipe_id : 0;
+        targetSwipeId = lifecycle.targetSwipeIdx;
         // Clear stale generation metrics from the previous swipe so the pill
         // doesn't display outdated values while the new generation runs.
         // Uses patchMessageExtra to avoid triggering chunk rebuilds / WS events.
@@ -1432,13 +1884,12 @@ export async function startGeneration(
         }
       }
     } else if (genType === "continue") {
-      const lastMsg = chatsSvc.getLastAssistantMessage(
-        input.userId,
-        input.chat_id,
-      );
+      const lastMsg = targetAssistantMessage;
       if (lastMsg) {
         lifecycle.continueMessageId = lastMsg.id;
         lifecycle.continueOriginalContent = lastMsg.content;
+        // Continue appends to the currently-displayed swipe.
+        targetSwipeId = lastMsg.swipe_id;
         // Resolve continuePostfix from the preset's completion settings so it can
         // be inserted between original content and generated text when saving.
         const cpPresetId = input.preset_id || connection.preset_id;
@@ -1456,8 +1907,7 @@ export async function startGeneration(
     // on the message card, matching the regenerate/swipe UX.
     if (genType === "normal") {
       const extra: Record<string, any> = {};
-      if (input.target_character_id)
-        extra.character_id = input.target_character_id;
+      if (targetCharId) extra.character_id = targetCharId;
       const stagedMsg = chatsSvc.createMessage(
         input.chat_id,
         {
@@ -1471,7 +1921,13 @@ export async function startGeneration(
       stagedMessageId = stagedMsg.id;
       lifecycle.targetMessageId = stagedMsg.id;
       excludeMessageId = stagedMsg.id;
+      // A fresh message has a single swipe at index 0.
+      targetSwipeId = 0;
     }
+
+    // Carry the streaming swipe index into runGeneration so the GENERATION_IN_PROGRESS
+    // emit (different scope) can surface it too.
+    lifecycle.streamingSwipeId = targetSwipeId;
 
     // Register pool entry for recovery — at this point we have all the metadata
     pool.createPoolEntry({
@@ -1483,6 +1939,7 @@ export async function startGeneration(
       characterId: targetCharId,
       model: connection.model,
       targetMessageId: lifecycle.targetMessageId,
+      targetSwipeId,
     });
 
     // Emit GENERATION_STARTED immediately so the frontend can show a chat head
@@ -1496,6 +1953,7 @@ export async function startGeneration(
         chatId: input.chat_id,
         model: connection.model,
         targetMessageId: lifecycle.targetMessageId,
+        targetSwipeId,
         characterId: targetCharId,
         characterName,
         generationType: lifecycle.generationType,
@@ -1512,8 +1970,9 @@ export async function startGeneration(
     //
     // The remaining heavy work (council → assembly → streaming) runs as a
     // detached async continuation. Errors are surfaced via GENERATION_ENDED
-    // with an error payload.
-    void (async () => {
+    // with an error payload. The promise is stored on activeGenerations so a
+    // replacement generation (regenerate) can await teardown before starting.
+    (async () => {
       // Yield to the macro task queue IMMEDIATELY so that the HTTP response
       // (`return { generationId, status: "streaming" }` below) is sent before
       // any assembly work begins.  Without this, JavaScript's async execution
@@ -1532,7 +1991,11 @@ export async function startGeneration(
           { isGroup: chat?.metadata?.group === true },
         );
         const councilSettings = resolvedCouncilProfile.council_settings;
-        let councilResult: CouncilExecutionResult | null = null;
+        let councilResult: CouncilExecutionResultWithHistory | null = null;
+        // Hash of the council's view of the chat at fingerprint time. Hoisted
+        // so the cache-store site (outside the if/else below) can stamp the
+        // same value the cache-check used into the persisted entry.
+        let councilContextHash: string | undefined;
         let inlineTools: ToolDefinition[] | undefined;
         let inlineToolDefsByName:
           | Map<string, RuntimeCouncilToolDefinition>
@@ -1609,6 +2072,25 @@ export async function startGeneration(
               }
             }
           } else {
+            // Load the council's view of the chat now so we can both fingerprint
+            // it for the cache check AND reuse the same list for enrichment if
+            // we miss. The hash of these messages is mixed into the cache
+            // fingerprint so editing or deleting any in-window message
+            // invalidates a stale cached deliberation block.
+            const fullCharacterId = targetCharId || chat?.character_id;
+            const fullCharacter = chat && fullCharacterId
+              ? charactersSvc.getCharacter(input.userId, fullCharacterId)
+              : null;
+            const councilMessages = chatsSvc
+              .getMessages(input.userId, input.chat_id)
+              .filter(
+                (m) => m.id !== excludeMessageId && m.id !== stagedMessageId,
+              );
+            councilContextHash = hashCouncilContextMessages(
+              councilMessages,
+              councilSettings.toolsSettings.sidecarContextWindow,
+            );
+
             // Check if we can reuse cached council results for regens/swipes/continues
             const shouldRetain =
               councilSettings.toolsSettings.retainResultsForRegens &&
@@ -1619,6 +2101,7 @@ export async function startGeneration(
             const councilCacheFingerprint = buildCouncilCacheFingerprint(
               councilSettings,
               resolvedCouncilProfile.sidecar_settings,
+              councilContextHash,
             );
             const cached = shouldRetain
               ? (chat?.metadata?.last_council_results as
@@ -1637,6 +2120,9 @@ export async function startGeneration(
               councilResult = {
                 results: cached.results,
                 deliberationBlock: cached.deliberationBlock,
+                ...(cached.historicalDeliberationBlock
+                  ? { historicalDeliberationBlock: cached.historicalDeliberationBlock }
+                  : {}),
                 totalDurationMs: 0,
               };
             } else {
@@ -1654,15 +2140,15 @@ export async function startGeneration(
               // so the frontend has a real message bubble to stream tokens into. Without
               // this, the HTTP response (and thus startStreaming) arrives after council
               // completes, racing with WS events that may have already finished.
-              // Guard: normal sends are already staged above; only stage here for swipe
-              // or for sidecar council paths that bypassed the early staging.
+              // Guard: normal sends are already staged above. A swipe/regenerate
+              // already has a blank target swipe, so do not create a duplicate
+              // assistant message here.
               if (
                 !stagedMessageId &&
-                (genType === "normal" || genType === "swipe")
+                genType === "normal"
               ) {
                 const extra: Record<string, any> = {};
-                if (input.target_character_id)
-                  extra.character_id = input.target_character_id;
+                if (targetCharId) extra.character_id = targetCharId;
                 const stagedMsg = chatsSvc.createMessage(
                   input.chat_id,
                   {
@@ -1682,28 +2168,18 @@ export async function startGeneration(
               checkAborted();
 
               // Yield before the heavy council enrichment phase — the next section
-              // loads all messages, collects world info entries, and runs keyword
-              // activation synchronously. Without a yield here the event loop is
-              // blocked from the setTimeout at the top of the IIFE through all of
-              // this sync work until the first real `await` (embedding API call).
+              // collects world info entries and runs keyword activation
+              // synchronously. Without a yield here the event loop is blocked
+              // from the setTimeout at the top of the IIFE through all of this
+              // sync work until the first real `await` (embedding API call).
               await new Promise<void>((r) => setTimeout(r, 0));
               checkAborted();
 
               // Pre-compute enrichment for council tools — resolve world info at the
               // top of the generation chain so tools receive proper world book context.
-              // Also filters out the staged empty message and excluded (regenerated)
-              // message so council doesn't see blank assistant turns.
-              const fullCharacter = chat
-                ? charactersSvc.getCharacter(
-                    input.userId,
-                    targetCharId || chat.character_id,
-                  )
-                : null;
-              const councilMessages = chatsSvc
-                .getMessages(input.userId, input.chat_id)
-                .filter(
-                  (m) => m.id !== excludeMessageId && m.id !== stagedMessageId,
-                );
+              // councilMessages was already loaded above (with the same
+              // staged/excluded filter the council expects) so the fingerprint
+              // and the enrichment see an identical view.
               const { entries: wiEntries, worldBookIds: wiBookIds } =
                 collectWorldInfoForCouncil(
                   input.userId,
@@ -1897,6 +2373,9 @@ export async function startGeneration(
                           mergedResults,
                           toolsMap,
                         ),
+                        ...(councilResult.historicalDeliberationBlock
+                          ? { historicalDeliberationBlock: councilResult.historicalDeliberationBlock }
+                          : {}),
                         totalDurationMs:
                           councilResult.totalDurationMs +
                           retryResult.totalDurationMs,
@@ -1987,23 +2466,53 @@ export async function startGeneration(
             }
           }
 
-          // Persist fully successful council results for potential reuse on regens/swipes.
-          // Only cache when results were freshly executed (totalDurationMs > 0 distinguishes
-          // a live execution from a cache hit which sets totalDurationMs to 0). Failed
-          // results are intentionally not cached; otherwise one bad sidecar/tool call can
-          // poison later regens and prevent council tools from re-firing.
+          if (councilResult.totalDurationMs > 0) {
+            try {
+              appendCouncilDeliberationHistory({
+                userId: input.userId,
+                chatId: input.chat_id,
+                settings: councilSettings,
+                results: councilResult.results,
+              });
+            } catch (err) {
+              console.warn(
+                "[council] Failed to append deliberation history:",
+                err,
+              );
+            }
+          }
+
+          // Persist successful council results for potential reuse on
+          // regens/swipes. Only cache freshly executed runs (totalDurationMs > 0
+          // distinguishes a live execution from a cache hit, which sets it to 0).
+          //
+          // Cache the *successful subset* rather than requiring every tool to
+          // succeed: failed results are already excluded from the deliberation
+          // block (formatDeliberation skips them), so a single flaky tool no
+          // longer prevents the whole council from being retained — which would
+          // otherwise force a full re-execution on the next regen even with
+          // "Retain results for regens" enabled. The failed tools still surface
+          // the COUNCIL_TOOLS_FAILED retry prompt on the original run.
+          const successfulResults = councilResult.results.filter(
+            (result) => result.success,
+          );
           if (
             councilResult.totalDurationMs > 0 &&
-            councilResult.results.every((result) => result.success)
+            successfulResults.length > 0 &&
+            councilContextHash !== undefined
           ) {
             const cachedResult: CouncilResultCache = {
-              results: councilResult.results,
+              results: successfulResults,
               deliberationBlock: councilResult.deliberationBlock,
+              ...(councilResult.historicalDeliberationBlock
+                ? { historicalDeliberationBlock: councilResult.historicalDeliberationBlock }
+                : {}),
               namedResults: councilNamedResults,
               cachedAt: Date.now(),
               fingerprint: buildCouncilCacheFingerprint(
                 councilSettings,
                 resolvedCouncilProfile.sidecar_settings,
+                councilContextHash,
               ),
             };
             try {
@@ -2019,6 +2528,40 @@ export async function startGeneration(
                 err,
               );
             }
+          }
+        } else if (
+          councilResult === null &&
+          councilContextHash !== undefined
+        ) {
+          // Empty dice roll: the council was active (sidecar mode, tools
+          // assigned) but no member survived their `chance` roll, so
+          // executeCouncil returned null. Cache that "stayed silent" outcome
+          // keyed by the same fingerprint so a retained regen/swipe reuses it
+          // instead of silently re-rolling — the most common reason a regen
+          // appeared to re-run the council despite Retain being on.
+          // councilContextHash is only set on the sidecar execution path, so
+          // this never fires for inline-mode or council-disabled generations.
+          const emptyRollCache: CouncilResultCache = {
+            results: [],
+            deliberationBlock: "",
+            namedResults: {},
+            cachedAt: Date.now(),
+            emptyRoll: true,
+            fingerprint: buildCouncilCacheFingerprint(
+              councilSettings,
+              resolvedCouncilProfile.sidecar_settings,
+              councilContextHash,
+            ),
+          };
+          try {
+            chatsSvc.mergeChatMetadata(input.userId, input.chat_id, {
+              last_council_results: emptyRollCache,
+            });
+          } catch (err) {
+            console.warn(
+              "[council] Failed to cache empty-roll outcome to chat metadata:",
+              err,
+            );
           }
         }
 
@@ -2049,9 +2592,12 @@ export async function startGeneration(
             inputMessages: input.messages,
             inputParameters: input.parameters,
             excludeMessageId,
-            targetCharacterId: input.target_character_id,
+            rejectedSwipe,
+            targetCharacterId: pipelineTargetCharId,
             councilToolResults,
             councilNamedResults,
+            councilHistoricalDeliberationBlock:
+              councilResult?.historicalDeliberationBlock,
             precomputedVectorEntries,
             regenFeedback: input.regen_feedback,
             regenFeedbackPosition: input.regen_feedback_position,
@@ -2061,8 +2607,8 @@ export async function startGeneration(
         );
 
         let { messages } = pipeline;
+        let { parameters: mergedParams } = pipeline;
         const {
-          parameters: mergedParams,
           breakdown,
           activatedWorldInfo,
           deliberationHandledByMacro,
@@ -2107,9 +2653,13 @@ export async function startGeneration(
         // that don't use {{lumiaCouncilDeliberation}} macro)
         if (councilResult?.deliberationBlock && !deliberationHandledByMacro) {
           const insertIdx = Math.max(0, messages.length - 4);
+          const deliberationContent = [
+            councilResult.historicalDeliberationBlock,
+            councilResult.deliberationBlock,
+          ].filter(Boolean).join("\n\n");
           messages.splice(insertIdx, 0, {
             role: "system",
-            content: councilResult.deliberationBlock,
+            content: deliberationContent,
           });
         }
 
@@ -2128,17 +2678,37 @@ export async function startGeneration(
         // Strip internal-only keys before they reach the provider
         delete mergedParams.max_context_length;
 
-        // Inject connection-level metadata flags into parameters (e.g. use_responses_api)
-        if (connection.metadata?.use_responses_api) {
-          mergedParams.use_responses_api = true;
-        }
+        injectConnectionMetadataFlags(connection, mergedParams);
 
-        // Inject OpenRouter-specific settings from connection metadata
+        const cached = applyPromptCaching(
+          {
+            provider: provider.name,
+            model: connection.model,
+            metadata: connection.metadata,
+          },
+          { params: mergedParams, messages, tools: inlineTools },
+        );
+        mergedParams = cached.params;
+        messages = cached.messages;
+        inlineTools = cached.tools;
+
+        // Per-swipe seed: a regenerate/swipe excludes the whole target message,
+        // so the assembled prompt is byte-identical to the previous swipe. With
+        // a user-pinned seed (advancedSettings.seed >= 0) that means a
+        // seed-honoring backend returns byte-identical tokens every swipe. Offset
+        // the seed by the swipe slot so each swipe is reproducible-but-distinct
+        // while the first (normal) generation keeps the exact pinned seed. Modulo
+        // the int32 ceiling so a seed pinned near the max can't overflow the
+        // range some backends validate (the wrap keeps slots distinct).
         if (
-          connection.provider === "openrouter" &&
-          connection.metadata?.openrouter
+          (genType === "regenerate" || genType === "swipe") &&
+          typeof mergedParams.seed === "number" &&
+          mergedParams.seed >= 0 &&
+          typeof lifecycle.targetSwipeIdx === "number"
         ) {
-          mergedParams._openrouter = connection.metadata.openrouter;
+          const MAX_SEED = 2147483647; // int32 max — widely accepted ceiling
+          mergedParams.seed =
+            (mergedParams.seed + lifecycle.targetSwipeIdx) % MAX_SEED;
         }
 
         // Resolve preset name for breakdown display
@@ -2154,8 +2724,7 @@ export async function startGeneration(
         // and then tearing the stream down on the first iter.next() race.
         checkAborted();
 
-        // Run generation in the background
-        runGeneration(
+        await runGeneration(
           generationId,
           provider,
           apiKey,
@@ -2216,6 +2785,16 @@ export async function startGeneration(
           return;
         }
 
+        if (stagedMessageId) {
+          try {
+            chatsSvc.deleteMessage(input.userId, stagedMessageId);
+          } catch {
+            /* best-effort cleanup */
+          }
+        }
+
+        abortChatBackground(input.userId, input.chat_id);
+
         const msg = errorMessage(err);
         pool.errorPool(generationId, msg);
         eventBus.emit(
@@ -2228,6 +2807,8 @@ export async function startGeneration(
           },
           input.userId,
         );
+      } finally {
+        resolveCompletion();
       }
     })();
 
@@ -2244,6 +2825,7 @@ export async function startGeneration(
     }
     activeGenerations.delete(generationId);
     activeChatGenerations.delete(chatKey);
+    resolveCompletion();
     pool.errorPool(generationId, errorMessage(err));
     throw err;
   }
@@ -2258,6 +2840,24 @@ export async function dryRunGeneration(
   input: GenerateInput,
 ): Promise<DryRunResult> {
   const genType = input.generation_type || "normal";
+  const sourceMessagesById = new Map(
+    chatsSvc
+      .getMessages(input.userId, input.chat_id)
+      .map((message) => [message.id, message] as const),
+  );
+  const dryRunReasoningSettings =
+    settingsSvc.getSetting(input.userId, "reasoningSettings")?.value ?? null;
+
+  // No-preset temp chats bypass preset resolution/assertion (same as
+  // startGeneration); assembly falls back to raw message mapping.
+  const dryRunChat = chatsSvc.getChat(input.userId, input.chat_id);
+  const isNoPresetChat = isNoPresetChatMetadata(dryRunChat?.metadata);
+  if (isNoPresetChat) {
+    input.preset_id = undefined;
+    input.force_preset_id = false;
+  } else if (!input.preset_id) {
+    input.preset_id = resolveActivePresetId(input.userId);
+  }
 
   // Resolve persona_id from settings if not provided (same as startGeneration)
   if (!input.persona_id) {
@@ -2274,11 +2874,14 @@ export async function dryRunGeneration(
   }
 
   const connection = resolveConnection(input.userId, input.connection_id);
-  presetsSvc.assertUsablePreset(
-    input.userId,
-    input.preset_id,
-    connection.preset_id,
-  );
+  input.connection_id = connection.id;
+  if (!isNoPresetChat) {
+    presetsSvc.assertUsablePreset(
+      input.userId,
+      input.preset_id,
+      connection.preset_id,
+    );
+  }
   const { provider } = await resolveProviderAndKey(input.userId, connection.id);
 
   const pipeline = await runPromptPipeline({
@@ -2286,6 +2889,7 @@ export async function dryRunGeneration(
     chatId: input.chat_id,
     connectionId: input.connection_id,
     presetId: input.preset_id,
+    forcePresetId: input.force_preset_id,
     personaId: input.persona_id,
     personaAddonStates: input.persona_addon_states,
     generationType: genType,
@@ -2304,6 +2908,7 @@ export async function dryRunGeneration(
 
   // Compute token counts for the breakdown
   let tokenCount: DryRunResult["tokenCount"];
+  let chatHistoryTokens: number | undefined;
   if (pipeline.breakdown && pipeline.breakdown.length > 0) {
     try {
       tokenCount = await tokenizerSvc.countBreakdown(
@@ -2311,6 +2916,7 @@ export async function dryRunGeneration(
         pipeline.breakdown,
         pipeline.chatHistoryMessages,
       );
+      chatHistoryTokens = sumChatHistoryBreakdownTokens(tokenCount.breakdown);
     } catch {
       // non-fatal: skip token count if tokenizer fails
     }
@@ -2332,13 +2938,28 @@ export async function dryRunGeneration(
   }
 
   return {
-    messages: pipeline.messages,
-    breakdown: pipeline.breakdown || [],
+    // The dry-run viewer is display-only and assumes string content. Flatten
+    // multimodal parts (image/audio/tool) to placeholder-annotated strings so
+    // multipart turns don't crash the frontend (TypeError: e.replace is not a
+    // function) when a chat message carries an attachment. Emit structured
+    // non-text part counts alongside the flattened content so the viewer can
+    // badge media-bearing turns without having to re-parse placeholder text.
+    // When the source chat message preserved reasoning separately, attach it
+    // alongside the flattened content so the viewer can show both. Token
+    // counts come from the breakdown above, which is already computed from the
+    // real parts.
+    messages: buildDryRunDisplayMessages(
+      pipeline.messages,
+      sourceMessagesById,
+      dryRunReasoningSettings,
+    ),
+    breakdown: omitChatHistoryBreakdownEntries(pipeline.breakdown || []),
     parameters: outboundParams,
     assistantPrefill: pipeline.assistantPrefill,
     model: connection.model,
     provider: provider.name,
-    tokenCount,
+    tokenCount: omitChatHistoryTokenBreakdown(tokenCount),
+    chatHistoryTokens,
     worldInfoStats: pipeline.worldInfoStats,
     memoryStats: pipeline.memoryStats,
     databankStats: pipeline.databankStats,
@@ -2377,7 +2998,16 @@ async function runGeneration(
   type PendingStreamSegment = {
     token: string;
     type?: "reasoning";
+    // seq is the tokenSeq of the LAST token merged into this segment; startSeq
+    // is the FIRST. Retained for Spindle extensions and stale (pre-refresh)
+    // clients; the frontend now reconciles via `offset` instead.
     seq: number;
+    startSeq: number;
+    // Char position of this segment's first token within the cumulative pool
+    // buffer for its stream type (content or reasoning). Lets clients dedupe
+    // exactly against recovery snapshots (slice off the overlap) and detect
+    // gaps (offset ahead of local buffer → re-poll immediately).
+    offset: number;
   };
 
   const streamTopic = `stream:${userId}:${chatId}`;
@@ -2386,6 +3016,7 @@ async function runGeneration(
   let pendingStreamSegments: PendingStreamSegment[] = [];
   let pendingStreamChars = 0;
   let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastStreamFlushAt = 0;
 
   function flushPendingStreamSegments(): void {
     if (streamFlushTimer) {
@@ -2397,6 +3028,7 @@ async function runGeneration(
     const segments = pendingStreamSegments;
     pendingStreamSegments = [];
     pendingStreamChars = 0;
+    lastStreamFlushAt = Date.now();
 
     for (const segment of segments) {
       eventBus.emit(
@@ -2407,6 +3039,8 @@ async function runGeneration(
           token: segment.token,
           ...(segment.type ? { type: segment.type } : {}),
           seq: segment.seq,
+          startSeq: segment.startSeq,
+          offset: segment.offset,
         },
         userId,
         { topic: streamTopic },
@@ -2416,18 +3050,25 @@ async function runGeneration(
 
   function schedulePendingStreamFlush(): void {
     if (streamFlushTimer) return;
+    // Leading-edge after idle: if the last flush is older than the emit
+    // interval, fire immediately (delay 0) instead of holding the buffer the
+    // full interval. Takes ~40ms off TTFT and off every quiet-period
+    // resumption (reasoning→content transitions) without raising the steady
+    // emit rate.
+    const elapsed = Date.now() - lastStreamFlushAt;
+    const delay = Math.max(0, STREAM_EMIT_INTERVAL_MS - elapsed);
     streamFlushTimer = setTimeout(() => {
       flushPendingStreamSegments();
-    }, STREAM_EMIT_INTERVAL_MS);
+    }, delay);
   }
 
-  function queueStreamSegment(token: string, seq: number, type?: "reasoning"): void {
+  function queueStreamSegment(token: string, seq: number, offset: number, type?: "reasoning"): void {
     const previous = pendingStreamSegments[pendingStreamSegments.length - 1];
     if (previous && previous.type === type) {
       previous.token += token;
       previous.seq = seq;
     } else {
-      pendingStreamSegments.push({ token, seq, ...(type ? { type } : {}) });
+      pendingStreamSegments.push({ token, seq, startSeq: seq, offset, ...(type ? { type } : {}) });
     }
 
     pendingStreamChars += token.length;
@@ -2447,6 +3088,7 @@ async function runGeneration(
       model,
       breakdown: lifecycle.breakdown,
       targetMessageId: lifecycle.targetMessageId,
+      targetSwipeId: lifecycle.streamingSwipeId,
       characterId: lifecycle.targetCharacterId,
       characterName: lifecycle.characterName,
       contextClipStats: lifecycle.contextClipStats,
@@ -2483,16 +3125,16 @@ async function runGeneration(
       reasoningDurationMs = Date.now() - reasoningStartedAt;
     }
     fullContent += text;
-    const seq = pool.appendPoolContent(generationId, text);
-    queueStreamSegment(text, seq);
+    const appended = pool.appendPoolContent(generationId, text);
+    queueStreamSegment(text, appended.seq, appended.offset);
   }
 
   function emitReasoningToken(text: string) {
     if (!text) return;
     if (!reasoningStartedAt) reasoningStartedAt = Date.now();
     fullReasoning += text;
-    const seq = pool.appendPoolReasoning(generationId, text);
-    queueStreamSegment(text, seq, "reasoning");
+    const appended = pool.appendPoolReasoning(generationId, text);
+    queueStreamSegment(text, appended.seq, appended.offset, "reasoning");
   }
 
   function processContentToken(token: string) {
@@ -2530,6 +3172,8 @@ async function runGeneration(
         "ai_output",
         0,
         macroEnv,
+        undefined,
+        { source: "response_backend" },
       );
       if (fullReasoning) {
         fullReasoning = await regexScriptsSvc.applyRegexScripts(
@@ -2538,6 +3182,8 @@ async function runGeneration(
           "reasoning",
           0,
           macroEnv,
+          undefined,
+          { source: "response_backend" },
         );
       }
     }
@@ -2552,14 +3198,25 @@ async function runGeneration(
       );
       messageId = updated?.id ?? lifecycle.targetMessageId;
       if (fullReasoning) {
-        const existingExtra =
-          chatsSvc.getMessage(userId, lifecycle.targetMessageId)?.extra || {};
-        chatsSvc.patchMessageExtra(userId, lifecycle.targetMessageId, {
-          ...existingExtra,
-          reasoning: fullReasoning,
-        });
+        // Target the regenerated swipe, not the displayed one (the user may have
+        // navigated away mid-stream before stopping).
+        chatsSvc.setSwipeScopedExtra(
+          userId,
+          lifecycle.targetMessageId,
+          lifecycle.streamingSwipeId,
+          { reasoning: fullReasoning },
+        );
       }
     } else if (lifecycle.stagedMessageId) {
+      if (!closedContent && !fullReasoning) {
+        try {
+          chatsSvc.deleteMessage(userId, lifecycle.stagedMessageId);
+        } catch {
+          /* best-effort cleanup */
+        }
+        return { content: closedContent };
+      }
+
       const existingStagedExtra =
         chatsSvc.getMessage(userId, lifecycle.stagedMessageId)?.extra || {};
       const partialExtra = fullReasoning
@@ -2570,6 +3227,7 @@ async function runGeneration(
         ...(Object.keys(partialExtra).length > 0
           ? { extra: partialExtra }
           : {}),
+        skipCouncilCacheInvalidation: true,
       });
       messageId = lifecycle.stagedMessageId;
     } else if (lifecycle.continueMessageId && closedContent) {
@@ -2577,17 +3235,21 @@ async function runGeneration(
         (lifecycle.continueOriginalContent ?? "") +
         (lifecycle.continuePostfix ?? "") +
         closedContent;
-      const existingContinueExtra = chatsSvc.getMessage(
-        userId,
-        lifecycle.continueMessageId,
-      )?.extra;
-      const continueExtra = fullReasoning
-        ? { ...existingContinueExtra, reasoning: fullReasoning }
-        : undefined;
+      // Append onto the continued swipe (not the displayed one, in case the user
+      // navigated away before stopping).
       chatsSvc.updateMessage(userId, lifecycle.continueMessageId, {
         content: combined,
-        ...(continueExtra ? { extra: continueExtra } : {}),
+        contentSwipeId: lifecycle.streamingSwipeId,
+        skipCouncilCacheInvalidation: true,
       });
+      if (fullReasoning) {
+        chatsSvc.setSwipeScopedExtra(
+          userId,
+          lifecycle.continueMessageId,
+          lifecycle.streamingSwipeId,
+          { reasoning: fullReasoning },
+        );
+      }
       messageId = lifecycle.continueMessageId;
     } else if (lifecycle.impersonateDraft) {
       // Impersonate draft: do not persist the partial content as a message.
@@ -2645,11 +3307,31 @@ async function runGeneration(
       : 30_000;
     let generationMessages = messages;
 
-    for (let inlineRound = 0; inlineRound < 3; inlineRound++) {
-      let pendingToolCalls: ToolCallResult[] | undefined;
+    // Providers that round-trip reasoning across tool calls (DeepSeek thinking
+    // mode, etc.) get a native tool_use/tool_result continuation so the model
+    // can keep reasoning between tool calls — interleaved thinking. Everything
+    // else keeps the legacy text continuation (and providers like Anthropic
+    // would *break* on structured tool_use without their thinking blocks, so
+    // they must stay on the legacy path until their carrier is wired).
+    const interleavedStructured =
+      !!tools?.length && provider.capabilities.interleavedThinking === true;
 
-      // Non-streaming path: call generate() once, then synthesize a single-chunk stream
-      const stream: AsyncGenerator<StreamChunk, void, unknown> = useStreaming
+    for (let inlineRound = 0; inlineRound < INLINE_TOOL_MAX_ROUNDS; inlineRound++) {
+      // fullContent/fullReasoning accumulate across rounds for the final
+      // persisted message; capture the start offsets so we can slice out just
+      // this round's delta for the continuation we feed back to the provider.
+      const roundContentStart = fullContent.length;
+      const roundReasoningStart = fullReasoning.length;
+      let pendingToolCalls: ToolCallResult[] | undefined;
+      // Provider-native reasoning blocks (Anthropic thinking blocks with
+      // signatures) captured this round, replayed on the structured continuation.
+      let pendingThinkingBlocks: LlmThinkingBlock[] | undefined;
+      // OpenRouter reasoning_details captured this round, replayed likewise.
+      let pendingReasoningDetails: Record<string, unknown>[] | undefined;
+
+      // Non-streaming path: call generate() once, then synthesize a single-chunk stream.
+      // Wrapped in a factory so the pre-token retry below can re-issue a clean request.
+      const makeStream = (): AsyncGenerator<StreamChunk, void, unknown> => useStreaming
         ? provider.generateStream(apiKey, apiUrl, {
             messages: generationMessages,
             model,
@@ -2672,33 +3354,76 @@ async function runGeneration(
               reasoning: result.reasoning,
               finish_reason: result.finish_reason,
               tool_calls: result.tool_calls,
+              thinking_blocks: result.thinking_blocks,
+              reasoning_details: result.reasoning_details,
               usage: result.usage,
             };
           })();
 
-      // Drive the iterator manually so each `.next()` can be raced against the
-      // abort signal. Providers intentionally don't pass the signal into
-      // `fetch()` (a Bun-Windows stream-cancel workaround), which means a stop
-      // clicked during the initial fetch wait — before any chunk arrives —
-      // would otherwise stall until the upstream LLM responds. Racing at this
-      // level unwinds immediately on abort; the in-flight fetch completes
-      // silently in the background and the generator's own finally cancels
-      // the reader.
-      const iter = stream[Symbol.asyncIterator]();
-      const maybeYieldDuringStream = createCooperativeYielder(32, signal);
-      while (true) {
-        let result: IteratorResult<StreamChunk, void>;
+      // Establish the stream and pull its FIRST chunk under a bounded retry.
+      // Streaming providers throw transport/HTTP errors on the first `.next()`
+      // (before the body reader exists), so a retry here re-issues a clean
+      // request and cannot duplicate emitted tokens. Once the first chunk lands
+      // we never retry — mid-stream failures fall through to the outer catch.
+      let iter!: AsyncIterator<StreamChunk, void>;
+      let firstResult!: IteratorResult<StreamChunk, void>;
+      for (let attempt = 0; ; attempt++) {
+        const candidate = makeStream()[Symbol.asyncIterator]();
         try {
-          result = await raceWithSignal(iter.next(), signal);
+          firstResult = await raceWithSignal(candidate.next(), signal);
+          iter = candidate;
+          break;
         } catch (err) {
-          // Signal won the race. Tell the generator to clean up (best-effort)
-          // and rethrow so the outer catch handles emission.
           try {
-            await iter.return?.(undefined);
+            await candidate.return?.(undefined);
           } catch {
             /* best-effort */
           }
-          throw err;
+          const retryable =
+            attempt < GENERATION_MAX_RETRIES &&
+            !signal.aborted &&
+            err instanceof ProviderRequestError &&
+            err.retryable;
+          if (!retryable) throw err;
+          try {
+            await abortableSleep(
+              computeBackoffMs(attempt, (err as ProviderRequestError).retryAfterMs),
+              signal,
+            );
+          } catch {
+            // Aborted during backoff — surface the original provider error.
+            throw err;
+          }
+        }
+      }
+
+      // Drive the iterator manually so each `.next()` can be raced against the
+      // abort signal. Streaming providers forward aborts only until response
+      // headers arrive (so preflight stops cancel the upstream request), then
+      // switch to user-space read cancellation to avoid Bun's mid-stream abort
+      // crash on Windows.
+      const maybeYieldDuringStream = createCooperativeYielder(32, signal);
+      let consumedFirst = false;
+      while (true) {
+        let result: IteratorResult<StreamChunk, void>;
+        if (!consumedFirst) {
+          // The first chunk was already obtained (and signal-raced) during
+          // stream establishment above; process it before resuming the pull.
+          consumedFirst = true;
+          result = firstResult;
+        } else {
+          try {
+            result = await raceWithSignal(iter.next(), signal);
+          } catch (err) {
+            // Signal won the race. Tell the generator to clean up (best-effort)
+            // and rethrow so the outer catch handles emission.
+            try {
+              await iter.return?.(undefined);
+            } catch {
+              /* best-effort */
+            }
+            throw err;
+          }
         }
         if (result.done) break;
         const chunk = result.value;
@@ -2725,8 +3450,8 @@ async function runGeneration(
         if (chunk.reasoning) {
           if (!reasoningStartedAt) reasoningStartedAt = Date.now();
           fullReasoning += chunk.reasoning;
-          const seq = pool.appendPoolReasoning(generationId, chunk.reasoning);
-          queueStreamSegment(chunk.reasoning, seq, "reasoning");
+          const appended = pool.appendPoolReasoning(generationId, chunk.reasoning);
+          queueStreamSegment(chunk.reasoning, appended.seq, appended.offset, "reasoning");
         }
 
         if (chunk.token) {
@@ -2735,6 +3460,14 @@ async function runGeneration(
 
         if (chunk.tool_calls) {
           pendingToolCalls = chunk.tool_calls;
+        }
+
+        if (chunk.thinking_blocks) {
+          pendingThinkingBlocks = chunk.thinking_blocks;
+        }
+
+        if (chunk.reasoning_details) {
+          pendingReasoningDetails = chunk.reasoning_details;
         }
 
         // Capture provider usage data (token counts) from the stream
@@ -2753,9 +3486,15 @@ async function runGeneration(
         break;
       }
 
+      // This round's freshly-streamed deltas (not the cross-round accumulation).
+      const roundContent = fullContent.slice(roundContentStart);
+      const roundReasoning = fullReasoning.slice(roundReasoningStart);
+
       // Reconstruct the full assistant output including any guided CoT
       // reasoning block so the model sees its own <think>...</think> on
-      // continuation rounds and doesn't re-enter the planning phase.
+      // continuation rounds and doesn't re-enter the planning phase. This text
+      // rendering is used for the legacy continuation and as the context
+      // summary handed to extension tools during execution.
       const fullAssistantOutput = fullReasoning
         ? `${cotDelimiters.prefix}${fullReasoning}${cotDelimiters.suffix}\n${fullContent}`
         : fullContent;
@@ -2785,13 +3524,16 @@ async function runGeneration(
 
       generationMessages = [
         ...generationMessages,
-        ...(fullAssistantOutput
-          ? [{ role: "assistant", content: fullAssistantOutput } satisfies LlmMessage]
-          : []),
-        {
-          role: "system",
-          content: formatInlineCouncilToolResults(inlineCouncilResults),
-        },
+        ...buildInlineToolContinuation({
+          structured: interleavedStructured,
+          legacyAssistantOutput: fullAssistantOutput,
+          roundContent,
+          roundReasoning,
+          toolCalls: pendingToolCalls ?? [],
+          results: inlineCouncilResults,
+          thinkingBlocks: pendingThinkingBlocks,
+          reasoningDetails: pendingReasoningDetails,
+        }),
       ];
     }
 
@@ -2846,6 +3588,8 @@ async function runGeneration(
             "ai_output",
             0,
             macroEnv,
+            undefined,
+            { source: "response_backend" },
           );
           if (fullReasoning) {
             fullReasoning = await regexScriptsSvc.applyRegexScripts(
@@ -2854,6 +3598,8 @@ async function runGeneration(
               "reasoning",
               0,
               macroEnv,
+              undefined,
+              { source: "response_backend" },
             );
           }
         }
@@ -2872,24 +3618,21 @@ async function runGeneration(
         messageId = updated?.id ?? lifecycle.targetMessageId;
       } else if (lifecycle.continueMessageId) {
         // Continue: append generated text to existing assistant message,
-        // inserting the continuePostfix separator (e.g. newline, double newline)
+        // inserting the continuePostfix separator (e.g. newline, double newline).
+        // Target the continued swipe explicitly — the user may have navigated to a
+        // different swipe while this streamed. Reasoning is persisted by the shared
+        // swipe-scoped extra write below.
         const combined =
           (lifecycle.continueOriginalContent ?? "") +
           (lifecycle.continuePostfix ?? "") +
           fullContent;
-        const existingExtra = chatsSvc.getMessage(
-          userId,
-          lifecycle.continueMessageId,
-        )?.extra;
-        const continueExtra = fullReasoning
-          ? { ...existingExtra, reasoning: fullReasoning }
-          : undefined;
         const updated = chatsSvc.updateMessage(
           userId,
           lifecycle.continueMessageId,
           {
             content: combined,
-            ...(continueExtra ? { extra: continueExtra } : {}),
+            contentSwipeId: lifecycle.streamingSwipeId,
+            skipCouncilCacheInvalidation: true,
           },
         );
         messageId = updated?.id ?? lifecycle.continueMessageId;
@@ -2906,6 +3649,7 @@ async function runGeneration(
         chatsSvc.updateMessage(userId, lifecycle.stagedMessageId, {
           content: fullContent,
           ...(stagedExtra ? { extra: stagedExtra } : {}),
+          skipCouncilCacheInvalidation: true,
         });
         messageId = lifecycle.stagedMessageId;
       } else if (lifecycle.impersonateDraft) {
@@ -2949,17 +3693,35 @@ async function runGeneration(
 
       if (messageId) {
         const savedMessage = chatsSvc.getMessage(userId, messageId);
-        let resolvedMessage = savedMessage?.content ?? fullContent;
+        // The generated content lives on the generation's swipe (streamingSwipeId),
+        // which may differ from the displayed swipe_id if the user navigated
+        // mid-stream. Read and rewrite that swipe so macro resolution targets the
+        // right one (identical to the old path when not navigated, idx === swipe_id).
+        const genSwipeId =
+          lifecycle.streamingSwipeId != null &&
+          savedMessage != null &&
+          lifecycle.streamingSwipeId >= 0 &&
+          lifecycle.streamingSwipeId < savedMessage.swipes.length
+            ? lifecycle.streamingSwipeId
+            : null;
+        const baseContent =
+          genSwipeId != null
+            ? savedMessage!.swipes[genSwipeId]
+            : (savedMessage?.content ?? fullContent);
+        let resolvedMessage = baseContent ?? fullContent;
         if (macroEnv || macroEnvSeed) {
           const assistantEnv = cloneEnv(macroEnv ?? macroEnvSeed!);
           resolvedMessage = await resolveRenderedMessageContent(
-            savedMessage?.content ?? fullContent,
+            baseContent ?? fullContent,
             assistantEnv,
           );
           persistMacroVariableState(userId, chatId, assistantEnv);
         }
-        if (savedMessage && savedMessage.content !== resolvedMessage) {
-          chatsSvc.updateMessage(userId, messageId, { content: resolvedMessage });
+        if (savedMessage && baseContent !== resolvedMessage) {
+          chatsSvc.updateMessage(userId, messageId, {
+            content: resolvedMessage,
+            ...(genSwipeId != null ? { contentSwipeId: genSwipeId } : {}),
+          });
         }
         fullContent = resolvedMessage;
       }
@@ -2980,11 +3742,14 @@ async function runGeneration(
         if (reasoningDurationMs > 0)
           immediateExtra.reasoningDuration = reasoningDurationMs;
         if (messageId && Object.keys(immediateExtra).length > 0) {
-          const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
-          chatsSvc.patchMessageExtra(userId, messageId, {
-            ...existing,
-            ...immediateExtra,
-          });
+          // Anchor reasoning/usage to the generated swipe, not the displayed one —
+          // the user may have navigated to another swipe while this streamed.
+          chatsSvc.setSwipeScopedExtra(
+            userId,
+            messageId,
+            lifecycle.streamingSwipeId,
+            immediateExtra,
+          );
         }
       }
 
@@ -3077,12 +3842,35 @@ async function runGeneration(
         }
 
         if (messageId && (resolvedTokenCount || generationMetrics)) {
-          const existing = chatsSvc.getMessage(userId, messageId)?.extra || {};
-          const metricsExtra: Record<string, any> = { ...existing };
+          const metricsExtra: Record<string, any> = {};
           if (resolvedTokenCount) metricsExtra.tokenCount = resolvedTokenCount;
           if (generationMetrics)
             metricsExtra.generationMetrics = generationMetrics;
-          chatsSvc.patchMessageExtra(userId, messageId, metricsExtra);
+          // Anchor metrics to the generated swipe, not the displayed one.
+          chatsSvc.setSwipeScopedExtra(
+            userId,
+            messageId,
+            lifecycle.streamingSwipeId,
+            metricsExtra,
+          );
+          // GENERATION_ENDED already fired (and no longer carries these — they're
+          // computed here, after the terminal event, so the stop button clears
+          // immediately). Push a follow-up so the live detail pill / hover tooltip
+          // fill in without waiting for a reload. swipeId lets the client gate the
+          // patch to the swipe these belong to, in case the user navigated away
+          // mid-stream.
+          eventBus.emit(
+            EventType.GENERATION_METRICS_READY,
+            {
+              generationId,
+              chatId,
+              messageId,
+              swipeId: lifecycle.streamingSwipeId,
+              ...(resolvedTokenCount ? { tokenCount: resolvedTokenCount } : {}),
+              ...(generationMetrics ? { generationMetrics } : {}),
+            },
+            userId,
+          );
         }
 
         if (
@@ -3096,11 +3884,14 @@ async function runGeneration(
               lifecycle.breakdown,
               lifecycle.chatHistoryMessages,
             );
+            const entries = tokenResult.breakdown.map((entry, index) => ({
+              ...entry,
+              content: lifecycle.breakdown?.[index]?.content,
+            }));
+            const chatHistoryTokens = sumChatHistoryBreakdownTokens(entries);
             const breakdownPayload = {
-              entries: tokenResult.breakdown.map((entry, index) => ({
-                ...entry,
-                content: lifecycle.breakdown?.[index]?.content,
-              })),
+              entries: omitChatHistoryBreakdownEntries(entries),
+              chatHistoryTokens,
               messages: (lifecycle.messages || []).map((message) => ({
                 role: message.role,
                 content:
@@ -3114,6 +3905,8 @@ async function runGeneration(
               maxContext: lifecycle.maxContext || 0,
               model: lifecycle.model,
               provider: lifecycle.providerName || "",
+              parameters,
+              usage: streamUsage,
               presetName: lifecycle.presetName,
               tokenizer_name: tokenResult.tokenizer_name,
             };
@@ -3123,6 +3916,19 @@ async function runGeneration(
                 messageId,
                 chatId,
                 breakdownPayload,
+              );
+              // Push the breakdown so an opened Prompt Breakdown modal renders
+              // from cache instead of re-fetching. GENERATION_ENDED stopped
+              // carrying it (deferred, after the terminal event). Drop `messages`
+              // — the modal derives chat-history messages from the store or
+              // fetches raw on demand, so there's no need to send the largest
+              // (duplicated) field over the socket.
+              const { messages: _omitMessages, ...breakdownForClient } =
+                breakdownPayload;
+              eventBus.emit(
+                EventType.GENERATION_BREAKDOWN_READY,
+                { generationId, chatId, messageId, breakdown: breakdownForClient },
+                userId,
               );
             }
           } catch {
@@ -3175,6 +3981,7 @@ async function runGeneration(
       }
     } else {
       const msg = errorMessage(err);
+      abortChatBackground(userId, chatId);
       // Socket drops, provider 5xx mid-stream, etc. — persist whatever was
       // already streamed so the user keeps the visible content rather than
       // having the streaming bubble wiped on error.
@@ -3255,6 +4062,8 @@ async function fireExpressionDetection(
         characterId,
         groups: expressionGroups,
         recentMessages,
+        connectionId: detectionSettings.connectionProfileId,
+        modelOverride: detectionSettings.model,
       },
       rawGenerate,
     );
@@ -3284,10 +4093,7 @@ async function fireExpressionDetection(
 
   // Check if council already produced an expression result
   if (lifecycle.councilNamedResults?.["expression_data"]) {
-    const councilLabel = lifecycle.councilNamedResults["expression_data"]
-      .trim()
-      .toLowerCase();
-    const matched = labels.find((l) => l.toLowerCase() === councilLabel);
+    const matched = resolveDetectedExpressionLabel(lifecycle.councilNamedResults["expression_data"], labels);
     if (matched) {
       emitExpressionChanged(
         userId,
@@ -3321,6 +4127,8 @@ async function fireExpressionDetection(
       characterId,
       labels,
       recentMessages,
+      connectionId: detectionSettings.connectionProfileId,
+      modelOverride: detectionSettings.model,
     },
     rawGenerate,
   );
@@ -3387,9 +4195,11 @@ function emitExpressionChanged(
   );
 }
 
-export function stopGeneration(generationId: string): boolean {
+export function stopGeneration(userId: string, generationId: string): boolean {
   const entry = activeGenerations.get(generationId);
-  if (!entry) return false;
+  // User scoping: a generationId is unguessable, but never let one user's
+  // stop request abort another user's generation.
+  if (!entry || entry.userId !== userId) return false;
   entry.controller.abort();
   // Tear down any fire-and-forget background work for this chat too —
   // the user asked to stop, so cache-warming cortex/databank queries
@@ -3407,14 +4217,19 @@ export function stopUserGenerations(userId: string): void {
   abortUserBackgrounds(userId);
 }
 
-export function stopChatGenerations(userId: string, chatId: string): void {
+export function stopChatGenerations(userId: string, chatId: string): boolean {
   const chatKey = `${userId}:${chatId}`;
   const genId = activeChatGenerations.get(chatKey);
+  let stopped = false;
   if (genId) {
     const entry = activeGenerations.get(genId);
-    if (entry) entry.controller.abort();
+    if (entry) {
+      entry.controller.abort();
+      stopped = true;
+    }
   }
   abortChatBackground(userId, chatId);
+  return stopped;
 }
 
 export function stopAllGenerations(): void {
@@ -3510,26 +4325,36 @@ async function prepareRawCall(
   userId: string,
   input: RawGenerateInput & { signal?: AbortSignal },
 ): Promise<PreparedGenerationCall> {
-  const { provider, apiKey, apiUrl } = await resolveRawProviderAndKey(
+  const { provider, apiKey, apiUrl, connection } = await resolveRawProviderAndKey(
     userId,
     input,
   );
   const parameters: GenerationParameters = { ...(input.parameters || {}) };
-  const reasoningConnection = input.connection_id
-    ? connectionsSvc.getConnection(userId, input.connection_id)
-    : null;
+  const reasoningConnection = connection;
   applyEffectiveReasoningSettings(
     userId,
     reasoningConnection || {},
     provider.name,
     input.model,
     parameters,
+    input.reasoning,
   );
+  if (reasoningConnection) injectConnectionMetadataFlags(reasoningConnection, parameters);
+
+  const cached = applyPromptCaching(
+    {
+      provider: provider.name,
+      model: input.model,
+      metadata: reasoningConnection?.metadata,
+    },
+    { params: parameters, messages: input.messages, tools: input.tools },
+  );
+
   const request: GenerationRequest = {
-    messages: input.messages,
+    messages: cached.messages,
     model: input.model,
-    parameters,
-    tools: input.tools,
+    parameters: cached.params,
+    tools: cached.tools,
     signal: input.signal,
   };
   return { provider, apiKey, apiUrl, request };
@@ -3560,32 +4385,37 @@ async function prepareQuietCall(
     provider.name,
     connection.model || undefined,
     mergedParams,
+    input.reasoning,
   );
-
-  // Inject connection-level metadata flags into parameters (e.g. use_responses_api)
-  if (connection.metadata?.use_responses_api) {
-    mergedParams.use_responses_api = true;
-  }
-
-  // Inject OpenRouter-specific settings from connection metadata
-  if (connection.provider === "openrouter" && connection.metadata?.openrouter) {
-    mergedParams._openrouter = connection.metadata.openrouter;
-  }
 
   // Allow callers (e.g. Memory Cortex sidecar) to override the model without
   // swapping connection profiles. Strip the key from parameters so it doesn't
-  // leak into provider-specific request bodies as an unknown field.
+  // leak into provider-specific request bodies as an unknown field. Resolved
+  // before caching dispatch so model-gated strategies see the actual model
+  // that will be sent.
   const paramModel =
     typeof (mergedParams as any).model === "string"
       ? (mergedParams as any).model.trim()
       : "";
   if ("model" in mergedParams) delete (mergedParams as any).model;
 
+  injectConnectionMetadataFlags(connection, mergedParams);
+
+  const resolvedModel = paramModel || connection.model;
+  const cached = applyPromptCaching(
+    {
+      provider: provider.name,
+      model: resolvedModel,
+      metadata: connection.metadata,
+    },
+    { params: mergedParams, messages: input.messages, tools: input.tools },
+  );
+
   const request: GenerationRequest = {
-    messages: input.messages,
-    model: paramModel || connection.model,
-    parameters: mergedParams,
-    tools: input.tools,
+    messages: cached.messages,
+    model: resolvedModel,
+    parameters: cached.params,
+    tools: cached.tools,
     signal: input.signal,
   };
 
@@ -3683,12 +4513,13 @@ export async function quietGenerateStream(
 
 /**
  * Summarize generation — used by the Loom Summary feature.
- * Resolves connection via: explicit connection_id → sidecar settings → default.
- * When using sidecar, applies sidecar model/temperature/maxTokens overrides.
+ * Accepts raw message data and builds the prompt internally using the shared
+ * `buildSummarizationPrompt` function. Resolves connection via: explicit
+ * connection_id → sidecar settings → default.
  */
 export async function summarizeGenerate(
   userId: string,
-  input: QuietGenerateInput,
+  input: SummarizeGenerateInput,
 ): Promise<GenerationResponse> {
   const chatId = input.chat_id;
   // One generationId per summary invocation — tracked in summarize-pool so the
@@ -3701,6 +4532,37 @@ export async function summarizeGenerate(
   }
 
   try {
+    // Fetch messages from the database (last N by message_context)
+    const allMessages = chatsSvc.getMessages(userId, chatId);
+    const visibleMessages = allMessages.filter((m) => m.extra?.hidden !== true);
+    const recentMessages = visibleMessages.slice(-input.message_context);
+
+    if (recentMessages.length === 0) {
+      throw new Error('No messages to summarize');
+    }
+
+    // Build the prompt using the shared backend function
+    const defaults = getSummarizationPromptDefaults();
+    const systemPrompt = input.systemPromptOverride && input.systemPromptOverride.trim().length > 0
+      ? input.systemPromptOverride
+      : defaults.systemPrompt;
+    const userPrompt = input.userPromptOverride && input.userPromptOverride.trim().length > 0
+      ? input.userPromptOverride
+      : defaults.userPrompt;
+
+    const prompt = buildSummarizationPrompt({
+      messages: recentMessages,
+      previousSummary: input.existingSummary || '',
+      userName: input.userName,
+      characterName: input.characterName,
+      systemPromptTemplate: systemPrompt,
+      userPromptTemplate: userPrompt,
+    });
+
+    if (!prompt) {
+      throw new Error('No messages to summarize');
+    }
+
     let connectionId = input.connection_id;
     let sidecarModel: string | undefined;
     let sidecarParams: Record<string, unknown> = {};
@@ -3714,7 +4576,7 @@ export async function summarizeGenerate(
         sidecarParams = {
           temperature: sidecar.temperature,
           top_p: sidecar.topP,
-          max_tokens: sidecar.maxTokens,
+          max_tokens: sidecar.maxTokens ?? 8192,
         };
       }
     }
@@ -3725,7 +4587,7 @@ export async function summarizeGenerate(
       connection.id,
     );
 
-    // Merge: preset defaults < sidecar overrides < request overrides
+    // Merge: preset defaults < sidecar overrides
     let mergedParams: GenerationParameters = {};
     if (connection.preset_id) {
       const preset = presetsSvc.getPreset(userId, connection.preset_id);
@@ -3733,18 +4595,13 @@ export async function summarizeGenerate(
         mergedParams = { ...preset.parameters };
       }
     }
-    mergedParams = { ...mergedParams, ...sidecarParams, ...input.parameters };
+    mergedParams = { ...mergedParams, ...sidecarParams };
+    // Ensure summary generation has enough tokens — presets may cap at 1024
+    if ((mergedParams.max_tokens as number) < 4096) {
+      mergedParams.max_tokens = 8192;
+    }
 
-    // Inject connection-level metadata flags
-    if (connection.metadata?.use_responses_api) {
-      mergedParams.use_responses_api = true;
-    }
-    if (
-      connection.provider === "openrouter" &&
-      connection.metadata?.openrouter
-    ) {
-      mergedParams._openrouter = connection.metadata.openrouter;
-    }
+    injectConnectionMetadataFlags(connection, mergedParams);
 
     applyEffectiveReasoningSettings(
       userId,
@@ -3754,31 +4611,33 @@ export async function summarizeGenerate(
       mergedParams,
     );
 
+    const resolvedModel = sidecarModel || connection.model;
+    const summarizeMessages: LlmMessage[] = [
+      { role: 'system', content: prompt.systemPrompt },
+      { role: 'user', content: prompt.userPrompt },
+    ];
+    const cached = applyPromptCaching(
+      {
+        provider: provider.name,
+        model: resolvedModel,
+        metadata: connection.metadata,
+      },
+      { params: mergedParams, messages: summarizeMessages },
+    );
+
     const request: GenerationRequest = {
-      messages: input.messages,
-      model: sidecarModel || connection.model,
-      parameters: mergedParams,
-      tools: input.tools,
+      messages: cached.messages,
+      model: resolvedModel,
+      parameters: cached.params,
     };
 
-    // Use streaming when tools are present — some providers only emit tool call
-    // deltas correctly via the streaming path.
-    const result =
-      input.tools && input.tools.length > 0
-        ? await consumeStream(
-            provider.generateStream(apiKey, apiUrl, {
-              ...request,
-              stream: true,
-            }),
-            userId,
-          )
-        : applyDelimitedReasoningParsing(
-            userId,
-            await provider.generate(apiKey, apiUrl, {
-              ...request,
-              stream: false,
-            }),
-          );
+    const result = applyDelimitedReasoningParsing(
+      userId,
+      await provider.generate(apiKey, apiUrl, {
+        ...request,
+        stream: false,
+      }),
+    );
 
     if (chatId) {
       summarizePool.completeSummarizePool({ generationId, userId, chatId });
@@ -3794,6 +4653,439 @@ export async function summarizeGenerate(
       });
     }
     throw err;
+  }
+}
+
+// ── Batch Rebuild Summary ────────────────────────────────────────────────
+
+interface RebuildSummaryResult {
+  generationId: string;
+  totalBatches: number;
+  totalMessages: number;
+}
+
+interface RebuildBatchContext {
+  chatId: string;
+  generationId: string;
+  userId: string;
+  batchSize: number;
+  connection: ConnectionProfile;
+  provider: LlmProvider;
+  apiKey: string;
+  apiUrl: string;
+  sidecarModel: string | undefined;
+  sidecarParams: Record<string, unknown>;
+  systemPrompt: string;
+  userPrompt: string;
+  userName: string;
+  characterName: string;
+  presetParams: Record<string, unknown>;
+}
+
+/**
+ * Process a single batch in the rebuild flow.
+ */
+async function processRebuildBatch(
+  ctx: RebuildBatchContext,
+  batch: Message[],
+  batchIdx: number,
+  totalBatches: number,
+  messagesProcessed: number,
+  currentSummary: string,
+): Promise<{ summary: string; messagesProcessed: number; failed: boolean }> {
+  const { chatId, generationId, userId, provider, apiKey, apiUrl, sidecarModel, sidecarParams, systemPrompt, userPrompt, userName, characterName, presetParams } = ctx;
+
+  // Build prompt for this batch
+  const prompt = buildSummarizationPrompt({
+    messages: batch,
+    previousSummary: currentSummary,
+    userName,
+    characterName,
+    systemPromptTemplate: systemPrompt,
+    userPromptTemplate: userPrompt,
+  });
+
+  if (!prompt) {
+    // Empty batch, skip (not a failure)
+    summarizePool.emitSummarizationProgress({
+      chatId,
+      generationId,
+      batchNumber: batchIdx + 1,
+      totalBatches,
+      messagesProcessed: messagesProcessed + batch.length,
+      userId,
+    });
+    return { summary: currentSummary, messagesProcessed: messagesProcessed + batch.length, failed: false };
+  }
+
+  // Merge parameters
+  const mergedParams = { ...presetParams, ...sidecarParams };
+  // Ensure summary generation has enough tokens — presets may cap at 1024
+  if ((mergedParams.max_tokens as number) < 4096) {
+    mergedParams.max_tokens = 8192;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  injectConnectionMetadataFlags(ctx.connection, mergedParams as any);
+
+  console.log(
+    `[rebuild] Batch ${batchIdx + 1}/${totalBatches}: model=${sidecarModel || ctx.connection.model}, max_tokens=${mergedParams.max_tokens ?? 'NOT SET'}`,
+  );
+
+  const rebuildMessages: LlmMessage[] = [
+    { role: 'system' as const, content: prompt.systemPrompt },
+    { role: 'user' as const, content: prompt.userPrompt },
+  ];
+  const cached = applyPromptCaching(
+    {
+      provider: provider.name,
+      model: sidecarModel || ctx.connection.model,
+      metadata: ctx.connection.metadata,
+    },
+    { params: mergedParams as GenerationParameters, messages: rebuildMessages },
+  );
+
+  const request = {
+    messages: cached.messages,
+    model: sidecarModel || ctx.connection.model,
+    parameters: cached.params,
+    stream: false,
+  };
+
+  // Call LLM for this batch
+  let result: GenerationResponse;
+  try {
+    result = applyDelimitedReasoningParsing(
+      userId,
+      await provider.generate(apiKey, apiUrl, request),
+    );
+  } catch (err: any) {
+    // Retry once on failure
+    try {
+      await new Promise<void>((r) => setTimeout(r, 500));
+      result = applyDelimitedReasoningParsing(
+        userId,
+        await provider.generate(apiKey, apiUrl, request),
+      );
+    } catch (retryErr: any) {
+      // On retry failure, keep the previous summary unchanged
+      console.warn(
+        `[rebuild] Batch ${batchIdx + 1}/${totalBatches} failed, keeping previous summary`,
+        retryErr?.message,
+      );
+      summarizePool.emitSummarizationProgress({
+        chatId,
+        generationId,
+        batchNumber: batchIdx + 1,
+        totalBatches,
+        messagesProcessed: messagesProcessed + batch.length,
+        userId,
+      });
+      return { summary: currentSummary, messagesProcessed: messagesProcessed + batch.length, failed: true };
+    }
+  }
+
+  const batchSummary = result.content?.trim();
+  const newSummary = batchSummary || currentSummary;
+
+  console.log(
+    `[rebuild] Batch ${batchIdx + 1}/${totalBatches}: contentLen=${(result.content || '').length}, batchSummaryLen=${(batchSummary || '').length}, newSummaryLen=${newSummary.length}`,
+  );
+
+  // Emit progress event
+  summarizePool.emitSummarizationProgress({
+    chatId,
+    generationId,
+    batchNumber: batchIdx + 1,
+    totalBatches,
+    messagesProcessed: messagesProcessed + batch.length,
+    userId,
+  });
+
+  return { summary: newSummary, messagesProcessed: messagesProcessed + batch.length, failed: false };
+}
+
+/**
+ * Rebuild a chat summary by processing all messages in sequential batches.
+ * Each batch's output feeds into the next as the "previous summary".
+ *
+ * This function is non-blocking: it resolves connection/settings, registers
+ * in the pool, kicks off the batch processing as a fire-and-forget async
+ * task, and returns immediately with metadata. The frontend tracks progress
+ * via SUMMARIZATION_PROGRESS and SUMMARIZATION_COMPLETED WS events.
+ */
+export async function rebuildSummary(
+  userId: string,
+  input: {
+    chat_id: string;
+    batch_size: number;
+    userName: string;
+    system_prompt_override?: string | null;
+    user_prompt_override?: string | null;
+    connection_id?: string;
+  },
+): Promise<RebuildSummaryResult> {
+  const chatId = input.chat_id;
+  const generationId = crypto.randomUUID();
+  const batchSize = Math.max(1, input.batch_size);
+
+  // Resolve connection
+  let connectionId = input.connection_id;
+  if (!connectionId) {
+    const sidecar = getSidecarSettings(userId);
+    if (sidecar.connectionProfileId) {
+      connectionId = sidecar.connectionProfileId;
+    }
+  }
+  const connection = resolveConnection(userId, connectionId);
+  const { provider, apiKey, apiUrl } = await resolveProviderAndKey(
+    userId,
+    connection.id,
+  );
+
+  // Resolve model and parameters
+  let sidecarModel: string | undefined;
+  let sidecarParams: Record<string, unknown> = {};
+  if (!input.connection_id) {
+    const sidecar = getSidecarSettings(userId);
+    if (sidecar.model) sidecarModel = sidecar.model;
+    sidecarParams = {
+      temperature: sidecar.temperature,
+      top_p: sidecar.topP,
+      max_tokens: sidecar.maxTokens ?? 8192,
+    };
+  }
+
+  // Get prompt defaults
+  const defaults = getSummarizationPromptDefaults();
+  const systemPrompt = input.system_prompt_override && input.system_prompt_override.trim().length > 0
+    ? input.system_prompt_override
+    : defaults.systemPrompt;
+  const userPrompt = input.user_prompt_override && input.user_prompt_override.trim().length > 0
+    ? input.user_prompt_override
+    : defaults.userPrompt;
+
+  // Get chat for character/user names
+  const chat = chatsSvc.getChat(userId, chatId);
+  const characterId = chat?.character_id;
+  const character = characterId ? charactersSvc.getCharacter(userId, characterId) : null;
+  const characterName = character?.name || 'Character';
+  const userName = input.userName || 'User';
+
+  // Fetch all messages ordered chronologically
+  const allMessages = chatsSvc.getMessages(userId, chatId);
+  const visibleMessages = allMessages.filter((m) => m.extra?.hidden !== true);
+
+  if (visibleMessages.length === 0) {
+    throw new Error('No messages to summarize');
+  }
+
+  // Get preset params
+  let presetParams: Record<string, unknown> = {};
+  if (connection.preset_id) {
+    const preset = presetsSvc.getPreset(userId, connection.preset_id);
+    if (preset) {
+      presetParams = { ...preset.parameters };
+    }
+  }
+
+  // Slice into batches
+  const batches: Message[][] = [];
+  for (let i = 0; i < visibleMessages.length; i += batchSize) {
+    batches.push(visibleMessages.slice(i, i + batchSize));
+  }
+
+  // Return immediately — batch processing runs in background
+  // (startRebuildSummary emits SUMMARIZATION_STARTED)
+  return { generationId, totalBatches: batches.length, totalMessages: visibleMessages.length };
+}
+
+/**
+ * Start the background batch processing for a rebuild summary.
+ * Called by the route handler after rebuildSummary() returns.
+ */
+export async function startRebuildSummary(
+  userId: string,
+  input: {
+    chat_id: string;
+    batch_size: number;
+    userName: string;
+    system_prompt_override?: string | null;
+    user_prompt_override?: string | null;
+    connection_id?: string;
+  },
+): Promise<void> {
+  const chatId = input.chat_id;
+  const generationId = crypto.randomUUID();
+  const batchSize = Math.max(1, input.batch_size);
+
+  // Resolve connection
+  let connectionId = input.connection_id;
+  if (!connectionId) {
+    const sidecar = getSidecarSettings(userId);
+    if (sidecar.connectionProfileId) {
+      connectionId = sidecar.connectionProfileId;
+    }
+  }
+  const connection = resolveConnection(userId, connectionId);
+  const { provider, apiKey, apiUrl } = await resolveProviderAndKey(
+    userId,
+    connection.id,
+  );
+
+  // Resolve model and parameters
+  let sidecarModel: string | undefined;
+  let sidecarParams: Record<string, unknown> = {};
+  if (!input.connection_id) {
+    const sidecar = getSidecarSettings(userId);
+    if (sidecar.model) sidecarModel = sidecar.model;
+    sidecarParams = {
+      temperature: sidecar.temperature,
+      top_p: sidecar.topP,
+      max_tokens: sidecar.maxTokens ?? 8192,
+    };
+  }
+
+  // Get prompt defaults
+  const defaults = getSummarizationPromptDefaults();
+  const systemPrompt = input.system_prompt_override && input.system_prompt_override.trim().length > 0
+    ? input.system_prompt_override
+    : defaults.systemPrompt;
+  const userPrompt = input.user_prompt_override && input.user_prompt_override.trim().length > 0
+    ? input.user_prompt_override
+    : defaults.userPrompt;
+
+  // Get chat for character/user names
+  const chat = chatsSvc.getChat(userId, chatId);
+  const characterId = chat?.character_id;
+  const character = characterId ? charactersSvc.getCharacter(userId, characterId) : null;
+  const characterName = character?.name || 'Character';
+  const userName = input.userName || 'User';
+
+  // Fetch all messages
+  const allMessages = chatsSvc.getMessages(userId, chatId);
+  const visibleMessages = allMessages.filter((m) => m.extra?.hidden !== true);
+
+  if (visibleMessages.length === 0) {
+    summarizePool.failSummarizePool({ generationId, userId, chatId, error: 'No messages to summarize' });
+    return;
+  }
+
+  // Get preset params
+  let presetParams: Record<string, unknown> = {};
+  if (connection.preset_id) {
+    const preset = presetsSvc.getPreset(userId, connection.preset_id);
+    if (preset) {
+      presetParams = { ...preset.parameters };
+    }
+  }
+
+  // Slice into batches
+  const batches: Message[][] = [];
+  for (let i = 0; i < visibleMessages.length; i += batchSize) {
+    batches.push(visibleMessages.slice(i, i + batchSize));
+  }
+
+  // Register in pool
+  if (chatId) {
+    summarizePool.startSummarizePool({ generationId, userId, chatId });
+  }
+
+  try {
+    // Get existing summary
+    const existingSummary = (chat?.metadata?.loom_summary as string) || '';
+    console.log(
+      `[rebuild] Starting rebuild for ${chatId}: existingSummary=${existingSummary ? existingSummary.slice(0, 80) + '…' : '(empty)'}, batches=${batches.length}`,
+    );
+
+    let currentSummary = existingSummary;
+    let messagesProcessed = 0;
+    let hadFailure = false;
+
+    // Process each batch
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      const result = await processRebuildBatch(
+        {
+          chatId,
+          generationId,
+          userId,
+          batchSize,
+          connection,
+          provider,
+          apiKey,
+          apiUrl,
+          sidecarModel,
+          sidecarParams,
+          systemPrompt,
+          userPrompt,
+          userName,
+          characterName,
+          presetParams,
+        },
+        batch,
+        batchIdx,
+        batches.length,
+        messagesProcessed,
+        currentSummary,
+      );
+      currentSummary = result.summary;
+      messagesProcessed = result.messagesProcessed;
+
+      // Track whether this batch failed
+      if (result.failed) {
+        hadFailure = true;
+      }
+
+      console.log(
+        `[rebuild] Batch ${batchIdx + 1}/${batches.length} done, summaryLen=${currentSummary.length}, failed=${result.failed}`,
+      );
+
+      // Small delay between batches
+      if (batchIdx < batches.length - 1) {
+        await new Promise<void>((r) => setTimeout(r, 500));
+      }
+    }
+
+    // Rebuild is atomic: only commit if ALL batches succeeded.
+    // If any batch failed, the chain is broken and the result is unreliable.
+    const allBatchesSucceeded = !hadFailure;
+
+    if (allBatchesSucceeded) {
+      // All batches produced new content — commit the rebuilt summary
+      console.log(
+        `[rebuild] All ${batches.length} batches succeeded, committing summary (len=${currentSummary.length})`,
+      );
+      await chatsSvc.mergeChatMetadata(userId, chatId, {
+        loom_summary: currentSummary,
+        loom_last_summarized_at: {
+          messageCount: visibleMessages.length,
+          timestamp: Date.now(),
+        },
+      });
+      eventBus.emit(
+        EventType.SUMMARIZATION_COMPLETED,
+        { chatId, generationId, summaryText: currentSummary },
+        userId,
+      );
+    } else {
+      // At least one batch failed — keep existing summary, emit failure
+      console.warn(
+        `[rebuild] Rebuild aborted: at least one batch failed, keeping existing summary`,
+      );
+      eventBus.emit(
+        EventType.SUMMARIZATION_FAILED,
+        { chatId, generationId, error: 'One or more batches failed — rebuild aborted' },
+        userId,
+      );
+    }
+  } catch (err: any) {
+    summarizePool.failSummarizePool({
+      generationId,
+      userId,
+      chatId,
+      error: err?.message || 'Rebuild summary failed',
+    });
   }
 }
 

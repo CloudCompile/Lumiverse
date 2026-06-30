@@ -76,7 +76,7 @@ export class SMBFileSystem implements FileSystem {
       // Try as a file by listing parent with the filename as pattern
       try {
         const dir = posix.dirname(path);
-        const base = posix.basename(path);
+        const base = this.toSmbPath(posix.basename(path));
         const smbDir = this.toSmbPath(dir);
         const output = await this.runCommand(`cd "${smbDir}"; ls "${base}"`);
         return output.trim().length > 0 && !output.includes("NT_STATUS_");
@@ -258,6 +258,7 @@ export class SMBFileSystem implements FileSystem {
       args.push("-p", String(port));
     }
 
+    let credentials: string | null = null;
     if (username) {
       // Username goes on the command line; password is delivered via the
       // PASSWD env var by runCommand() so it never appears in argv.

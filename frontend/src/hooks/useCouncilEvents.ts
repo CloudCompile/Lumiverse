@@ -6,6 +6,7 @@ import { useStore } from '@/store'
 import { generateApi } from '@/api/generate'
 import type { CouncilToolResult } from 'lumiverse-spindle-types'
 import type { CouncilToolsFailedInfo } from '@/types/store'
+import i18n from '@/i18n'
 
 /** Open the council retry modal for a given failure payload. */
 export function showCouncilRetryModal(payload: CouncilToolsFailedInfo) {
@@ -14,12 +15,17 @@ export function showCouncilRetryModal(payload: CouncilToolsFailedInfo) {
     .map((t) => `${t.memberName} / ${t.toolDisplayName}${t.error ? `: ${t.error}` : ''}`)
     .join('\n')
 
+  const total = payload.failedCount + payload.successCount
   state.openModal('confirm', {
-    title: 'Council Tools Failed',
-    message: `${payload.failedCount} of ${payload.failedCount + payload.successCount} council tool(s) failed:\n\n${failedList}\n\nWould you like to retry the failed tools or continue with the successful results?`,
+    title: i18n.t('chat:council.toolsFailed.title'),
+    message: i18n.t('chat:council.toolsFailed.message', {
+      failed: payload.failedCount,
+      total,
+      list: failedList,
+    }),
     variant: 'warning',
-    confirmText: 'Retry Failed',
-    secondaryText: 'Continue Anyway',
+    confirmText: i18n.t('chat:council.toolsFailed.retry'),
+    secondaryText: i18n.t('chat:council.toolsFailed.continue'),
     secondaryVariant: 'safe',
     onConfirm: () => {
       generateApi.councilRetry(payload.generationId, 'retry').catch(console.error)

@@ -8,7 +8,7 @@ import LoginPage from './components/auth/LoginPage'
 import SignupPage from './components/auth/SignupPage'
 import VerifyEmailPage from './components/auth/VerifyEmailPage'
 
-export const router = createBrowserRouter([
+const routes = [
   {
     path: '/login',
     element: <LoginPage />,
@@ -31,4 +31,6 @@ export const router = createBrowserRouter([
       { path: 'characters/:id', element: <CharacterProfile /> },
     ],
   },
-])
+]
+
+export const router = createBrowserRouter(routes)

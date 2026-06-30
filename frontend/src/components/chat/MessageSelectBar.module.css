@@ -4,19 +4,28 @@
   justify-content: space-between;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--lumiverse-primary-010);
+  background: color-mix(in srgb, var(--lumiverse-bg-elevated) 88%, var(--lumiverse-primary) 12%);
   border: 1px solid var(--lumiverse-primary);
   border-radius: 10px;
   position: absolute;
   bottom: 110px;
   left: 12px;
   right: 12px;
-  backdrop-filter: blur(12px);
   z-index: 21;
+  transition: opacity 180ms ease, transform 180ms ease, background var(--lumiverse-transition-fast);
 }
 
 :global(html[data-ios-pwa]) .bar {
   bottom: calc(110px + max(0px, env(safe-area-inset-bottom, 0px) - var(--app-keyboard-inset-bottom, 0px)));
+}
+
+/* Chromium/Android PWA: shell no longer reserves the gesture-nav-bar inset,
+   so add it here to keep the bar clear of the nav bar (and above the input
+   bar). resizes-content shrinks the dvh shell above the keyboard, so the bar
+   rides up on its own and env() collapses to 0 — no keyboard-inset subtraction
+   like iOS. */
+:global(html[data-pwa]:not([data-ios-pwa])) .bar {
+  bottom: calc(110px + env(safe-area-inset-bottom, 0px));
 }
 
 @media (max-width: 600px) {
@@ -28,6 +37,10 @@
 
   :global(html[data-ios-pwa]) .bar {
     bottom: calc(90px + max(0px, env(safe-area-inset-bottom, 0px) - var(--app-keyboard-inset-bottom, 0px)));
+  }
+
+  :global(html[data-pwa]:not([data-ios-pwa])) .bar {
+    bottom: calc(90px + env(safe-area-inset-bottom, 0px));
   }
 }
 

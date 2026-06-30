@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   X, Upload, Box, User, Wrench, Settings, Palette, Zap,
   Check, Download, RefreshCw,
@@ -15,13 +16,12 @@ import clsx from 'clsx'
 
 type ImportTab = 'file' | 'url' | 'lucid'
 
-// Lucid Cards category tabs — mirrors extension's TABS config
-const LUCID_TABS = [
-  { id: 'Lumia DLCs', label: 'Lumia DLCs', Icon: User },
-  { id: 'Loom Utilities', label: 'Utilities', Icon: Wrench },
-  { id: 'Loom Retrofits', label: 'Retrofits', Icon: Settings },
-  { id: 'Loom Narratives', label: 'Narratives', Icon: Palette },
-  { id: 'Council Tools', label: 'Tools', Icon: Zap },
+const LUCID_TAB_IDS = [
+  { id: 'Lumia DLCs', labelKey: 'packBrowser.importModal.lucidTabLumiaDlcs', Icon: User },
+  { id: 'Loom Utilities', labelKey: 'packBrowser.importModal.lucidTabUtilities', Icon: Wrench },
+  { id: 'Loom Retrofits', labelKey: 'packBrowser.importModal.lucidTabRetrofits', Icon: Settings },
+  { id: 'Loom Narratives', labelKey: 'packBrowser.importModal.lucidTabNarratives', Icon: Palette },
+  { id: 'Council Tools', labelKey: 'packBrowser.importModal.lucidTabTools', Icon: Zap },
 ] as const
 
 // Maps tab IDs to their API count field — mirrors extension's TAB_TO_COUNT_FIELD
@@ -38,6 +38,7 @@ interface Props {
 }
 
 export default function ImportPackModal({ onImport, onClose }: Props) {
+  const { t } = useTranslation('panels')
   const [activeImportTab, setActiveImportTab] = useState<ImportTab>('file')
 
   // File / URL state
@@ -82,11 +83,11 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
       const data = await res.json()
       setAllPacks(data.packs || [])
     } catch (err: any) {
-      setLucidError(err.message || 'Failed to load Lucid Cards catalog')
+      setLucidError(err.message || t('packBrowser.importModal.lucidLoadFailed'))
     } finally {
       setLucidLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     if (activeImportTab === 'lucid' && allPacks.length === 0 && !lucidLoading && !lucidError) {
@@ -127,7 +128,7 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
         const res = await fetch(`https://lucid.cards/api/lumia-dlc/${catalogEntry.slug}`)
         if (!res.ok) throw new Error(`HTTP error: ${res.status}`)
         const data = await res.json()
-        if (data.success === false) throw new Error(data.error || 'Pack not found')
+        if (data.success === false) throw new Error(data.error || t('packBrowser.importModal.packNotFound'))
 
         const packData = data.pack || data
         const payload = transformLucidPack(packData, catalogEntry)
@@ -159,10 +160,10 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
       const pack = await packsApi.importJson(payload)
       onImport(pack)
     } catch (e: any) {
-      setFileError(e.message || 'Failed to import file')
+      setFileError(e.message || t('packBrowser.importModal.importFileFailed'))
       setFileLoading(false)
     }
-  }, [onImport])
+  }, [onImport, t])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -180,15 +181,15 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
       const pack = await packsApi.importUrl(url.trim())
       onImport(pack)
     } catch (e: any) {
-      setUrlError(e.message || 'Failed to import from URL')
+      setUrlError(e.message || t('packBrowser.importModal.importFromUrlFailed'))
       setUrlLoading(false)
     }
-  }, [url, onImport])
+  }, [url, onImport, t])
 
   return (
     <ModalShell isOpen onClose={onClose} maxWidth={640} maxHeight="90vh" zIndex={10001} className={clsx(styles.modal, styles.modalLarge)}>
       <div className={styles.modalHeader}>
-        <h2 className={styles.modalTitle}>Import Pack</h2>
+        <h2 className={styles.modalTitle}>{t('packBrowser.importModal.title')}</h2>
         <Button size="icon" variant="ghost" onClick={onClose} icon={<X size={16} />} />
       </div>
 
@@ -201,7 +202,11 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
             className={clsx(styles.tab, activeImportTab === tab && styles.tabActive)}
             onClick={() => setActiveImportTab(tab)}
           >
-            {tab === 'file' ? 'File Upload' : tab === 'url' ? 'From URL' : 'Lucid Cards'}
+            {tab === 'file'
+              ? t('packBrowser.importModal.tabFile')
+              : tab === 'url'
+                ? t('packBrowser.importModal.tabUrl')
+                : t('packBrowser.importModal.tabLucid')}
           </button>
         ))}
       </div>
@@ -218,8 +223,8 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
             onClick={() => fileInputRef.current?.click()}
           >
             <Upload size={24} style={{ margin: '0 auto 8px', opacity: 0.5, display: 'block' }} />
-            <div className={styles.dropZoneText}>Drop a JSON file here or click to browse</div>
-            <div className={styles.dropZoneSub}>Supports native pack format and extension format</div>
+            <div className={styles.dropZoneText}>{t('packBrowser.importModal.dropZone')}</div>
+            <div className={styles.dropZoneSub}>{t('packBrowser.importModal.dropZoneSub')}</div>
           </div>
           <input
             ref={fileInputRef}
@@ -231,7 +236,7 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
               if (file) handleFile(file)
             }}
           />
-          {fileLoading && <div className={styles.importStatus}>Importing...</div>}
+          {fileLoading && <div className={styles.importStatus}>{t('packBrowser.importModal.importing')}</div>}
         </div>
       )}
 
@@ -240,13 +245,13 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
         <div className={styles.modalBody}>
           {urlError && <div className={styles.importError}>{urlError}</div>}
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Pack URL</label>
+            <label className={styles.fieldLabel}>{t('packBrowser.importModal.packUrl')}</label>
             <input
               type="text"
               className={styles.fieldInput}
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://example.com/pack.json"
+              placeholder={t('packBrowser.importModal.urlPlaceholder')}
               autoFocus
               onKeyDown={(e) => e.key === 'Enter' && handleUrlImport()}
             />
@@ -257,7 +262,7 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
             loading={urlLoading}
             onClick={handleUrlImport}
           >
-            {urlLoading ? 'Importing...' : 'Import'}
+            {urlLoading ? t('packBrowser.importModal.importing') : t('packBrowser.importModal.import')}
           </Button>
         </div>
       )}
@@ -267,7 +272,7 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
         <>
           {/* Category tabs */}
           <div className={styles.lucidCategoryTabs}>
-            {LUCID_TABS.map(({ id, label, Icon }) => (
+            {LUCID_TAB_IDS.map(({ id, labelKey, Icon }) => (
               <button
                 key={id}
                 type="button"
@@ -275,7 +280,7 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
                 onClick={() => { setLucidTab(id); setSelectedPacks([]) }}
               >
                 <Icon size={13} />
-                <span>{label}</span>
+                <span>{t(labelKey)}</span>
               </button>
             ))}
           </div>
@@ -285,28 +290,28 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
             {lucidLoading ? (
               <div className={styles.lucidStateCenter}>
                 <Spinner size={22} />
-                <span>Loading content from Lucid.cards...</span>
+                <span>{t('packBrowser.importModal.lucidLoading')}</span>
               </div>
             ) : lucidError ? (
               <div className={styles.lucidStateCenter}>
                 <X size={28} style={{ color: '#f44336' }} />
                 <span className={styles.lucidErrorText}>{lucidError}</span>
                 <Button size="sm" onClick={fetchLucidCards} icon={<RefreshCw size={13} />}>
-                  Retry
+                  {t('packBrowser.importModal.retry')}
                 </Button>
               </div>
             ) : filteredLucidPacks.length === 0 ? (
               <div className={styles.lucidStateCenter}>
-                No items available in this category.
+                {t('packBrowser.importModal.lucidEmptyCategory')}
               </div>
             ) : (
               <div className={styles.lucidCardGrid}>
                 {filteredLucidPacks.map((pack) => {
                   const selected = isSelected(pack)
                   const counts: string[] = []
-                  if (pack.lumiaCount > 0) counts.push(`${pack.lumiaCount} Lumia`)
-                  if (pack.loomCount > 0) counts.push(`${pack.loomCount} Loom`)
-                  if (pack.extrasCount > 0) counts.push(`${pack.extrasCount} Extra`)
+                  if (pack.lumiaCount > 0) counts.push(t('packBrowser.importModal.countLumia', { count: pack.lumiaCount }))
+                  if (pack.loomCount > 0) counts.push(t('packBrowser.importModal.countLoom', { count: pack.loomCount }))
+                  if (pack.extrasCount > 0) counts.push(t('packBrowser.importModal.countExtra', { count: pack.extrasCount }))
 
                   return (
                     <div
@@ -327,8 +332,8 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
                         </div>
                       </div>
                       <div className={styles.lucidCardInfo}>
-                        <div className={styles.lucidCardTitle}>{pack.packName || 'Unknown'}</div>
-                        <div className={styles.lucidCardAuthor}>{pack.packAuthor || 'Unknown Author'}</div>
+                        <div className={styles.lucidCardTitle}>{pack.packName || t('packBrowser.importModal.unknownPack')}</div>
+                        <div className={styles.lucidCardAuthor}>{pack.packAuthor || t('packBrowser.importModal.unknownAuthor')}</div>
                         {counts.length > 0 && (
                           <div className={styles.lucidCardCounts}>{counts.join(', ')}</div>
                         )}
@@ -343,28 +348,32 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
           {/* Import result */}
           {importResult && (
             <div className={clsx(styles.importStatus, importResult.failed > 0 && styles.importStatusWarn)}>
-              Import complete: {importResult.imported} imported
-              {importResult.failed > 0 && `, ${importResult.failed} failed`}
+              {importResult.failed > 0
+                ? t('packBrowser.importModal.importCompleteWithFailed', {
+                  imported: importResult.imported,
+                  failed: importResult.failed,
+                })
+                : t('packBrowser.importModal.importComplete', { imported: importResult.imported })}
             </div>
           )}
 
           {/* Lucid Cards footer */}
           <div className={styles.lucidFooter}>
             <Button variant="ghost" onClick={onClose}>
-              Close
+              {t('packBrowser.importModal.close')}
             </Button>
 
             <div className={styles.lucidFooterRight}>
               {selectedPacks.length > 0 && (
                 <>
                   <button type="button" className={styles.lucidFooterLink} onClick={selectAll}>
-                    Select All
+                    {t('packBrowser.importModal.selectAll')}
                   </button>
                   <button type="button" className={styles.lucidFooterLink} onClick={clearSelection}>
-                    Clear
+                    {t('packBrowser.importModal.clear')}
                   </button>
                   <span className={styles.lucidSelectedCount}>
-                    {selectedPacks.length} selected
+                    {t('packBrowser.importModal.selectedCount', { count: selectedPacks.length })}
                   </span>
                 </>
               )}
@@ -377,8 +386,13 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
                   onClick={handleLucidImport}
                 >
                   {importing
-                    ? `Importing ${importProgress.current}/${importProgress.total}...`
-                    : `Import ${selectedPacks.length === 1 ? 'Pack' : `${selectedPacks.length} Packs`}`}
+                    ? t('packBrowser.importModal.importProgress', {
+                      current: importProgress.current,
+                      total: importProgress.total,
+                    })
+                    : selectedPacks.length === 1
+                      ? t('packBrowser.importModal.importOnePack')
+                      : t('packBrowser.importModal.importManyPacks', { count: selectedPacks.length })}
                 </Button>
               )}
             </div>
@@ -389,7 +403,7 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
       {/* Footer for file/url tabs */}
       {activeImportTab !== 'lucid' && (
         <div className={styles.modalFooter}>
-          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button variant="ghost" onClick={onClose}>{t('packBrowser.importModal.close')}</Button>
         </div>
       )}
     </ModalShell>

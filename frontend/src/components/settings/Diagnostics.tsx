@@ -1,4 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
+
 import { Copy, Check, RefreshCw, Server, Monitor, Bell, Send, Users } from 'lucide-react'
 import { IconPlugConnected, IconStethoscope } from '@tabler/icons-react'
 import { spinClass } from '@/components/shared/Spinner'
@@ -48,24 +51,47 @@ function detectOS(): string {
   return navigator.platform
 }
 
-function checkFeatures(): Record<string, boolean> {
+const BROWSER_FEATURE_IDS = [
+  'websocket',
+  'serviceWorker',
+  'webgl',
+  'clipboard',
+  'notifications',
+  'sharedArrayBuffer',
+] as const
+
+const PWA_FEATURE_IDS = [
+  'pushApi',
+  'backgroundSync',
+  'appBadge',
+  'periodicSync',
+] as const
+
+type BrowserFeatureId = (typeof BROWSER_FEATURE_IDS)[number]
+type PwaFeatureId = (typeof PWA_FEATURE_IDS)[number]
+
+function checkFeatures(): Record<BrowserFeatureId, boolean> {
   return {
-    'WebSocket': typeof WebSocket !== 'undefined',
-    'Service Worker': 'serviceWorker' in navigator,
-    'WebGL': (() => { try { return !!document.createElement('canvas').getContext('webgl2') } catch { return false } })(),
-    'Clipboard API': 'clipboard' in navigator,
-    'Notifications': 'Notification' in window,
-    'SharedArrayBuffer': typeof SharedArrayBuffer !== 'undefined',
+    websocket: typeof WebSocket !== 'undefined',
+    serviceWorker: 'serviceWorker' in navigator,
+    webgl: (() => { try { return !!document.createElement('canvas').getContext('webgl2') } catch { return false } })(),
+    clipboard: 'clipboard' in navigator,
+    notifications: 'Notification' in window,
+    sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
   }
 }
 
-function checkPwaFeatures(): Record<string, boolean> {
+function checkPwaFeatures(): Record<PwaFeatureId, boolean> {
   return {
-    'Push API': 'PushManager' in window,
-    'Background Sync': 'SyncManager' in window,
-    'App Badge': 'setAppBadge' in navigator,
-    'Periodic Sync': 'PeriodicSyncManager' in window,
+    pushApi: 'PushManager' in window,
+    backgroundSync: 'SyncManager' in window,
+    appBadge: 'setAppBadge' in navigator,
+    periodicSync: 'PeriodicSyncManager' in window,
   }
+}
+
+function featureLabel(t: TFunction<'settings'>, id: BrowserFeatureId | PwaFeatureId): string {
+  return t(`diagnostics.feature.${id}`)
 }
 
 function isSameHost(): boolean {
@@ -79,57 +105,57 @@ function isSameHost(): boolean {
   }
 }
 
-function buildMarkdown(backend: SystemInfo | null, backendError: string | null, extensions: { name: string; version: string; enabled: boolean }[]): string {
+function buildMarkdown(
+  t: TFunction<'settings'>,
+  backend: SystemInfo | null,
+  backendError: string | null,
+  extensions: { name: string; version: string; enabled: boolean }[],
+): string {
   const lines: string[] = []
 
-  lines.push('## Diagnostics Report')
+  lines.push(`## ${t('diagnostics.reportTitle')}`)
   lines.push('')
 
-  // Backend
-  lines.push('### Backend')
+  lines.push(`### ${t('diagnostics.reportBackend')}`)
   if (backendError) {
-    lines.push(`- **Status:** Unreachable (${backendError})`)
+    lines.push(`- **${t('diagnostics.reportStatus')}:** ${t('diagnostics.reportUnreachable', { error: backendError })}`)
   } else if (backend) {
-    lines.push(`- **Version:** ${backend.backend.version}`)
-    lines.push(`- **Branch:** ${backend.git.branch}`)
-    lines.push(`- **Commit:** ${backend.git.commit}`)
-    lines.push(`- **Runtime:** ${backend.backend.runtime}`)
-    lines.push(`- **OS:** ${getPlatformLabel(backend.os.platform)} ${backend.os.release} (${backend.os.arch})`)
-    lines.push(`- **Host:** ${backend.os.hostname}`)
-    lines.push(`- **CPU:** ${backend.cpu.model} (${backend.cpu.cores} cores)`)
-    lines.push(`- **RAM:** ${formatBytes(backend.memory.total - backend.memory.free)} used / ${formatBytes(backend.memory.total)} total`)
+    lines.push(`- **${t('diagnostics.version')}:** ${backend.backend.version}`)
+    lines.push(`- **${t('diagnostics.branch')}:** ${backend.git.branch}`)
+    lines.push(`- **${t('diagnostics.commit')}:** ${backend.git.commit}`)
+    lines.push(`- **${t('diagnostics.runtime')}:** ${backend.backend.runtime}`)
+    lines.push(`- **${t('diagnostics.os')}:** ${getPlatformLabel(backend.os.platform)} ${backend.os.release} (${backend.os.arch})`)
+    lines.push(`- **${t('diagnostics.host')}:** ${backend.os.hostname}`)
+    lines.push(`- **${t('diagnostics.cpu')}:** ${t('diagnostics.cpuCores', { model: backend.cpu.model, count: backend.cpu.cores })}`)
+    lines.push(`- **${t('diagnostics.ram')}:** ${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`)
     if (backend.disk) {
-      lines.push(`- **Storage:** ${formatBytes(backend.disk.used)} used / ${formatBytes(backend.disk.total)} total`)
+      lines.push(`- **${t('diagnostics.storage')}:** ${formatBytes(backend.disk.used)} / ${formatBytes(backend.disk.total)}`)
     }
   }
   lines.push('')
 
-  // Frontend
-  lines.push('### Frontend')
-  lines.push(`- **Version:** ${__APP_VERSION__}`)
-  lines.push(`- **OS:** ${detectOS()}`)
-  lines.push(`- **Browser:** ${detectBrowser()}`)
-  lines.push(`- **Same Host:** ${isSameHost() ? 'Yes' : 'No'}`)
+  lines.push(`### ${t('diagnostics.reportFrontend')}`)
+  lines.push(`- **${t('diagnostics.version')}:** ${__APP_VERSION__}`)
+  lines.push(`- **${t('diagnostics.os')}:** ${detectOS()}`)
+  lines.push(`- **${t('diagnostics.browser')}:** ${detectBrowser()}`)
+  lines.push(`- **${t('diagnostics.sameHost')}:** ${isSameHost() ? t('diagnostics.yes') : t('diagnostics.no')}`)
   const features = checkFeatures()
-  const supported = Object.entries(features).filter(([, v]) => v).map(([k]) => k)
-  const unsupported = Object.entries(features).filter(([, v]) => !v).map(([k]) => k)
+  const unsupported = Object.entries(features).filter(([, v]) => !v).map(([k]) => featureLabel(t, k as BrowserFeatureId))
   if (unsupported.length > 0) {
-    lines.push(`- **Unsupported Features:** ${unsupported.join(', ')}`)
+    lines.push(`- **${t('diagnostics.reportUnsupportedFeatures')}:** ${unsupported.join(', ')}`)
   } else {
-    lines.push(`- **Browser Features:** All supported`)
+    lines.push(`- ${t('diagnostics.reportAllFeaturesSupported')}`)
   }
   lines.push('')
 
-  // Extensions
+  lines.push(`### ${t('diagnostics.reportExtensions')}`)
   if (extensions.length > 0) {
-    lines.push('### Extensions')
     for (const ext of extensions) {
-      const status = ext.enabled ? 'enabled' : 'disabled'
+      const status = ext.enabled ? t('diagnostics.enabled') : t('diagnostics.disabled')
       lines.push(`- ${ext.name} v${ext.version} (${status})`)
     }
   } else {
-    lines.push('### Extensions')
-    lines.push('- None installed')
+    lines.push(`- ${t('diagnostics.reportNoExtensions')}`)
   }
 
   return lines.join('\n')
@@ -138,6 +164,9 @@ function buildMarkdown(backend: SystemInfo | null, backendError: string | null, 
 declare const __APP_VERSION__: string
 
 export default function Diagnostics() {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
+
   const extensions = useStore((s) => s.extensions) ?? []
   const [backend, setBackend] = useState<SystemInfo | null>(null)
   const [backendError, setBackendError] = useState<string | null>(null)
@@ -151,11 +180,11 @@ export default function Diagnostics() {
       const info = await systemApi.getInfo()
       setBackend(info)
     } catch (err: any) {
-      setBackendError(err.message ?? 'Failed to connect')
+      setBackendError(err.message ?? t('diagnostics.connectFailed'))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => { fetchInfo() }, [fetchInfo])
 
@@ -169,23 +198,23 @@ export default function Diagnostics() {
   }))
 
   const handleCopy = useCallback(async () => {
-    const md = buildMarkdown(backend, backendError, extList)
+    const md = buildMarkdown(t, backend, backendError, extList)
     await copyTextToClipboard(md)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
-  }, [backend, backendError, extList])
+  }, [backend, backendError, extList, t])
 
   return (
     <div className={styles.container}>
       <div className={styles.headerRow}>
-        <h3 className={styles.heading}>Diagnostics</h3>
+        <h3 className={styles.heading}>{t('diagnostics.title')}</h3>
         <div className={styles.headerActions}>
           <button
             type="button"
             className={styles.actionBtn}
             onClick={fetchInfo}
             disabled={loading}
-            title="Refresh"
+            title={tc('actions.refresh')}
           >
             <RefreshCw size={14} className={loading ? spinClass : undefined} />
           </button>
@@ -194,7 +223,7 @@ export default function Diagnostics() {
             className={clsx(styles.copyBtn, copied && styles.copyBtnDone)}
             onClick={handleCopy}
           >
-            {copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy Report</>}
+            {copied ? <><Check size={14} /> {t('diagnostics.copied')}</> : <><Copy size={14} /> {t('diagnostics.copyReport')}</>}
           </button>
         </div>
       </div>
@@ -203,24 +232,24 @@ export default function Diagnostics() {
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <Server size={14} />
-          <span>Backend</span>
+          <span>{t('diagnostics.backend')}</span>
         </div>
         {loading ? (
-          <div className={styles.loadingRow}>Loading...</div>
+          <div className={styles.loadingRow}>{t('diagnostics.loading')}</div>
         ) : backendError ? (
-          <div className={styles.errorRow}>Unreachable: {backendError}</div>
+          <div className={styles.errorRow}>{t('diagnostics.unreachable', { error: backendError })}</div>
         ) : backend && (
           <div className={styles.grid}>
-            <InfoRow label="Version" value={backend.backend.version} />
-            <InfoRow label="Branch" value={backend.git.branch} />
-            <InfoRow label="Commit" value={backend.git.commit} />
-            <InfoRow label="Runtime" value={backend.backend.runtime} />
-            <InfoRow label="OS" value={`${getPlatformLabel(backend.os.platform)} ${backend.os.release} (${backend.os.arch})`} />
-            <InfoRow label="Host" value={backend.os.hostname} />
-            <InfoRow label="CPU" value={`${backend.cpu.model} (${backend.cpu.cores} cores)`} />
-            <InfoRow label="RAM" value={`${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`} />
+            <InfoRow label={t('diagnostics.version')} value={backend.backend.version} />
+            <InfoRow label={t('diagnostics.branch')} value={backend.git.branch} />
+            <InfoRow label={t('diagnostics.commit')} value={backend.git.commit} />
+            <InfoRow label={t('diagnostics.runtime')} value={backend.backend.runtime} />
+            <InfoRow label={t('diagnostics.os')} value={`${getPlatformLabel(backend.os.platform)} ${backend.os.release} (${backend.os.arch})`} />
+            <InfoRow label={t('diagnostics.host')} value={backend.os.hostname} />
+            <InfoRow label={t('diagnostics.cpu')} value={t('diagnostics.cpuCores', { model: backend.cpu.model, count: backend.cpu.cores })} />
+            <InfoRow label={t('diagnostics.ram')} value={`${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`} />
             {backend.disk && (
-              <InfoRow label="Storage" value={`${formatBytes(backend.disk.used)} / ${formatBytes(backend.disk.total)}`} />
+              <InfoRow label={t('diagnostics.storage')} value={`${formatBytes(backend.disk.used)} / ${formatBytes(backend.disk.total)}`} />
             )}
           </div>
         )}
@@ -230,19 +259,19 @@ export default function Diagnostics() {
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <Monitor size={14} />
-          <span>Frontend</span>
+          <span>{t('diagnostics.frontend')}</span>
         </div>
         <div className={styles.grid}>
-          <InfoRow label="Version" value={__APP_VERSION__} />
-          <InfoRow label="OS" value={detectOS()} />
-          <InfoRow label="Browser" value={detectBrowser()} />
-          <InfoRow label="Same Host" value={sameHost ? 'Yes' : 'No'} />
+          <InfoRow label={t('diagnostics.version')} value={__APP_VERSION__} />
+          <InfoRow label={t('diagnostics.os')} value={detectOS()} />
+          <InfoRow label={t('diagnostics.browser')} value={detectBrowser()} />
+          <InfoRow label={t('diagnostics.sameHost')} value={sameHost ? t('diagnostics.yes') : t('diagnostics.no')} />
           <div className={styles.featureRow}>
-            <span className={styles.featureLabel}>Browser Features</span>
+            <span className={styles.featureLabel}>{t('diagnostics.browserFeatures')}</span>
             <div className={styles.featureTags}>
-              {Object.entries(features).map(([name, supported]) => (
-                <span key={name} className={clsx(styles.featureTag, supported ? styles.featureOk : styles.featureMissing)}>
-                  {name}
+              {Object.entries(features).map(([id, supported]) => (
+                <span key={id} className={clsx(styles.featureTag, supported ? styles.featureOk : styles.featureMissing)}>
+                  {featureLabel(t, id as BrowserFeatureId)}
                 </span>
               ))}
             </div>
@@ -260,10 +289,10 @@ export default function Diagnostics() {
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <IconPlugConnected size={14} />
-          <span>Extensions ({extensions.length})</span>
+          <span>{t('diagnostics.extensionsCount', { count: extensions.length })}</span>
         </div>
         {extensions.length === 0 ? (
-          <div className={styles.emptyRow}>No extensions installed</div>
+          <div className={styles.emptyRow}>{t('diagnostics.noExtensions')}</div>
         ) : (
           <div className={styles.extList}>
             {extensions.map((ext) => (
@@ -271,7 +300,7 @@ export default function Diagnostics() {
                 <span className={styles.extName}>{ext.name}</span>
                 <span className={styles.extVersion}>v{ext.version}</span>
                 <span className={clsx(styles.extStatus, ext.enabled ? styles.extEnabled : styles.extDisabled)}>
-                  {ext.enabled ? 'Enabled' : 'Disabled'}
+                  {ext.enabled ? t('diagnostics.enabled') : t('diagnostics.disabled')}
                 </span>
               </div>
             ))}
@@ -283,6 +312,7 @@ export default function Diagnostics() {
 }
 
 function DataMaintenanceSection() {
+  const { t } = useTranslation('settings')
   const addToast = useStore((s) => s.addToast)
   const [reattributing, setReattributing] = useState(false)
   const [reattributeResult, setReattributeResult] = useState<string | null>(null)
@@ -293,34 +323,40 @@ function DataMaintenanceSection() {
     try {
       const result = await chatsApi.reattributeAll()
       if (result.messages_updated === 0) {
-        setReattributeResult('No unattributed messages found')
+        setReattributeResult(t('diagnostics.noUnattributed'))
       } else {
-        setReattributeResult(`${result.messages_updated} messages across ${result.chats_updated} chats`)
+        setReattributeResult(t('diagnostics.reattributeResult', {
+          messages: result.messages_updated,
+          chats: result.chats_updated,
+        }))
       }
       addToast({
         type: result.messages_updated > 0 ? 'success' : 'info',
         message: result.messages_updated > 0
-          ? `Reattributed ${result.messages_updated} messages across ${result.chats_updated} chats`
-          : 'All user messages are already attributed to personas',
+          ? t('diagnostics.reattributeToast', {
+            messages: result.messages_updated,
+            chats: result.chats_updated,
+          })
+          : t('diagnostics.reattributeToastNone'),
       })
     } catch (err: any) {
-      addToast({ type: 'error', message: err.message || 'Reattribution failed' })
+      addToast({ type: 'error', message: err.message || t('diagnostics.reattributeFailed') })
     } finally {
       setReattributing(false)
     }
-  }, [addToast])
+  }, [addToast, t])
 
   return (
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <IconStethoscope size={14} />
-        <span>Data Maintenance</span>
+        <span>{t('diagnostics.dataMaintenance')}</span>
       </div>
       <div className={styles.grid}>
         <div className={styles.maintenanceRow}>
           <div className={styles.maintenanceDesc}>
             <Users size={12} style={{ display: 'inline', verticalAlign: '-2px', marginRight: 4 }} />
-            Match user messages to persona avatars by name. Useful for chats imported from SillyTavern.
+            {t('diagnostics.reattributeDesc')}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             {reattributeResult && <span className={styles.maintenanceResult}>{reattributeResult}</span>}
@@ -331,7 +367,7 @@ function DataMaintenanceSection() {
               disabled={reattributing}
             >
               <Users size={12} />
-              {reattributing ? 'Working...' : 'Reattribute'}
+              {reattributing ? t('diagnostics.working') : t('diagnostics.reattribute')}
             </button>
           </div>
         </div>
@@ -341,6 +377,7 @@ function DataMaintenanceSection() {
 }
 
 function PwaCapabilitiesSection() {
+  const { t } = useTranslation('settings')
   const addToast = useStore((s) => s.addToast)
   const pwaFeatures = checkPwaFeatures()
   const {
@@ -354,10 +391,17 @@ function PwaCapabilitiesSection() {
   const [sending, setSending] = useState(false)
 
   const describeTestFailure = (reason?: 'no_subscriptions' | 'disabled' | 'event_disabled' | 'user_active') => {
-    if (reason === 'disabled') return 'Push notifications are disabled in settings.'
-    if (reason === 'event_disabled') return 'Generation completed notifications are disabled in settings.'
-    if (reason === 'user_active') return 'Push notifications are suppressed while you are actively viewing Lumiverse.'
-    return 'No push subscriptions found. Subscribe in Notifications settings first.'
+    if (reason === 'disabled') return t('diagnostics.pushDisabled')
+    if (reason === 'event_disabled') return t('diagnostics.pushEventDisabled')
+    if (reason === 'user_active') return t('diagnostics.pushUserActive')
+    return t('diagnostics.pushNoSubscriptions')
+  }
+
+  const pushRegistrationLabel = (status: 'ready' | 'pending' | 'missing' | 'error') => {
+    if (status === 'ready') return t('diagnostics.swReady')
+    if (status === 'pending') return t('diagnostics.swActivating')
+    if (status === 'missing') return t('diagnostics.missing')
+    return t('diagnostics.swError')
   }
 
   const handleDelayedPush = useCallback(async () => {
@@ -383,64 +427,64 @@ function PwaCapabilitiesSection() {
           addToast({ type: 'warning', message: describeTestFailure(result.reason) })
         }
       } catch (err: any) {
-        addToast({ type: 'error', message: err.message || 'Push test failed' })
+        addToast({ type: 'error', message: err.message || t('diagnostics.pushTestFailed') })
       } finally {
         setSending(false)
       }
     }, 10_000)
-  }, [addToast])
+  }, [addToast, t])
 
   return (
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <Bell size={14} />
-        <span>PWA Capabilities</span>
+        <span>{t('diagnostics.pwaCapabilities')}</span>
       </div>
       <div className={styles.grid}>
         <div className={styles.featureRow}>
-          <span className={styles.featureLabel}>Service Worker APIs</span>
+          <span className={styles.featureLabel}>{t('diagnostics.swApis')}</span>
           <div className={styles.featureTags}>
-            {Object.entries(pwaFeatures).map(([name, supported]) => (
-              <span key={name} className={clsx(styles.featureTag, supported ? styles.featureOk : styles.featureMissing)}>
-                {name}
+            {Object.entries(pwaFeatures).map(([id, supported]) => (
+              <span key={id} className={clsx(styles.featureTag, supported ? styles.featureOk : styles.featureMissing)}>
+                {featureLabel(t, id as PwaFeatureId)}
               </span>
             ))}
           </div>
         </div>
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>Notification Permission</span>
+          <span className={styles.infoLabel}>{t('diagnostics.notificationPermission')}</span>
           <span className={styles.infoValue}>
-            {typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'}
+            {typeof Notification !== 'undefined' ? Notification.permission : t('diagnostics.unsupported')}
           </span>
         </div>
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>Push Registration</span>
+          <span className={styles.infoLabel}>{t('diagnostics.pushRegistration')}</span>
           <span className={styles.infoValue}>
             {supportChecked
-              ? (isSupported ? 'Available' : (unsupportedReason || 'Unavailable'))
-              : 'Checking...'}
+              ? (isSupported ? t('diagnostics.available') : (unsupportedReason || t('diagnostics.unavailable')))
+              : t('diagnostics.checking')}
           </span>
         </div>
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>SW Registration State</span>
-          <span className={styles.infoValue}>{describePushRegistrationState(registrationStatus)}</span>
+          <span className={styles.infoLabel}>{t('diagnostics.swRegistrationState')}</span>
+          <span className={styles.infoValue}>{pushRegistrationLabel(registrationStatus)}</span>
         </div>
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>Secure Context</span>
-          <span className={styles.infoValue}>{window.isSecureContext ? 'Yes' : 'No'}</span>
+          <span className={styles.infoLabel}>{t('diagnostics.secureContext')}</span>
+          <span className={styles.infoValue}>{window.isSecureContext ? t('diagnostics.yes') : t('diagnostics.no')}</span>
         </div>
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>SW Controller</span>
-          <span className={styles.infoValue}>{navigator.serviceWorker?.controller ? 'Present' : 'Missing'}</span>
+          <span className={styles.infoLabel}>{t('diagnostics.swController')}</span>
+          <span className={styles.infoValue}>{navigator.serviceWorker?.controller ? t('diagnostics.present') : t('diagnostics.missing')}</span>
         </div>
         {registrationReason && registrationStatus !== 'ready' && (
           <div className={styles.infoRow}>
-            <span className={styles.infoLabel}>SW Detail</span>
+            <span className={styles.infoLabel}>{t('diagnostics.swDetail')}</span>
             <span className={styles.infoValue}>{registrationReason}</span>
           </div>
         )}
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>Delayed Push Test</span>
+          <span className={styles.infoLabel}>{t('diagnostics.delayedPushTest')}</span>
           <span className={styles.infoValue}>
             <button
               type="button"
@@ -449,7 +493,7 @@ function PwaCapabilitiesSection() {
               disabled={sending}
             >
               <Send size={12} />
-              {countdown !== null ? `Sending in ${countdown}s...` : 'Auto push in 10s'}
+              {countdown !== null ? t('diagnostics.sendingIn', { count: countdown }) : t('diagnostics.autoPushIn10s')}
             </button>
           </span>
         </div>
@@ -465,11 +509,4 @@ function InfoRow({ label, value }: { label: string; value: string }) {
       <span className={styles.infoValue}>{value}</span>
     </div>
   )
-}
-
-function describePushRegistrationState(status: 'ready' | 'pending' | 'missing' | 'error'): string {
-  if (status === 'ready') return 'Ready'
-  if (status === 'pending') return 'Activating'
-  if (status === 'missing') return 'Missing'
-  return 'Error'
 }

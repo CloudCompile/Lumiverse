@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useStore } from '@/store'
 import { setBadge, clearBadge } from '@/lib/badging'
+import i18n from '@/i18n'
 
 /**
  * Manages the PWA app badge count. Increments when backgrounded events arrive,
@@ -43,10 +44,13 @@ export function useBadging() {
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'BACKGROUND_SYNC_COMPLETE') {
+        const count = event.data.count
         addToast({
           type: 'info',
-          title: 'Background Sync',
-          message: `${event.data.count ?? 'Pending'} changes synced`,
+          title: i18n.t('settings:badging.backgroundSyncTitle'),
+          message: count == null
+            ? i18n.t('settings:badging.backgroundSyncPending')
+            : i18n.t('settings:badging.backgroundSyncMessage', { count }),
         })
       }
     }

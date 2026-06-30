@@ -1,7 +1,25 @@
 import * as embeddingsSvc from "./embeddings.service";
 import { getDb } from "../db/connection";
 import { scheduleChatMemoryRefresh } from "./chat-memory-cache.service";
+import {
+  canUseChatChunkVectorizationSubprocess,
+  isChatChunkVectorizationSubprocessStartupError,
+  processChatChunkVectorizationBatchInSubprocess,
+  shutdownChatChunkVectorizationSubprocess,
+  warnChatChunkVectorizationFallback,
+} from "./chat-chunk-vectorization-client";
+import {
+  processChatChunkVectorizationBatch,
+  type ChatChunkVectorizationBatchResult,
+  type ChatChunkVectorizationTask,
+} from "./chat-chunk-vectorization-runner";
 import type { WorldBookEntry, WorldBookVectorIndexStatus } from "../types/world-book";
+import {
+  desiredWorldBookVectorIndexStatus,
+  isWorldBookEntryVectorEligible,
+  worldBookVectorSettingsFingerprint,
+} from "./world-book-vector-state";
+import { loadWorldBookVectorSettings } from "./world-book-vector-settings.service";
 
 interface VectorizationJob {
   type: "chunk" | "world_book_entry";
@@ -15,6 +33,7 @@ interface VectorizationJob {
 
 const WORLD_BOOK_SWEEP_INTERVAL_MS = 60_000;
 const WORLD_BOOK_SWEEP_LIMIT_PER_USER = 100;
+const CHAT_CHUNK_REQUEUE_LIMIT = 500;
 
 function normalizeWorldBookVectorIndexStatus(row: any): WorldBookVectorIndexStatus {
   if (
@@ -25,7 +44,11 @@ function normalizeWorldBookVectorIndexStatus(row: any): WorldBookVectorIndexStat
   ) {
     return row.vector_index_status;
   }
-  return row.vectorized ? "pending" : "not_enabled";
+  return desiredWorldBookVectorIndexStatus({
+    vectorized: !!row.vectorized,
+    disabled: !!row.disabled,
+    content: typeof row.content === "string" ? row.content : "",
+  });
 }
 
 function rowToWorldBookEntry(row: any): WorldBookEntry {
@@ -108,7 +131,13 @@ class VectorizationQueue {
 
     try {
       while (this.queue.length > 0) {
-        const batch = this.takeBatch(10);
+        const userId = this.queue[0].userId;
+        let maxBatch = 10;
+        try {
+          const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
+          maxBatch = Math.max(1, Math.min(cfg.batch_size, 200));
+        } catch {}
+        const batch = this.takeBatch(maxBatch);
 
         if (batch[0].type === "chunk") {
           await this.processChunkBatch(batch);
@@ -144,54 +173,45 @@ class VectorizationQueue {
   }
 
   private async processChunkBatch(jobs: VectorizationJob[]) {
-    const db = getDb();
-    const chunks: Array<{ id: string; content: string; chatId: string }> = [];
-
-    for (const job of jobs) {
-      const chunk = db
-        .query("SELECT id, content, chat_id, vectorized_at FROM chat_chunks WHERE id = ?")
-        .get(job.chunkId!) as any;
-
-      if (chunk && chunk.vectorized_at == null) {
-        chunks.push({
-          id: chunk.id,
-          content: chunk.content,
-          chatId: chunk.chat_id,
-        });
-      }
-    }
-
-    if (chunks.length === 0) return;
-
     try {
-      const cfg = await embeddingsSvc.getEmbeddingConfig(jobs[0].userId);
-      const texts = chunks.map((c) => c.content);
-      const vectors = await embeddingsSvc.cachedEmbedTexts(jobs[0].userId, texts);
-      const refreshedChats = new Set<string>();
+      const tasks = jobs
+        .filter((job): job is VectorizationJob & { chunkId: string } => typeof job.chunkId === "string" && job.chunkId.length > 0)
+        .map<ChatChunkVectorizationTask>((job) => ({
+          userId: job.userId,
+          chatId: job.chatId,
+          chunkId: job.chunkId,
+        }));
+      if (tasks.length === 0) return;
 
-      // Batch upsert all vectors in a single LanceDB mergeInsert call
-      // to avoid creating one fragment per chunk (main cause of slow queries).
-      const batchItems = chunks.map((chunk, i) => ({
-        chatId: chunk.chatId,
-        chunkId: chunk.id,
-        vector: vectors[i],
-        content: chunk.content,
-      }));
-      await embeddingsSvc.batchUpsertChunkVectors(jobs[0].userId, batchItems);
-
-      const now = Math.floor(Date.now() / 1000);
-      for (let i = 0; i < chunks.length; i++) {
-        db.query(
-          "UPDATE chat_chunks SET vectorized_at = ?, vector_model = ? WHERE id = ?"
-        ).run(now, cfg.model, chunks[i].id);
-        refreshedChats.add(chunks[i].chatId);
+      let result: ChatChunkVectorizationBatchResult;
+      if (canUseChatChunkVectorizationSubprocess()) {
+        try {
+          result = await processChatChunkVectorizationBatchInSubprocess(tasks);
+        } catch (err) {
+          if (!isChatChunkVectorizationSubprocessStartupError(err)) throw err;
+          warnChatChunkVectorizationFallback();
+          result = await processChatChunkVectorizationBatch(tasks);
+        }
+      } else {
+        warnChatChunkVectorizationFallback();
+        result = await processChatChunkVectorizationBatch(tasks);
       }
 
-      for (const chatId of refreshedChats) {
+      const failedChunkIds = new Set(result.failedChunkIds);
+
+      for (const job of jobs) {
+        if (job.chunkId && failedChunkIds.has(job.chunkId) && job.priority > 0) {
+          this.add({ ...job, priority: job.priority - 1 });
+        }
+      }
+
+      for (const chatId of result.refreshedChatIds) {
         scheduleChatMemoryRefresh(jobs[0].userId, chatId, 7);
       }
 
-      console.info(`[vectorization] Processed ${chunks.length} chunk(s)`);
+      if (result.processedCount > 0) {
+        console.info(`[vectorization] Processed ${result.processedCount} chunk(s)`);
+      }
     } catch (err) {
       console.warn("[vectorization] Chunk batch failed, requeueing with lower priority", err);
       for (const job of jobs) {
@@ -209,31 +229,52 @@ class VectorizationQueue {
     const placeholders = entryIds.map(() => "?").join(", ");
     const rows = getDb()
       .query(`
-        SELECT e.*
+        SELECT e.*, wb.name AS world_book_name
         FROM world_book_entries e
         JOIN world_books wb ON wb.id = e.world_book_id
         WHERE wb.user_id = ?
           AND e.id IN (${placeholders})
           AND (e.vector_index_status != 'indexed' OR e.vector_index_status IS NULL)
+        ORDER BY wb.name COLLATE NOCASE, e.updated_at ASC
       `)
       .all(jobs[0].userId, ...entryIds) as any[];
 
     if (rows.length === 0) return;
 
     const entries = rows.map(rowToWorldBookEntry);
+    const settingsFingerprint = worldBookVectorSettingsFingerprint(loadWorldBookVectorSettings(jobs[0].userId));
+    const bookCounts = new Map<string, number>();
+    for (const row of rows) {
+      const name = String(row.world_book_name || "Untitled world book");
+      bookCounts.set(name, (bookCounts.get(name) ?? 0) + 1);
+    }
+    const bookParts = Array.from(bookCounts.entries()).map(([name, count]) => `${name} (${count})`);
+    const bookLabel = bookParts.length === 1
+      ? bookParts[0]
+      : `${bookParts.slice(0, 5).join(", ")}${bookParts.length > 5 ? `, +${bookParts.length - 5} more books` : ""}`;
+    let configFingerprint: string | null = null;
     try {
       const cfg = await embeddingsSvc.getEmbeddingConfig(jobs[0].userId);
+      configFingerprint = embeddingsSvc.getWorldBookVectorWriteFingerprint(cfg);
       await embeddingsSvc.reindexWorldBookEntries(jobs[0].userId, entries, {
         batchSize: Math.max(1, Math.min(cfg.batch_size, entries.length, 200)),
+        optimizeAfter: false,
+        rebuildVectorIndex: false,
       });
-      console.info(`[vectorization] Processed ${entries.length} world book entr${entries.length === 1 ? "y" : "ies"}`);
+      console.info(`[vectorization] Processed ${entries.length} world book entr${entries.length === 1 ? "y" : "ies"} for ${bookParts.length === 1 ? bookLabel : `multiple books: ${bookLabel}`}`);
     } catch (err) {
       const errorMsg = String(err instanceof Error ? err.message : err);
       console.warn("[vectorization] World book batch failed, marked as error:", errorMsg);
-      for (const job of jobs) {
-        if (job.worldBookEntryId) {
-          getDb().query("UPDATE world_book_entries SET vector_index_status = 'error', vector_index_error = ? WHERE id = ?").run(errorMsg, job.worldBookEntryId);
-        }
+      if (configFingerprint) {
+        await embeddingsSvc.markWorldBookEntriesVectorErrorIfCurrent(
+          jobs[0].userId,
+          entries.filter(isWorldBookEntryVectorEligible),
+          errorMsg,
+          settingsFingerprint,
+          configFingerprint,
+        );
+      } else {
+        console.warn("[vectorization] Skipped world-book error-state update because the job config fingerprint was unavailable");
       }
     }
   }
@@ -274,6 +315,33 @@ export function queuePendingChatChunkVectorization(userId: string, chatId: strin
   }
 
   return rows.length;
+}
+
+export async function queueStaleChatChunkVectorization(limit = CHAT_CHUNK_REQUEUE_LIMIT, priority = 2): Promise<number> {
+  const rows = getDb().query(
+    `SELECT cc.id, cc.chat_id, c.user_id
+     FROM chat_chunks cc
+     JOIN chats c ON c.id = cc.chat_id
+     WHERE cc.vectorized_at IS NULL
+     ORDER BY c.updated_at DESC, cc.updated_at ASC, cc.created_at ASC
+     LIMIT ?`,
+  ).all(Math.max(1, limit)) as Array<{ id: string; chat_id: string; user_id: string }>;
+
+  const eligibleUsers = new Map<string, boolean>();
+  let queued = 0;
+  for (const row of rows) {
+    let eligible = eligibleUsers.get(row.user_id);
+    if (eligible === undefined) {
+      const cfg = await embeddingsSvc.getEmbeddingConfig(row.user_id);
+      eligible = !!(cfg.enabled && cfg.vectorize_chat_messages && cfg.has_api_key);
+      eligibleUsers.set(row.user_id, eligible);
+    }
+    if (!eligible) continue;
+    queueChunkVectorization(row.user_id, row.chat_id, row.id, priority);
+    queued++;
+  }
+
+  return queued;
 }
 
 export function queueWorldBookEntryVectorization(userId: string, entryId: string, priority = 4) {
@@ -374,4 +442,8 @@ export function stopWorldBookVectorizationSweep(): void {
     clearInterval(_worldBookSweepTimer);
     _worldBookSweepTimer = null;
   }
+}
+
+export function stopChatChunkVectorizationWorker(): void {
+  shutdownChatChunkVectorizationSubprocess();
 }

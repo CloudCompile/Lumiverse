@@ -55,6 +55,7 @@ interface WorldInfoInterceptorEntry {
   content: string
   automation_id: string | null
   selective: boolean
+  // 0=AND all, 1=NOT none, 2=OR any, 3=NOT all for secondary keys.
   selective_logic: number
   match_whole_words: boolean
   case_sensitive: boolean
@@ -64,6 +65,9 @@ interface WorldInfoInterceptorEntry {
   delay_until_recursion: boolean
   scan_depth: number | null
   order_value: number
+  // Which attachment scope contributed the entry's book to this chat.
+  // When a book is attached at multiple scopes the narrowest one wins.
+  book_source?: "character" | "persona" | "chat" | "global"
 }
 
 interface WorldInfoInterceptorMessage {

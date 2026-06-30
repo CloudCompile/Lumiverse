@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { COUNCIL_SETTINGS_DEFAULTS, COUNCIL_TOOLS_DEFAULTS, type CouncilSettings } from 'lumiverse-spindle-types'
 import { useStore } from '@/store'
 import { councilApi, type CouncilProfileBinding, type CouncilSidecarConfig, type ResolvedCouncilProfile } from '@/api/council'
 import { settingsApi } from '@/api/settings'
@@ -41,6 +43,49 @@ export function councilSourceToTarget(
   }
 }
 
+/** Merge a (possibly partial) council snapshot up to the full default shape so
+ *  consumers can read every field regardless of where the snapshot came from. */
+function normalizeCouncilSettings(settings: Partial<CouncilSettings> | undefined): CouncilSettings {
+  return {
+    ...COUNCIL_SETTINGS_DEFAULTS,
+    ...(settings ?? {}),
+    toolsSettings: { ...COUNCIL_TOOLS_DEFAULTS, ...(settings?.toolsSettings ?? {}) },
+  }
+}
+
+export interface ResolvedCouncilForChat {
+  council_settings: CouncilSettings
+  sidecar_settings: CouncilSidecarConfig
+  /** The council-profile source — drives the binding indicator. */
+  source: ResolvedCouncilProfile['source']
+  target: CouncilPersistenceTarget
+}
+
+/**
+ * Single source of truth for "which council settings apply to this chat".
+ *
+ * Council (members, tool toggles and sidecar) is owned exclusively by the
+ * council-profile system — chat binding > character binding > defaults > none.
+ * Loadouts no longer carry council, so there is nothing to reconcile here; this
+ * helper just centralises the resolve + persistence-target mapping shared by
+ * ChatView and the council panel.
+ */
+export async function resolveCouncilForChat(
+  chatId: string,
+  ctx: { characterId: string | null; characterBindingEnabled: boolean },
+): Promise<ResolvedCouncilForChat> {
+  const profileRes = await councilApi.resolve(chatId)
+  return {
+    council_settings: normalizeCouncilSettings(profileRes.council_settings),
+    sidecar_settings: profileRes.sidecar_settings,
+    source: profileRes.source,
+    target: councilSourceToTarget(profileRes.source, {
+      chatId,
+      characterId: ctx.characterBindingEnabled ? ctx.characterId : null,
+    }),
+  }
+}
+
 async function loadGlobalSidecar(): Promise<CouncilSidecarConfig> {
   try {
     const row = await settingsApi.get('sidecarSettings')
@@ -71,6 +116,7 @@ async function loadGlobalSidecar(): Promise<CouncilSidecarConfig> {
 }
 
 export function useCouncilProfiles() {
+  const { t } = useTranslation('panels', { keyPrefix: 'councilManager.toast' })
   const councilSettings = useStore((s) => s.councilSettings)
   const councilPersistenceTarget = useStore((s) => s.councilPersistenceTarget)
   const activeChatId = useStore((s) => s.activeChatId)
@@ -92,18 +138,6 @@ export function useCouncilProfiles() {
 
   const characterBindingEnabled = !isGroupChat
 
-  const applyResolved = useCallback((resolved: ResolvedCouncilProfile) => {
-    setCouncilSettings(resolved.council_settings)
-    setCouncilPersistenceTarget(
-      councilSourceToTarget(resolved.source, {
-        chatId: activeChatId,
-        characterId: characterBindingEnabled ? activeCharacterId : null,
-      }),
-    )
-    setSidecarConfig({ ...SIDECAR_DEFAULTS, ...resolved.sidecar_settings })
-    setActiveSource(resolved.source)
-  }, [activeChatId, activeCharacterId, characterBindingEnabled, setCouncilPersistenceTarget, setCouncilSettings])
-
   const refreshDefaults = useCallback(async () => {
     try {
       const binding = await councilApi.getDefaults()
@@ -122,9 +156,17 @@ export function useCouncilProfiles() {
       setActiveSource('none')
       return
     }
-    const resolved = await councilApi.resolve(activeChatId)
-    applyResolved(resolved)
-  }, [activeChatId, applyResolved, setCouncilPersistenceTarget, setCouncilSettings])
+    // Loadout-aware unified resolution so a bound loadout's council roster is no
+    // longer clobbered by the council-profile/defaults resolver.
+    const resolved = await resolveCouncilForChat(activeChatId, {
+      characterId: activeCharacterId,
+      characterBindingEnabled,
+    })
+    setCouncilSettings(resolved.council_settings)
+    setCouncilPersistenceTarget(resolved.target)
+    setSidecarConfig({ ...SIDECAR_DEFAULTS, ...resolved.sidecar_settings })
+    setActiveSource(resolved.source)
+  }, [activeChatId, activeCharacterId, characterBindingEnabled, setCouncilPersistenceTarget, setCouncilSettings])
 
   useEffect(() => {
     void refreshDefaults()
@@ -203,7 +245,7 @@ export function useCouncilProfiles() {
         pendingSidecarRef.current = null
         if (toSave) {
           void persistSidecar(toSave).catch(() => {
-            addToast({ type: 'error', message: 'Failed to save sidecar settings' })
+            addToast({ type: 'error', message: t('saveSidecarFailed') })
           })
         }
       }, SIDECAR_SAVE_DEBOUNCE_MS)
@@ -236,9 +278,9 @@ export function useCouncilProfiles() {
       })
       setDefaults(binding)
       if (activeChatId) await refreshResolved()
-      addToast({ type: 'success', message: 'Default council profile saved' })
+      addToast({ type: 'success', message: t('defaultSaved') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to save default council profile' })
+      addToast({ type: 'error', message: t('defaultSaveFailed') })
     } finally {
       setIsLoading(false)
     }
@@ -250,13 +292,13 @@ export function useCouncilProfiles() {
       await councilApi.deleteDefaults()
       setDefaults(null)
       await refreshResolved()
-      addToast({ type: 'info', message: 'Default council profile cleared' })
+      addToast({ type: 'info', message: t('defaultCleared') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to clear default council profile' })
+      addToast({ type: 'error', message: t('defaultClearFailed') })
     } finally {
       setIsLoading(false)
     }
-  }, [addToast, refreshResolved])
+  }, [addToast, refreshResolved, t])
 
   const bindToChat = useCallback(async () => {
     if (!activeChatId) return
@@ -268,9 +310,9 @@ export function useCouncilProfiles() {
       })
       setChatSlot({ for: activeChatId, binding })
       await refreshResolved()
-      addToast({ type: 'success', message: 'Council profile bound to this chat' })
+      addToast({ type: 'success', message: t('boundToChat') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to bind council profile to chat' })
+      addToast({ type: 'error', message: t('bindChatFailed') })
     } finally {
       setIsLoading(false)
     }
@@ -283,9 +325,9 @@ export function useCouncilProfiles() {
       await councilApi.deleteChatBinding(activeChatId)
       setChatSlot({ for: activeChatId, binding: null })
       await refreshResolved()
-      addToast({ type: 'info', message: 'Chat council binding removed' })
+      addToast({ type: 'info', message: t('chatBindingRemoved') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to remove chat council binding' })
+      addToast({ type: 'error', message: t('removeChatBindingFailed') })
     } finally {
       setIsLoading(false)
     }
@@ -301,9 +343,9 @@ export function useCouncilProfiles() {
       })
       setCharSlot({ for: activeCharacterId, binding })
       await refreshResolved()
-      addToast({ type: 'success', message: 'Council profile bound to this character' })
+      addToast({ type: 'success', message: t('boundToCharacter') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to bind council profile to character' })
+      addToast({ type: 'error', message: t('bindCharacterFailed') })
     } finally {
       setIsLoading(false)
     }
@@ -316,9 +358,9 @@ export function useCouncilProfiles() {
       await councilApi.deleteCharacterBinding(activeCharacterId)
       setCharSlot({ for: activeCharacterId, binding: null })
       await refreshResolved()
-      addToast({ type: 'info', message: 'Character council binding removed' })
+      addToast({ type: 'info', message: t('characterBindingRemoved') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to remove character council binding' })
+      addToast({ type: 'error', message: t('removeCharacterBindingFailed') })
     } finally {
       setIsLoading(false)
     }

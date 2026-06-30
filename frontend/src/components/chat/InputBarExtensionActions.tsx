@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import DOMPurify from 'dompurify'
 import styles from './InputArea.module.css'
@@ -7,6 +8,7 @@ interface InputBarExtensionActionsProps {
 }
 
 export default function InputBarExtensionActions({ onClose }: InputBarExtensionActionsProps) {
+  const { t } = useTranslation('chat')
   const inputBarActions = useStore((s) => s.inputBarActions)
 
   const enabledActions = inputBarActions.filter((a) => a.enabled)
@@ -33,7 +35,7 @@ export default function InputBarExtensionActions({ onClose }: InputBarExtensionA
         <div key={extName} className={styles.extrasSection}>
           <div className={styles.extrasExtHeader}>
             {extName}
-            <span className={styles.extrasExtBadge}>Extension</span>
+            <span className={styles.extrasExtBadge}>{t('extension')}</span>
           </div>
           {actions.map((action) => (
             <button

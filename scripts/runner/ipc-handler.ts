@@ -12,7 +12,6 @@ import {
   PROJECT_ROOT,
   AVAILABLE_BRANCHES,
   TIMEOUT_BUN_CACHE_MS,
-  TIMEOUT_BUN_INSTALL_MS,
 } from "./lib/constants.js";
 import { spawnAsync } from "./lib/spawn-async.js";
 
@@ -215,33 +214,9 @@ export async function handleIPCMessage(msg: any): Promise<void> {
 
     case "ensure-deps": {
       try {
-        progress(id, "ensure-deps", "Installing backend dependencies...");
-        const backend = await spawnAsync(["bun", "install"], {
-          cwd: PROJECT_ROOT,
-          timeoutMs: TIMEOUT_BUN_INSTALL_MS,
-        });
-        if (backend.exitCode !== 0) {
-          const reason = backend.timedOut
-            ? `backend install timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
-            : backend.stderr.trim() || "backend install failed";
-          respond(id, false, undefined, reason);
-          break;
-        }
-
-        progress(id, "ensure-deps", "Installing frontend dependencies...");
         const frontendDir = join(PROJECT_ROOT, "frontend");
-        const frontend = await spawnAsync(["bun", "install"], {
-          cwd: frontendDir,
-          timeoutMs: TIMEOUT_BUN_INSTALL_MS,
-        });
-        if (frontend.exitCode !== 0) {
-          const reason = frontend.timedOut
-            ? `frontend install timed out after ${TIMEOUT_BUN_INSTALL_MS / 1000}s`
-            : frontend.stderr.trim() || "frontend install failed";
-          respond(id, false, undefined, reason);
-          break;
-        }
-
+        progress(id, "ensure-deps", "Installing backend and frontend dependencies...");
+        await ensureDependencies(frontendDir);
         respond(id, true, { message: "Dependencies installed successfully" });
       } catch (err) {
         respond(id, false, undefined, err instanceof Error ? err.message : "Install failed");

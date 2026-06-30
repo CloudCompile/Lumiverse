@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Star, Pencil } from 'lucide-react'
 import { getCharacterAvatarThumbUrl, getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
 import { getTagColor } from '@/lib/tagColors'
@@ -33,6 +34,7 @@ export default memo(function CharacterCard({
   onToggleFavorite,
   onToggleBatch,
 }: CharacterCardProps) {
+  const { t } = useTranslation('panels')
   const avatarUrl = (useLargeTier ? getCharacterAvatarLargeUrl(character) : getCharacterAvatarThumbUrl(character)) ?? ''
   const tags = character.tags?.slice(0, 3) || []
   const extraTagCount = (character.tags?.length || 0) - 3
@@ -82,7 +84,7 @@ export default memo(function CharacterCard({
               e.stopPropagation()
               onEdit(character.id)
             }}
-            title="Edit character"
+            title={t('characterBrowser.editCharacter')}
           >
             <Pencil size={13} />
           </button>
@@ -95,7 +97,7 @@ export default memo(function CharacterCard({
               e.stopPropagation()
               onToggleFavorite(character.id)
             }}
-            title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+            title={isFavorite ? t('characterBrowser.removeFromFavorites') : t('characterBrowser.addToFavorites')}
           >
             <Star size={14} fill={isFavorite ? 'currentColor' : 'none'} />
           </button>

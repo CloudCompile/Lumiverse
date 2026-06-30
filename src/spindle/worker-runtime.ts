@@ -38,6 +38,8 @@ import type {
   DatabankDocumentCreateDTO,
   DatabankDocumentUpdateDTO,
   PersonaDTO,
+  GlobalAddonDTO,
+  GlobalAddonUpdateDTO,
   PersonaCreateDTO,
   PersonaUpdateDTO,
   CouncilSettings,
@@ -49,12 +51,48 @@ import type {
   ImageListOptionsDTO,
   ImageUploadDTO,
   ImageUploadFromDataUrlOptionsDTO,
+  ChatMessageDTO,
+  ChatChunkDTO,
+  ChatLinkAttachDTO,
+  ChatLinkDTO,
+  ChatMemoryResultDTO,
+  ChatMemoryWarmupResultDTO,
+  CortexIngestionStatusDTO,
+  CortexIngestionTelemetryDTO,
+  CortexQueryDTO,
+  CortexResultDTO,
+  CortexUsageStatsDTO,
+  LinkedCortexResultDTO,
+  MemoryConsolidationDTO,
+  MemoryCortexConfigDTO,
+  MemoryEntityDTO,
+  MemoryEntityStatusUpdateDTO,
+  MemoryEntityUpsertDTO,
+  MemoryRelationDTO,
+  MemoryRelationUpsertDTO,
+  MemorySalienceDTO,
+  VaultChunkDTO,
+  VaultCreateDTO,
+  VaultDTO,
+  VaultReindexResultDTO,
+  VaultWithContentsDTO,
 } from "lumiverse-spindle-types";
+import type {
+  MediaConvertAudioRequestDTO,
+  MediaConvertVideoRequestDTO,
+  MediaTranscodeVideoRequestDTO,
+  MediaRemoveAudioFromVideoRequestDTO,
+  MediaAddAudioToVideoRequestDTO,
+  MediaCreateVideoFromImageAndAudioRequestDTO,
+  MediaTransformResultDTO,
+} from "../services/media.service";
 import { initializeSandbox } from "./worker-runtime-sandbox";
 import {
   assertValidSharedRpcEndpoint,
   normalizeOwnedSharedRpcEndpoint,
 } from "./shared-rpc";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Preset, CreatePresetInput, UpdatePresetInput, PromptBlock } from "../types/preset";
 
 const nativeProcessExit = process.exit.bind(process);
 
@@ -67,6 +105,11 @@ type TokenCountResult = {
   tokenizer_id: string | null;
   tokenizer_name: string;
   approximate: boolean;
+};
+
+type PromptBlockCategoryGroup = {
+  categoryBlock: PromptBlock | null;
+  children: PromptBlock[];
 };
 
 type FrontendProcessState =
@@ -162,23 +205,65 @@ type BackendProcessLifecycleEvent = {
   metadata?: Record<string, unknown>;
 };
 
+type SharedRpcEndpointPolicy = {
+  requires?: readonly string[];
+};
+
+type SharedRpcPermissionScope = {
+  id: string;
+  effectivePermissions: readonly string[];
+};
+
 type MacroInvocationState = {
   commit: boolean;
 };
 
+type ChatAppendGenerationOptions = {
+  connection_id?: string;
+  persona_id?: string;
+  persona_addon_states?: Record<string, boolean>;
+  preset_id?: string;
+  force_preset_id?: boolean;
+  parameters?: Record<string, unknown>;
+  target_character_id?: string;
+  retain_council?: boolean;
+};
+
+type ChatAppendMessageOptions =
+  | boolean
+  | {
+      triggerGeneration?: boolean;
+      generation?: ChatAppendGenerationOptions;
+    };
+
+type SpindleUserRole = "operator" | "admin" | "user";
+
 type RuntimeWorkerToHost =
   | WorkerToHost
-  | { type: "rpc_pool_sync"; endpoint: string; value: unknown }
-  | { type: "rpc_pool_register_handler"; endpoint: string }
+  | {
+      type: "chat_append_message";
+      requestId: string;
+      chatId: string;
+      message: {
+        role: "system" | "user" | "assistant";
+        content: string;
+        metadata?: Record<string, unknown>;
+      };
+      options?: ChatAppendMessageOptions;
+    }
+  | { type: "rpc_pool_sync"; endpoint: string; value: unknown; policy?: SharedRpcEndpointPolicy; rpcPermissionScopeId?: string }
+  | { type: "rpc_pool_register_handler"; endpoint: string; policy?: SharedRpcEndpointPolicy; rpcPermissionScopeId?: string }
   | { type: "rpc_pool_unregister"; endpoint: string }
-  | { type: "rpc_pool_read"; requestId: string; endpoint: string }
+  | { type: "rpc_pool_read"; requestId: string; endpoint: string; rpcPermissionScopeId?: string }
   | {
       type: "rpc_pool_handler_result";
       requestId: string;
       result?: unknown;
       error?: string;
+      rpcPermissionScopeId?: string;
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
+  | { type: "prompt_regex_set_owned"; chatIds: string[] }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | {
       type: "user_storage_write_binary";
@@ -189,6 +274,20 @@ type RuntimeWorkerToHost =
     }
   | { type: "user_storage_move"; requestId: string; from: string; to: string; userId?: string }
   | { type: "user_storage_stat"; requestId: string; path: string; userId?: string }
+  | { type: "user_get_role"; requestId: string; userId?: string }
+  | { type: "presets_list"; requestId: string; limit?: number; offset?: number; userId?: string }
+  | { type: "presets_get"; requestId: string; presetId: string; userId?: string }
+  | { type: "presets_create"; requestId: string; input: CreatePresetInput; userId?: string }
+  | { type: "presets_update"; requestId: string; presetId: string; input: UpdatePresetInput; userId?: string }
+  | { type: "presets_delete"; requestId: string; presetId: string; userId?: string }
+  | { type: "preset_blocks_list"; requestId: string; presetId: string; userId?: string }
+  | { type: "preset_blocks_get"; requestId: string; presetId: string; blockId: string; userId?: string }
+  | { type: "preset_blocks_create"; requestId: string; presetId: string; input: Partial<PromptBlock>; index?: number; userId?: string }
+  | { type: "preset_blocks_update"; requestId: string; presetId: string; blockId: string; input: Partial<Omit<PromptBlock, "id">>; userId?: string }
+  | { type: "preset_blocks_delete"; requestId: string; presetId: string; blockId: string; userId?: string }
+  | { type: "preset_categories_list"; requestId: string; presetId: string; userId?: string }
+  | { type: "uploads_get"; requestId: string; uploadId: string; userId?: string }
+  | { type: "uploads_delete"; requestId: string; uploadId: string; userId?: string }
   | {
       type: "tokens_count_text";
       requestId: string;
@@ -257,6 +356,12 @@ type RuntimeWorkerToHost =
   | { type: "images_upload"; requestId: string; input: ImageUploadDTO; userId?: string }
   | { type: "images_upload_from_data_url"; requestId: string; dataUrl: string; originalFilename?: string; userId?: string }
   | { type: "images_delete"; requestId: string; imageId: string; userId?: string }
+  | { type: "media_audio_convert"; requestId: string; input: MediaConvertAudioRequestDTO }
+  | { type: "media_video_convert"; requestId: string; input: MediaConvertVideoRequestDTO }
+  | { type: "media_video_transcode"; requestId: string; input: MediaTranscodeVideoRequestDTO }
+  | { type: "media_video_remove_audio"; requestId: string; input: MediaRemoveAudioFromVideoRequestDTO }
+  | { type: "media_video_add_audio"; requestId: string; input: MediaAddAudioToVideoRequestDTO }
+  | { type: "media_video_from_image_audio"; requestId: string; input: MediaCreateVideoFromImageAndAudioRequestDTO }
   | { type: "register_message_content_processor"; priority?: number }
   | {
       type: "message_content_processor_result";
@@ -339,7 +444,23 @@ type RuntimeWorkerToHost =
       processId: string;
       options?: { userId?: string; reason?: string };
     }
-  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string };
+  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string }
+  | { type: "ui_get_drawer_tabs"; requestId: string; userId?: string }
+  | { type: "ui_get_settings_tabs"; requestId: string; userId?: string }
+  | {
+      type: "ui_navigate";
+      requestId: string;
+      action:
+        | "open_drawer_tab"
+        | "close_drawer"
+        | "open_settings"
+        | "close_settings"
+        | "open_command_palette"
+        | "close_command_palette";
+      tabId?: string;
+      viewId?: string;
+      userId?: string;
+    };
 
 type RuntimeHostToWorker =
   | HostToWorker
@@ -348,6 +469,8 @@ type RuntimeHostToWorker =
       requestId: string;
       endpoint: string;
       requesterExtensionId: string;
+      rpcPermissionScopeId: string;
+      effectivePermissions: string[];
     }
   | {
       type: "message_content_processor_request";
@@ -364,12 +487,24 @@ type RuntimeHostToWorker =
       requestId: string;
       ctx: unknown;
     }
+  | {
+      type: "permission_changed";
+      extensionId?: string;
+      permission: string;
+      granted: boolean;
+      allGranted: string[];
+    }
   | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
   | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
   | { type: "backend_process_lifecycle"; event: BackendProcessLifecycleEvent }
   | { type: "backend_process_message"; processId: string; payload: unknown; userId: string };
 
-type RuntimeSpindleAPI = SpindleAPI & {
+// `presets` is replaced wholesale (not intersected) because the local
+// PromptBlock type adds variants (select, switch, multiselect) that the
+// published PromptBlockDTO doesn't carry. Intersection would require the
+// implementation to satisfy both shapes — which is impossible since the
+// local type is strictly broader.
+type RuntimeSpindleAPI = Omit<SpindleAPI, "presets"> & {
   registerMessageContentProcessor(
     handler: (ctx: {
       chatId: string;
@@ -456,6 +591,35 @@ type RuntimeSpindleAPI = SpindleAPI & {
     } | void>,
     priority?: number
   ): void;
+  presets: {
+    list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: Preset[]; total: number }>;
+    get(presetId: string, userId?: string): Promise<Preset | null>;
+    create(input: CreatePresetInput, userId?: string): Promise<Preset>;
+    update(presetId: string, input: UpdatePresetInput, userId?: string): Promise<Preset>;
+    delete(presetId: string, userId?: string): Promise<boolean>;
+    blocks: {
+      list(presetId: string, userId?: string): Promise<PromptBlock[]>;
+      get(presetId: string, blockId: string, userId?: string): Promise<PromptBlock | null>;
+      create(presetId: string, input: Partial<PromptBlock>, options?: { index?: number; userId?: string }): Promise<PromptBlock>;
+      update(presetId: string, blockId: string, input: Partial<Omit<PromptBlock, "id">>, userId?: string): Promise<PromptBlock>;
+      delete(presetId: string, blockId: string, userId?: string): Promise<boolean>;
+    };
+    categories: {
+      list(presetId: string, userId?: string): Promise<PromptBlockCategoryGroup[]>;
+    };
+  };
+  uploads: {
+    get(uploadId: string, userId?: string): Promise<{ fileName: string; size: number; data: Uint8Array } | null>;
+    delete(uploadId: string, userId?: string): Promise<boolean>;
+  };
+  media: {
+    convertAudio(input: MediaConvertAudioRequestDTO): Promise<MediaTransformResultDTO>;
+    convertVideo(input: MediaConvertVideoRequestDTO): Promise<MediaTransformResultDTO>;
+    transcodeVideo(input: MediaTranscodeVideoRequestDTO): Promise<MediaTransformResultDTO>;
+    removeAudioFromVideo(input: MediaRemoveAudioFromVideoRequestDTO): Promise<MediaTransformResultDTO>;
+    addAudioToVideo(input: MediaAddAudioToVideoRequestDTO): Promise<MediaTransformResultDTO>;
+    createVideoFromImageAndAudio(input: MediaCreateVideoFromImageAndAudioRequestDTO): Promise<MediaTransformResultDTO>;
+  };
   tokens: {
     countText(text: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
     countMessages(
@@ -531,13 +695,42 @@ type RuntimeSpindleAPI = SpindleAPI & {
     onMessage(handler: (event: { processId: string; payload: unknown; userId: string }) => void): () => void;
   };
   rpcPool: {
-    sync(endpoint: string, value: unknown): string;
+    sync(endpoint: string, value: unknown, policy?: SharedRpcEndpointPolicy): string;
     handle(
       endpoint: string,
-      handler: (ctx: { endpoint: string; requesterExtensionId: string }) => unknown | Promise<unknown>
+      handler: (ctx: { endpoint: string; requesterExtensionId: string; effectivePermissions: readonly string[] }) => unknown | Promise<unknown>,
+      policy?: SharedRpcEndpointPolicy,
     ): string;
     read<T = unknown>(endpoint: string): Promise<T>;
     unregister(endpoint: string): void;
+  };
+  users: SpindleAPI["users"] & {
+    getRole(userId?: string): Promise<SpindleUserRole>;
+  };
+  ui: {
+    getDrawerTabs(options?: { userId?: string }): Promise<Array<{
+      id: string;
+      shortName: string;
+      tabName: string;
+      tabDescription: string;
+      keywords: string[];
+      source: "builtin" | "extension";
+      extensionId?: string;
+    }>>;
+    getSettingsTabs(options?: { userId?: string }): Promise<Array<{
+      id: string;
+      shortName: string;
+      tabName: string;
+      tabDescription: string;
+      keywords: string[];
+      role?: "admin" | "owner";
+    }>>;
+    openDrawerTab(tabId: string, options?: { userId?: string }): Promise<void>;
+    closeDrawer(options?: { userId?: string }): Promise<void>;
+    openSettings(viewId?: string, options?: { userId?: string }): Promise<void>;
+    closeSettings(options?: { userId?: string }): Promise<void>;
+    openCommandPalette(options?: { userId?: string }): Promise<void>;
+    closeCommandPalette(options?: { userId?: string }): Promise<void>;
   };
 };
 
@@ -584,15 +777,24 @@ const backendProcessLifecycleHandlers = new Set<(event: BackendProcessLifecycleE
 const backendProcessMessageHandlers = new Set<(event: { processId: string; payload: unknown; userId: string }) => void>();
 const sharedRpcHandlers = new Map<
   string,
-  (ctx: { endpoint: string; requesterExtensionId: string }) => unknown | Promise<unknown>
+  (ctx: { endpoint: string; requesterExtensionId: string; effectivePermissions: readonly string[] }) => unknown | Promise<unknown>
 >();
 const grantedPermissions = new Set<string>();
 const extensionMacroHandlers = new Map<string, (ctx: unknown) => unknown | Promise<unknown>>();
 const macroInvocationStack: MacroInvocationState[] = [];
+const sharedRpcPermissionScope = new AsyncLocalStorage<SharedRpcPermissionScope | undefined>();
+
+function isLocalRuntimeEvent(event: string): boolean {
+  return event === "PERMISSION_CHANGED";
+}
 
 // ─── Messaging ───────────────────────────────────────────────────────────
 
 function post(msg: RuntimeWorkerToHost): void {
+  const scope = sharedRpcPermissionScope.getStore();
+  if (scope) {
+    (msg as any).rpcPermissionScopeId = scope.id;
+  }
   if (typeof process.send === "function") {
     process.send(msg);
     return;
@@ -847,7 +1049,9 @@ const spindleApi: RuntimeSpindleAPI = {
   on(event: string, handler: (payload: any) => void): () => void {
     if (!eventHandlers.has(event)) {
       eventHandlers.set(event, new Set());
-      post({ type: "subscribe_event", event });
+      if (!isLocalRuntimeEvent(event)) {
+        post({ type: "subscribe_event", event });
+      }
     }
     eventHandlers.get(event)!.add(handler);
 
@@ -855,7 +1059,9 @@ const spindleApi: RuntimeSpindleAPI = {
       eventHandlers.get(event)?.delete(handler);
       if (eventHandlers.get(event)?.size === 0) {
         eventHandlers.delete(event);
-        post({ type: "unsubscribe_event", event });
+        if (!isLocalRuntimeEvent(event)) {
+          post({ type: "unsubscribe_event", event });
+        }
       }
     };
   },
@@ -1397,18 +1603,12 @@ const spindleApi: RuntimeSpindleAPI = {
     async getMessages(chatId: string) {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "chat_get_messages", requestId, chatId });
-      return result as Array<{
-        id: string;
+      return result as Array<ChatMessageDTO & {
         role: "system" | "user" | "assistant";
-        content: string;
-        extra: Record<string, unknown>;
         metadata?: Record<string, unknown>;
-        swipe_id: number;
-        swipes: string[];
-        swipe_dates: number[];
       }>;
     },
-    async appendMessage(chatId: string, message) {
+    async appendMessage(chatId: string, message, options?: ChatAppendMessageOptions) {
       assertMutationAllowed("spindle.chat.appendMessage()");
       const requestId = crypto.randomUUID();
       const result = await request({
@@ -1416,8 +1616,9 @@ const spindleApi: RuntimeSpindleAPI = {
         requestId,
         chatId,
         message,
+        options,
       });
-      return result as { id: string };
+      return result as { id: string; generationId?: string };
     },
     async updateMessage(chatId: string, messageId: string, patch): Promise<void> {
       assertMutationAllowed("spindle.chat.updateMessage()");
@@ -1471,6 +1672,17 @@ const spindleApi: RuntimeSpindleAPI = {
         messageId,
       });
       return result as boolean;
+    },
+    async setStyleMode(chatId: string, mode: "bounded" | "extension-relaxed", userId?: string): Promise<void> {
+      assertMutationAllowed("spindle.chat.setStyleMode()");
+      const requestId = crypto.randomUUID();
+      await request({
+        type: "chat_set_style_mode",
+        requestId,
+        chatId,
+        mode,
+        userId,
+      });
     },
   },
 
@@ -1531,6 +1743,19 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "connections_get", requestId, connectionId, userId });
       return result as ConnectionProfileDTO | null;
+    },
+  },
+
+  uploads: {
+    async get(uploadId: string, userId?: string): Promise<{ fileName: string; size: number; data: Uint8Array } | null> {
+      const requestId = crypto.randomUUID();
+      return (await request({ type: "uploads_get", requestId, uploadId, userId })) as
+        | { fileName: string; size: number; data: Uint8Array }
+        | null;
+    },
+    async delete(uploadId: string, userId?: string): Promise<boolean> {
+      const requestId = crypto.randomUUID();
+      return (await request({ type: "uploads_delete", requestId, uploadId, userId })) as boolean;
     },
   },
 
@@ -1603,10 +1828,10 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   theme: {
-    async apply(overrides: { variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } }): Promise<void> {
+    async apply(overrides: { variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } }, userId?: string): Promise<void> {
       assertMutationAllowed("spindle.theme.apply()");
       const requestId = crypto.randomUUID();
-      await request({ type: "theme_apply", requestId, overrides });
+      await request({ type: "theme_apply", requestId, overrides, userId });
     },
     async applyPalette(palette, userId?: string): Promise<void> {
       assertMutationAllowed("spindle.theme.applyPalette()");
@@ -1701,6 +1926,21 @@ const spindleApi: RuntimeSpindleAPI = {
       const result = await request({ type: "images_upload", requestId, input, userId });
       return result as ImageDTO;
     },
+    async uploadMany(
+      items: ImageUploadDTO[],
+      options?: { userId?: string; concurrency?: number },
+    ): Promise<Array<{ id?: string; error?: string }>> {
+      assertMutationAllowed("spindle.images.uploadMany()");
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "images_upload_many",
+        requestId,
+        items,
+        userId: options?.userId,
+        concurrency: options?.concurrency,
+      });
+      return result as Array<{ id?: string; error?: string }>;
+    },
     async uploadFromDataUrl(
       dataUrl: string,
       originalFilenameOrOptions?: string | ImageUploadFromDataUrlOptionsDTO,
@@ -1730,6 +1970,45 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "images_delete", requestId, imageId, userId });
       return result as boolean;
+    },
+  },
+
+  media: {
+    async convertAudio(input: MediaConvertAudioRequestDTO): Promise<MediaTransformResultDTO> {
+      assertMutationAllowed("spindle.media.convertAudio()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "media_audio_convert", requestId, input });
+      return result as MediaTransformResultDTO;
+    },
+    async convertVideo(input: MediaConvertVideoRequestDTO): Promise<MediaTransformResultDTO> {
+      assertMutationAllowed("spindle.media.convertVideo()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "media_video_convert", requestId, input });
+      return result as MediaTransformResultDTO;
+    },
+    async transcodeVideo(input: MediaTranscodeVideoRequestDTO): Promise<MediaTransformResultDTO> {
+      assertMutationAllowed("spindle.media.transcodeVideo()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "media_video_transcode", requestId, input });
+      return result as MediaTransformResultDTO;
+    },
+    async removeAudioFromVideo(input: MediaRemoveAudioFromVideoRequestDTO): Promise<MediaTransformResultDTO> {
+      assertMutationAllowed("spindle.media.removeAudioFromVideo()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "media_video_remove_audio", requestId, input });
+      return result as MediaTransformResultDTO;
+    },
+    async addAudioToVideo(input: MediaAddAudioToVideoRequestDTO): Promise<MediaTransformResultDTO> {
+      assertMutationAllowed("spindle.media.addAudioToVideo()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "media_video_add_audio", requestId, input });
+      return result as MediaTransformResultDTO;
+    },
+    async createVideoFromImageAndAudio(input: MediaCreateVideoFromImageAndAudioRequestDTO): Promise<MediaTransformResultDTO> {
+      assertMutationAllowed("spindle.media.createVideoFromImageAndAudio()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "media_video_from_image_audio", requestId, input });
+      return result as MediaTransformResultDTO;
     },
   },
 
@@ -1813,6 +2092,87 @@ const spindleApi: RuntimeSpindleAPI = {
         const requestId = crypto.randomUUID();
         const result = await request({ type: "vars_has_chat", requestId, chatId, key });
         return result as boolean;
+      },
+    },
+  },
+
+  presets: {
+    async list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: Preset[]; total: number }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "presets_list",
+        requestId,
+        limit: options?.limit,
+        offset: options?.offset,
+        userId: options?.userId,
+      });
+      return result as { data: Preset[]; total: number };
+    },
+    async get(presetId: string, userId?: string): Promise<Preset | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "presets_get", requestId, presetId, userId });
+      return result as Preset | null;
+    },
+    async create(input: CreatePresetInput, userId?: string): Promise<Preset> {
+      assertMutationAllowed("spindle.presets.create()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "presets_create", requestId, input, userId });
+      return result as Preset;
+    },
+    async update(presetId: string, input: UpdatePresetInput, userId?: string): Promise<Preset> {
+      assertMutationAllowed("spindle.presets.update()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "presets_update", requestId, presetId, input, userId });
+      return result as Preset;
+    },
+    async delete(presetId: string, userId?: string): Promise<boolean> {
+      assertMutationAllowed("spindle.presets.delete()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "presets_delete", requestId, presetId, userId });
+      return result as boolean;
+    },
+    blocks: {
+      async list(presetId: string, userId?: string): Promise<PromptBlock[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "preset_blocks_list", requestId, presetId, userId });
+        return result as PromptBlock[];
+      },
+      async get(presetId: string, blockId: string, userId?: string): Promise<PromptBlock | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "preset_blocks_get", requestId, presetId, blockId, userId });
+        return result as PromptBlock | null;
+      },
+      async create(presetId: string, input: Partial<PromptBlock>, options?: { index?: number; userId?: string }): Promise<PromptBlock> {
+        assertMutationAllowed("spindle.presets.blocks.create()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "preset_blocks_create",
+          requestId,
+          presetId,
+          input,
+          index: options?.index,
+          userId: options?.userId,
+        });
+        return result as PromptBlock;
+      },
+      async update(presetId: string, blockId: string, input: Partial<Omit<PromptBlock, "id">>, userId?: string): Promise<PromptBlock> {
+        assertMutationAllowed("spindle.presets.blocks.update()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "preset_blocks_update", requestId, presetId, blockId, input, userId });
+        return result as PromptBlock;
+      },
+      async delete(presetId: string, blockId: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.presets.blocks.delete()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "preset_blocks_delete", requestId, presetId, blockId, userId });
+        return result as boolean;
+      },
+    },
+    categories: {
+      async list(presetId: string, userId?: string): Promise<PromptBlockCategoryGroup[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "preset_categories_list", requestId, presetId, userId });
+        return result as PromptBlockCategoryGroup[];
       },
     },
   },
@@ -1990,6 +2350,29 @@ const spindleApi: RuntimeSpindleAPI = {
       });
       return result as import("lumiverse-spindle-types").ActivatedWorldInfoEntryDTO[];
     },
+    async getGlobal(userId?: string): Promise<string[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_get_global", requestId, userId });
+      return result as string[];
+    },
+    async setGlobal(worldBookIds: string[], userId?: string): Promise<string[]> {
+      assertMutationAllowed("spindle.world_books.setGlobal()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_set_global", requestId, worldBookIds, userId });
+      return result as string[];
+    },
+    async activateGlobal(worldBookId: string, userId?: string): Promise<string[]> {
+      assertMutationAllowed("spindle.world_books.activateGlobal()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_activate_global", requestId, worldBookId, userId });
+      return result as string[];
+    },
+    async deactivateGlobal(worldBookId: string, userId?: string): Promise<string[]> {
+      assertMutationAllowed("spindle.world_books.deactivateGlobal()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "world_books_deactivate_global", requestId, worldBookId, userId });
+      return result as string[];
+    },
   },
 
   regex_scripts: {
@@ -2137,6 +2520,420 @@ const spindleApi: RuntimeSpindleAPI = {
     },
   },
 
+  memories: {
+    cortex: {
+      async getConfig(userId?: string): Promise<MemoryCortexConfigDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_config_get", requestId, userId });
+        return result as MemoryCortexConfigDTO;
+      },
+      async putConfig(patch: Partial<MemoryCortexConfigDTO>, userId?: string): Promise<MemoryCortexConfigDTO> {
+        assertMutationAllowed("spindle.memories.cortex.putConfig()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_config_put", requestId, patch, userId });
+        return result as MemoryCortexConfigDTO;
+      },
+      async query(query: CortexQueryDTO): Promise<CortexResultDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_query_cortex", requestId, query });
+        return result as CortexResultDTO;
+      },
+      async getCached(chatId: string): Promise<CortexResultDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_get_cached", requestId, chatId });
+        return result as CortexResultDTO | null;
+      },
+      async queryLinked(
+        chatId: string,
+        options?: { queryText?: string; userId?: string },
+      ): Promise<LinkedCortexResultDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_query_linked",
+          requestId,
+          chatId,
+          queryText: options?.queryText,
+          userId: options?.userId,
+        });
+        return result as LinkedCortexResultDTO;
+      },
+      async getCachedLinked(chatId: string): Promise<LinkedCortexResultDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_get_cached_linked", requestId, chatId });
+        return result as LinkedCortexResultDTO | null;
+      },
+      async invalidateCache(chatId: string): Promise<void> {
+        assertMutationAllowed("spindle.memories.cortex.invalidateCache()");
+        const requestId = crypto.randomUUID();
+        await request({ type: "memories_invalidate_cache", requestId, chatId });
+      },
+      async invalidateLinkedCache(chatId: string): Promise<void> {
+        assertMutationAllowed("spindle.memories.cortex.invalidateLinkedCache()");
+        const requestId = crypto.randomUUID();
+        await request({ type: "memories_invalidate_linked_cache", requestId, chatId });
+      },
+    },
+
+    entities: {
+      async list(
+        chatId: string,
+        options?: { activeOnly?: boolean; limit?: number; userId?: string },
+      ): Promise<MemoryEntityDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_entities_list",
+          requestId,
+          chatId,
+          activeOnly: options?.activeOnly,
+          limit: options?.limit,
+          userId: options?.userId,
+        });
+        return result as MemoryEntityDTO[];
+      },
+      async get(entityId: string, userId?: string): Promise<MemoryEntityDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_entities_get", requestId, entityId, userId });
+        return result as MemoryEntityDTO | null;
+      },
+      async findByName(chatId: string, name: string, userId?: string): Promise<MemoryEntityDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_entities_find_by_name",
+          requestId,
+          chatId,
+          name,
+          userId,
+        });
+        return result as MemoryEntityDTO | null;
+      },
+      async upsert(
+        chatId: string,
+        entity: MemoryEntityUpsertDTO,
+        options?: { chunkId?: string | null; createdAt?: number; userId?: string },
+      ): Promise<MemoryEntityDTO> {
+        assertMutationAllowed("spindle.memories.entities.upsert()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_entities_upsert",
+          requestId,
+          chatId,
+          entity,
+          chunkId: options?.chunkId ?? null,
+          createdAt: options?.createdAt,
+          userId: options?.userId,
+        });
+        return result as MemoryEntityDTO;
+      },
+      async updateStatus(
+        entityId: string,
+        patch: MemoryEntityStatusUpdateDTO,
+        userId?: string,
+      ): Promise<MemoryEntityDTO> {
+        assertMutationAllowed("spindle.memories.entities.updateStatus()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_entities_update_status",
+          requestId,
+          entityId,
+          patch,
+          userId,
+        });
+        return result as MemoryEntityDTO;
+      },
+      async addFacts(entityId: string, facts: string[], userId?: string): Promise<MemoryEntityDTO> {
+        assertMutationAllowed("spindle.memories.entities.addFacts()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_entities_add_facts",
+          requestId,
+          entityId,
+          facts,
+          userId,
+        });
+        return result as MemoryEntityDTO;
+      },
+      async getFacts(entityId: string, userId?: string): Promise<string[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_entities_get_facts", requestId, entityId, userId });
+        return result as string[];
+      },
+      async updateEmotionalValence(
+        entityId: string,
+        valence: Record<string, number>,
+        userId?: string,
+      ): Promise<MemoryEntityDTO> {
+        assertMutationAllowed("spindle.memories.entities.updateEmotionalValence()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_entities_update_emotional_valence",
+          requestId,
+          entityId,
+          valence,
+          userId,
+        });
+        return result as MemoryEntityDTO;
+      },
+    },
+
+    relations: {
+      async list(chatId: string, userId?: string): Promise<MemoryRelationDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_relations_list", requestId, chatId, userId });
+        return result as MemoryRelationDTO[];
+      },
+      async listAll(chatId: string, userId?: string): Promise<MemoryRelationDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_relations_list_all", requestId, chatId, userId });
+        return result as MemoryRelationDTO[];
+      },
+      async forEntity(chatId: string, entityId: string, userId?: string): Promise<MemoryRelationDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_relations_for_entity",
+          requestId,
+          chatId,
+          entityId,
+          userId,
+        });
+        return result as MemoryRelationDTO[];
+      },
+      async forEntities(
+        chatId: string,
+        entityIds: string[],
+        options?: { limit?: number; userId?: string },
+      ): Promise<MemoryRelationDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_relations_for_entities",
+          requestId,
+          chatId,
+          entityIds,
+          limit: options?.limit,
+          userId: options?.userId,
+        });
+        return result as MemoryRelationDTO[];
+      },
+      async upsert(
+        chatId: string,
+        relation: MemoryRelationUpsertDTO,
+        options?: { chunkId?: string | null; userId?: string },
+      ): Promise<MemoryRelationDTO | null> {
+        assertMutationAllowed("spindle.memories.relations.upsert()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_relations_upsert",
+          requestId,
+          chatId,
+          relation,
+          chunkId: options?.chunkId ?? null,
+          userId: options?.userId,
+        });
+        return result as MemoryRelationDTO | null;
+      },
+    },
+
+    consolidations: {
+      async list(
+        chatId: string,
+        options?: { tier?: number; userId?: string },
+      ): Promise<MemoryConsolidationDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_consolidations_list",
+          requestId,
+          chatId,
+          tier: options?.tier,
+          userId: options?.userId,
+        });
+        return result as MemoryConsolidationDTO[];
+      },
+      async latestArc(chatId: string, userId?: string): Promise<MemoryConsolidationDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_consolidations_latest_arc",
+          requestId,
+          chatId,
+          userId,
+        });
+        return result as MemoryConsolidationDTO | null;
+      },
+      async run(chatId: string, userId?: string): Promise<void> {
+        assertMutationAllowed("spindle.memories.consolidations.run()");
+        const requestId = crypto.randomUUID();
+        await request({ type: "memories_consolidations_run", requestId, chatId, userId });
+      },
+    },
+
+    salience: {
+      async list(
+        chatId: string,
+        options?: { limit?: number; offset?: number; userId?: string },
+      ): Promise<MemorySalienceDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_salience_get",
+          requestId,
+          chatId,
+          limit: options?.limit,
+          offset: options?.offset,
+          userId: options?.userId,
+        });
+        return result as MemorySalienceDTO[];
+      },
+    },
+
+    vaults: {
+      async list(userId?: string): Promise<VaultDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_list", requestId, userId });
+        return result as VaultDTO[];
+      },
+      async get(vaultId: string, userId?: string): Promise<VaultWithContentsDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_get", requestId, vaultId, userId });
+        return result as VaultWithContentsDTO | null;
+      },
+      async getChunks(vaultId: string, userId?: string): Promise<VaultChunkDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_get_chunks", requestId, vaultId, userId });
+        return result as VaultChunkDTO[];
+      },
+      async create(input: VaultCreateDTO, userId?: string): Promise<VaultDTO> {
+        assertMutationAllowed("spindle.memories.vaults.create()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_create", requestId, input, userId });
+        return result as VaultDTO;
+      },
+      async rename(vaultId: string, name: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.memories.vaults.rename()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_rename", requestId, vaultId, name, userId });
+        return result as boolean;
+      },
+      async delete(vaultId: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.memories.vaults.delete()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_delete", requestId, vaultId, userId });
+        return result as boolean;
+      },
+      async reindex(vaultId: string, userId?: string): Promise<VaultReindexResultDTO> {
+        assertMutationAllowed("spindle.memories.vaults.reindex()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_vaults_reindex", requestId, vaultId, userId });
+        return result as VaultReindexResultDTO;
+      },
+    },
+
+    links: {
+      async list(chatId: string, userId?: string): Promise<ChatLinkDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_links_list", requestId, chatId, userId });
+        return result as ChatLinkDTO[];
+      },
+      async attach(input: ChatLinkAttachDTO, userId?: string): Promise<ChatLinkDTO[]> {
+        assertMutationAllowed("spindle.memories.links.attach()");
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_links_attach", requestId, input, userId });
+        return result as ChatLinkDTO[];
+      },
+      async remove(chatId: string, linkId: string, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.memories.links.remove()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_links_remove",
+          requestId,
+          chatId,
+          linkId,
+          userId,
+        });
+        return result as boolean;
+      },
+      async toggle(chatId: string, linkId: string, enabled: boolean, userId?: string): Promise<boolean> {
+        assertMutationAllowed("spindle.memories.links.toggle()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_links_toggle",
+          requestId,
+          chatId,
+          linkId,
+          enabled,
+          userId,
+        });
+        return result as boolean;
+      },
+    },
+
+    chatMemory: {
+      async listChunks(chatId: string, userId?: string): Promise<ChatChunkDTO[]> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_chat_chunks_list", requestId, chatId, userId });
+        return result as ChatChunkDTO[];
+      },
+      async get(
+        chatId: string,
+        options?: { topK?: number; userId?: string },
+      ): Promise<ChatMemoryResultDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_chat_memory_get",
+          requestId,
+          chatId,
+          topK: options?.topK,
+          userId: options?.userId,
+        });
+        return result as ChatMemoryResultDTO;
+      },
+      async warm(
+        chatId: string,
+        options?: { force?: boolean; userId?: string },
+      ): Promise<ChatMemoryWarmupResultDTO> {
+        assertMutationAllowed("spindle.memories.chatMemory.warm()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_chat_memory_warm",
+          requestId,
+          chatId,
+          force: options?.force,
+          userId: options?.userId,
+        });
+        return result as ChatMemoryWarmupResultDTO;
+      },
+      async invalidate(chatId: string, userId?: string): Promise<void> {
+        assertMutationAllowed("spindle.memories.chatMemory.invalidate()");
+        const requestId = crypto.randomUUID();
+        await request({ type: "memories_chat_memory_invalidate", requestId, chatId, userId });
+      },
+    },
+
+    stats: {
+      async usage(chatId: string, userId?: string): Promise<CortexUsageStatsDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({ type: "memories_stats_usage", requestId, chatId, userId });
+        return result as CortexUsageStatsDTO;
+      },
+      async ingestionStatus(chatId: string, userId?: string): Promise<CortexIngestionStatusDTO | null> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_stats_ingestion_status",
+          requestId,
+          chatId,
+          userId,
+        });
+        return result as CortexIngestionStatusDTO | null;
+      },
+      async ingestionTelemetry(chatId: string, userId?: string): Promise<CortexIngestionTelemetryDTO> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "memories_stats_ingestion_telemetry",
+          requestId,
+          chatId,
+          userId,
+        });
+        return result as CortexIngestionTelemetryDTO;
+      },
+    },
+  },
+
   personas: {
     async list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: PersonaDTO[]; total: number }> {
       const requestId = crypto.randomUUID();
@@ -2194,6 +2991,25 @@ const spindleApi: RuntimeSpindleAPI = {
     },
   },
 
+  global_addons: {
+    async list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: GlobalAddonDTO[]; total: number }> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "global_addons_list", requestId, limit: options?.limit, offset: options?.offset, userId: options?.userId });
+      return result as { data: GlobalAddonDTO[]; total: number };
+    },
+    async get(addonId: string, userId?: string): Promise<GlobalAddonDTO | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "global_addons_get", requestId, addonId, userId });
+      return result as GlobalAddonDTO | null;
+    },
+    async update(addonId: string, input: GlobalAddonUpdateDTO, userId?: string): Promise<GlobalAddonDTO> {
+      assertMutationAllowed("spindle.global_addons.update()");
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "global_addons_update", requestId, addonId, input, userId });
+      return result as GlobalAddonDTO;
+    },
+  },
+
   council: {
     async getSettings(options?: { userId?: string }): Promise<CouncilSettings> {
       const requestId = crypto.randomUUID();
@@ -2214,6 +3030,9 @@ const spindleApi: RuntimeSpindleAPI = {
 
   permissions: {
     async getGranted(): Promise<string[]> {
+      const scope = sharedRpcPermissionScope.getStore();
+      if (scope) return [...scope.effectivePermissions];
+
       const requestId = crypto.randomUUID();
       const result = await request({ type: "permissions_get_granted", requestId });
       // Sync local cache with authoritative host response
@@ -2223,6 +3042,8 @@ const spindleApi: RuntimeSpindleAPI = {
       return perms;
     },
     has(permission: string): boolean {
+      const scope = sharedRpcPermissionScope.getStore();
+      if (scope) return scope.effectivePermissions.includes(permission);
       return grantedPermissions.has(permission);
     },
     onDenied(handler: (detail: PermissionDeniedDetail) => void): () => void {
@@ -2240,20 +3061,21 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   rpcPool: {
-    sync(endpoint: string, value: unknown): string {
+    sync(endpoint: string, value: unknown, policy?: SharedRpcEndpointPolicy): string {
       assertMutationAllowed("spindle.rpcPool.sync()");
       const normalized = normalizeOwnedRpcPoolEndpoint(endpoint);
-      post({ type: "rpc_pool_sync", endpoint: normalized, value });
+      post({ type: "rpc_pool_sync", endpoint: normalized, value, policy });
       return normalized;
     },
     handle(
       endpoint: string,
-      handler: (ctx: { endpoint: string; requesterExtensionId: string }) => unknown | Promise<unknown>
+      handler: (ctx: { endpoint: string; requesterExtensionId: string; effectivePermissions: readonly string[] }) => unknown | Promise<unknown>,
+      policy?: SharedRpcEndpointPolicy,
     ): string {
       assertMutationAllowed("spindle.rpcPool.handle()");
       const normalized = normalizeOwnedRpcPoolEndpoint(endpoint);
       sharedRpcHandlers.set(normalized, handler);
-      post({ type: "rpc_pool_register_handler", endpoint: normalized });
+      post({ type: "rpc_pool_register_handler", endpoint: normalized, policy });
       return normalized;
     },
     async read<T = unknown>(endpoint: string): Promise<T> {
@@ -2302,6 +3124,35 @@ const spindleApi: RuntimeSpindleAPI = {
         userId,
       } as any);
       return result as { available: boolean; subscriptionCount: number };
+    },
+  },
+
+  webSearch: {
+    async query(input: {
+      query: string;
+      count?: number;
+      scrape?: boolean;
+      userId?: string;
+    }): Promise<import("lumiverse-spindle-types").WebSearchResponseDTO> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "web_search_query",
+        requestId,
+        query: input.query,
+        count: input.count,
+        scrape: input.scrape,
+        userId: input.userId,
+      } as any);
+      return result as import("lumiverse-spindle-types").WebSearchResponseDTO;
+    },
+    async getSettings(userId?: string): Promise<import("lumiverse-spindle-types").WebSearchSettingsDTO> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "web_search_get_settings",
+        requestId,
+        userId,
+      } as any);
+      return result as import("lumiverse-spindle-types").WebSearchSettingsDTO;
     },
   },
 
@@ -2354,6 +3205,15 @@ const spindleApi: RuntimeSpindleAPI = {
         userId,
       } as any);
       return result as boolean;
+    },
+    async getRole(userId?: string): Promise<SpindleUserRole> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "user_get_role",
+        requestId,
+        userId,
+      } as any);
+      return result as SpindleUserRole;
     },
   },
 
@@ -2554,6 +3414,79 @@ const spindleApi: RuntimeSpindleAPI = {
     },
   },
 
+  promptRegex: {
+    setOwnedChats(chatIds: string[]) {
+      post({ type: "prompt_regex_set_owned", chatIds: chatIds.map(String) });
+    },
+  },
+
+  ui: {
+    async getDrawerTabs(options?: { userId?: string }): Promise<Array<{
+      id: string;
+      shortName: string;
+      tabName: string;
+      tabDescription: string;
+      keywords: string[];
+      source: "builtin" | "extension";
+      extensionId?: string;
+    }>> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "ui_get_drawer_tabs", requestId, userId: options?.userId });
+      return result as Array<{
+        id: string;
+        shortName: string;
+        tabName: string;
+        tabDescription: string;
+        keywords: string[];
+        source: "builtin" | "extension";
+        extensionId?: string;
+      }>;
+    },
+    async getSettingsTabs(options?: { userId?: string }): Promise<Array<{
+      id: string;
+      shortName: string;
+      tabName: string;
+      tabDescription: string;
+      keywords: string[];
+      role?: "admin" | "owner";
+    }>> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "ui_get_settings_tabs", requestId, userId: options?.userId });
+      return result as Array<{
+        id: string;
+        shortName: string;
+        tabName: string;
+        tabDescription: string;
+        keywords: string[];
+        role?: "admin" | "owner";
+      }>;
+    },
+    async openDrawerTab(tabId: string, options?: { userId?: string }): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "ui_navigate", requestId, action: "open_drawer_tab", tabId, userId: options?.userId });
+    },
+    async closeDrawer(options?: { userId?: string }): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "ui_navigate", requestId, action: "close_drawer", userId: options?.userId });
+    },
+    async openSettings(viewId?: string, options?: { userId?: string }): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "ui_navigate", requestId, action: "open_settings", viewId, userId: options?.userId });
+    },
+    async closeSettings(options?: { userId?: string }): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "ui_navigate", requestId, action: "close_settings", userId: options?.userId });
+    },
+    async openCommandPalette(options?: { userId?: string }): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "ui_navigate", requestId, action: "open_command_palette", userId: options?.userId });
+    },
+    async closeCommandPalette(options?: { userId?: string }): Promise<void> {
+      const requestId = crypto.randomUUID();
+      await request({ type: "ui_navigate", requestId, action: "close_command_palette", userId: options?.userId });
+    },
+  },
+
   toast: {
     success(message: string, options?: { title?: string; duration?: number; userId?: string }) {
       post({ type: "toast_show", toastType: "success", message, title: options?.title, duration: options?.duration, userId: options?.userId });
@@ -2711,9 +3644,14 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
       }
 
       // Initialize runtime sandbox before loading untrusted extension code.
-      // This patches import(), eval, Function, and sensitive Bun/process APIs
-      // so that static-analysis bypasses (dynamic imports, indirect access)
-      // are caught at runtime.
+      // This patches eval, the Function constructor, and sensitive Bun/process
+      // APIs (real property overrides that take effect). It CANNOT block the
+      // native `import()` operator or `node:` builtins — those resolve through
+      // Bun internals that neither a global override nor a loader plugin can
+      // intercept. Dangerous module access is therefore enforced upstream by
+      // the static scan (detectDangerousBackendCapabilities, run before this
+      // entry is loaded) and, when enabled, by the OS-level sandbox (sandbox
+      // mode). The sandbox here is a cooperative speed bump, not the boundary.
       initializeSandbox();
 
       // Dynamically import the extension's backend entry
@@ -3028,7 +3966,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
       for (const p of msg.allGranted) grantedPermissions.add(p);
 
       const detail: PermissionChangedDetail = {
-        extensionId: manifest.identifier,
+        extensionId: ("extensionId" in msg ? msg.extensionId : undefined) ?? manifest.identifier,
         permission: msg.permission,
         granted: msg.granted,
         allGranted: msg.allGranted,
@@ -3073,18 +4011,30 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
         break;
       }
 
-      Promise.resolve(handler({ endpoint: msg.endpoint, requesterExtensionId: msg.requesterExtensionId })).then(
-        (result) => {
-          post({ type: "rpc_pool_handler_result", requestId: msg.requestId, result });
-        },
-        (err: any) => {
-          post({
-            type: "rpc_pool_handler_result",
-            requestId: msg.requestId,
-            error: err?.message || String(err),
-          });
-        }
-      );
+      const scope = {
+        id: (msg as any).rpcPermissionScopeId,
+        effectivePermissions: Array.isArray((msg as any).effectivePermissions)
+          ? (msg as any).effectivePermissions
+          : [],
+      };
+      sharedRpcPermissionScope.run(scope, () => {
+        Promise.resolve(handler({
+          endpoint: msg.endpoint,
+          requesterExtensionId: msg.requesterExtensionId,
+          effectivePermissions: scope.effectivePermissions,
+        })).then(
+          (result) => {
+            post({ type: "rpc_pool_handler_result", requestId: msg.requestId, result });
+          },
+          (err: any) => {
+            post({
+              type: "rpc_pool_handler_result",
+              requestId: msg.requestId,
+              error: err?.message || String(err),
+            });
+          }
+        );
+      });
       break;
     }
 

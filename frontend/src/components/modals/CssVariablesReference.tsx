@@ -1,8 +1,10 @@
+import { useTranslation } from 'react-i18next'
 import { Palette } from 'lucide-react'
 import GENERATED_VARS from '@/lib/generatedCssVariables'
 import styles from './PropsReference.module.css'
 
 export default function CssVariablesReference() {
+  const { t } = useTranslation('modals', { keyPrefix: 'cssVariablesReference' })
   const vars = Object.entries(GENERATED_VARS)
   
   if (vars.length === 0) {
@@ -11,12 +13,12 @@ export default function CssVariablesReference() {
         <div className={styles.header}>
           <span className={styles.headerLabel}>
             <Palette size={13} />
-            CSS Variables
+            {t('title')}
           </span>
         </div>
         <div className={styles.list}>
           <div className={styles.emptyNote}>
-            No variables found.
+            {t('empty')}
           </div>
         </div>
       </div>
@@ -28,7 +30,7 @@ export default function CssVariablesReference() {
       <div className={styles.header}>
         <span className={styles.headerLabel}>
           <Palette size={13} />
-          CSS Variables — {vars.length}
+          {t('titleWithCount', { count: vars.length })}
         </span>
       </div>
       <div className={styles.list}>
@@ -38,7 +40,7 @@ export default function CssVariablesReference() {
               <div className={styles.propHeader}>
                 <span className={styles.propName}>{name}</span>
               </div>
-              <span className={styles.propDesc} style={{ fontFamily: 'var(--lumiverse-font-mono)', opacity: 0.8 }}>{value}</span>
+              <div className={styles.propDesc}>{value}</div>
             </div>
           </div>
         ))}

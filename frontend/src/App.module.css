@@ -23,8 +23,8 @@
      Safe for all browsers — the app shell has an opaque background so
      backdrop-filter children blur against rendered app content as intended. */
   isolation: isolate;
-  /* Safe area insets + Spindle dock panel insets */
-  padding-top: calc(env(safe-area-inset-top, 0px) + var(--spindle-dock-top, 0px));
+  /* Safe area insets + desktop PWA window controls + Spindle dock panel insets */
+  padding-top: calc(var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) + var(--spindle-dock-top, 0px));
   padding-right: var(--spindle-dock-right, 0px);
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--spindle-dock-bottom, 0px));
   padding-left: var(--spindle-dock-left, 0px);
@@ -39,7 +39,23 @@
   padding-bottom: var(--spindle-dock-bottom, 0px);
 }
 
+/* Same treatment for Chromium/Android PWAs. Since Chrome 135 the Android
+   viewport goes edge-to-edge by default, so env(safe-area-inset-bottom) is
+   the gesture-navigation-bar height (large on foldables like the Galaxy
+   Fold) rather than 0. Reserving it as shell padding leaves a dead band
+   below the floating input bar — the "bottom gap" — and ChatView's
+   overflow:clip stops the bar reaching the screen edge. Drop the bottom
+   padding so the shell and bottom bars fill edge-to-edge; each bottom bar
+   pads its own interactive content above the nav bar instead (see
+   InputArea / MessageSelectBar). No-op on desktop Chromium PWAs where the
+   inset is 0. */
+:global(html[data-pwa]:not([data-ios-pwa])) .app {
+  padding-bottom: var(--spindle-dock-bottom, 0px);
+}
+
 .main {
+  position: relative;
+  z-index: 1;
   flex: 1 1 0;
   display: flex;
   flex-direction: column;

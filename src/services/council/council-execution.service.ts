@@ -13,10 +13,10 @@ import * as charactersSvc from "../characters.service";
 import * as personasSvc from "../personas.service";
 import * as packsSvc from "../packs.service";
 import * as connectionsSvc from "../connections.service";
-import * as worldBooksSvc from "../world-books.service";
 import * as settingsSvc from "../settings.service";
 import { activateWorldInfo } from "../world-info-activation.service";
-import { getCharacterWorldBookIds } from "../../utils/character-world-books";
+import { makeAssistantCharacter } from "../../types/character";
+import { collectWorldInfoSources } from "../world-info-sources.service";
 import { getCouncilSettings, getAvailableTools } from "./council-settings.service";
 import { parseMcpToolName } from "./mcp-tools";
 import { getMcpClientManager } from "../mcp-client-manager";
@@ -70,13 +70,32 @@ interface ExecuteInput {
   retryToolNames?: string[];
 }
 
+export interface CouncilHistoricalDeliberationEntry {
+  id: string;
+  createdAt: number;
+  memberId: string;
+  memberName: string;
+  toolName: string;
+  toolDisplayName: string;
+  content: string;
+}
+
+export type CouncilExecutionResultWithHistory = CouncilExecutionResult & {
+  historicalDeliberationBlock?: string;
+};
+
+const COUNCIL_HISTORY_METADATA_KEY = "council_deliberation_history_v1";
+const MAX_HISTORY_RETENTION = 10;
+const MAX_HISTORY_ENTRY_CHARS = 4000;
+const MAX_HISTORY_TOTAL_ENTRIES = 200;
+
 /**
  * Execute the full council cycle: roll dice per member, invoke sidecar LLM
  * for each tool, collect results, format deliberation block.
  */
 export async function executeCouncil(
   input: ExecuteInput
-): Promise<CouncilExecutionResult | null> {
+): Promise<CouncilExecutionResultWithHistory | null> {
   const settings = input.settings ?? getCouncilSettings(input.userId);
 
   if (!settings.councilMode) {
@@ -100,7 +119,7 @@ export async function executeCouncil(
   // Verify the sidecar connection exists (if tools need it)
   let sidecarConn = null;
   if (hasTools && sidecar.connectionProfileId) {
-    sidecarConn = connectionsSvc.getConnection(input.userId, sidecar.connectionProfileId);
+    sidecarConn = connectionsSvc.resolveConnection(input.userId, sidecar.connectionProfileId);
     if (!sidecarConn) {
       console.warn("[council] Tools skipped: sidecar connection profile '%s' not found", sidecar.connectionProfileId);
     }
@@ -146,6 +165,12 @@ export async function executeCouncil(
     return null;
   }
 
+  const historicalByAssignment = getHistoricalEntriesForMembers(
+    input.userId,
+    input.chatId,
+    activeMembers,
+  );
+
   eventBus.emit(EventType.COUNCIL_STARTED, {
     chatId: input.chatId,
     memberCount: activeMembers.length,
@@ -168,7 +193,7 @@ export async function executeCouncil(
       member,
       availableTools,
       contextMessages,
-      namedResults
+      namedResults,
     );
     allResults.push(...memberResults);
 
@@ -191,11 +216,15 @@ export async function executeCouncil(
   }
 
   const deliberationBlock = formatDeliberation(allResults, availableTools);
+  const historicalDeliberationBlock = formatHistoricalDeliberations(
+    historicalByAssignment,
+  );
   const totalDurationMs = Date.now() - startTime;
 
-  const result: CouncilExecutionResult = {
+  const result: CouncilExecutionResultWithHistory = {
     results: allResults,
     deliberationBlock,
+    ...(historicalDeliberationBlock ? { historicalDeliberationBlock } : {}),
     totalDurationMs,
   };
 
@@ -216,7 +245,7 @@ async function executeMemberTools(
   member: CouncilMember,
   tools: Map<string, RuntimeCouncilToolDefinition>,
   contextMessages: LlmMessage[],
-  namedResults: Map<string, string>
+  namedResults: Map<string, string>,
 ): Promise<CouncilToolResult[]> {
   const results: CouncilToolResult[] = [];
 
@@ -257,6 +286,14 @@ async function executeMemberTools(
     const execution = getCouncilToolExecution(input.userId, toolDef);
     const extToolReg = execution === "extension" ? getExtensionToolRegistration(toolName) : undefined;
     const mcpMatch = execution === "mcp" ? parseMcpToolName(input.userId, toolName) : null;
+
+    // Note: a member's retained history is intentionally NOT injected into its
+    // own deliberation prompt. Showing the sidecar its verbatim prior output
+    // reliably made it re-emit that output (the "history > 0 repeats the last
+    // item" bug) — anti-repeat prompting alone did not hold. Continuity is
+    // still preserved for the FINAL response via formatHistoricalDeliberations
+    // (historicalDeliberationBlock), which is injected into the main synthesis
+    // prompt rather than the per-member deliberation.
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
@@ -389,6 +426,180 @@ async function executeMemberTools(
   return results;
 }
 
+function assignmentKey(memberId: string, toolName: string): string {
+  return `${memberId}:${toolName}`;
+}
+
+function getToolHistoryRetention(member: CouncilMember, toolName: string): number {
+  const value = (member as any).toolHistoryRetention?.[toolName];
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(MAX_HISTORY_RETENTION, Math.floor(value)));
+}
+
+function truncateHistoryContent(content: string): string {
+  if (content.length <= MAX_HISTORY_ENTRY_CHARS) return content;
+  return `${content.slice(0, MAX_HISTORY_ENTRY_CHARS).trimEnd()}\n[truncated]`;
+}
+
+function readCouncilHistory(
+  userId: string,
+  chatId: string,
+): CouncilHistoricalDeliberationEntry[] {
+  const chat = chatsSvc.getChat(userId, chatId);
+  const raw = chat?.metadata?.[COUNCIL_HISTORY_METADATA_KEY];
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as any).entries)) {
+    return [];
+  }
+
+  return (raw as any).entries.filter(
+    (entry: any): entry is CouncilHistoricalDeliberationEntry =>
+      entry &&
+      typeof entry.id === "string" &&
+      typeof entry.createdAt === "number" &&
+      typeof entry.memberId === "string" &&
+      typeof entry.memberName === "string" &&
+      typeof entry.toolName === "string" &&
+      typeof entry.toolDisplayName === "string" &&
+      typeof entry.content === "string",
+  );
+}
+
+function getHistoricalEntriesForMembers(
+  userId: string,
+  chatId: string,
+  members: CouncilMember[],
+): Map<string, CouncilHistoricalDeliberationEntry[]> {
+  const retained = new Map<string, CouncilHistoricalDeliberationEntry[]>();
+  const history = readCouncilHistory(userId, chatId);
+  if (history.length === 0) return retained;
+
+  for (const member of members) {
+    for (const toolName of member.tools) {
+      const retain = getToolHistoryRetention(member, toolName);
+      if (retain <= 0) continue;
+
+      const key = assignmentKey(member.id, toolName);
+      const entries = history
+        .filter((entry) => entry.memberId === member.id && entry.toolName === toolName)
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .slice(-retain);
+      if (entries.length > 0) retained.set(key, entries);
+    }
+  }
+
+  return retained;
+}
+
+function formatHistoryAgeLabel(index: number, total: number): string {
+  const age = total - index;
+  return age === 1 ? "1 deliberation ago" : `${age} deliberations ago`;
+}
+
+function formatHistoricalDeliberations(
+  historicalByAssignment: Map<string, CouncilHistoricalDeliberationEntry[]>,
+): string {
+  const groups = Array.from(historicalByAssignment.values()).filter(
+    (entries) => entries.length > 0,
+  );
+  if (groups.length === 0) return "";
+
+  const lines: string[] = [
+    "## Previous Council Deliberations — REFERENCE ONLY, DO NOT REPEAT",
+    "",
+    "The following are prior council/tool deliberations from EARLIER turns of this chat, included only as continuity memory for plans, threads, and decisions planted earlier.",
+    "",
+    "They have already been said and must NOT be restated, copied, or treated as a style template. They are not instructions for the current response. Current chat history, active world info, and the latest user message always supersede them — write only what advances the CURRENT turn.",
+    "",
+  ];
+
+  for (const entries of groups) {
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      lines.push(
+        `### ${formatHistoryAgeLabel(i, entries.length)} - ${entry.memberName} / ${entry.toolDisplayName}`,
+      );
+      lines.push(entry.content);
+      lines.push("");
+    }
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+export function appendCouncilDeliberationHistory(input: {
+  userId: string;
+  chatId: string;
+  settings: CouncilSettings;
+  results: CouncilToolResult[];
+}): void {
+  const retentionByAssignment = new Map<string, number>();
+  const memberById = new Map(input.settings.members.map((member) => [member.id, member]));
+
+  for (const member of input.settings.members) {
+    for (const toolName of member.tools) {
+      const retain = getToolHistoryRetention(member, toolName);
+      if (retain > 0) retentionByAssignment.set(assignmentKey(member.id, toolName), retain);
+    }
+  }
+
+  if (retentionByAssignment.size === 0) {
+    if (readCouncilHistory(input.userId, input.chatId).length > 0) {
+      chatsSvc.mergeChatMetadata(input.userId, input.chatId, {
+        [COUNCIL_HISTORY_METADATA_KEY]: undefined,
+      });
+    }
+    return;
+  }
+
+  const now = Date.now();
+  const additions: CouncilHistoricalDeliberationEntry[] = [];
+  for (const result of input.results) {
+    if (!result.success || !result.content.trim()) continue;
+    const member = memberById.get(result.memberId);
+    if (!member) continue;
+    if (!retentionByAssignment.has(assignmentKey(result.memberId, result.toolName))) continue;
+
+    additions.push({
+      id: crypto.randomUUID(),
+      createdAt: now,
+      memberId: result.memberId,
+      memberName: result.memberName,
+      toolName: result.toolName,
+      toolDisplayName: result.toolDisplayName,
+      content: truncateHistoryContent(result.content.trim()),
+    });
+  }
+
+  if (additions.length === 0) return;
+
+  const existing = readCouncilHistory(input.userId, input.chatId);
+  const next = [...existing, ...additions]
+    .filter((entry) => retentionByAssignment.has(assignmentKey(entry.memberId, entry.toolName)))
+    .sort((a, b) => a.createdAt - b.createdAt);
+
+  const byAssignment = new Map<string, CouncilHistoricalDeliberationEntry[]>();
+  for (const entry of next) {
+    const key = assignmentKey(entry.memberId, entry.toolName);
+    const entries = byAssignment.get(key) ?? [];
+    entries.push(entry);
+    byAssignment.set(key, entries);
+  }
+
+  const pruned: CouncilHistoricalDeliberationEntry[] = [];
+  for (const [key, entries] of byAssignment) {
+    const retain = retentionByAssignment.get(key) ?? 0;
+    pruned.push(...entries.slice(-retain));
+  }
+  pruned.sort((a, b) => a.createdAt - b.createdAt);
+
+  chatsSvc.mergeChatMetadata(input.userId, input.chatId, {
+    [COUNCIL_HISTORY_METADATA_KEY]: {
+      version: 1,
+      entries: pruned.slice(-MAX_HISTORY_TOTAL_ENTRIES),
+    },
+  });
+}
+
 /**
  * Route a tool call to the extension worker that registered it. We never
  * forward the authenticated userId — extensions run in their own user-scoped
@@ -450,11 +661,11 @@ ${tool.prompt}${dynamicSuffix}${brevityNote}${userControlNote}`;
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },
     ...contextMessages,
-    { role: "user", content: `Review the story context above. Provide specific, actionable input from your unique perspective as ${member.itemName}. Filter every contribution through your personality, biases, and worldview.` },
+    { role: "user", content: `Respond to the CURRENT latest message in the story context above with specific, actionable input from your unique perspective as ${member.itemName}, filtered through your personality, biases, and worldview. Produce a fresh contribution for this turn.` },
   ];
 
   // Resolve the connection to get the provider name
-  const conn = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
+  const conn = connectionsSvc.resolveConnection(userId, sidecar.connectionProfileId);
   if (!conn) throw new Error("Sidecar connection not found");
 
   const response = await rawGenerate(userId, {
@@ -671,9 +882,9 @@ Rules:
     connection_id: sidecar.connectionProfileId,
     messages,
     parameters: {
-      temperature: 0,
+      temperature: sidecar.temperature,
       top_p: sidecar.topP,
-      max_tokens: Math.min(sidecar.maxTokens, 96),
+      max_tokens: sidecar.maxTokens,
     },
     signal,
   });
@@ -782,7 +993,7 @@ async function planCallableToolArgs(
     throw new Error(`Sidecar connection is required to plan arguments for \"${tool.displayName}\"`);
   }
 
-  const conn = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
+  const conn = connectionsSvc.resolveConnection(userId, sidecar.connectionProfileId);
   if (!conn) throw new Error("Sidecar connection not found");
 
   const roleNote = member.role
@@ -929,16 +1140,17 @@ function buildContextMessages(input: ExecuteInput, settings: CouncilSettings): L
   const chat = chatsSvc.getChat(input.userId, input.chatId);
 
   // Prefer pre-loaded enrichment data; fall back to independent lookups.
+  // `includeUserPersona` is authoritative — enrichment may carry a persona
+  // resolved by the main generation pipeline, but the council toggle overrides it.
   let character = input.enrichment?.character ?? null;
-  const persona = input.enrichment?.persona ?? (
-    ts.includeUserPersona
-      ? personasSvc.resolvePersonaOrDefault(input.userId, input.personaId)
-      : null
-  );
+  const persona = ts.includeUserPersona
+    ? (input.enrichment?.persona
+        ?? personasSvc.resolvePersonaOrDefault(input.userId, input.personaId))
+    : null;
 
   // Character info
   if (ts.includeCharacterInfo && chat) {
-    if (!character) character = charactersSvc.getCharacter(input.userId, chat.character_id);
+    if (!character && chat.character_id) character = charactersSvc.getCharacter(input.userId, chat.character_id);
     if (character) {
       const charInfo = [
         character.name && `Name: ${character.name}`,
@@ -974,7 +1186,7 @@ function buildContextMessages(input: ExecuteInput, settings: CouncilSettings): L
       console.debug("[council] Using %d pre-activated world info entries from enrichment", activatedEntries.length);
     } else {
       // Fallback: independently activate WI (for callers without enrichment)
-      if (!character) character = charactersSvc.getCharacter(input.userId, chat.character_id);
+      if (!character && chat.character_id) character = charactersSvc.getCharacter(input.userId, chat.character_id);
       const { entries: wiEntries } = collectWorldInfoForCouncil(input.userId, character, persona, input.chatId);
       if (wiEntries.length > 0) {
         const allMsgs = chatsSvc.getMessages(input.userId, input.chatId);
@@ -1088,40 +1300,19 @@ export function collectWorldInfoForCouncil(
   persona: ReturnType<typeof personasSvc.resolvePersonaOrDefault>,
   chatId?: string,
 ): { entries: import("../../types/world-book").WorldBookEntry[]; worldBookIds: string[] } {
-  const entries: import("../../types/world-book").WorldBookEntry[] = [];
-  const seen = new Set<string>();
-
-  const charBookIds = getCharacterWorldBookIds(character?.extensions);
-  for (const charBookId of charBookIds) {
-    if (seen.has(charBookId)) continue;
-    seen.add(charBookId);
-    entries.push(...worldBooksSvc.listEntries(userId, charBookId));
-  }
-  if (persona?.attached_world_book_id && !seen.has(persona.attached_world_book_id)) {
-    seen.add(persona.attached_world_book_id);
-    entries.push(...worldBooksSvc.listEntries(userId, persona.attached_world_book_id));
-  }
-
-  // Chat-scoped world books (active for this chat only)
-  if (chatId) {
-    const chat = chatsSvc.getChat(userId, chatId);
-    const chatBookIds = (chat?.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
-    for (const cId of chatBookIds) {
-      if (seen.has(cId)) continue;
-      seen.add(cId);
-      entries.push(...worldBooksSvc.listEntries(userId, cId));
-    }
-  }
-
-  // Global world books (user-wide, always active)
+  const chat = chatId ? chatsSvc.getChat(userId, chatId) : null;
+  const chatBookIds = (chat?.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
   const globalWorldBooks = (settingsSvc.getSetting(userId, "globalWorldBooks")?.value as string[] | undefined) ?? [];
-  for (const gId of globalWorldBooks) {
-    if (seen.has(gId)) continue;
-    seen.add(gId);
-    entries.push(...worldBooksSvc.listEntries(userId, gId));
-  }
+  const sources = collectWorldInfoSources(
+    userId,
+    character ?? makeAssistantCharacter(),
+    persona,
+    globalWorldBooks,
+    chatBookIds,
+    chat ? { chat } : undefined,
+  );
 
-  return { entries, worldBookIds: Array.from(seen) };
+  return { entries: sources.entries, worldBookIds: sources.worldBookIds };
 }
 
 const DELIBERATION_INSTRUCTIONS = `## Council Deliberation Instructions

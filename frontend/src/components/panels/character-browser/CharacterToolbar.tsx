@@ -14,6 +14,7 @@ import {
   UsersRound,
 } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import ImportMenu from './ImportMenu'
 import type { CharacterFilterTab, CharacterSortField, CharacterSortDirection, CharacterViewMode } from '@/types/store'
 import styles from './CharacterToolbar.module.css'
@@ -42,10 +43,10 @@ interface CharacterToolbarProps {
 }
 
 const SORT_OPTIONS: { value: CharacterSortField; label: string }[] = [
-  { value: 'name', label: 'Name' },
-  { value: 'recent', label: 'Recent' },
-  { value: 'created', label: 'Created' },
-  { value: 'shuffle', label: 'Shuffle' },
+  { value: 'name', label: 'name' },
+  { value: 'recent', label: 'recent' },
+  { value: 'created', label: 'created' },
+  { value: 'shuffle', label: 'shuffle' },
 ]
 
 export default function CharacterToolbar({
@@ -69,18 +70,30 @@ export default function CharacterToolbar({
   tagLibraryImporting = false,
   onGroupChat,
 }: CharacterToolbarProps) {
+  const { t } = useTranslation('panels')
   const [sortOpen, setSortOpen] = useState(false)
   const sortRef = useRef<HTMLDivElement>(null)
 
+  const isGroupsTab = filterTab === 'groups'
+  // shuffle is meaningless for group chats; the hook coerces it to 'recent'
+  // for fetching — mirror that visually so the active item highlights correctly.
+  const effectiveSortField: CharacterSortField =
+    isGroupsTab && sortField === 'shuffle' ? 'recent' : sortField
+  const visibleSortOptions = isGroupsTab
+    ? SORT_OPTIONS.filter((opt) => opt.value !== 'shuffle')
+    : SORT_OPTIONS
+
   useEffect(() => {
     if (!sortOpen) return
-    const handler = (e: MouseEvent) => {
+    const openedAt = Date.now()
+    const handler = (e: PointerEvent) => {
+      if (e.timeStamp < openedAt + 100) return
       if (sortRef.current && !sortRef.current.contains(e.target as Node)) {
         setSortOpen(false)
       }
     }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    document.addEventListener('pointerdown', handler)
+    return () => document.removeEventListener('pointerdown', handler)
   }, [sortOpen])
 
   return (
@@ -93,7 +106,7 @@ export default function CharacterToolbar({
           className={styles.searchInput}
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Search characters..."
+          placeholder={isGroupsTab ? t('characterToolbar.searchGroupChats') : t('characterToolbar.searchCharacters')}
         />
         {searchQuery && (
           <button type="button" className={styles.clearBtn} onClick={() => onSearchChange('')}>
@@ -117,7 +130,7 @@ export default function CharacterToolbar({
             type="button"
             className={clsx(styles.tabBtn, filterTab === 'characters' && styles.tabBtnActive)}
             onClick={() => onFilterTabChange('characters')}
-            title="Characters"
+            title={t('characterToolbar.characters')}
           >
             <Layers size={14} />
           </button>
@@ -125,7 +138,7 @@ export default function CharacterToolbar({
             type="button"
             className={clsx(styles.tabBtn, filterTab === 'favorites' && styles.tabBtnActive)}
             onClick={() => onFilterTabChange('favorites')}
-            title="Favorites"
+            title={t('characterToolbar.favorites')}
           >
             <Star size={14} />
           </button>
@@ -133,7 +146,7 @@ export default function CharacterToolbar({
             type="button"
             className={clsx(styles.tabBtn, filterTab === 'groups' && styles.tabBtnActive)}
             onClick={() => onFilterTabChange('groups')}
-            title="Group Chats"
+            title={t('characterToolbar.groupChats')}
           >
             <UsersRound size={14} />
           </button>
@@ -144,33 +157,33 @@ export default function CharacterToolbar({
             type="button"
             className={styles.iconBtn}
             onClick={() => setSortOpen(!sortOpen)}
-            title={`Sort by ${sortField}`}
+            title={t('characterToolbar.sortBy', { field: t(`characterToolbar.sort.${effectiveSortField}`) })}
           >
             <ArrowUpDown size={14} />
           </button>
           {sortOpen && (
             <div className={styles.sortDropdown}>
-              {SORT_OPTIONS.map((opt) => (
+              {visibleSortOptions.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
-                  className={clsx(styles.sortItem, sortField === opt.value && styles.sortItemActive)}
+                  className={clsx(styles.sortItem, effectiveSortField === opt.value && styles.sortItemActive)}
                   onClick={() => {
                     onSortFieldChange(opt.value)
                     setSortOpen(false)
                   }}
                 >
-                  {opt.label}
+                  {t(`characterToolbar.sort.${opt.label}`)}
                 </button>
               ))}
             </div>
           )}
-          {sortField === 'shuffle' ? (
+          {effectiveSortField === 'shuffle' ? (
             <button
               type="button"
               className={styles.iconBtn}
               onClick={onToggleSortDirection}
-              title="Reshuffle"
+              title={t('characterToolbar.reshuffle')}
             >
               <RefreshCw size={14} />
             </button>
@@ -179,7 +192,7 @@ export default function CharacterToolbar({
               type="button"
               className={styles.iconBtn}
               onClick={onToggleSortDirection}
-              title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+              title={sortDirection === 'asc' ? t('characterToolbar.ascending') : t('characterToolbar.descending')}
             >
               {sortDirection === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
             </button>
@@ -195,10 +208,10 @@ export default function CharacterToolbar({
           }}
           title={
             viewMode === 'grid'
-              ? 'Switch to single card view'
+              ? t('characterToolbar.switchToSingle')
               : viewMode === 'single'
-                ? 'Switch to list view'
-                : 'Switch to grid view'
+                ? t('characterToolbar.switchToList')
+                : t('characterToolbar.switchToGrid')
           }
         >
           {viewMode === 'grid' ? <RectangleVertical size={14} /> : viewMode === 'single' ? <List size={14} /> : <LayoutGrid size={14} />}
@@ -209,7 +222,7 @@ export default function CharacterToolbar({
             type="button"
             className={styles.iconBtn}
             onClick={onGroupChat}
-            title="New Group Chat"
+            title={t('characterToolbar.newGroupChat')}
           >
             <UsersRound size={14} />
           </button>
@@ -219,7 +232,7 @@ export default function CharacterToolbar({
           type="button"
           className={clsx(styles.iconBtn, batchMode && styles.iconBtnActive)}
           onClick={() => onBatchModeChange(!batchMode)}
-          title={batchMode ? 'Exit batch mode' : 'Batch select'}
+          title={batchMode ? t('characterToolbar.exitBatchMode') : t('characterToolbar.batchSelect')}
         >
           <CheckSquare size={14} />
         </button>

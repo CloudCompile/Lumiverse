@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ExternalLink, RefreshCw, LogIn, Zap, Settings2, ChevronRight } from 'lucide-react'
 import { FormField, Select, Button } from '@/components/shared/FormComponents'
 import { Toggle } from '@/components/shared/Toggle'
@@ -20,24 +21,12 @@ interface OpenRouterSettingsProps {
   onConnectionCreated?: (profile: ConnectionProfile) => void
 }
 
-const SORT_OPTIONS = [
-  { value: '', label: 'Default (balanced)' },
-  { value: 'price', label: 'Cheapest first' },
-  { value: 'throughput', label: 'Fastest throughput' },
-  { value: 'latency', label: 'Lowest latency' },
-]
-
-const DATA_COLLECTION_OPTIONS = [
-  { value: '', label: 'Default (allow)' },
-  { value: 'allow', label: 'Allow' },
-  { value: 'deny', label: 'Deny (privacy-first)' },
-]
-
 const QUANTIZATION_OPTIONS = [
   'int4', 'int8', 'fp4', 'fp6', 'fp8', 'fp16', 'bf16', 'fp32', 'unknown',
 ]
 
 export default function OpenRouterSettings({ connectionId, connectionName, hasApiKey, settings, onChange, onApiKeySet, onConnectionCreated }: OpenRouterSettingsProps) {
+  const { t } = useTranslation('panels')
   const [credits, setCredits] = useState<OpenRouterCreditsInfo | null>(null)
   const [creditsLoading, setCreditsLoading] = useState(false)
   const [oauthLoading, setOauthLoading] = useState(false)
@@ -45,6 +34,25 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [upstreamProviders, setUpstreamProviders] = useState<OpenRouterProviderEntry[]>([])
   const [providersLoading, setProvidersLoading] = useState(false)
+
+  const sortOptions = useMemo(
+    () => [
+      { value: '', label: t('openRouterSettings.sort.default') },
+      { value: 'price', label: t('openRouterSettings.sort.price') },
+      { value: 'throughput', label: t('openRouterSettings.sort.throughput') },
+      { value: 'latency', label: t('openRouterSettings.sort.latency') },
+    ],
+    [t],
+  )
+
+  const dataCollectionOptions = useMemo(
+    () => [
+      { value: '', label: t('openRouterSettings.dataCollectionOptions.default') },
+      { value: 'allow', label: t('openRouterSettings.dataCollectionOptions.allow') },
+      { value: 'deny', label: t('openRouterSettings.dataCollectionOptions.deny') },
+    ],
+    [t],
+  )
 
   const routing = settings.provider_routing || {}
   const plugins = settings.plugins || []
@@ -167,10 +175,9 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
     <div className={styles.container}>
       <div className={styles.brandHeader}>
         <span className={styles.brandDot} />
-        <span className={styles.brandLabel}>OpenRouter</span>
+        <span className={styles.brandLabel}>{t('openRouterSettings.brand')}</span>
       </div>
 
-      {/* OAuth Login */}
       {(connectionId || connectionName?.trim()) && !hasApiKey && (
         <div className={styles.oauthSection}>
           <Button
@@ -180,35 +187,34 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
             disabled={oauthLoading}
             icon={oauthLoading ? <Spinner size={13} /> : <LogIn size={13} />}
           >
-            Sign in with OpenRouter
+            {t('openRouterSettings.signIn')}
           </Button>
           <span className={styles.oauthHint}>
-            {connectionId ? 'Authorize to get an API key automatically' : 'Sign in to create this connection with your OpenRouter account'}
+            {connectionId ? t('openRouterSettings.oauthHintExisting') : t('openRouterSettings.oauthHintCreate')}
           </span>
         </div>
       )}
 
-      {/* Credits */}
       {connectionId && hasApiKey && (
         credits ? (
           <div className={styles.creditsRow}>
             <div className={styles.creditCell}>
-              <span className={styles.creditLabel}>Remaining</span>
+              <span className={styles.creditLabel}>{t('connectionItem.remaining')}</span>
               <span className={styles.creditValue}>
                 {credits.limit_remaining !== null && credits.limit !== null
                   ? `$${credits.limit_remaining.toFixed(2)} / $${credits.limit.toFixed(2)}`
                   : credits.limit_remaining !== null
                     ? `$${credits.limit_remaining.toFixed(2)}`
-                    : 'Unlimited'}
-                {credits.is_free_tier && <span className={styles.freeTierBadge}>Free</span>}
+                    : t('connectionItem.unlimited')}
+                {credits.is_free_tier && <span className={styles.freeTierBadge}>{t('openRouterSettings.freeTier')}</span>}
               </span>
             </div>
             <div className={styles.creditCell}>
-              <span className={styles.creditLabel}>Today</span>
+              <span className={styles.creditLabel}>{t('connectionItem.today')}</span>
               <span className={styles.creditValue}>${credits.usage_daily.toFixed(4)}</span>
             </div>
             <div className={styles.creditCell}>
-              <span className={styles.creditLabel}>This month</span>
+              <span className={styles.creditLabel}>{t('connectionItem.thisMonth')}</span>
               <span className={styles.creditValue}>${credits.usage_monthly.toFixed(4)}</span>
             </div>
             <div className={styles.creditsActions}>
@@ -218,82 +224,80 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
             </div>
           </div>
         ) : (
-          !creditsLoading && <span className={styles.creditsUnavailable}>Unable to fetch credit info</span>
+          !creditsLoading && <span className={styles.creditsUnavailable}>{t('openRouterSettings.creditsUnavailable')}</span>
         )
       )}
 
-      {/* Provider Routing */}
       <button type="button" className={styles.sectionToggle} onClick={() => setRoutingOpen(!routingOpen)}>
         <ChevronRight size={12} className={`${styles.sectionChevron} ${routingOpen ? styles.sectionChevronOpen : ''}`} />
         <Settings2 size={13} className={styles.sectionToggleIcon} />
-        <span>Provider Routing</span>
+        <span>{t('openRouterSettings.providerRouting')}</span>
       </button>
       {routingOpen && (
         <div className={styles.sectionContent}>
-          <FormField label="Sort By" hint="How to prioritize providers for this model">
+          <FormField label={t('openRouterSettings.sortBy')} hint={t('openRouterSettings.sortByHint')}>
             <Select
               value={routing.sort || ''}
               onChange={(v) => updateRouting({ sort: v || undefined })}
-              options={SORT_OPTIONS}
+              options={sortOptions}
             />
           </FormField>
-          <FormField label="Data Collection" hint="Filter by provider data retention policy">
+          <FormField label={t('openRouterSettings.dataCollection')} hint={t('openRouterSettings.dataCollectionHint')}>
             <Select
               value={routing.data_collection || ''}
               onChange={(v) => updateRouting({ data_collection: (v as any) || undefined })}
-              options={DATA_COLLECTION_OPTIONS}
+              options={dataCollectionOptions}
             />
           </FormField>
           <FormField label="">
             <Toggle.Checkbox
               checked={routing.allow_fallbacks !== false}
               onChange={(v) => updateRouting({ allow_fallbacks: v })}
-              label="Allow fallback providers"
-              hint="Use backup providers when primary is unavailable"
+              label={t('openRouterSettings.allowFallbacks')}
+              hint={t('openRouterSettings.allowFallbacksHint')}
             />
           </FormField>
           <FormField label="">
             <Toggle.Checkbox
               checked={routing.require_parameters ?? false}
               onChange={(v) => updateRouting({ require_parameters: v })}
-              label="Require parameter support"
-              hint="Only route to providers that support all request parameters"
+              label={t('openRouterSettings.requireParameters')}
+              hint={t('openRouterSettings.requireParametersHint')}
             />
           </FormField>
-          <FormField label="Preferred Providers" hint="Providers to try first, in order of preference">
+          <FormField label={t('openRouterSettings.preferredProviders')} hint={t('openRouterSettings.preferredProvidersHint')}>
             <MultiChipSelect
               options={providerOptions}
               selected={routing.order || []}
               onChange={(v) => updateRouting({ order: v.length ? v : undefined })}
-              placeholder="Select providers to prefer..."
+              placeholder={t('openRouterSettings.preferPlaceholder')}
               loading={providersLoading}
             />
           </FormField>
-          <FormField label="Ignore Providers" hint="Providers to exclude from routing entirely">
+          <FormField label={t('openRouterSettings.ignoreProviders')} hint={t('openRouterSettings.ignoreProvidersHint')}>
             <MultiChipSelect
               options={providerOptions}
               selected={routing.ignore || []}
               onChange={(v) => updateRouting({ ignore: v.length ? v : undefined })}
-              placeholder="Select providers to exclude..."
+              placeholder={t('openRouterSettings.ignorePlaceholder')}
               loading={providersLoading}
             />
           </FormField>
-          <FormField label="Quantizations" hint="Only use endpoints with these quantization levels">
+          <FormField label={t('openRouterSettings.quantizations')} hint={t('openRouterSettings.quantizationsHint')}>
             <MultiChipSelect
               options={quantizationOptions}
               selected={routing.quantizations || []}
               onChange={(v) => updateRouting({ quantizations: v.length ? v : undefined })}
-              placeholder="Select quantizations..."
+              placeholder={t('openRouterSettings.quantizationsPlaceholder')}
             />
           </FormField>
         </div>
       )}
 
-      {/* Plugins */}
       <button type="button" className={styles.sectionToggle} onClick={() => setPluginsOpen(!pluginsOpen)}>
         <ChevronRight size={12} className={`${styles.sectionChevron} ${pluginsOpen ? styles.sectionChevronOpen : ''}`} />
         <Zap size={13} className={styles.sectionToggleIcon} />
-        <span>Plugins</span>
+        <span>{t('openRouterSettings.plugins')}</span>
       </button>
       {pluginsOpen && (
         <div className={styles.sectionContent}>
@@ -301,34 +305,33 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
             <Toggle.Checkbox
               checked={isPluginEnabled('web')}
               onChange={(v) => togglePlugin('web', v)}
-              label="Web Search"
-              hint="Augment responses with web search results"
+              label={t('openRouterSettings.webSearch')}
+              hint={t('openRouterSettings.webSearchHint')}
             />
           </FormField>
           <FormField label="">
             <Toggle.Checkbox
               checked={isPluginEnabled('response-healing')}
               onChange={(v) => togglePlugin('response-healing', v)}
-              label="Response Healing"
-              hint="Auto-fix malformed JSON in responses (non-streaming)"
+              label={t('openRouterSettings.responseHealing')}
+              hint={t('openRouterSettings.responseHealingHint')}
             />
           </FormField>
           <FormField label="">
             <Toggle.Checkbox
               checked={isPluginEnabled('context-compression')}
               onChange={(v) => togglePlugin('context-compression', v)}
-              label="Context Compression"
-              hint="Middle-out compression when context exceeds limit"
+              label={t('openRouterSettings.contextCompression')}
+              hint={t('openRouterSettings.contextCompressionHint')}
             />
           </FormField>
         </div>
       )}
 
-      {/* Attribution */}
       <div className={styles.attribution}>
-        <span>Lumiverse on</span>
+        <span>{t('openRouterSettings.attributionPrefix')}</span>
         <a href="https://openrouter.ai/apps" target="_blank" rel="noopener noreferrer">
-          OpenRouter Apps <ExternalLink size={9} />
+          {t('openRouterSettings.attributionLink')} <ExternalLink size={9} />
         </a>
       </div>
     </div>

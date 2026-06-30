@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
@@ -9,6 +10,9 @@ import styles from './RegexImportModal.module.css'
 import clsx from 'clsx'
 
 export default function RegexImportModal() {
+  const { t } = useTranslation('modals', { keyPrefix: 'regexImport' })
+  const { t: tc } = useTranslation('common')
+
   const closeModal = useStore((s) => s.closeModal)
   const loadRegexScripts = useStore((s) => s.loadRegexScripts)
 
@@ -26,17 +30,17 @@ export default function RegexImportModal() {
       setResult(res)
       if (res.imported > 0) {
         await loadRegexScripts()
-        toast.success(`Imported ${res.imported} script${res.imported !== 1 ? 's' : ''}`)
+        toast.success(t('importedCount', { count: res.imported }))
       }
       if (res.errors.length > 0) {
-        toast.error(`${res.errors.length} error${res.errors.length !== 1 ? 's' : ''} during import`)
+        toast.error(t('errorsDuringImport', { count: res.errors.length }))
       }
     } catch (err: any) {
-      toast.error(err.body?.error || err.message)
+      toast.error(err.body?.error || err.message || t('invalidJsonContent'))
     } finally {
       setImporting(false)
     }
-  }, [loadRegexScripts])
+  }, [loadRegexScripts, t])
 
   const handleFile = useCallback(async (file: File) => {
     const text = await file.text()
@@ -44,9 +48,9 @@ export default function RegexImportModal() {
       const parsed = JSON.parse(text)
       await doImport(parsed)
     } catch {
-      toast.error('Invalid JSON file')
+      toast.error(t('invalidJsonFile'))
     }
-  }, [doImport])
+  }, [doImport, t])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -61,24 +65,24 @@ export default function RegexImportModal() {
       const parsed = JSON.parse(pasteContent)
       await doImport(parsed)
     } catch {
-      toast.error('Invalid JSON content')
+      toast.error(t('invalidJsonContent'))
     }
-  }, [pasteContent, doImport])
+  }, [pasteContent, doImport, t])
 
   return (
     <ModalShell isOpen={true} onClose={closeModal} maxWidth={520} maxHeight="80vh">
       <div className={styles.header}>
-        <h2 className={styles.title}>Import Regex Scripts</h2>
+        <h2 className={styles.title}>{t('title')}</h2>
         <CloseButton onClick={closeModal} />
       </div>
 
       <div className={styles.body}>
         <div className={styles.tabs}>
           <button className={clsx(styles.tab, tab === 'file' && styles.tabActive)} onClick={() => setTab('file')}>
-            File Upload
+            {t('fileUpload')}
           </button>
           <button className={clsx(styles.tab, tab === 'paste' && styles.tabActive)} onClick={() => setTab('paste')}>
-            Paste JSON
+            {t('pasteJson')}
           </button>
         </div>
 
@@ -90,8 +94,8 @@ export default function RegexImportModal() {
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
           >
-            <p>Drop a JSON file here or click to browse</p>
-            <p>Supports Lumiverse and SillyTavern formats</p>
+            <p>{t('dropZone')}</p>
+            <p>{t('formatsHint')}</p>
             <input
               ref={fileInputRef}
               type="file"
@@ -111,7 +115,7 @@ export default function RegexImportModal() {
               className={styles.pasteArea}
               value={pasteContent}
               onChange={(e) => setPasteContent(e.target.value)}
-              placeholder='Paste JSON here...'
+              placeholder={t('pastePlaceholder')}
               rows={8}
             />
             <Button
@@ -119,14 +123,14 @@ export default function RegexImportModal() {
               onClick={handlePasteImport}
               disabled={importing || !pasteContent.trim()}
             >
-              {importing ? 'Importing...' : 'Import'}
+              {importing ? t('importing') : tc('actions.import')}
             </Button>
           </>
         )}
 
         {result && (
           <div className={styles.result}>
-            <p>Imported: {result.imported} | Skipped: {result.skipped}</p>
+            <p>{t('resultSummary', { imported: result.imported, skipped: result.skipped })}</p>
             {result.errors.length > 0 && (
               <div className={styles.resultError}>
                 {result.errors.map((e, i) => <p key={i}>{e}</p>)}
@@ -137,7 +141,7 @@ export default function RegexImportModal() {
       </div>
 
       <div className={styles.footer}>
-        <Button variant="ghost" onClick={closeModal}>Close</Button>
+        <Button variant="ghost" onClick={closeModal}>{tc('actions.close')}</Button>
       </div>
     </ModalShell>
   )

@@ -4,6 +4,7 @@ import { hashPassword } from "../crypto/password";
 import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";
+export { backfillDefaultPresets } from "./default-preset";
 import {
   ownerCredentialsExist,
   readOwnerCredentials,

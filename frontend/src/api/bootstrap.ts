@@ -1,9 +1,10 @@
 import { get } from './client'
 import type {
   ConnectionProfile, ProviderInfo,
+  SttConnectionProfile, SttProviderInfo,
   TtsConnectionProfile, TtsProviderInfo,
   ImageGenConnectionProfile, ImageGenProviderInfo,
-  Pack, Persona, PaginatedResult,
+  Pack, Persona, PaginatedResult, GroupedRecentChat,
 } from '@/types/api'
 import type { RegexScript } from '@/types/regex'
 import type { StartupSettings } from '@/types/store'
@@ -19,6 +20,10 @@ export interface BootstrapPayload {
   llm: {
     connections: PaginatedResult<ConnectionProfile>
     providers: ProviderInfo[]
+  }
+  stt: {
+    connections: PaginatedResult<SttConnectionProfile>
+    providers: SttProviderInfo[]
   }
   tts: {
     connections: PaginatedResult<TtsConnectionProfile>
@@ -40,6 +45,13 @@ export interface BootstrapPayload {
     isPrivileged: boolean
     tools: ToolRegistration[]
   }
+  /** Response-shape placeholder; `/bootstrap/landing` owns recent-chat preload. */
+  recentChats: PaginatedResult<GroupedRecentChat>
+}
+
+export interface LandingBootstrapPayload {
+  startupSettings: StartupSettings
+  recentChats: PaginatedResult<GroupedRecentChat>
 }
 
 export interface BootstrapResponse {
@@ -48,6 +60,13 @@ export interface BootstrapResponse {
   errors: Record<string, string>
 }
 
+export interface LandingBootstrapResponse {
+  payload: LandingBootstrapPayload
+  /** Per-section failures. Missing sections arrive with empty defaults. */
+  errors: Record<string, string>
+}
+
 export const bootstrapApi = {
   fetch: () => get<BootstrapResponse>('/bootstrap'),
+  fetchLanding: () => get<LandingBootstrapResponse>('/bootstrap/landing'),
 }

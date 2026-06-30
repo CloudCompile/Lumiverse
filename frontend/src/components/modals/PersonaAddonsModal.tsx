@@ -1,6 +1,25 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Check, Trash2, Globe, Link2, Unlink } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { Plus, Check, Trash2, Globe, Link2, Unlink, GripVertical } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
+import {
+  DndContext,
+  MouseSensor,
+  TouchSensor,
+  KeyboardSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { useScaledSortableStyle } from '@/lib/dndUiScale'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
@@ -15,6 +34,9 @@ import { uuidv7 } from '@/lib/uuid'
 import clsx from 'clsx'
 
 export default function PersonaAddonsModal() {
+  const { t } = useTranslation('modals', { keyPrefix: 'personaAddons' })
+  const { t: tc } = useTranslation('common')
+
   const modalProps = useStore((s) => s.modalProps)
   const closeModal = useStore((s) => s.closeModal)
   const openModal = useStore((s) => s.openModal)
@@ -48,7 +70,7 @@ export default function PersonaAddonsModal() {
         setAttachedRefs(Array.isArray(refs) ? refs : [])
         setAllGlobalAddons(globalRes.data)
       })
-      .catch(() => toast.error('Failed to load persona'))
+      .catch(() => toast.error(t('loadFailed')))
       .finally(() => setLoading(false))
   }, [personaId])
 
@@ -62,7 +84,7 @@ export default function PersonaAddonsModal() {
         setMetadata(updated.metadata || newMeta)
         updatePersonaInStore(personaId, updated)
       } catch {
-        toast.error('Failed to save add-ons')
+        toast.error(t('saveFailed'))
       }
     }, 300)
   }, [personaId, metadata, updatePersonaInStore])
@@ -76,7 +98,7 @@ export default function PersonaAddonsModal() {
       setAttachedRefs(next)
       updatePersonaInStore(personaId, updated)
     } catch {
-      toast.error('Failed to save global add-on attachment')
+      toast.error(t('saveAttachmentFailed'))
     }
   }, [personaId, metadata, updatePersonaInStore])
 
@@ -114,6 +136,26 @@ export default function PersonaAddonsModal() {
 
   const handleContentChange = useCallback((id: string, content: string) => {
     const next = addons.map((a) => a.id === id ? { ...a, content } : a)
+    setAddons(next)
+    persistAddons(next)
+  }, [addons, persistAddons])
+
+  // Drag-to-reorder for persona-specific addons. `sort_order` is also re-stamped
+  // so the backend MacroEnv resolves them in the visual order.
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const oldIndex = addons.findIndex((a) => a.id === active.id)
+    const newIndex = addons.findIndex((a) => a.id === over.id)
+    if (oldIndex < 0 || newIndex < 0) return
+    const moved = arrayMove(addons, oldIndex, newIndex)
+    const next = moved.map((a, i) => ({ ...a, sort_order: i }))
     setAddons(next)
     persistAddons(next)
   }, [addons, persistAddons])
@@ -159,7 +201,7 @@ export default function PersonaAddonsModal() {
         <div className={styles.headerLeft}>
           <IconPlaylistAdd size={16} className={styles.headerIcon} />
           <span className={styles.title}>
-            {personaName ? `${personaName} — Add-Ons` : 'Persona Add-Ons'}
+            {personaName ? t('titleWithPersona', { name: personaName }) : t('title')}
           </span>
         </div>
         <CloseButton onClick={closeModal} size="sm" />
@@ -167,66 +209,43 @@ export default function PersonaAddonsModal() {
 
       {/* Body */}
       <div className={styles.body}>
-        {loading && <div className={styles.empty}>Loading...</div>}
+        {loading && <div className={styles.empty}>{t('loading')}</div>}
 
         {!loading && (
           <>
             {/* ── Section 1: Persona-Specific Add-Ons ── */}
             <div className={styles.sectionHeader}>
               <IconPlaylistAdd size={13} className={styles.sectionIconPersona} />
-              <span>Default Persona Add-Ons</span>
+              <span>{t('personaSectionDefault')}</span>
             </div>
             <div className={styles.sectionHint}>
-              These defaults are used when a chat has no binding or chat-specific override.
+              {t('personaSectionHint')}
             </div>
 
             {addons.length === 0 && (
               <div className={styles.emptySection}>
-                No persona-specific add-ons. These are exclusive to this persona.
+                {t('personaEmpty')}
               </div>
             )}
 
-            {addons.map((addon) => (
-              <div key={addon.id} className={clsx(styles.addonCard, !addon.enabled && styles.addonCardDisabled)}>
-                <div className={styles.addonTopRow}>
-                  <button
-                    type="button"
-                    className={clsx(styles.addonToggle, addon.enabled && styles.addonToggleActive)}
-                    onClick={() => handleToggle(addon.id)}
-                    title={addon.enabled ? 'Disable add-on' : 'Enable add-on'}
-                  >
-                    <Check size={13} />
-                  </button>
-                  <input
-                    type="text"
-                    className={styles.addonLabelInput}
-                    value={addon.label}
-                    onChange={(e) => handleLabelChange(addon.id, e.target.value)}
-                    placeholder="Add-on name..."
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={addons.map((a) => a.id)} strategy={verticalListSortingStrategy}>
+                {addons.map((addon) => (
+                  <SortableAddonRow
+                    key={addon.id}
+                    addon={addon}
+                    onToggle={handleToggle}
+                    onDelete={handleDelete}
+                    onLabelChange={handleLabelChange}
+                    onContentChange={handleContentChange}
                   />
-                  <button
-                    type="button"
-                    className={styles.addonDeleteBtn}
-                    onClick={() => handleDelete(addon.id)}
-                    title="Delete add-on"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-                <ExpandableTextarea
-                  className={styles.addonContent}
-                  value={addon.content}
-                  onChange={(v) => handleContentChange(addon.id, v)}
-                  title={addon.label || 'Add-On Content'}
-                  placeholder="Add-on content (appended to persona description when enabled)..."
-                  rows={2}
-                />
-              </div>
-            ))}
+                ))}
+              </SortableContext>
+            </DndContext>
 
             <div className={styles.sectionAddRow}>
               <Button variant="ghost" icon={<Plus size={13} />} onClick={handleAdd} className={styles.sectionAddBtn}>
-                Add Persona Add-On
+                {t('addPersonaAddon')}
               </Button>
             </div>
 
@@ -236,19 +255,19 @@ export default function PersonaAddonsModal() {
             {/* ── Section 2: Global Add-Ons ── */}
             <div className={styles.sectionHeader}>
               <Globe size={13} className={styles.sectionIconGlobal} />
-              <span>Global Add-Ons</span>
+              <span>{t('globalSection')}</span>
               <button
                 type="button"
                 className={styles.manageLibraryBtn}
                 onClick={() => openModal('globalAddonsLibrary')}
               >
-                Manage Library
+                {t('manageLibrary')}
               </button>
             </div>
 
             {attachedGlobalAddons.length === 0 && (
               <div className={styles.emptySection}>
-                No global add-ons attached. Attach from your library to reuse across personas.
+                {t('globalEmpty')}
               </div>
             )}
 
@@ -259,19 +278,19 @@ export default function PersonaAddonsModal() {
                     type="button"
                     className={clsx(styles.addonToggle, addon.enabled && styles.addonToggleActiveGlobal)}
                     onClick={() => handleToggleGlobal(addon.id)}
-                    title={addon.enabled ? 'Disable add-on' : 'Enable add-on'}
+                    title={addon.enabled ? t('disableAddon') : t('enableAddon')}
                   >
                     <Check size={13} />
                   </button>
                   <div className={styles.globalIndicator}>
                     <Globe size={10} />
                   </div>
-                  <span className={styles.globalAddonLabel}>{addon.label || 'Untitled global add-on'}</span>
+                  <span className={styles.globalAddonLabel}>{addon.label || t('untitledGlobal')}</span>
                   <button
                     type="button"
                     className={styles.detachBtn}
                     onClick={() => handleDetachGlobal(addon.id)}
-                    title="Detach from persona"
+                    title={t('detachTitle')}
                   >
                     <Unlink size={13} />
                   </button>
@@ -294,7 +313,7 @@ export default function PersonaAddonsModal() {
                   className={styles.sectionAddBtn}
                   disabled={unattachedGlobalAddons.length === 0}
                 >
-                  Attach Global Add-On
+                  {t('attachGlobalAddon')}
                 </Button>
                 {showAttachPicker && unattachedGlobalAddons.length > 0 && (
                   <div className={styles.attachPopover}>
@@ -306,7 +325,7 @@ export default function PersonaAddonsModal() {
                         onClick={() => handleAttachGlobal(g.id)}
                       >
                         <Globe size={11} className={styles.attachPopoverIcon} />
-                        <span>{g.label || 'Untitled'}</span>
+                        <span>{g.label || t('untitled')}</span>
                       </button>
                     ))}
                   </div>
@@ -326,5 +345,79 @@ export default function PersonaAddonsModal() {
         </span>
       </div>
     </ModalShell>
+  )
+}
+
+interface SortableAddonRowProps {
+  addon: PersonaAddon
+  onToggle: (id: string) => void
+  onDelete: (id: string) => void
+  onLabelChange: (id: string, label: string) => void
+  onContentChange: (id: string, content: string) => void
+}
+
+function SortableAddonRow({ addon, onToggle, onDelete, onLabelChange, onContentChange }: SortableAddonRowProps) {
+  const { t } = useTranslation('modals', { keyPrefix: 'personaAddons' })
+
+  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: addon.id })
+  const { setNodeRef, style: scaledStyle } = useScaledSortableStyle({ setNodeRef: setSortableRef, transform, transition, isDragging })
+  const style = {
+    ...scaledStyle,
+    opacity: isDragging ? 0.6 : undefined,
+    zIndex: isDragging ? 1 : undefined,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={clsx(styles.addonCard, !addon.enabled && styles.addonCardDisabled)}
+    >
+      <div className={styles.addonTopRow}>
+        <button
+          type="button"
+          className={styles.addonDragHandle}
+          title={t('dragTitle')}
+          aria-label={t('dragAria')}
+          tabIndex={-1}
+          onContextMenu={(e) => e.preventDefault()}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical size={13} />
+        </button>
+        <button
+          type="button"
+          className={clsx(styles.addonToggle, addon.enabled && styles.addonToggleActive)}
+          onClick={() => onToggle(addon.id)}
+          title={addon.enabled ? t('disableAddon') : t('enableAddon')}
+        >
+          <Check size={13} />
+        </button>
+        <input
+          type="text"
+          className={styles.addonLabelInput}
+          value={addon.label}
+          onChange={(e) => onLabelChange(addon.id, e.target.value)}
+          placeholder={t('namePlaceholder')}
+        />
+        <button
+          type="button"
+          className={styles.addonDeleteBtn}
+          onClick={() => onDelete(addon.id)}
+          title={t('deleteTitle')}
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+      <ExpandableTextarea
+        className={styles.addonContent}
+        value={addon.content}
+        onChange={(v) => onContentChange(addon.id, v)}
+        title={addon.label || t('addonContent')}
+        placeholder={t('contentPlaceholder')}
+        rows={2}
+      />
+    </div>
   )
 }

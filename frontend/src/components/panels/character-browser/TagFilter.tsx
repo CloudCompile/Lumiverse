@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
-import { ChevronDown, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { ChevronDown, X, Check, Ban } from 'lucide-react'
 import { getTagColor } from '@/lib/tagColors'
 import styles from './TagFilter.module.css'
 import clsx from 'clsx'
@@ -12,16 +13,21 @@ interface TagInfo {
 interface TagFilterProps {
   allTags: TagInfo[]
   selectedTags: string[]
-  onToggleTag: (tag: string) => void
+  excludedTags: string[]
+  /** Advance a tag through the filter states: neutral → include → exclude → neutral. */
+  onCycleTag: (tag: string) => void
+  /** Clear both included and excluded tags. */
   onClearTags: () => void
 }
 
 export default function TagFilter({
   allTags,
   selectedTags,
-  onToggleTag,
+  excludedTags,
+  onCycleTag,
   onClearTags,
 }: TagFilterProps) {
+  const { t } = useTranslation('panels')
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const ref = useRef<HTMLDivElement>(null)
@@ -39,23 +45,34 @@ export default function TagFilter({
   }, [open])
 
   const filtered = search
-    ? allTags.filter((t) => t.tag.toLowerCase().includes(search.toLowerCase()))
+    ? allTags.filter((tagInfo) => tagInfo.tag.toLowerCase().includes(search.toLowerCase()))
     : allTags
 
-  if (allTags.length === 0) return <div className={styles.placeholder} />
+  const activeCount = selectedTags.length + excludedTags.length
+
+  if (allTags.length === 0 && activeCount === 0) return null
 
   return (
     <div className={styles.container} ref={ref}>
       <button
         type="button"
-        className={clsx(styles.trigger, selectedTags.length > 0 && styles.triggerActive)}
+        className={clsx(styles.trigger, activeCount > 0 && styles.triggerActive)}
         onClick={() => setOpen(!open)}
       >
-        <span>Tags{selectedTags.length > 0 ? ` (${selectedTags.length})` : ''}</span>
+        <span>
+          {activeCount > 0
+            ? t('characterBrowser.tagFilter.labelWithCount', { count: activeCount })
+            : t('characterBrowser.tagFilter.label')}
+        </span>
         <ChevronDown size={12} />
       </button>
-      {selectedTags.length > 0 && (
-        <button type="button" className={styles.clearBtn} onClick={onClearTags} title="Clear tags">
+      {activeCount > 0 && (
+        <button
+          type="button"
+          className={styles.clearBtn}
+          onClick={onClearTags}
+          title={t('characterBrowser.tagFilter.clearTags')}
+        >
           <X size={12} />
         </button>
       )}
@@ -64,7 +81,7 @@ export default function TagFilter({
           <input
             type="text"
             className={styles.search}
-            placeholder="Search tags..."
+            placeholder={t('characterBrowser.tagFilter.searchPlaceholder')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             autoFocus
@@ -72,16 +89,31 @@ export default function TagFilter({
           <div className={styles.list}>
             {filtered.map(({ tag, count }) => {
               const color = getTagColor(tag)
-              const isSelected = selectedTags.includes(tag)
+              const isIncluded = selectedTags.includes(tag)
+              const isExcluded = excludedTags.includes(tag)
+              const stateLabel = isIncluded
+                ? t('characterBrowser.tagFilter.stateIncluded')
+                : isExcluded
+                  ? t('characterBrowser.tagFilter.stateExcluded')
+                  : t('characterBrowser.tagFilter.stateNeutral')
               return (
                 <button
                   key={tag}
                   type="button"
-                  className={clsx(styles.tagItem, isSelected && styles.tagItemSelected)}
-                  onClick={() => onToggleTag(tag)}
+                  className={clsx(
+                    styles.tagItem,
+                    isIncluded && styles.tagItemIncluded,
+                    isExcluded && styles.tagItemExcluded,
+                  )}
+                  onClick={() => onCycleTag(tag)}
+                  title={stateLabel}
                 >
+                  <span className={styles.tagState} aria-hidden="true">
+                    {isIncluded && <Check size={12} className={styles.iconInclude} />}
+                    {isExcluded && <Ban size={12} className={styles.iconExclude} />}
+                  </span>
                   <span
-                    className={styles.tagPill}
+                    className={clsx(styles.tagPill, isExcluded && styles.tagPillExcluded)}
                     style={{ background: color.bg, color: color.text, borderColor: color.border }}
                   >
                     {tag}
@@ -91,9 +123,10 @@ export default function TagFilter({
               )
             })}
             {filtered.length === 0 && (
-              <div className={styles.empty}>No tags found</div>
+              <div className={styles.empty}>{t('characterBrowser.tagFilter.noTagsFound')}</div>
             )}
           </div>
+          <div className={styles.hint}>{t('characterBrowser.tagFilter.cycleHint')}</div>
         </div>
       )}
     </div>

@@ -14,7 +14,13 @@ export const chatsApi = {
     return get<PaginatedResult<RecentChat>>('/chats/recent', params)
   },
 
-  listRecentGrouped(params?: { limit?: number; offset?: number }) {
+  listRecentGrouped(params?: {
+    limit?: number
+    offset?: number
+    search?: string
+    sort?: 'name' | 'recent' | 'created'
+    direction?: 'asc' | 'desc'
+  }) {
     return get<PaginatedResult<GroupedRecentChat>>('/chats/recent-grouped', params)
   },
 
@@ -36,6 +42,20 @@ export const chatsApi = {
     return post<Chat>('/chats', input)
   },
 
+  /**
+   * Disposable character-less, persona-less chat for trying out the current
+   * connection profile. Swept by deleteTemporary() when the user returns home.
+   * Pass noPreset to test the model raw — generation skips preset blocks,
+   * preset parameters, and the active/connection preset fallbacks.
+   */
+  createTemporary(opts?: { noPreset?: boolean }) {
+    return post<Chat>('/chats/temporary', opts?.noPreset ? { no_preset: true } : {})
+  },
+
+  deleteTemporary() {
+    return del<{ success: boolean; deleted: number }>('/chats/temporary')
+  },
+
   update(id: string, input: Partial<{ name: string; metadata: Record<string, any> }>) {
     return put<Chat>(`/chats/${id}`, input)
   },
@@ -52,6 +72,10 @@ export const chatsApi = {
 
   delete(id: string) {
     return del<void>(`/chats/${id}`)
+  },
+
+  deleteCharacterChats(characterId: string) {
+    return del<{ success: boolean; deleted: number }>(`/chats/character-chats/${characterId}`)
   },
 
   createGroup(input: CreateGroupChatInput) {
@@ -76,6 +100,10 @@ export const chatsApi = {
 
   removeMember(chatId: string, characterId: string) {
     return del<void>(`/chats/${chatId}/members/${characterId}`)
+  },
+
+  setGroupMemberAlternateFields(chatId: string, characterId: string, selections: Record<string, string | null>) {
+    return patch<Chat>(`/chats/${chatId}/members/${characterId}/alternate-fields`, { selections })
   },
 
   reattributeUserMessages(chatId: string, personaId: string) {
@@ -164,5 +192,9 @@ export const messagesApi = {
       `/chats/${chatId}/messages/bulk-delete`,
       { message_ids: messageIds }
     )
+  },
+
+  removeAttachment(chatId: string, messageId: string, imageId: string) {
+    return del<Message>(`/chats/${chatId}/messages/${messageId}/attachments/${imageId}`)
   },
 }

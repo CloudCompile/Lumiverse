@@ -3,9 +3,14 @@ import { env } from "../env";
 import type {
   SpindleManifest,
   SpindlePermission,
+  SpindleCapability,
   ExtensionInfo,
 } from "lumiverse-spindle-types";
-import { validateIdentifier, isValidPermission } from "lumiverse-spindle-types";
+import {
+  validateIdentifier,
+  isValidPermission,
+  isValidCapability,
+} from "lumiverse-spindle-types";
 import {
   existsSync,
   mkdirSync,
@@ -20,18 +25,48 @@ import { join, resolve, dirname, sep } from "path";
 import { getUserExtensionPath } from "../auth/provision";
 import { spawnAsync } from "./spawn-async";
 import { normalizeSpindleHttpsUrl } from "./url-safety";
+import { bunCmd } from "../utils/bun-cmd";
 
 export type InstallScope = "operator" | "user";
-type ManagedSpindlePermission = SpindlePermission | "databanks";
-
-function isManagedPermission(permission: string): permission is ManagedSpindlePermission {
-  return permission === "databanks" || isValidPermission(permission);
+function isManagedPermission(permission: string): permission is SpindlePermission {
+  return isValidPermission(permission);
 }
 
 type BackendSafetyCheck = {
   label: string;
   regex: RegExp;
 };
+
+type SourceSpan = { start: number; end: number };
+type ScannableSource = { text: string; ignoredSpans: SourceSpan[] };
+
+const DANGEROUS_MODULE_LABELS = new Map<string, string>([
+  ["fs", "filesystem module access"],
+  ["fs/promises", "filesystem module access"],
+  ["node:fs", "filesystem module access"],
+  ["node:fs/promises", "filesystem module access"],
+  ["child_process", "subprocess module access"],
+  ["node:child_process", "subprocess module access"],
+  ["net", "direct socket module access"],
+  ["tls", "direct socket module access"],
+  ["dgram", "direct socket module access"],
+  ["http", "direct socket module access"],
+  ["https", "direct socket module access"],
+  ["node:net", "direct socket module access"],
+  ["node:tls", "direct socket module access"],
+  ["node:dgram", "direct socket module access"],
+  ["node:http", "direct socket module access"],
+  ["node:https", "direct socket module access"],
+  ["worker_threads", "worker or cluster module access"],
+  ["cluster", "worker or cluster module access"],
+  ["node:worker_threads", "worker or cluster module access"],
+  ["node:cluster", "worker or cluster module access"],
+  ["bun:sqlite", "direct SQLite module access"],
+  ["node:sqlite", "direct SQLite module access"],
+]);
+
+const DANGEROUS_BUN_PROPERTIES = new Set(["file", "write", "spawn", "spawnSync", "serve", "connect", "listen"]);
+const DANGEROUS_PROCESS_PROPERTIES = new Set(["env", "exit", "kill", "chdir", "dlopen"]);
 
 const DANGEROUS_BACKEND_CHECKS: BackendSafetyCheck[] = [
   {
@@ -64,20 +99,512 @@ const DANGEROUS_BACKEND_CHECKS: BackendSafetyCheck[] = [
   },
 ];
 
-export function detectDangerousBackendCapabilities(content: string): string[] {
-  const hits = new Set<string>();
-  for (const check of DANGEROUS_BACKEND_CHECKS) {
-    if (check.regex.test(content)) {
-      hits.add(check.label);
-    }
+function normalizeJavaScriptForSafetyScan(content: string): string {
+  try {
+    return new Bun.Transpiler({ loader: "js" }).transformSync(content);
+  } catch {
+    return content;
   }
-  return [...hits];
 }
 
-async function assertSafeBackendBundle(identifier: string, backendPath: string): Promise<void> {
+function collectIgnoredSpans(source: string): SourceSpan[] {
+  const spans: SourceSpan[] = [];
+  const len = source.length;
+  const addSpan = (start: number, end: number) => {
+    if (end > start) spans.push({ start, end });
+  };
+
+  const skipQuoted = (start: number, quote: "'" | '"', end: number): number => {
+    let i = start + 1;
+    while (i < end) {
+      if (source[i] === "\\") {
+        i += 2;
+        continue;
+      }
+      if (source[i] === quote) {
+        addSpan(start, i + 1);
+        return i + 1;
+      }
+      i += 1;
+    }
+    addSpan(start, end);
+    return end;
+  };
+
+  const scanTemplate = (start: number, end: number): number => {
+    let i = start + 1;
+    let textStart = start;
+    while (i < end) {
+      if (source[i] === "\\") {
+        i += 2;
+        continue;
+      }
+      if (source[i] === "`") {
+        addSpan(textStart, i + 1);
+        return i + 1;
+      }
+      if (source[i] === "$" && source[i + 1] === "{") {
+        addSpan(textStart, i + 2);
+        i = scanCode(i + 2, end, true);
+        if (source[i] !== "}") return i;
+        textStart = i;
+        i += 1;
+        continue;
+      }
+      i += 1;
+    }
+    addSpan(textStart, end);
+    return end;
+  };
+
+  // Tokens after which a `/` starts a regex literal rather than division.
+  // Conservative: only single-char operators / openers and a closed set of
+  // keywords. The fallthrough is "treat as division" — false negatives in
+  // regex detection just leave the existing behaviour intact (substrings
+  // inside regex bodies remain scannable), so the heuristic only needs to
+  // be RIGHT about value-producing tokens to avoid swallowing real code.
+  const REGEX_CONTEXT_CHARS = new Set([
+    "(", ",", "=", "!", "&", "|", "?", ":", ";", "{", "[", "}",
+    "+", "-", "*", "%", "~", "^", "<", ">",
+  ]);
+  const REGEX_CONTEXT_KEYWORDS = new Set([
+    "return", "typeof", "delete", "void", "throw", "new",
+    "in", "of", "instanceof", "case", "do", "else", "yield", "await",
+  ]);
+
+  /**
+   * Find the last non-whitespace, non-comment character before `pos` and
+   * decide whether a `/` at `pos` starts a regex literal. Walks backwards
+   * skipping whitespace, single-line comments (which we've already
+   * registered as spans, but they don't exist yet at this scan position —
+   * scanCode runs forward), and identifier characters (to detect keyword
+   * tokens like `return`).
+   *
+   * Returns true if `pos` is regex-context, false if it's division-context.
+   * Defaults to true at start-of-input (a leading `/` is a regex).
+   */
+  const isRegexContext = (pos: number): boolean => {
+    let j = pos - 1;
+    // Skip whitespace.
+    while (j >= 0 && /\s/.test(source[j])) j -= 1;
+    if (j < 0) return true;
+    const ch = source[j];
+    if (REGEX_CONTEXT_CHARS.has(ch)) return true;
+    // Identifier scan — keyword or value?
+    if (/[A-Za-z_$]/.test(ch)) {
+      let k = j;
+      while (k >= 0 && /[A-Za-z0-9_$]/.test(source[k])) k -= 1;
+      const word = source.slice(k + 1, j + 1);
+      if (REGEX_CONTEXT_KEYWORDS.has(word)) return true;
+      return false;
+    }
+    // Closing `)`, `]`, `++`, `--`, etc. — value context, treat as division.
+    return false;
+  };
+
+  /**
+   * Scan a regex literal starting at `start` (the leading `/`). Returns the
+   * index past the closing `/` and any flag characters. Respects character
+   * classes (`[...]` can contain `/` literally) and `\` escapes.
+   */
+  const scanRegex = (start: number, end: number): number => {
+    let i = start + 1;
+    let inClass = false;
+    while (i < end) {
+      const ch = source[i];
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "[") {
+        inClass = true;
+        i += 1;
+        continue;
+      }
+      if (ch === "]" && inClass) {
+        inClass = false;
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && !inClass) {
+        i += 1;
+        // Consume regex flags.
+        while (i < end && /[dgimsuy]/.test(source[i])) i += 1;
+        addSpan(start, i);
+        return i;
+      }
+      if (ch === "\n") {
+        // Unterminated regex on a single line — bail out, leave the rest
+        // scannable. (Real JS would have rejected this at parse time.)
+        return start + 1;
+      }
+      i += 1;
+    }
+    addSpan(start, end);
+    return end;
+  };
+
+  const scanCode = (start: number, end: number, stopOnTemplateBrace = false): number => {
+    let i = start;
+    while (i < end) {
+      if (stopOnTemplateBrace && source[i] === "}") return i;
+      if (source[i] === "/" && source[i + 1] === "/") {
+        const lineEnd = source.indexOf("\n", i + 2);
+        const commentEnd = lineEnd === -1 ? end : lineEnd;
+        addSpan(i, commentEnd);
+        i = commentEnd;
+        continue;
+      }
+      if (source[i] === "/" && source[i + 1] === "*") {
+        const blockEnd = source.indexOf("*/", i + 2);
+        const commentEnd = blockEnd === -1 ? end : blockEnd + 2;
+        addSpan(i, commentEnd);
+        i = commentEnd;
+        continue;
+      }
+      // Regex literal — disambiguated from division by preceding-token check.
+      // Bundle minifiers preserve regex literals (`/pat/flags`), and several
+      // legitimate extensions inline a regex whose source string mentions
+      // forbidden tokens (e.g. lumiscript's host-dispatcher security check
+      // `/(?<!\.)\b(?:new\s+)?Function\s*\(/.test(t)`). Without this branch
+      // the scanner reads the regex source as raw code and false-positives.
+      if (source[i] === "/" && isRegexContext(i)) {
+        i = scanRegex(i, end);
+        continue;
+      }
+      if (source[i] === '"' || source[i] === "'") {
+        i = skipQuoted(i, source[i] as "'" | '"', end);
+        continue;
+      }
+      if (source[i] === "`") {
+        i = scanTemplate(i, end);
+        continue;
+      }
+      i += 1;
+    }
+    return i;
+  };
+
+  scanCode(0, len);
+  return spans.sort((a, b) => a.start - b.start);
+}
+
+function isIgnoredIndex(index: number | undefined, spans: SourceSpan[]): boolean {
+  if (index === undefined || index < 0) return false;
+  for (const span of spans) {
+    if (index < span.start) return false;
+    if (index >= span.start && index < span.end) return true;
+  }
+  return false;
+}
+
+function createScannableSources(content: string): ScannableSource[] {
+  const normalized = normalizeJavaScriptForSafetyScan(content);
+  const texts = normalized === content ? [content] : [content, normalized];
+  return texts.map((text) => ({ text, ignoredSpans: collectIgnoredSpans(text) }));
+}
+
+function matchOutsideIgnored(source: ScannableSource, regex: RegExp): RegExpMatchArray[] {
+  const flags = regex.flags.includes("g") ? regex.flags : `${regex.flags}g`;
+  const globalRegex = new RegExp(regex.source, flags);
+  const matches: RegExpMatchArray[] = [];
+  for (const match of source.text.matchAll(globalRegex)) {
+    if (!isIgnoredIndex(match.index, source.ignoredSpans)) matches.push(match);
+  }
+  return matches;
+}
+
+function decodeQuotedLiteral(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!/^(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)$/.test(trimmed)) return null;
+  const quote = trimmed[0];
+  const body = trimmed.slice(1, -1);
+  if (quote === "`") return body.replace(/\$\{[^}]*\}/g, "");
+  if (quote === '"') {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return body;
+    }
+  }
+  return body.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+}
+
+function decodeSimpleStringExpression(raw: string): string | null {
+  const trimmed = raw.trim();
+  const direct = decodeQuotedLiteral(trimmed);
+  if (direct !== null) return direct;
+
+  const charCode = trimmed.match(/^String\.fromCharCode\s*\(([^)]*)\)$/);
+  if (charCode) {
+    const chars = charCode[1]
+      .split(",")
+      .map((part) => Number(part.trim()))
+      .filter((value) => Number.isInteger(value) && value >= 0 && value <= 0x10ffff);
+    if (chars.length > 0) return String.fromCodePoint(...chars);
+  }
+
+  const literalParts = [...trimmed.matchAll(/"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`/g)].map((match) => {
+    if (match[3] !== undefined) return match[3].replace(/\$\{[^}]*\}/g, "");
+    if (match[1] !== undefined) return decodeQuotedLiteral(`"${match[1]}"`) ?? "";
+    return decodeQuotedLiteral(`'${match[2]}'`) ?? "";
+  });
+  return literalParts.length > 0 ? literalParts.join("") : null;
+}
+
+/**
+ * Resolve a dynamic `import()` / `require()` specifier ONLY when the entire
+ * expression is a provably-constant string: a single string literal, a `+`
+ * concatenation of string literals, or `String.fromCharCode(<int literals>)`.
+ * Returns the resolved module string, or `null` if any part is non-constant
+ * (template interpolation `${…}`, a variable, member/computed access, a
+ * function call, etc.).
+ *
+ * This is deliberately STRICTER than {@link decodeSimpleStringExpression},
+ * which strips `${…}` and concatenates whatever literals it can find — that
+ * leniency let a specifier like `` `node:${seg}` `` decode to the harmless
+ * "node:" and slip past the dangerous-module check. The import/require gate
+ * must fail CLOSED: anything we cannot fully prove constant is reported as
+ * "dynamic module access" and hard-blocked (there is no capability opt-in,
+ * because the unresolved string could be `node:fs`, `child_process`, etc.).
+ */
+function resolveStaticModuleSpecifier(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // `String.fromCharCode(<int literals>)` — constant only when every argument
+  // is an integer literal (a variable arg makes the whole call non-constant).
+  const charCode = trimmed.match(/^String\.fromCharCode\s*\(([^)]*)\)$/);
+  if (charCode) {
+    const parts = charCode[1].split(",").map((p) => p.trim());
+    if (parts.length === 0 || parts.some((p) => !/^\d+$/.test(p))) return null;
+    const codes = parts.map(Number);
+    if (codes.some((n) => !Number.isInteger(n) || n < 0 || n > 0x10ffff)) return null;
+    return String.fromCodePoint(...codes);
+  }
+
+  // One or more string literals joined by `+`. A template literal is accepted
+  // only when it contains NO `${…}` interpolation (`\$(?!\{)` allows a bare
+  // `$`, but `${` ends the literal match and forces a `null` "dynamic" result).
+  const LITERAL = /^(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:[^`\\$]|\\.|\$(?!\{))*`)/;
+  let rest = trimmed;
+  let value = "";
+  let matchedAny = false;
+  while (rest) {
+    const m = rest.match(LITERAL);
+    if (!m) return null;
+    const decoded = decodeQuotedLiteral(m[0]);
+    if (decoded === null) return null;
+    value += decoded;
+    matchedAny = true;
+    rest = rest.slice(m[0].length).replace(/^\s+/, "");
+    if (!rest) break;
+    // `import(spec, { with: … })` — the specifier is complete; the trailing
+    // comma introduces the (static) import-attributes object, not part of it.
+    if (rest[0] === ",") break;
+    if (rest[0] !== "+") return null; // any non-`+` operator/token ⇒ dynamic
+    rest = rest.slice(1).replace(/^\s+/, "");
+    if (!rest) return null; // dangling `+`
+  }
+  return matchedAny ? value : null;
+}
+
+function addDynamicModuleHits(source: ScannableSource, hits: Set<string>): void {
+  // Only the BARE dynamic-import operator `import(…)` and the global
+  // `require(…)` are real module-load surfaces. Member calls (`x.require(…)`,
+  // `ns.import(…)`) and shorthand method definitions (`require(name) { … }`)
+  // are unrelated: extensions routinely ship a scripting API whose methods are
+  // literally named `require`/`import` (e.g. RisuAI-compat layers). The
+  // negative lookbehind `(?<![.\w$])` drops member access and identifier-
+  // prefixed names; the trailing-`{` check below drops method definitions.
+  // No coverage is lost — a constant dangerous specifier on ANY receiver is
+  // still caught by DANGEROUS_BACKEND_CHECKS, and a dynamic `globalThis.require`
+  // is caught at runtime by guardRequire (a real override, unlike `import()`).
+  for (const match of matchOutsideIgnored(source, /(?<![.\w$])(?:require|import)\s*\(([^;\n]{1,300})\)/)) {
+    if (match.index !== undefined) {
+      const tail = source.text.slice(match.index + match[0].length);
+      if (/^\s*\{/.test(tail)) continue; // `require(name) { … }` — a definition
+    }
+    const resolved = resolveStaticModuleSpecifier(match[1]);
+    if (resolved === null) {
+      // Specifier is not a provable constant — fail closed. We cannot tell
+      // whether it resolves to `node:fs`, `child_process`, etc., so block it.
+      hits.add("dynamic module access");
+      continue;
+    }
+    const label = DANGEROUS_MODULE_LABELS.get(resolved);
+    if (label) hits.add(label);
+  }
+}
+
+function addPropertyAccessHits(
+  source: ScannableSource,
+  objectName: string,
+  properties: Set<string>,
+  label: string,
+  hits: Set<string>
+): void {
+  const escapedObject = objectName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const dotAccess = new RegExp(`\\b${escapedObject}\\s*\\.\\s*([A-Za-z_$][\\w$]*)`, "g");
+  for (const match of matchOutsideIgnored(source, dotAccess)) {
+    if (properties.has(match[1])) hits.add(label);
+  }
+
+  const computedAccess = new RegExp(`\\b${escapedObject}\\s*\\[([^\\]]{1,300})\\]`, "g");
+  for (const match of matchOutsideIgnored(source, computedAccess)) {
+    const property = decodeSimpleStringExpression(match[1]);
+    if (property && properties.has(property)) hits.add(label);
+  }
+}
+
+function addAliasPropertyHits(source: ScannableSource, hits: Set<string>): void {
+  const aliases = new Map<string, "Bun" | "process">();
+  for (const match of matchOutsideIgnored(source, /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(Bun|process)\b/)) {
+    aliases.set(match[1], match[2] as "Bun" | "process");
+  }
+
+  for (const [alias, aliasSource] of aliases) {
+    addPropertyAccessHits(
+      source,
+      alias,
+      aliasSource === "Bun" ? DANGEROUS_BUN_PROPERTIES : DANGEROUS_PROCESS_PROPERTIES,
+      aliasSource === "Bun" ? "dangerous Bun system API usage" : "dangerous process API usage",
+      hits
+    );
+  }
+}
+
+function addDestructuringHits(source: ScannableSource, hits: Set<string>): void {
+  for (const match of matchOutsideIgnored(source, /\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*Bun\b/)) {
+    for (const prop of match[1].split(",")) {
+      const name = prop.trim().split(/\s*:/, 1)[0]?.trim();
+      if (DANGEROUS_BUN_PROPERTIES.has(name)) hits.add("dangerous Bun system API usage");
+    }
+  }
+
+  for (const match of matchOutsideIgnored(source, /\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*process\b/)) {
+    for (const prop of match[1].split(",")) {
+      const name = prop.trim().split(/\s*:/, 1)[0]?.trim();
+      if (DANGEROUS_PROCESS_PROPERTIES.has(name)) hits.add("dangerous process API usage");
+    }
+  }
+}
+
+/**
+ * Maps a scanner label to the manifest-declared capability that, when
+ * present, suppresses that label. Capabilities are install-time opt-ins
+ * declared in `spindle.json`'s `requested_capabilities` field; the user
+ * grants them on install just like `permissions`. Only labels with a
+ * meaningful false-positive rate get a capability mapping — filesystem,
+ * subprocess, sockets, sqlite, workers, Bun system APIs, and process APIs
+ * remain hard-blocked with no opt-in available.
+ */
+const LABEL_TO_CAPABILITY: ReadonlyMap<string, SpindleCapability> = new Map([
+  ["dynamic code execution", "dynamic_code_execution"],
+  ["base64 decoding",        "base64_decode"],
+]);
+
+/**
+ * Match `Function(...)` calls where the FIRST argument is an empty string
+ * literal (or where the call has no arguments). Used to carve out the
+ * Zod / generic feature-detect probe `try { new Function(""); … }` that
+ * checks for Cloudflare-Workers-style environments without actually
+ * executing any code. The body of an empty-string Function is empty —
+ * the call constructs a no-op, indistinguishable from `() => {}`.
+ *
+ * Matches `Function()`, `Function("")`, `Function('')`, `Function(\`\`)`,
+ * with whitespace tolerated.
+ */
+const EMPTY_FUNCTION_PROBE_RE = /\bFunction\s*\(\s*(?:""|''|``|)\s*\)/g;
+
+function isEmptyFunctionProbe(source: ScannableSource, matchIndex: number): boolean {
+  EMPTY_FUNCTION_PROBE_RE.lastIndex = 0;
+  let probe: RegExpExecArray | null;
+  while ((probe = EMPTY_FUNCTION_PROBE_RE.exec(source.text)) !== null) {
+    // matchIndex points at the `F` of `Function(`; the probe match also
+    // starts at the `F` after `\b`. So index equality is the test.
+    if (probe.index === matchIndex) return true;
+    if (probe.index > matchIndex) return false;
+  }
+  return false;
+}
+
+export function detectDangerousBackendCapabilities(
+  content: string,
+  declared: ReadonlySet<SpindleCapability> = new Set(),
+): string[] {
+  const hits = new Set<string>();
+  for (const source of createScannableSources(content)) {
+    for (const check of DANGEROUS_BACKEND_CHECKS) {
+      if (matchOutsideIgnored(source, check.regex).length > 0) {
+        hits.add(check.label);
+      }
+    }
+    addDynamicModuleHits(source, hits);
+    addPropertyAccessHits(source, "Bun", DANGEROUS_BUN_PROPERTIES, "dangerous Bun system API usage", hits);
+    addPropertyAccessHits(source, "process", DANGEROUS_PROCESS_PROPERTIES, "dangerous process API usage", hits);
+    addAliasPropertyHits(source, hits);
+    addDestructuringHits(source, hits);
+    if (matchOutsideIgnored(source, /\bObject\.getOwnPropertyDescriptor\s*\(\s*process\s*,\s*["'`]env["'`]/).length > 0) {
+      hits.add("dangerous process API usage");
+    }
+
+    // Dynamic code execution — `eval(` / `Function(`. The empty-body
+    // Function probe (`new Function("")`) is excluded as a known
+    // feature-detect pattern with no real execution capability.
+    const dynExecMatches = matchOutsideIgnored(source, /\beval\s*\(|\bFunction\s*\(/);
+    for (const match of dynExecMatches) {
+      if (match.index === undefined) continue;
+      const matchedText = match[0];
+      if (matchedText.startsWith("Function") && isEmptyFunctionProbe(source, match.index)) continue;
+      hits.add("dynamic code execution");
+      break;
+    }
+
+    // Base64 decoding — `Buffer.from(..., "base64")`. Split from
+    // dynamic-execution so it carries its own capability and can be
+    // declared independently.
+    if (matchOutsideIgnored(source, /\bBuffer\.from\s*\([^)]*["'`]base64["'`]/).length > 0) {
+      hits.add("base64 decoding");
+    }
+  }
+
+  if (declared.size === 0) return [...hits];
+  return [...hits].filter((label) => {
+    const cap = LABEL_TO_CAPABILITY.get(label);
+    return cap === undefined || !declared.has(cap);
+  });
+}
+
+/**
+ * Normalize a manifest's `requested_capabilities` field into a Set the
+ * scanner can consume. Invalid entries are dropped silently — the scanner
+ * still enforces the underlying check; an invalid declaration just means
+ * no opt-in.
+ */
+export function declaredCapabilitiesFromManifest(
+  manifest: SpindleManifest,
+): Set<SpindleCapability> {
+  const declared = new Set<SpindleCapability>();
+  const raw = manifest.requested_capabilities;
+  if (!Array.isArray(raw)) return declared;
+  for (const entry of raw) {
+    if (typeof entry === "string" && isValidCapability(entry)) declared.add(entry);
+  }
+  return declared;
+}
+
+async function assertSafeBackendBundle(
+  identifier: string,
+  backendPath: string,
+  declared: ReadonlySet<SpindleCapability> = new Set(),
+): Promise<void> {
   if (!(await Bun.file(backendPath).exists())) return;
 
-  const blocked = detectDangerousBackendCapabilities(await Bun.file(backendPath).text());
+  const blocked = detectDangerousBackendCapabilities(
+    await Bun.file(backendPath).text(),
+    declared,
+  );
   if (blocked.length === 0) return;
 
   throw new Error(
@@ -119,15 +646,27 @@ function storageDir(identifier: string): string {
   return join(extensionDir(identifier), "storage");
 }
 
-/** Cross-platform move: tries renameSync, falls back to cpSync+rmSync for cross-device moves. */
+/**
+ * Cross-platform move. On Windows, freshly-cloned directories frequently hit
+ * transient EPERM/EBUSY from antivirus, the search indexer, or git child handles
+ * that haven't fully released. Retry a few times with backoff, then fall back to
+ * copy+delete (which also covers cross-device EXDEV).
+ */
 function moveSync(from: string, to: string): void {
-  try {
-    renameSync(from, to);
-  } catch (err: any) {
-    if (err.code !== "EXDEV") throw err;
-    cpSync(from, to, { recursive: true, force: true, errorOnExist: false });
-    rmSync(from, { recursive: true, force: true });
+  const transientCodes = new Set(["EPERM", "EBUSY", "EACCES", "ENOTEMPTY"]);
+  const delays = [50, 100, 200, 400, 800];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (err: any) {
+      if (err.code === "EXDEV") break;
+      if (!transientCodes.has(err.code)) throw err;
+      if (attempt < delays.length) Bun.sleepSync(delays[attempt]);
+    }
   }
+  cpSync(from, to, { recursive: true, force: true, errorOnExist: false });
+  rmSync(from, { recursive: true, force: true });
 }
 
 // ─── Manifest parsing ────────────────────────────────────────────────────
@@ -150,7 +689,13 @@ async function readManifest(identifier: string): Promise<SpindleManifest> {
     throw new Error(`spindle manifest not found in ${repo}`);
   }
   const raw = await Bun.file(manifestPath).text();
-  const manifest: SpindleManifest = JSON.parse(raw);
+  // L-17: Guard JSON.parse so a corrupt spindle.json produces a clear error.
+  let manifest: SpindleManifest;
+  try {
+    manifest = JSON.parse(raw) as SpindleManifest;
+  } catch {
+    throw new Error(`spindle.json in ${repo} is not valid JSON`);
+  }
 
   // Validate
   if (!manifest.identifier || !validateIdentifier(manifest.identifier)) {
@@ -176,7 +721,12 @@ async function readManifestFromPath(
   }
 
   const raw = await Bun.file(manifestPath).text();
-  const manifest: SpindleManifest = JSON.parse(raw);
+  let manifest: SpindleManifest;
+  try {
+    manifest = JSON.parse(raw) as SpindleManifest;
+  } catch {
+    throw new Error(`spindle.json at ${manifestPath} is not valid JSON`);
+  }
 
   if (!manifest.identifier || !validateIdentifier(manifest.identifier)) {
     throw new Error(
@@ -272,12 +822,15 @@ export const PRIVILEGED_PERMISSIONS = new Set([
   "characters",
   "chats",
   "world_books",
+  "presets",
   "regex_scripts",
   "databanks",
   "personas",
   "push_notification",
   "image_gen",
   "images",
+  "web_search",
+  "unsafe_eval",
 ]);
 
 function grantRequestedPermissionsByDefault(
@@ -454,54 +1007,21 @@ function applyStorageSeeds(identifier: string, manifest: SpindleManifest): void 
 }
 
 // ─── Termux-aware Bun command builders ───────────────────────────────────
-// On Termux, the bare `bun` binary can't execute natively. start.sh detects
-// the working invocation method and exports it via env vars so we can mirror
-// the same wrapping here when spawning bun subprocesses.
-
-/**
- * Build a command array for running `bun <args>`.
- * Mirrors start.sh's `_bun()` wrapper.
- */
-export function bunCmd(...args: string[]): string[] {
-  const method = process.env.LUMIVERSE_BUN_METHOD;
-  const bunPath = process.env.LUMIVERSE_BUN_PATH;
-
-  if (!method || !bunPath) return ["bun", ...args];
-
-  switch (method) {
-    case "direct":
-      return [bunPath, ...args];
-    case "grun":
-      return ["grun", bunPath, ...args];
-    case "proot": {
-      const prefix = process.env.PREFIX || "/data/data/com.termux/files/usr";
-      return [
-        "proot", "--link2symlink", "-0",
-        `${prefix}/glibc/lib/ld-linux-aarch64.so.1`,
-        "--library-path", `${prefix}/glibc/lib`,
-        bunPath, ...args,
-      ];
-    }
-    default:
-      return [bunPath, ...args];
-  }
-}
-
 /**
  * Build a command array for `bun install`.
  * On Termux, `bun install` always needs proot wrapping (Android's seccomp
  * filter blocks certain syscalls) and `--backend=copyfile` (no hardlinks).
  * Mirrors start.sh's `_proot_bun()` + install_deps().
  */
-function bunInstallCmd(): string[] {
+export function bunInstallCmd(): string[] {
   const isTermux = process.env.LUMIVERSE_IS_TERMUX === "true";
   const isProot = process.env.LUMIVERSE_IS_PROOT === "true";
 
-  if (!isTermux && !isProot) return ["bun", "install"];
+  if (!isTermux && !isProot) return ["bun", "install", "--ignore-scripts"];
 
   if (isProot) {
     // Inside proot-distro: proot already intercepts syscalls
-    return ["bun", "install", "--backend=copyfile"];
+    return ["bun", "install", "--ignore-scripts", "--backend=copyfile"];
   }
 
   // Native Termux: always wrap bun install in proot
@@ -512,14 +1032,21 @@ function bunInstallCmd(): string[] {
 
   if (method === "direct") {
     // bun-termux wrapper handles linker; proot adds syscall interception
-    return ["proot", "--link2symlink", "-0", bunPath, "install", "--backend=copyfile"];
+    return ["proot", "--link2symlink", "-0", bunPath, "install", "--ignore-scripts", "--backend=copyfile"];
   }
 
-  // grun/proot: explicit glibc linker + proot
+  if (method === "grun") {
+    // Keep using the user's working grun wrapper inside proot instead of
+    // reconstructing ld.so arguments ourselves. Native Termux installs can
+    // otherwise pass `grun bun --version` and still fail the real install path.
+    return ["proot", "--link2symlink", "-0", "grun", bunPath, "install", "--ignore-scripts", "--backend=copyfile"];
+  }
+
+  // proot/unknown: explicit glibc linker + proot
   return [
     "proot", "--link2symlink", "-0",
     glibcLd, "--library-path", `${prefix}/glibc/lib`,
-    bunPath, "install", "--backend=copyfile",
+    bunPath, "install", "--ignore-scripts", "--backend=copyfile",
   ];
 }
 
@@ -543,12 +1070,14 @@ export async function buildExtension(identifier: string): Promise<void> {
     }
   }
 
+  const declaredCaps = declaredCapabilitiesFromManifest(manifest);
+
   // If the repo ships pre-built dist/ (files tracked in git), skip build entirely
   const distDir = join(repo, "dist");
   if (existsSync(distDir)) {
     const lsFiles = await spawnAsync(["git", "ls-files", "dist"], { cwd: repo });
     if (lsFiles.exitCode === 0 && lsFiles.stdout.trim().length > 0) {
-      await assertSafeBackendBundle(identifier, backendOut);
+      await assertSafeBackendBundle(identifier, backendOut, declaredCaps);
       return;
     }
   }
@@ -589,7 +1118,7 @@ export async function buildExtension(identifier: string): Promise<void> {
     }
   }
 
-  await assertSafeBackendBundle(identifier, backendOut);
+  await assertSafeBackendBundle(identifier, backendOut, declaredCaps);
 }
 
 // ─── Install ─────────────────────────────────────────────────────────────
@@ -662,7 +1191,13 @@ export async function install(
   }
 
   const raw = await Bun.file(manifestPath).text();
-  const manifest: SpindleManifest = JSON.parse(raw);
+  let manifest: SpindleManifest;
+  try {
+    manifest = JSON.parse(raw) as SpindleManifest;
+  } catch {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw new Error("spindle.json in repository is not valid JSON");
+  }
 
   if (!manifest.identifier || !validateIdentifier(manifest.identifier)) {
     rmSync(tempDir, { recursive: true, force: true });
@@ -740,21 +1275,31 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
     throw new Error(`Extension repo not found: ${identifier}`);
   }
 
-  // Clean build artifacts and installed dependencies so git pull succeeds.
-  // We don't read stdout for these — ignore it to reduce pipe overhead.
-  await spawnAsync(["git", "checkout", "."], { cwd: repo, ignoreStdout: true });
-  await spawnAsync(["git", "clean", "-fd"], { cwd: repo, ignoreStdout: true });
+  // Read manifest up-front so we can honor `dev_mode` before touching the
+  // working tree. Extensions with `dev_mode: true` keep their local repo
+  // contents intact — we skip the git checkout/clean/pull and just rebuild
+  // + relaunch from whatever the developer has on disk.
+  const initialManifest = await readManifest(identifier);
+  const devMode = (initialManifest as { dev_mode?: boolean }).dev_mode === true;
 
-  const pullProc = await spawnAsync(["git", "pull"], {
-    cwd: repo,
-    timeoutMs: 60_000,
-  });
-  if (pullProc.exitCode !== 0) {
-    throw new Error(`git pull failed: ${pullProc.stderr}`);
+  if (!devMode) {
+    // Clean build artifacts and installed dependencies so git pull succeeds.
+    // We don't read stdout for these — ignore it to reduce pipe overhead.
+    await spawnAsync(["git", "checkout", "."], { cwd: repo, ignoreStdout: true });
+    await spawnAsync(["git", "clean", "-fd"], { cwd: repo, ignoreStdout: true });
+
+    const pullProc = await spawnAsync(["git", "pull"], {
+      cwd: repo,
+      timeoutMs: 60_000,
+    });
+    if (pullProc.exitCode !== 0) {
+      throw new Error(`git pull failed: ${pullProc.stderr}`);
+    }
   }
 
-  // Re-read manifest
-  const manifest = await readManifest(identifier);
+  // Re-read manifest — in non-dev mode the pull may have modified it; in
+  // dev mode we already have the current version.
+  const manifest = devMode ? initialManifest : await readManifest(identifier);
 
   const db = getDb();
   const existing = db
@@ -896,7 +1441,7 @@ export function revokePermission(
   );
 }
 
-export function getGrantedPermissions(identifier: string): ManagedSpindlePermission[] {
+export function getGrantedPermissions(identifier: string): SpindlePermission[] {
   const db = getDb();
   const ext = db
     .query("SELECT id FROM extensions WHERE identifier = ?")
@@ -907,12 +1452,12 @@ export function getGrantedPermissions(identifier: string): ManagedSpindlePermiss
     .query("SELECT permission FROM extension_grants WHERE extension_id = ?")
     .all(ext.id) as { permission: string }[];
 
-  return rows.map((r) => r.permission as ManagedSpindlePermission);
+  return rows.map((r) => r.permission as SpindlePermission);
 }
 
 export function hasPermission(
   identifier: string,
-  permission: ManagedSpindlePermission
+  permission: SpindlePermission
 ): boolean {
   return getGrantedPermissions(identifier).includes(permission);
 }
@@ -1004,6 +1549,14 @@ export async function getEnabledExtensions(): Promise<ExtensionInfo[]> {
   return Promise.all(rows.map(rowToExtensionInfo));
 }
 
+export function getEnabledExtensionIdentifiers(): string[] {
+  const db = getDb();
+  const rows = db
+    .query("SELECT identifier FROM extensions WHERE enabled = 1")
+    .all() as { identifier: string }[];
+  return rows.map((r) => r.identifier);
+}
+
 export async function getFrontendBundlePath(identifier: string): Promise<string | null> {
   const manifest = await readManifest(identifier);
   const entry = manifest.entry_frontend || "dist/frontend.js";
@@ -1012,13 +1565,25 @@ export async function getFrontendBundlePath(identifier: string): Promise<string 
   return (await Bun.file(bundlePath).exists()) ? bundlePath : null;
 }
 
+export async function getFrontendBundleCacheKey(identifier: string): Promise<string | null> {
+  const bundlePath = await getFrontendBundlePath(identifier);
+  if (!bundlePath) return null;
+
+  try {
+    const stat = statSync(bundlePath);
+    return `${stat.size}-${Math.floor(stat.mtimeMs)}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function getBackendEntryPath(identifier: string): Promise<string | null> {
   const manifest = await readManifest(identifier);
   const entry = manifest.entry_backend || "dist/backend.js";
   const repo = repoDir(identifier);
   const entryPath = resolveWithin(repo, entry, "entry_backend");
   if (!(await Bun.file(entryPath).exists())) return null;
-  await assertSafeBackendBundle(identifier, entryPath);
+  await assertSafeBackendBundle(identifier, entryPath, declaredCapabilitiesFromManifest(manifest));
   return entryPath;
 }
 
@@ -1208,34 +1773,50 @@ export async function switchBranch(
     throw new Error(`Extension repo not found: ${identifier}`);
   }
 
+  const runGitStep = async (
+    cmd: string[],
+    label: string,
+    options: { timeoutMs?: number; ignoreStdout?: boolean } = {}
+  ): Promise<void> => {
+    const proc = await spawnAsync(cmd, {
+      cwd: repo,
+      timeoutMs: options.timeoutMs,
+      ignoreStdout: options.ignoreStdout,
+    });
+    if (proc.exitCode === 0) return;
+
+    const reason = proc.timedOut
+      ? `timed out after ${(options.timeoutMs ?? 0) / 1000}s`
+      : proc.stderr.trim() || proc.stdout.trim() || "unknown error";
+    throw new Error(`${label} failed: ${reason}`);
+  };
+
   // Clean working tree
-  Bun.spawnSync({ cmd: ["git", "checkout", "."], cwd: repo });
-  Bun.spawnSync({ cmd: ["git", "clean", "-fd"], cwd: repo });
+  await runGitStep(["git", "checkout", "."], "git checkout .", {
+    ignoreStdout: true,
+    timeoutMs: 15_000,
+  });
+  await runGitStep(["git", "clean", "-fd"], "git clean -fd", {
+    ignoreStdout: true,
+    timeoutMs: 15_000,
+  });
 
   // Widen the fetch refspec — shallow/single-branch clones only track one branch
-  Bun.spawnSync({
-    cmd: ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
-    cwd: repo,
-  });
+  await runGitStep(
+    ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+    "git config remote.origin.fetch",
+    { timeoutMs: 15_000 }
+  );
 
   // Fetch the target branch (--depth=1 to keep it shallow)
-  const fetchProc = Bun.spawnSync({
-    cmd: ["git", "fetch", "--depth", "1", "origin", branch],
-    cwd: repo,
-    timeout: 30_000,
+  await runGitStep(["git", "fetch", "--depth", "1", "origin", branch], `git fetch ${branch}`, {
+    timeoutMs: 30_000,
   });
-  if (fetchProc.exitCode !== 0) {
-    throw new Error(`git fetch failed: ${fetchProc.stderr.toString()}`);
-  }
 
   // Checkout the branch
-  const checkoutProc = Bun.spawnSync({
-    cmd: ["git", "checkout", "-B", branch, `origin/${branch}`],
-    cwd: repo,
+  await runGitStep(["git", "checkout", "-B", branch, `origin/${branch}`], `git checkout ${branch}`, {
+    timeoutMs: 30_000,
   });
-  if (checkoutProc.exitCode !== 0) {
-    throw new Error(`git checkout failed: ${checkoutProc.stderr.toString()}`);
-  }
 
   // Re-read manifest
   const manifest = await readManifest(identifier);
@@ -1258,11 +1839,8 @@ export async function switchBranch(
   if (hasBuildableSrc) {
     const distDir = join(repo, "dist");
     if (existsSync(distDir)) {
-      const lsFiles = Bun.spawnSync({
-        cmd: ["git", "ls-files", "dist"],
-        cwd: repo,
-      });
-      const distIsTracked = lsFiles.exitCode === 0 && lsFiles.stdout.toString().trim().length > 0;
+      const lsFiles = await spawnAsync(["git", "ls-files", "dist"], { cwd: repo });
+      const distIsTracked = lsFiles.exitCode === 0 && lsFiles.stdout.trim().length > 0;
       if (!distIsTracked) {
         rmSync(distDir, { recursive: true });
       }
@@ -1302,7 +1880,7 @@ export async function switchBranch(
 
 async function rowToExtensionInfo(row: any): Promise<ExtensionInfo> {
   const identifier = row.identifier;
-  const permissions: ManagedSpindlePermission[] = parsePermissionsSafe<ManagedSpindlePermission>(row.permissions);
+  const permissions: SpindlePermission[] = parsePermissionsSafe<SpindlePermission>(row.permissions);
   const granted = getGrantedPermissions(identifier);
 
   let hasFrontend = false;

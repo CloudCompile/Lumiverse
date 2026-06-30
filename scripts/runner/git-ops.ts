@@ -1,5 +1,5 @@
 import { join } from "path";
-import { existsSync, rmSync } from "fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { runGit, getUpstreamRef, getCurrentBranch } from "./lib/git.js";
 import {
   PROJECT_ROOT,
@@ -7,10 +7,12 @@ import {
   TIMEOUT_GIT_FETCH_MS,
   TIMEOUT_GIT_PULL_MS,
   TIMEOUT_GIT_CHECKOUT_MS,
+  TIMEOUT_BUN_CACHE_MS,
   TIMEOUT_BUN_INSTALL_MS,
   TIMEOUT_BUN_BUILD_MS,
 } from "./lib/constants.js";
 import { spawnAsync } from "./lib/spawn-async.js";
+import { npmCmd } from "./lib/termux-cli.js";
 
 export interface UpdateState {
   available: boolean;
@@ -51,6 +53,13 @@ function getChangedFilesBetween(fromRef: string, toRef: string): string[] {
     .filter(Boolean);
 }
 
+function getCommitsAhead(branchRef: string, upstreamRef: string): number {
+  const revList = runGit("rev-list", "--count", `${upstreamRef}..${branchRef}`);
+  if (!revList.ok || !revList.out) return 0;
+  const ahead = parseInt(revList.out, 10);
+  return Number.isFinite(ahead) ? ahead : 0;
+}
+
 function isFrontendBuildInput(filePath: string): boolean {
   if (!filePath.startsWith("frontend/")) return false;
   if (FRONTEND_BUILD_IGNORED_FILES.has(filePath)) return false;
@@ -59,6 +68,38 @@ function isFrontendBuildInput(filePath: string): boolean {
 
 function shouldRebuildFrontend(changedFiles: string[]): boolean {
   return changedFiles.some(isFrontendBuildInput);
+}
+
+// Termux/proot detection. start.sh exports LUMIVERSE_IS_TERMUX /
+// LUMIVERSE_IS_PROOT before launching the runner so we can mirror its
+// install-time workarounds (copyfile backend, pre-install cache flush) on
+// the operator-panel-driven update + branch-switch + rebuild paths.
+function isTermuxRuntime(): boolean {
+  return process.env.LUMIVERSE_IS_TERMUX === "true";
+}
+
+function isProotRuntime(): boolean {
+  return process.env.LUMIVERSE_IS_PROOT === "true";
+}
+
+function bunInstallCmd(): string[] {
+  if (isTermuxRuntime() || isProotRuntime()) {
+    // Android filesystem emulation can't hardlink — copyfile is the only
+    // backend that reliably installs without "Cannot find package" corruption.
+    // --ignore-scripts: proot's path translation makes getcwd() fail when bun
+    // forks lifecycle scripts (ssh2, cpu-features), producing spurious
+    // CouldntReadCurrentDirectory errors. Both packages fall back to pure-JS.
+    return ["bun", "install", "--backend=copyfile", "--ignore-scripts"];
+  }
+  return ["bun", "install"];
+}
+
+function clearBunInstallCacheIfTermux(): void {
+  if (!isTermuxRuntime() && !isProotRuntime()) return;
+  const cacheDir = join(process.env.HOME ?? "", ".bun/install/cache");
+  if (cacheDir && existsSync(cacheDir)) {
+    try { rmSync(cacheDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 function summarizeFrontendChanges(changedFiles: string[]): string {
@@ -83,6 +124,60 @@ async function runCommandOrThrow(
     ? `${opts.label} timed out after ${opts.timeoutMs / 1000}s`
     : result.stderr.trim() || result.stdout.trim() || `${opts.label} failed`;
   throw new Error(reason);
+}
+
+function getUpstreamRefForSync(branchName: string): string {
+  return getUpstreamRef(branchName) || `origin/${branchName}`;
+}
+
+function assertNoLocalCommitsBeforeHardSync(branchRef: string, branchName: string, upstreamRef: string): void {
+  const ahead = getCommitsAhead(branchRef, upstreamRef);
+  if (ahead > 0) {
+    throw new Error(
+      `Refusing to hard-sync '${branchName}': it is ${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${upstreamRef}`
+    );
+  }
+}
+
+async function stashLocalChanges(label: string): Promise<void> {
+  const status = runGit("status", "--porcelain", "--untracked-files=all");
+  if (!status.ok || !status.out) return;
+
+  log("Stashing local changes and untracked files...");
+  await runCommandOrThrow(["git", "stash", "push", "-u", "-m", label], {
+    cwd: PROJECT_ROOT,
+    timeoutMs: TIMEOUT_GIT_CHECKOUT_MS,
+    label: "git stash push",
+  });
+}
+
+async function resetTrackedFiles(ref: string): Promise<void> {
+  log(`Resetting tracked files to '${ref}'...`);
+  await runCommandOrThrow(["git", "reset", "--hard", ref], {
+    cwd: PROJECT_ROOT,
+    timeoutMs: TIMEOUT_GIT_PULL_MS,
+    label: `git reset --hard ${ref}`,
+  });
+}
+
+async function checkoutBranch(target: string): Promise<void> {
+  log(`Checking out '${target}'...`);
+  await runCommandOrThrow(["git", "checkout", target], {
+    cwd: PROJECT_ROOT,
+    timeoutMs: TIMEOUT_GIT_CHECKOUT_MS,
+    label: `git checkout ${target}`,
+  });
+}
+
+async function syncBranchToUpstream(branchName: string, upstreamRef: string): Promise<void> {
+  log(`Fetching latest changes for '${branchName}'...`);
+  await runCommandOrThrow(["git", "fetch", "--quiet"], {
+    cwd: PROJECT_ROOT,
+    timeoutMs: TIMEOUT_GIT_FETCH_MS,
+    label: "git fetch",
+  });
+  log(`Resetting '${branchName}' to '${upstreamRef}'...`);
+  await resetTrackedFiles(upstreamRef);
 }
 
 /**
@@ -126,8 +221,8 @@ export async function checkForUpdates(): Promise<UpdateState> {
 }
 
 /**
- * Apply update: stash → clear cache → delete dist → pull → install deps →
- * conditional frontend build → restart
+ * Apply update: stash → hard reset tracked files → fetch → hard reset to
+ * upstream head → install deps → conditional frontend build → restart
  */
 export async function applyUpdate(
   stopServer: () => Promise<void>,
@@ -136,47 +231,36 @@ export async function applyUpdate(
 ): Promise<void> {
   log("Preparing update...");
   const previousHead = getHeadRef();
-
-  // Stash local changes
-  const status = runGit("status", "--porcelain");
-  if (status.ok && status.out) {
-    log("Stashing local changes...");
-    runGit("stash", "push", "-m", "lumiverse-runner-auto-stash");
+  const currentBranch = getCurrentBranch();
+  if (!currentBranch || currentBranch === "HEAD") {
+    throw new Error("Unable to resolve current git branch");
   }
+  const currentUpstream = getUpstreamRefForSync(currentBranch);
+  assertNoLocalCommitsBeforeHardSync("HEAD", currentBranch, currentUpstream);
 
   // Stop server before destructive operations
   await stopServer();
 
-  // Clear Bun transpiler cache
-  log("Clearing transpiler cache...");
-  Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
-
-  // Delete frontend/dist to prevent git conflicts
-  const frontendDir = join(PROJECT_ROOT, "frontend");
-  const frontendDistDir = join(frontendDir, "dist");
-  if (existsSync(frontendDistDir)) {
-    log("Removing frontend/dist...");
-    rmSync(frontendDistDir, { recursive: true, force: true });
-  }
-
-  // Pull latest
-  log("Pulling latest changes...");
-  const pull = await spawnAsync(["git", "pull", "--ff-only"], {
+  // Clear Bun install cache
+  log("Clearing install cache...");
+  await runCommandOrThrow(["bun", "pm", "cache", "rm"], {
     cwd: PROJECT_ROOT,
-    timeoutMs: TIMEOUT_GIT_PULL_MS,
+    timeoutMs: TIMEOUT_BUN_CACHE_MS,
+    label: "package cache clear",
   });
 
-  if (pull.exitCode !== 0) {
-    const reason = pull.timedOut
-      ? `git pull timed out after ${TIMEOUT_GIT_PULL_MS / 1000}s`
-      : pull.stderr.trim() || pull.stdout.trim();
-    log(`Update failed: ${reason}`);
-    await recoverFrontendAndStart(frontendDir, startServer);
-    throw new Error(`git pull failed: ${reason}`);
-  }
+  const frontendDir = join(PROJECT_ROOT, "frontend");
 
-  for (const line of pull.stdout.trim().split("\n")) {
-    if (line.trim()) log(`  ${line.trim()}`);
+  reportProgress?.("Syncing repository to upstream branch head...");
+  try {
+    await stashLocalChanges("lumiverse-runner-auto-stash");
+    await resetTrackedFiles("HEAD");
+    await syncBranchToUpstream(currentBranch, currentUpstream);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`Update failed: ${message}`);
+    await recoverFrontendAndStart(frontendDir, startServer);
+    throw error;
   }
 
   const currentHead = getHeadRef();
@@ -201,8 +285,9 @@ export async function applyUpdate(
 }
 
 /**
- * Switch branch: stash → stop → clear cache → delete dist → checkout → pull
- * → install deps → conditional frontend build → restart
+ * Switch branch: stash → hard reset tracked files → checkout → fetch →
+ * hard reset target branch to upstream head → install deps → conditional
+ * frontend build → restart
  */
 export async function switchBranch(
   target: string,
@@ -217,62 +302,33 @@ export async function switchBranch(
   const currentBranch = getCurrentBranch();
   log(`Switching from '${currentBranch}' to '${target}'...`);
   const previousHead = getHeadRef();
-
-  // Stash local changes
-  const status = runGit("status", "--porcelain");
-  if (status.ok && status.out) {
-    log("Stashing local changes...");
-    runGit("stash", "push", "-m", `lumiverse-branch-switch-${currentBranch}`);
-  }
+  const targetUpstream = getUpstreamRefForSync(target);
 
   // Stop server
   await stopServer();
 
-  // Clear transpiler cache
-  log("Clearing transpiler cache...");
-  Bun.spawnSync(["bun", "--clear-cache"], { cwd: PROJECT_ROOT, stdout: "ignore", stderr: "ignore" });
+  // Clear install cache
+  log("Clearing install cache...");
+  await runCommandOrThrow(["bun", "pm", "cache", "rm"], {
+    cwd: PROJECT_ROOT,
+    timeoutMs: TIMEOUT_BUN_CACHE_MS,
+    label: "package cache clear",
+  });
 
-  // Delete frontend/dist
   const frontendDir = join(PROJECT_ROOT, "frontend");
-  const frontendDistDir = join(frontendDir, "dist");
-  if (existsSync(frontendDistDir)) {
-    log("Removing frontend/dist...");
-    rmSync(frontendDistDir, { recursive: true, force: true });
-  }
 
-  // Checkout (bounded — a dirty working tree shouldn't have survived the
-  // stash above, but a stuck index lock or slow disk could still hang).
-  const checkout = await spawnAsync(["git", "checkout", target], {
-    cwd: PROJECT_ROOT,
-    timeoutMs: TIMEOUT_GIT_CHECKOUT_MS,
-  });
-  if (checkout.exitCode !== 0) {
-    const reason = checkout.timedOut
-      ? `git checkout timed out after ${TIMEOUT_GIT_CHECKOUT_MS / 1000}s`
-      : checkout.stderr.trim() || checkout.stdout.trim();
-    log(`Failed to checkout '${target}': ${reason}`);
+  reportProgress?.(`Syncing '${target}' to upstream branch head...`);
+  try {
+    await stashLocalChanges(`lumiverse-branch-switch-${currentBranch || "detached-head"}`);
+    await resetTrackedFiles("HEAD");
+    await checkoutBranch(target);
+    assertNoLocalCommitsBeforeHardSync("HEAD", target, targetUpstream);
+    await syncBranchToUpstream(target, targetUpstream);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`Failed to switch to '${target}': ${message}`);
     await recoverFrontendAndStart(frontendDir, startServer);
-    throw new Error(`git checkout failed: ${reason}`);
-  }
-
-  log(`Checked out '${target}'.`);
-
-  // Pull latest (non-fatal — checkout already succeeded)
-  log("Pulling latest changes...");
-  const pull = await spawnAsync(["git", "pull", "--ff-only"], {
-    cwd: PROJECT_ROOT,
-    timeoutMs: TIMEOUT_GIT_PULL_MS,
-  });
-
-  if (pull.exitCode !== 0) {
-    const reason = pull.timedOut
-      ? `git pull timed out after ${TIMEOUT_GIT_PULL_MS / 1000}s`
-      : pull.stderr.trim() || pull.stdout.trim();
-    log(`Pull failed (non-fatal): ${reason}`);
-  } else {
-    for (const line of pull.stdout.trim().split("\n").filter((l: string) => l.trim())) {
-      log(`  ${line.trim()}`);
-    }
+    throw error;
   }
 
   const currentHead = getHeadRef();
@@ -295,22 +351,184 @@ export async function switchBranch(
   await startServer();
 }
 
-export async function ensureDependencies(frontendDir: string): Promise<void> {
-  log("Installing backend dependencies...");
-  await runCommandOrThrow(["bun", "install"], {
-    cwd: PROJECT_ROOT,
-    timeoutMs: TIMEOUT_BUN_INSTALL_MS,
-    label: "backend install",
-  });
-  log("Backend dependencies updated.");
+// Written into node_modules only after `bun install` exits 0. Its absence
+// alongside an existing node_modules used to be treated as a broken half-
+// install. That was too aggressive: manual `bun install` never writes the
+// runner stamp, so a healthy tree could be deleted on the next update. We now
+// validate the tree against direct package deps first and only move it aside
+// when it is actually incomplete.
+const INSTALL_STAMP = "node_modules/.lumiverse-install-complete";
+const INSTALL_BACKUP_PREFIX = "node_modules.lumiverse-backup-";
+const MAX_MISSING_DEP_PREVIEW = 5;
 
-  log("Installing frontend dependencies...");
-  await runCommandOrThrow(["bun", "install"], {
+interface DependencyTreeState {
+  hasNodeModules: boolean;
+  hasStamp: boolean;
+  missingPackages: string[];
+}
+
+interface PreparedDependencyInstall {
+  backupDir: string | null;
+}
+
+function listDeclaredInstallPackages(dir: string): string[] {
+  const manifestPath = join(dir, "package.json");
+  const raw = readFileSync(manifestPath, "utf8");
+  const manifest = JSON.parse(raw) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+
+  return Array.from(new Set([
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.devDependencies ?? {}),
+  ])).sort();
+}
+
+function packageInstallPath(nodeModulesDir: string, packageName: string): string {
+  return join(nodeModulesDir, ...packageName.split("/"));
+}
+
+export function inspectDependencyTree(dir: string): DependencyTreeState {
+  const nodeModules = join(dir, "node_modules");
+  const hasNodeModules = existsSync(nodeModules);
+  const declaredPackages = listDeclaredInstallPackages(dir);
+  const missingPackages = declaredPackages.filter((packageName) => !existsSync(packageInstallPath(nodeModules, packageName)));
+
+  return {
+    hasNodeModules,
+    hasStamp: existsSync(join(dir, INSTALL_STAMP)),
+    missingPackages,
+  };
+}
+
+export function summarizeMissingDependencyPackages(missingPackages: string[]): string {
+  if (missingPackages.length === 0) return "no missing packages";
+  const preview = missingPackages.slice(0, MAX_MISSING_DEP_PREVIEW).join(", ");
+  return missingPackages.length > MAX_MISSING_DEP_PREVIEW
+    ? `${preview}, ...`
+    : preview;
+}
+
+function writeInstallStamp(dir: string): void {
+  try { writeFileSync(join(dir, INSTALL_STAMP), `${Date.now()}\n`); } catch {}
+}
+
+export function prepareDependencyInstall(dir: string, label: string): PreparedDependencyInstall {
+  const nodeModules = join(dir, "node_modules");
+  const state = inspectDependencyTree(dir);
+  if (!state.hasNodeModules) return { backupDir: null };
+
+  if (state.missingPackages.length === 0) {
+    if (!state.hasStamp) {
+      log(`Detected ${label} dependencies installed without runner stamp; keeping current tree and marking it complete.`);
+      writeInstallStamp(dir);
+    }
+    return { backupDir: null };
+  }
+
+  const backupDir = join(dir, `${INSTALL_BACKUP_PREFIX}${Date.now()}-${process.pid}`);
+  log(
+    `Detected incomplete ${label} dependency tree (${summarizeMissingDependencyPackages(state.missingPackages)} missing); ` +
+    "moving node_modules aside before reinstall..."
+  );
+  try { rmSync(backupDir, { recursive: true, force: true }); } catch {}
+  renameSync(nodeModules, backupDir);
+  return { backupDir };
+}
+
+export function finalizeDependencyInstall(dir: string, prepared: PreparedDependencyInstall): void {
+  writeInstallStamp(dir);
+  if (!prepared.backupDir || !existsSync(prepared.backupDir)) return;
+  try { rmSync(prepared.backupDir, { recursive: true, force: true }); } catch {}
+}
+
+export function restoreDependencyInstall(
+  dir: string,
+  label: string,
+  prepared: PreparedDependencyInstall,
+): void {
+  if (!prepared.backupDir || !existsSync(prepared.backupDir)) return;
+
+  const nodeModules = join(dir, "node_modules");
+  try {
+    rmSync(nodeModules, { recursive: true, force: true });
+    renameSync(prepared.backupDir, nodeModules);
+
+    if (inspectDependencyTree(dir).missingPackages.length === 0) {
+      writeInstallStamp(dir);
+    }
+
+    log(`Restored previous ${label} dependencies after failed reinstall.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`Failed to restore previous ${label} dependencies: ${message}`);
+  }
+}
+
+const TERMUX_FRONTEND_NATIVE_DEPS = [
+  "@rolldown/binding-android-arm64@1.0.2",
+  "lightningcss-android-arm64@1.32.0",
+];
+
+async function repairTermuxFrontendNativeDeps(frontendDir: string): Promise<void> {
+  if (!isTermuxRuntime() && !isProotRuntime()) return;
+
+  log("Repairing Termux frontend native bindings with npm...");
+  await runCommandOrThrow(npmCmd(["cache", "clean", "--force"]), {
+    cwd: frontendDir,
+    timeoutMs: 60_000,
+    label: "npm cache clean",
+  });
+  await runCommandOrThrow(npmCmd([
+    "install",
+    "--force",
+    "--no-save",
+    "--no-package-lock",
+    "--include=optional",
+    "--no-audit",
+    "--no-fund",
+    ...TERMUX_FRONTEND_NATIVE_DEPS,
+  ]), {
     cwd: frontendDir,
     timeoutMs: TIMEOUT_BUN_INSTALL_MS,
-    label: "frontend install",
+    label: "Termux frontend native binding install",
   });
-  log("Frontend dependencies updated.");
+  log("Termux frontend native bindings repaired.");
+}
+
+async function installDependenciesForDir(
+  dir: string,
+  label: string,
+  installCmd: string[],
+  postInstall?: () => Promise<void>,
+): Promise<void> {
+  const prepared = prepareDependencyInstall(dir, label);
+  log(`Installing ${label} dependencies...`);
+
+  try {
+    await runCommandOrThrow(installCmd, {
+      cwd: dir,
+      timeoutMs: TIMEOUT_BUN_INSTALL_MS,
+      label: `${label} install`,
+    });
+    if (postInstall) await postInstall();
+    finalizeDependencyInstall(dir, prepared);
+    log(`${label[0]?.toUpperCase() ?? ""}${label.slice(1)} dependencies updated.`);
+  } catch (error) {
+    restoreDependencyInstall(dir, label, prepared);
+    throw error;
+  }
+}
+
+export async function ensureDependencies(frontendDir: string): Promise<void> {
+  const installCmd = bunInstallCmd();
+  clearBunInstallCacheIfTermux();
+
+  await installDependenciesForDir(PROJECT_ROOT, "backend", installCmd);
+  await installDependenciesForDir(frontendDir, "frontend", installCmd, async () => {
+    await repairTermuxFrontendNativeDeps(frontendDir);
+  });
 }
 
 export async function rebuildFrontend(frontendDir: string): Promise<void> {

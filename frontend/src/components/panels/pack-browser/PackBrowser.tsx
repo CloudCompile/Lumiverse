@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Plus, Upload, Search } from 'lucide-react'
 import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
@@ -12,13 +13,8 @@ import ImportPackModal from './ImportPackModal'
 import styles from './PackBrowser.module.css'
 import clsx from 'clsx'
 
-const FILTER_TABS: { id: PackFilterTab; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'custom', label: 'Custom' },
-  { id: 'downloaded', label: 'Downloaded' },
-]
-
 export default function PackBrowser() {
+  const { t } = useTranslation('panels')
   const packs = useStore((s) => s.packs)
   const setPacks = useStore((s) => s.setPacks)
   const addPack = useStore((s) => s.addPack)
@@ -30,6 +26,12 @@ export default function PackBrowser() {
   const setPackSearchQuery = useStore((s) => s.setPackSearchQuery)
   const packFilterTab = useStore((s) => s.packFilterTab)
   const setPackFilterTab = useStore((s) => s.setPackFilterTab)
+
+  const filterTabs = useMemo(() => [
+    { id: 'all' as PackFilterTab, label: t('packBrowser.filterAll') },
+    { id: 'custom' as PackFilterTab, label: t('packBrowser.filterCustom') },
+    { id: 'downloaded' as PackFilterTab, label: t('packBrowser.filterDownloaded') },
+  ], [t])
 
   const [detailPack, setDetailPack] = useState<PackWithItems | null>(null)
   const [showPackEditor, setShowPackEditor] = useState(false)
@@ -150,32 +152,31 @@ export default function PackBrowser() {
 
   return (
     <div className={styles.panel}>
-      {/* Toolbar */}
       <div className={styles.toolbar}>
         <div className={styles.searchBar}>
           <Search size={14} className={styles.searchIcon} />
           <input
             type="text"
             className={styles.searchInput}
-            placeholder="Search packs..."
+            placeholder={t('packBrowser.searchPacks')}
             value={packSearchQuery}
             onChange={(e) => setPackSearchQuery(e.target.value)}
           />
           <Button
             size="icon"
             onClick={() => setShowImport(true)}
-            title="Import pack"
+            title={t('packBrowser.importPack')}
             icon={<Upload size={14} />}
           />
           <Button
             size="icon"
             onClick={() => { setEditingPack(null); setShowPackEditor(true) }}
-            title="New pack"
+            title={t('packBrowser.newPack')}
             icon={<Plus size={14} />}
           />
         </div>
         <div className={styles.filterTabs}>
-          {FILTER_TABS.map((tab) => (
+          {filterTabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
@@ -188,13 +189,12 @@ export default function PackBrowser() {
         </div>
       </div>
 
-      {/* Pack grid */}
       <div className={styles.grid}>
         {filteredPacks.map((pack) => (
           <PackCard key={pack.id} pack={pack} onClick={handleSelectPack} />
         ))}
         {filteredPacks.length === 0 && (
-          <div className={styles.emptyState}>No packs found</div>
+          <div className={styles.emptyState}>{t('packBrowser.noPacksFound')}</div>
         )}
       </div>
 

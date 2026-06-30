@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Ban, Trash2, ShieldCheck } from 'lucide-react'
 import { useStore } from '@/store'
 import type { AuthUser } from '@/types/store'
@@ -7,6 +8,8 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import styles from './UserManagement.module.css'
 
 export default function UserManagement() {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
   const {
     createUser, listUsers,
     resetUserPassword, banUser, unbanUser, deleteUser,
@@ -30,6 +33,7 @@ export default function UserManagement() {
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
   const isAdmin = currentUser?.role === 'owner' || currentUser?.role === 'admin'
+  const displayName = (user: AuthUser) => user.username || user.name || user.email || user.id
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -61,10 +65,10 @@ export default function UserManagement() {
       setPassword('')
       setRole('user')
       setShowForm(false)
-      setSuccess('User created successfully')
+      setSuccess(t('users.userCreated'))
       await fetchUsers()
     } catch (err: any) {
-      setError(err.message || 'Failed to create user')
+      setError(err.message || t('users.createFailed'))
     } finally {
       setCreating(false)
     }
@@ -74,13 +78,14 @@ export default function UserManagement() {
     if (!resetTarget || !resetPw) return
     clearMessages()
     setResetting(true)
+    const name = displayName(resetTarget)
     try {
       await resetUserPassword(resetTarget.id, resetPw)
       setResetTarget(null)
       setResetPw('')
-      setSuccess(`Password reset for ${resetTarget.username || resetTarget.name}`)
+      setSuccess(t('users.resetSuccess', { name }))
     } catch (err: any) {
-      setError(err.body?.error || err.message || 'Failed to reset password')
+      setError(err.body?.error || err.message || t('users.resetFailed'))
     } finally {
       setResetting(false)
     }
@@ -89,17 +94,18 @@ export default function UserManagement() {
   const handleBan = async (user: AuthUser) => {
     clearMessages()
     setActionLoading(user.id)
+    const name = displayName(user)
     try {
       if (user.banned) {
         await unbanUser(user.id)
-        setSuccess(`${user.username || user.name} has been re-enabled`)
+        setSuccess(t('users.userReEnabled', { name }))
       } else {
         await banUser(user.id)
-        setSuccess(`${user.username || user.name} has been disabled`)
+        setSuccess(t('users.userDisabled', { name }))
       }
       await fetchUsers()
     } catch (err: any) {
-      setError(err.body?.error || err.message || 'Action failed')
+      setError(err.body?.error || err.message || t('users.actionFailed'))
     } finally {
       setActionLoading(null)
     }
@@ -109,31 +115,32 @@ export default function UserManagement() {
     if (!confirmDelete) return
     clearMessages()
     setActionLoading(confirmDelete.id)
+    const name = displayName(confirmDelete)
     try {
       await deleteUser(confirmDelete.id)
-      setSuccess(`${confirmDelete.username || confirmDelete.name} has been deleted`)
+      setSuccess(t('users.userDeleted', { name }))
       setConfirmDelete(null)
       await fetchUsers()
     } catch (err: any) {
-      setError(err.body?.error || err.message || 'Failed to delete user')
+      setError(err.body?.error || err.message || t('users.deleteFailed'))
     } finally {
       setActionLoading(null)
     }
   }
 
   if (loading) {
-    return <div className={styles.container}>Loading...</div>
+    return <div className={styles.container}>{t('users.loading')}</div>
   }
 
   if (!isAdmin) {
-    return <div className={styles.container}>User management requires admin access.</div>
+    return <div className={styles.container}>{t('users.adminRequired')}</div>
   }
 
   return (
     <div className={styles.container}>
       <section className={styles.section}>
         <div className={styles.header}>
-          <h3 className={styles.title}>User Management</h3>
+          <h3 className={styles.title}>{t('users.title')}</h3>
           <Button
             variant="ghost"
             size="sm"
@@ -142,7 +149,7 @@ export default function UserManagement() {
               clearMessages()
             }}
           >
-            {showForm ? 'Cancel' : 'Add User'}
+            {showForm ? tc('actions.cancel') : t('users.addUser')}
           </Button>
         </div>
 
@@ -152,7 +159,7 @@ export default function UserManagement() {
               <input
                 className={styles.input}
                 type="text"
-                placeholder="Username"
+                placeholder={t('users.username')}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoFocus
@@ -160,7 +167,7 @@ export default function UserManagement() {
               <input
                 className={styles.input}
                 type="password"
-                placeholder="Password"
+                placeholder={t('users.password')}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
@@ -169,8 +176,8 @@ export default function UserManagement() {
                 value={role}
                 onChange={(e) => setRole(e.target.value)}
               >
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
+                <option value="user">{t('users.roleUser')}</option>
+                <option value="admin">{t('users.roleAdmin')}</option>
               </select>
               <Button
                 type="submit"
@@ -179,7 +186,7 @@ export default function UserManagement() {
                 disabled={creating || !username || !password}
                 loading={creating}
               >
-                {creating ? 'Creating...' : 'Create'}
+                {creating ? t('users.creating') : t('users.create')}
               </Button>
             </div>
           </form>
@@ -188,13 +195,13 @@ export default function UserManagement() {
         {resetTarget && (
           <div className={styles.form}>
             <div className={styles.resetHeader}>
-              Reset password for <strong>{resetTarget.username || resetTarget.name}</strong>
+              {t('users.resetPasswordFor')} <strong>{displayName(resetTarget)}</strong>
             </div>
             <div className={styles.formRow}>
               <input
                 className={styles.input}
                 type="password"
-                placeholder="New password"
+                placeholder={t('users.newPassword')}
                 value={resetPw}
                 onChange={(e) => setResetPw(e.target.value)}
                 autoFocus
@@ -206,10 +213,10 @@ export default function UserManagement() {
                 loading={resetting}
                 onClick={handleResetPassword}
               >
-                {resetting ? 'Resetting...' : 'Reset'}
+                {resetting ? t('users.resetting') : t('users.reset')}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => { setResetTarget(null); setResetPw('') }}>
-                Cancel
+                {tc('actions.cancel')}
               </Button>
             </div>
           </div>
@@ -229,9 +236,9 @@ export default function UserManagement() {
               <div key={user.id} className={`${styles.userRow} ${user.banned ? styles.userRowBanned : ''}`}>
                 <div className={styles.userInfo}>
                   <div className={styles.userName}>
-                    {user.username || user.name}
-                    {isSelf && <span className={styles.youBadge}>You</span>}
-                    {user.banned && <span className={styles.bannedBadge}>Banned</span>}
+                    {displayName(user)}
+                    {isSelf && <span className={styles.youBadge}>{t('users.youBadge')}</span>}
+                    {!!user.banned && <span className={styles.bannedBadge}>{t('users.bannedBadge')}</span>}
                   </div>
                   <div className={styles.userEmail}>{user.email}</div>
                 </div>
@@ -250,9 +257,9 @@ export default function UserManagement() {
                         setResetPw('')
                         clearMessages()
                       }}
-                      title="Reset password"
+                      title={t('users.resetPasswordTitle')}
                     >
-                      Reset
+                      {t('users.reset')}
                     </Button>
                   )}
 
@@ -265,9 +272,9 @@ export default function UserManagement() {
                       onClick={() => handleBan(user)}
                       disabled={isLoading}
                       loading={isLoading}
-                      title={user.banned ? 'Unban user' : 'Ban user'}
+                      title={user.banned ? t('users.unbanUser') : t('users.banUser')}
                     >
-                      {user.banned ? 'Enable' : 'Disable'}
+                      {user.banned ? t('users.enable') : t('users.disable')}
                     </Button>
                   )}
 
@@ -281,9 +288,9 @@ export default function UserManagement() {
                         clearMessages()
                       }}
                       disabled={isLoading}
-                      title="Delete user"
+                      title={t('users.deleteUser')}
                     >
-                      Delete
+                      {tc('actions.delete')}
                     </Button>
                   )}
                 </div>
@@ -296,13 +303,19 @@ export default function UserManagement() {
       {confirmDelete && (
         <ConfirmationModal
           isOpen
-          title="Delete User"
-          message={`Are you sure you want to permanently delete ${confirmDelete.username || confirmDelete.name}? This cannot be undone.`}
+          title={t('users.deleteTitle')}
+          message={
+            actionLoading === confirmDelete.id
+              ? t('users.deleteWiping', { name: displayName(confirmDelete) })
+              : t('users.deleteConfirm', { name: displayName(confirmDelete) })
+          }
           variant="danger"
-          confirmText="Delete"
-          cancelText="Cancel"
+          confirmText={tc('actions.delete')}
+          cancelText={tc('actions.cancel')}
           onConfirm={handleDelete}
           onCancel={() => setConfirmDelete(null)}
+          loading={actionLoading === confirmDelete.id}
+          loadingText={t('users.deleting')}
         />
       )}
     </div>

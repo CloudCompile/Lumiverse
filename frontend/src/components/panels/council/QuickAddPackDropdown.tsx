@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Search, X, Package } from 'lucide-react'
 import type { CouncilMember } from 'lumiverse-spindle-types'
 import type { PackWithItems } from '@/types/api'
@@ -22,6 +23,7 @@ interface AvailablePack {
 }
 
 export default function QuickAddPackDropdown({ existingMembers, onAddPack, onClose }: QuickAddPackDropdownProps) {
+  const { t } = useTranslation('panels')
   const packs = useStore((s) => s.packs)
   const packsWithItems = useStore((s) => s.packsWithItems)
   const setPackWithItems = useStore((s) => s.setPackWithItems)
@@ -85,7 +87,7 @@ export default function QuickAddPackDropdown({ existingMembers, onAddPack, onClo
           <input
             type="text"
             className={styles.addSearchInput}
-            placeholder="Search packs..."
+            placeholder={t('councilManager.quickAddPack.searchPlaceholder')}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             autoFocus={!isMobile}
@@ -102,10 +104,10 @@ export default function QuickAddPackDropdown({ existingMembers, onAddPack, onClo
       </div>
       <div className={styles.addDropdownList}>
         {loadingPacks ? (
-          <div className={styles.addDropdownEmpty}>Loading packs...</div>
+          <div className={styles.addDropdownEmpty}>{t('councilManager.quickAddPack.loadingPacks')}</div>
         ) : availablePacks.length === 0 ? (
           <div className={styles.addDropdownEmpty}>
-            {searchTerm ? 'No matching packs found' : 'All packs are fully added'}
+            {searchTerm ? t('councilManager.quickAddPack.noMatch') : t('councilManager.quickAddPack.allAdded')}
           </div>
         ) : (
           availablePacks.map((pack) => (
@@ -126,7 +128,7 @@ export default function QuickAddPackDropdown({ existingMembers, onAddPack, onClo
               <div className={styles.addDropdownInfo}>
                 <span className={styles.addDropdownName}>{pack.packName}</span>
                 <span className={styles.addDropdownPack}>
-                  {pack.availableCount} Lumia{pack.availableCount !== 1 ? 's' : ''} available
+                  {t('councilManager.quickAddPack.lumiasAvailable', { count: pack.availableCount })}
                 </span>
               </div>
             </button>

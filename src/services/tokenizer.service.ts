@@ -1,7 +1,8 @@
 import { getDb } from "../db/connection";
-import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCountBreakdownEntry } from "../types/tokenizer";
+import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCountBreakdownEntry, TokenizerType } from "../types/tokenizer";
 import { getTextContent, type AssemblyBreakdownEntry, type LlmMessage } from "../llm/types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
+import { hfAuthHeaders } from "./huggingface.service";
 
 export interface TokenCountMessageLike {
   role: "system" | "user" | "assistant";
@@ -12,6 +13,14 @@ export interface TokenCountMessageLike {
  * Validate a tokenizer resource URL before fetching. Owner-supplied, but still
  * should not reach private/internal hosts.
  */
+/**
+ * Deadline for fetching remote tokenizer / vocab files (one-time, then cached).
+ * Without it, a reachable-but-hung host stalls token counting on the live
+ * generation path indefinitely (a hang never throws, so the char/4 fallback
+ * would never engage). On timeout the fetch throws and the fallback kicks in.
+ */
+const TOKENIZER_FETCH_TIMEOUT_MS = 30_000;
+
 async function validateTokenizerUrl(url: string, label: string): Promise<void> {
   let parsed: URL;
   try {
@@ -34,10 +43,86 @@ interface TokenizerInstance {
 }
 
 // ---- Caches ----
+const MAX_CACHED_TOKENIZER_INSTANCES = 5;
+const MAX_PREWARM_TOKENIZERS = MAX_CACHED_TOKENIZER_INSTANCES;
+
 const instanceCache = new Map<string, TokenizerInstance>();
+const pendingInstanceLoads = new Map<string, Promise<TokenizerInstance>>();
 let patternCache: { patterns: { regex: RegExp; tokenizerId: string }[] } | null = null;
 
+// ---- Token-count memoization ----
+// `count(text)` for a fixed tokenizer is a pure function, and the dominant cost
+// of context-budget clipping is re-encoding chat history that hasn't changed
+// since the last generation (regenerate / swipe / continue / next turn all
+// re-tokenize the same surviving messages). Memoizing by content turns that
+// O(chars) BPE encode into an O(chars) hash + Map lookup — ~100-150x faster on
+// the slow HuggingFace tokenizers (Claude, GLM) in practice.
+//
+// The key is content-derived, so it's automatically correct across message
+// edits, macro expansion, and swipes: any change to the encoded text yields a
+// different key → cache miss → fresh encode. `length` is folded into the key so
+// a hash collision additionally needs an identical length to misfire (and even
+// then the only consequence is an off-by-a-little budget estimate, already
+// within the clip's safety margin).
+const TOKEN_COUNT_CACHE_MAX = 50_000;
+const tokenCountCache = new Map<string, number>();
+
+/** Fast, non-cryptographic 53-bit string hash (cyrb53). */
+function hashText(str: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+/** Memoized `instance.count(text)`, keyed by (tokenizerId, length, content hash). */
+function countCached(
+  tokenizerId: string,
+  instance: TokenizerInstance,
+  text: string,
+): number {
+  const key = `${tokenizerId}\u0000${text.length}\u0000${hashText(text)}`;
+  const hit = tokenCountCache.get(key);
+  if (hit !== undefined) return hit;
+  const value = instance.count(text);
+  // Bounded FIFO eviction — entries are tiny (~short key + number), and the
+  // oldest are the least likely to belong to an actively-regenerating chat.
+  if (tokenCountCache.size >= TOKEN_COUNT_CACHE_MAX) {
+    const oldest = tokenCountCache.keys().next().value;
+    if (oldest !== undefined) tokenCountCache.delete(oldest);
+  }
+  tokenCountCache.set(key, value);
+  return value;
+}
+
 // ---- Helpers ----
+
+const BENIGN_TOKENIZER_CLASS_WARNING =
+  'Unknown tokenizer class "TokenizersBackend", attempting to construct from base class.';
+
+function isBenignTokenizerWarning(args: unknown[]): boolean {
+  return args.length > 0 && String(args[0]) === BENIGN_TOKENIZER_CLASS_WARNING;
+}
+
+function withoutBenignTokenizerWarning<T>(fn: () => T): T {
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    if (!isBenignTokenizerWarning(args)) {
+      originalWarn(...args);
+    }
+  };
+  try {
+    return fn();
+  } finally {
+    console.warn = originalWarn;
+  }
+}
 
 function parseConfig(row: any): TokenizerConfig {
   return {
@@ -139,7 +224,7 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
       // @lenml/tokenizer-* v3.x packages export fromPreTrained(params?) which builds
       // a tokenizer from embedded model data (tokenizerJSON + tokenizerConfig baked in)
       if (typeof mod.fromPreTrained === "function") {
-        const tokenizer = mod.fromPreTrained();
+        const tokenizer = withoutBenignTokenizerWarning(() => mod.fromPreTrained());
         if (tokenizer?.encode) {
           return { count: (text: string) => tokenizer.encode(text).length };
         }
@@ -167,23 +252,29 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
     // try fetching the JSON data manually and use fromPreTrained() instead of fromPreTrainedUrls()
     if (configUrl === cfg.url) {
       await validateTokenizerUrl(cfg.url, "tokenizer url");
-      const resp = await fetch(cfg.url);
+      const resp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
       if (!resp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${resp.status}`);
       const tokenizerJSON = await resp.json();
-      const tokenizer = TokenizerLoader.fromPreTrained({
+      const tokenizer = withoutBenignTokenizerWarning(() => TokenizerLoader.fromPreTrained({
         tokenizerJSON,
         tokenizerConfig: { tokenizer_class: "PreTrainedTokenizer" },
-      });
+      }));
       return { count: (text: string) => tokenizer.encode(text).length };
     }
 
-    // fromPreTrainedUrls() fetches both URLs internally — validate both hosts up front
+    // Fetch both files ourselves so warning suppression is scoped only to construction,
+    // not the whole network request inside fromPreTrainedUrls().
     await validateTokenizerUrl(cfg.url, "tokenizer url");
     await validateTokenizerUrl(configUrl, "tokenizer config url");
-    const tokenizer = await TokenizerLoader.fromPreTrainedUrls({
-      tokenizerJSON: cfg.url,
-      tokenizerConfig: configUrl,
-    });
+    const tokenizerResp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
+    if (!tokenizerResp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${tokenizerResp.status}`);
+    const configResp = await fetch(configUrl, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(configUrl) });
+    if (!configResp.ok) throw new Error(`Failed to fetch tokenizer_config.json from ${configUrl}: ${configResp.status}`);
+    const tokenizerJSON = await tokenizerResp.json();
+    const tokenizerConfig = await configResp.json();
+    const tokenizer = withoutBenignTokenizerWarning(() =>
+      TokenizerLoader.fromPreTrained({ tokenizerJSON, tokenizerConfig })
+    );
     return { count: (text: string) => tokenizer.encode(text).length };
   }
 
@@ -234,7 +325,7 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   if (!cfg.url) throw new Error("Tiktoken requires 'url' in config pointing to .model file");
 
   await validateTokenizerUrl(cfg.url, "tiktoken model url");
-  const resp = await fetch(cfg.url);
+  const resp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
   if (!resp.ok) throw new Error(`Failed to fetch tiktoken model from ${cfg.url}`);
   const rawBpe = await resp.text();
 
@@ -252,7 +343,7 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   if (cfg.configUrl) {
     try {
       await validateTokenizerUrl(cfg.configUrl, "tiktoken config url");
-      const configResp = await fetch(cfg.configUrl);
+      const configResp = await fetch(cfg.configUrl, { headers: await hfAuthHeaders(cfg.configUrl) });
       if (configResp.ok) {
         const configData = await configResp.json();
         if (configData.added_tokens_decoder) {
@@ -283,16 +374,46 @@ function loadApproximate(config: TokenizerConfig): TokenizerInstance {
 
 // ---- Instance management ----
 
+function touchInstance(tokenizerId: string, instance: TokenizerInstance): void {
+  if (instanceCache.get(tokenizerId) === instance) {
+    instanceCache.delete(tokenizerId);
+  }
+  instanceCache.set(tokenizerId, instance);
+
+  while (instanceCache.size > MAX_CACHED_TOKENIZER_INSTANCES) {
+    const oldest = instanceCache.keys().next().value;
+    if (oldest === undefined) break;
+    instanceCache.delete(oldest);
+  }
+}
+
 async function getInstance(tokenizerId: string): Promise<TokenizerInstance> {
   const cached = instanceCache.get(tokenizerId);
-  if (cached) return cached;
+  if (cached) {
+    touchInstance(tokenizerId, cached);
+    return cached;
+  }
+
+  const pending = pendingInstanceLoads.get(tokenizerId);
+  if (pending) return pending;
 
   const config = getConfig(tokenizerId);
   if (!config) throw new Error(`Tokenizer not found: ${tokenizerId}`);
 
-  const instance = await loadTokenizer(config);
-  instanceCache.set(tokenizerId, instance);
-  return instance;
+  const loadPromise = (async () => {
+    const instance = await loadTokenizer(config);
+    touchInstance(tokenizerId, instance);
+    return instance;
+  })();
+
+  pendingInstanceLoads.set(tokenizerId, loadPromise);
+  try {
+    return await loadPromise;
+  } finally {
+    if (pendingInstanceLoads.get(tokenizerId) === loadPromise) {
+      pendingInstanceLoads.delete(tokenizerId);
+    }
+  }
 }
 
 // ---- Public API ----
@@ -309,7 +430,37 @@ export async function countForModel(modelId: string, text: string): Promise<numb
 
 export async function countWithTokenizer(tokenizerId: string, text: string): Promise<number> {
   const instance = await getInstance(tokenizerId);
-  return instance.count(text);
+  if (!text) return 0;
+  return countCached(tokenizerId, instance, text);
+}
+
+/**
+ * Attempt to load an ad-hoc tokenizer config (without persisting it or touching
+ * the instance cache) and run a sample encode. Used by the "resolve from repo"
+ * flow to prove a tokenizer is actually usable before we install it — file
+ * existence alone doesn't catch SentencePiece-only repos or custom formats our
+ * loaders can't parse (e.g. Grok's `tokenizer.tok.json`).
+ */
+export async function verifyConfig(
+  type: TokenizerType,
+  config: Record<string, any>
+): Promise<{ ok: true; sampleTokens: number } | { ok: false; error: string }> {
+  const synthetic: TokenizerConfig = {
+    id: "__verify__",
+    name: "__verify__",
+    type,
+    config: config || {},
+    is_built_in: false,
+    created_at: 0,
+    updated_at: 0,
+  };
+  try {
+    const instance = await loadTokenizer(synthetic);
+    const sampleTokens = instance.count("The quick brown fox jumps over the lazy dog.");
+    return { ok: true, sampleTokens };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || String(err) };
+  }
 }
 
 export function flattenMessagesForTokenCount(messages: TokenCountMessageLike[]): string {
@@ -394,7 +545,7 @@ export async function resolveCounter(modelId: string): Promise<{ count: (text: s
       return {
         count: (text: string) => {
           if (!text) return 0;
-          try { return instance.count(text); } catch { return Math.ceil(text.length / 4); }
+          try { return countCached(tokenizerId, instance, text); } catch { return Math.ceil(text.length / 4); }
         },
         name,
       };
@@ -412,6 +563,13 @@ export { getTokenizerIdForModel, getAllConfigs, getConfig, getAllPatterns };
 
 export function invalidate(tokenizerId: string): void {
   instanceCache.delete(tokenizerId);
+  pendingInstanceLoads.delete(tokenizerId);
+  // The tokenizer's encoding may have changed — drop its memoized counts so we
+  // don't serve stale token totals from before the config edit.
+  const prefix = `${tokenizerId}\u0000`;
+  for (const key of tokenCountCache.keys()) {
+    if (key.startsWith(prefix)) tokenCountCache.delete(key);
+  }
 }
 
 export function invalidatePatterns(): void {
@@ -419,34 +577,166 @@ export function invalidatePatterns(): void {
 }
 
 /**
- * Pre-warm tokenizer instances for all models referenced by existing connection
- * profiles. Resolves each unique model to its tokenizer ID and eagerly loads the
- * instance so the first dry-run / generation doesn't pay the cold-start import
- * cost (2+ MB module parse for gpt-tokenizer / @lenml/tokenizer-claude).
+ * Pre-warm tokenizer instances for the most likely startup targets: each user's
+ * active connection, then their default connection, then a most-recently-edited
+ * fallback only when neither exists. The result is capped to the instance-cache
+ * size so startup never drags a long tail of rarely used tokenizers into RAM.
  *
  * Intended to be called fire-and-forget at startup — failures are non-fatal.
  */
 export async function prewarm(): Promise<void> {
-  const db = getDb();
-  const rows = db.query("SELECT DISTINCT model FROM connection_profiles WHERE model IS NOT NULL AND model != ''").all() as { model: string }[];
-
-  const tokenizerIds = new Set<string>();
-  for (const { model } of rows) {
-    const id = getTokenizerIdForModel(model);
-    if (id) tokenizerIds.add(id);
-  }
-
-  if (tokenizerIds.size === 0) return;
+  const tokenizerIds = collectPrewarmTokenizerIds();
+  if (tokenizerIds.length === 0) return;
 
   const labels: string[] = [];
-  await Promise.allSettled(
-    [...tokenizerIds].map(async (id) => {
+  for (const id of tokenizerIds) {
+    try {
       await getInstance(id);
       labels.push(id);
-    })
-  );
+    } catch {
+      // non-fatal
+    }
+  }
 
   if (labels.length > 0) {
     console.log("[Tokenizer] Pre-warmed: %s", labels.join(", "));
   }
+}
+
+type PrewarmConnectionRow = {
+  id: string;
+  user_id: string | null;
+  model: string;
+  is_default: number;
+  updated_at: number;
+};
+
+type PrewarmSettingRow = {
+  user_id: string | null;
+  value: string;
+  updated_at: number;
+};
+
+type PrewarmCandidate = {
+  connectionId: string;
+  model: string;
+  priority: number;
+  updatedAt: number;
+};
+
+function userScopeKey(userId: string | null): string {
+  return userId ?? "__global__";
+}
+
+function parseSettingString(value: string): string | null {
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "string" && parsed.trim() ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function collectPrewarmTokenizerIds(): string[] {
+  const db = getDb();
+  const connections = db.query(
+    "SELECT id, user_id, model, is_default, updated_at FROM connection_profiles WHERE model IS NOT NULL AND model != ''"
+  ).all() as PrewarmConnectionRow[];
+  if (connections.length === 0) return [];
+
+  const activeSettings = db.query(
+    "SELECT user_id, value, updated_at FROM settings WHERE key = ?"
+  ).all("activeProfileId") as PrewarmSettingRow[];
+
+  const connectionsByUser = new Map<string, PrewarmConnectionRow[]>();
+  for (const row of connections) {
+    const key = userScopeKey(row.user_id);
+    const existing = connectionsByUser.get(key);
+    if (existing) {
+      existing.push(row);
+    } else {
+      connectionsByUser.set(key, [row]);
+    }
+  }
+
+  const activeByUser = new Map<string, { connectionId: string; updatedAt: number }>();
+  for (const row of activeSettings) {
+    const connectionId = parseSettingString(row.value);
+    if (!connectionId) continue;
+    activeByUser.set(userScopeKey(row.user_id), {
+      connectionId,
+      updatedAt: Number(row.updated_at ?? 0),
+    });
+  }
+
+  const candidates: PrewarmCandidate[] = [];
+  for (const [key, userConnections] of connectionsByUser) {
+    userConnections.sort(
+      (a, b) => Number(b.updated_at ?? 0) - Number(a.updated_at ?? 0) || a.id.localeCompare(b.id)
+    );
+
+    const selected = new Set<string>();
+    const active = activeByUser.get(key);
+    if (active) {
+      const match = userConnections.find((row) => row.id === active.connectionId);
+      if (match) {
+        selected.add(match.id);
+        candidates.push({
+          connectionId: match.id,
+          model: match.model,
+          priority: 0,
+          updatedAt: active.updatedAt,
+        });
+      }
+    }
+
+    const defaultConnection = userConnections.find((row) => !!row.is_default);
+    if (defaultConnection && !selected.has(defaultConnection.id)) {
+      selected.add(defaultConnection.id);
+      candidates.push({
+        connectionId: defaultConnection.id,
+        model: defaultConnection.model,
+        priority: 1,
+        updatedAt: Number(defaultConnection.updated_at ?? 0),
+      });
+    }
+
+    if (selected.size === 0 && userConnections.length > 0) {
+      const fallback = userConnections[0];
+      candidates.push({
+        connectionId: fallback.id,
+        model: fallback.model,
+        priority: 2,
+        updatedAt: Number(fallback.updated_at ?? 0),
+      });
+    }
+  }
+
+  candidates.sort(
+    (a, b) => a.priority - b.priority || b.updatedAt - a.updatedAt || a.connectionId.localeCompare(b.connectionId)
+  );
+
+  const tokenizerIds: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const tokenizerId = getTokenizerIdForModel(candidate.model);
+    if (!tokenizerId || seen.has(tokenizerId)) continue;
+    seen.add(tokenizerId);
+    tokenizerIds.push(tokenizerId);
+    if (tokenizerIds.length >= MAX_PREWARM_TOKENIZERS) break;
+  }
+  return tokenizerIds;
+}
+
+/** @internal Only intended for unit tests — resets in-memory state. */
+export function _resetForTests(): void {
+  instanceCache.clear();
+  pendingInstanceLoads.clear();
+  patternCache = null;
+  tokenCountCache.clear();
+}
+
+/** @internal Only intended for unit tests — exposes current LRU order. */
+export function _getCachedTokenizerIdsForTests(): string[] {
+  return [...instanceCache.keys()];
 }

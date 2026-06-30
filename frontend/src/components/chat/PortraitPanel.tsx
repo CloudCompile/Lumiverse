@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Spinner } from '@/components/shared/Spinner'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { useStore } from '@/store'
@@ -19,6 +20,8 @@ import clsx from 'clsx'
 
 interface PortraitPanelProps {
   side?: 'left' | 'right'
+  mobileDrawer?: boolean
+  open?: boolean
 }
 
 interface GalleryMosaicCellProps {
@@ -49,7 +52,8 @@ function GalleryMosaicCell({ item, className, onOpen, onPreview }: GalleryMosaic
   )
 }
 
-export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
+export default function PortraitPanel({ side = 'right', mobileDrawer = false, open = false }: PortraitPanelProps) {
+  const { t } = useTranslation('chat')
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
@@ -99,7 +103,7 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
   const contextMenuItems: ContextMenuEntry[] = contextMenu ? [
     {
       key: 'set-chat-background',
-      label: 'Set as Chat Background',
+      label: t('portrait.setChatBackground'),
       disabled: !activeChatId,
       onClick: () => setGalleryImageAsChatBackground(contextMenu.item),
     },
@@ -114,7 +118,8 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
       if (altEntry?.original_image_id) return imagesApi.url(altEntry.original_image_id)
       return imagesApi.url(activeChatAvatarId)
     }
-    // Primary avatar — the character card image is already stored at full size
+    const originalImageId = character?.extensions?.original_image_id
+    if (typeof originalImageId === 'string' && originalImageId) return imagesApi.url(originalImageId)
     if (character?.image_id) return imagesApi.url(character.image_id)
     return null
   }, [character, activeChatAvatarId])
@@ -158,7 +163,13 @@ export default function PortraitPanel({ side = 'right' }: PortraitPanelProps) {
 
   return (
     <div
-      className={clsx(styles.panelOuter, side === 'left' ? styles.panelOuterLeft : styles.panelOuterRight)}
+      className={clsx(
+        styles.panelOuter,
+        side === 'left' ? styles.panelOuterLeft : styles.panelOuterRight,
+        mobileDrawer && styles.panelOuterMobile,
+        mobileDrawer && (side === 'left' ? styles.panelOuterMobileLeft : styles.panelOuterMobileRight),
+        mobileDrawer && open && styles.panelOuterMobileOpen,
+      )}
     >
       <div className={styles.panel}>
         <CloseButton onClick={togglePortraitPanel} iconSize={14} className={styles.closeBtn} />

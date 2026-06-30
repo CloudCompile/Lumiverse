@@ -3,15 +3,41 @@ import { BASE_URL } from '@/api/client'
 
 type EventHandler = (payload: any) => void
 
+/** Internal client-only event names — not part of the backend protocol. */
+export const WS_OPEN = '__ws_open'
+export const WS_CLOSE = '__ws_close'
+export const WS_PONG = '__ws_pong'
+export const WS_AUTH_ERROR = '__ws_auth_error'
+
+/** If we send a ping and don't see a pong within this window, treat the socket as dead. */
+const PONG_TIMEOUT_MS = 10_000
+
+/**
+ * Shorter watchdog used when the page returns from hidden — iOS PWAs and some
+ * desktop browsers silently kill the WS during suspension, and a snappier
+ * timeout here keeps the connection-lost overlay's grace window from
+ * overflowing on resume.
+ */
+const RESUME_PONG_TIMEOUT_MS = 3_000
+
 export class WebSocketClient {
   private ws: WebSocket | null = null
   private handlers = new Map<string, Set<EventHandler>>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private pongWatchdog: ReturnType<typeof setTimeout> | null = null
   private url: string
   private shouldReconnect = true
   private visibilityCleanup: Array<() => void> = []
   private focusedChatId: string | null = null
+  /** Previous visibility state — used to detect hidden→visible transitions. */
+  private wasVisible = false
+  /**
+   * One-shot suppression window for the aggressive resume watchdog. Used for
+   * expected system-modal hops like the file picker, which can blur/hide the
+   * page briefly and then return while a large upload is starting.
+   */
+  private suppressNextResumePingUntil = 0
 
   constructor(url?: string) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -40,16 +66,22 @@ export class WebSocketClient {
       }
       this.startPing()
       this.startVisibilityTracking()
+      this.emit(WS_OPEN, {})
       this.emit(EventType.CONNECTED, {})
     }
 
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        if (data.type === 'pong') return
+        if (data.type === 'pong') {
+          this.clearPongWatchdog()
+          this.emit(WS_PONG, {})
+          return
+        }
         if (data.event === 'AUTH_ERROR') {
           console.warn('[WS] Auth error — will not reconnect')
           this.shouldReconnect = false
+          this.emit(WS_AUTH_ERROR, data.payload ?? {})
           return
         }
         const eventName = data.event || data.type
@@ -65,10 +97,10 @@ export class WebSocketClient {
     const thisSocket = this.ws
     this.ws.onclose = (e) => {
       console.log('[WS] Closed:', e.code, e.reason)
+      if (this.ws !== thisSocket) return
       this.stopPing()
-      // Only reconnect if this is still the active socket — a newer socket
-      // may have already replaced us (e.g. server-side session eviction).
-      if (this.shouldReconnect && this.ws === thisSocket) {
+      this.emit(WS_CLOSE, { code: e.code, reason: e.reason })
+      if (this.shouldReconnect) {
         this.scheduleReconnect()
       }
     }
@@ -102,6 +134,15 @@ export class WebSocketClient {
     }
   }
 
+  /**
+   * Dispatch an event through the same handler registry as the live socket.
+   * Used by the relay client so events arriving over the Identity Server relay
+   * (for a remote peer) flow through the exact same store handlers.
+   */
+  dispatchExternal(event: string, payload: any) {
+    this.emit(event, payload)
+  }
+
   private emit(event: string, payload: any) {
     this.handlers.get(event)?.forEach(handler => {
       try {
@@ -115,9 +156,7 @@ export class WebSocketClient {
   private startPing() {
     this.stopPing()
     this.pingTimer = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'ping' }))
-      }
+      this.sendPingNow()
     }, 30000)
   }
 
@@ -126,12 +165,68 @@ export class WebSocketClient {
       clearInterval(this.pingTimer)
       this.pingTimer = null
     }
+    this.clearPongWatchdog()
+  }
+
+  private sendPingNow(timeoutMs: number = PONG_TIMEOUT_MS) {
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+    this.ws.send(JSON.stringify({ type: 'ping' }))
+    this.armPongWatchdog(timeoutMs)
+  }
+
+  private armPongWatchdog(timeoutMs: number = PONG_TIMEOUT_MS) {
+    this.clearPongWatchdog()
+    this.pongWatchdog = setTimeout(() => {
+      this.pongWatchdog = null
+      console.warn('[WS] Pong timeout — forcing close to trigger reconnect')
+      // Force-close the socket. onclose will fire, which both emits WS_CLOSE
+      // (so the UI shows the overlay) and triggers the standard reconnect path.
+      try {
+        this.ws?.close()
+      } catch {
+        /* noop */
+      }
+    }, timeoutMs)
+  }
+
+  private clearPongWatchdog() {
+    if (this.pongWatchdog) {
+      clearTimeout(this.pongWatchdog)
+      this.pongWatchdog = null
+    }
+  }
+
+  /** Send a ping immediately and arm the pong watchdog. Used after CONNECTED to verify round-trip. */
+  forcePing() {
+    this.sendPingNow()
+  }
+
+  /**
+   * Suppress the next hidden→visible fast-ping if it happens within the
+   * provided window. This avoids false reconnects around expected system UI
+   * transitions such as opening a file picker before a large upload.
+   */
+  suppressNextResumePingFor(ms: number = 120_000) {
+    const durationMs = Number.isFinite(ms) ? Math.max(0, Math.floor(ms)) : 0
+    if (durationMs <= 0) {
+      this.suppressNextResumePingUntil = 0
+      return
+    }
+    this.suppressNextResumePingUntil = Math.max(
+      this.suppressNextResumePingUntil,
+      Date.now() + durationMs,
+    )
   }
 
   private visibilityHandler: (() => void) | null = null
 
   private startVisibilityTracking() {
     this.stopVisibilityTracking()
+
+    // Seed wasVisible with the current state so the first sendVisibility()
+    // doesn't fire a spurious resume-check ping. onopen → forcePing already
+    // verifies round-trip for the initial connection.
+    this.wasVisible = this.isDocumentVisible()
 
     const handler = () => this.sendVisibility()
     this.visibilityHandler = handler
@@ -164,8 +259,48 @@ export class WebSocketClient {
 
   private sendVisibility(forceHidden = false) {
     const visible = !forceHidden && this.isDocumentVisible()
+    if (this.recoverIfSocketAlreadyClosed()) {
+      this.wasVisible = visible
+      return
+    }
     this.send({ type: 'visibility', visible })
     this.sendStreamFocus(forceHidden)
+    // Hidden→visible transition: iOS aggressively kills WS in suspended PWAs.
+    // Send a fast-watchdog ping so we detect a dead socket within ~3s, instead
+    // of waiting up to a full 30s ping window before noticing.
+    if (visible && !this.wasVisible) {
+      if (!this.consumeResumePingSuppression()) {
+        this.sendPingNow(RESUME_PONG_TIMEOUT_MS)
+      }
+    }
+    this.wasVisible = visible
+  }
+
+  private consumeResumePingSuppression() {
+    const suppressUntil = this.suppressNextResumePingUntil
+    if (suppressUntil <= 0) return false
+    if (Date.now() >= suppressUntil) {
+      this.suppressNextResumePingUntil = 0
+      return false
+    }
+    this.suppressNextResumePingUntil = 0
+    return true
+  }
+
+  private recoverIfSocketAlreadyClosed() {
+    const socket = this.ws
+    if (!socket) return false
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) return false
+
+    // Some browsers defer onclose while a tab/app is suspended. When lifecycle
+    // events resume, the socket may already be CLOSED, which makes pings no-op
+    // unless we explicitly drive the normal close/reconnect path here.
+    console.warn('[WS] Socket was closed before onclose fired — reconnecting')
+    this.stopPing()
+    this.ws = null
+    this.emit(WS_CLOSE, { code: 1006, reason: 'stale socket detected' })
+    if (this.shouldReconnect) this.scheduleReconnect()
+    return true
   }
 
   private sendStreamFocus(forceHidden = false) {

@@ -7,7 +7,10 @@ import ErrorBoundary from '@/components/shared/ErrorBoundary'
 import { CloseButton } from '@/components/shared/CloseButton'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import { useLongPress } from '@/hooks/useLongPress'
-import { DRAWER_TABS, adaptExtensionTabs, sanitizeHiddenDrawerTabIds } from '@/lib/drawer-tab-registry'
+import { DRAWER_TABS, adaptExtensionTabs, applyDrawerTabOrder, sanitizeDrawerTabOrder, sanitizeHiddenDrawerTabIds } from '@/lib/drawer-tab-registry'
+import { translateDrawerField } from '@/lib/i18n/resolveLabel'
+import { useTranslation } from 'react-i18next'
+import TabPanelContent from './TabPanelContent'
 import styles from './ViewportDrawer.module.css'
 import DOMPurify from 'dompurify'
 import clsx from 'clsx'
@@ -28,6 +31,8 @@ function ExtensionTabContent({ tabId }: { tabId: string }) {
 }
 
 export default function ViewportDrawer() {
+  const { t } = useTranslation('panels')
+  const { t: ts } = useTranslation('settings')
   const drawerOpen = useStore((s) => s.drawerOpen)
   const drawerTab = useStore((s) => s.drawerTab)
   const openDrawer = useStore((s) => s.openDrawer)
@@ -36,13 +41,16 @@ export default function ViewportDrawer() {
   const openSettings = useStore((s) => s.openSettings)
   const openModal = useStore((s) => s.openModal)
   const setSetting = useStore((s) => s.setSetting)
+  const settingsLoaded = useStore((s) => s.settingsLoaded)
   const drawerSettings = useStore((s) => s.drawerSettings)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const hiddenPlacements = useStore((s) => s.hiddenPlacements)
   const isGroupChat = useStore((s) => s.isGroupChat)
 
   const isMobile = useIsMobile()
   const sidebarRef = useRef<HTMLDivElement>(null)
   const tabListRef = useRef<HTMLDivElement>(null)
+  const panelContentRef = useRef<HTMLDivElement>(null)
   const [tabListScroll, setTabListScroll] = useState({ up: false, down: false })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
 
@@ -68,9 +76,11 @@ export default function ViewportDrawer() {
     }
   }, [updateTabListScroll])
 
-  const showTabLabels = drawerSettings.showTabLabels ?? false
+  const showTabLabels = drawerSettings.showTabLabels ?? true
   const hiddenTabIds = sanitizeHiddenDrawerTabIds(drawerSettings.hiddenTabIds)
   const hiddenTabIdsSet = new Set(hiddenTabIds)
+  const hiddenPlacementIdsSet = new Set(hiddenPlacements)
+  const tabOrder = sanitizeDrawerTabOrder(drawerSettings.tabOrder)
 
   const updateDrawer = useCallback(
     (partial: Partial<typeof drawerSettings>) => {
@@ -84,9 +94,12 @@ export default function ViewportDrawer() {
     ...entry,
     component: () => <ExtensionTabContent tabId={entry.id} />,
   }))
-  const visibleBuiltInTabs = DRAWER_TABS.filter((tab) => !hiddenTabIdsSet.has(tab.id))
-  const visibleDrawerTabs = drawerTabs.filter((tab) => !hiddenTabIdsSet.has(tab.id))
-  const visibleExtensionEntries = extensionEntries.filter((entry) => !hiddenTabIdsSet.has(entry.id))
+  const orderedBuiltInTabs = applyDrawerTabOrder(DRAWER_TABS, tabOrder)
+  const orderedDrawerTabs = applyDrawerTabOrder(drawerTabs, tabOrder)
+  const orderedExtensionEntries = applyDrawerTabOrder(extensionEntries, tabOrder)
+  const visibleBuiltInTabs = orderedBuiltInTabs.filter((tab) => !hiddenTabIdsSet.has(tab.id))
+  const visibleDrawerTabs = orderedDrawerTabs.filter((tab) => !hiddenTabIdsSet.has(tab.id) && !hiddenPlacementIdsSet.has(tab.id))
+  const visibleExtensionEntries = orderedExtensionEntries.filter((entry) => !hiddenTabIdsSet.has(entry.id) && !hiddenPlacementIdsSet.has(entry.id))
   const requestedActiveTab = drawerTab || 'profile'
   const allTabs = [...visibleBuiltInTabs, ...visibleExtensionEntries]
   const activeTab = allTabs.some((tab) => tab.id === requestedActiveTab) ? requestedActiveTab : 'profile'
@@ -97,6 +110,17 @@ export default function ViewportDrawer() {
       setDrawerTab(activeTab)
     }
   }, [drawerTab, activeTab, setDrawerTab])
+
+  // Reset active tab when the current tab is moved out of main-drawer
+  const pendingActiveTabReset = useStore((s) => s.pendingActiveTabReset)
+  const clearPendingReset = useStore((s) => s.clearPendingActiveTabReset)
+  useEffect(() => {
+    if (!pendingActiveTabReset) return
+    // Find the first available built-in tab that isn't the one being moved away
+    const fallback = allTabs.find((t) => t.id !== pendingActiveTabReset)
+    setDrawerTab(fallback?.id ?? 'profile')
+    clearPendingReset()
+  }, [pendingActiveTabReset, allTabs, setDrawerTab, clearPendingReset])
 
   const handleTabClick = useCallback(
     (tabId: string) => {
@@ -121,7 +145,7 @@ export default function ViewportDrawer() {
   const contextMenuItems: ContextMenuEntry[] = [
     {
       key: 'toggle-labels',
-      label: showTabLabels ? 'Hide tab labels' : 'Show tab labels',
+      label: showTabLabels ? t('viewportDrawer.hideTabLabels') : t('viewportDrawer.showTabLabels'),
       danger: showTabLabels,
       onClick: () => {
         updateDrawer({ showTabLabels: !showTabLabels })
@@ -130,7 +154,7 @@ export default function ViewportDrawer() {
     },
     {
       key: 'configure-tabs',
-      label: 'Configure Tabs',
+      label: t('viewportDrawer.configureTabs'),
       onClick: () => {
         setContextMenu(null)
         openModal('configureTabs')
@@ -143,11 +167,12 @@ export default function ViewportDrawer() {
 
   const panelWidthCSS = (() => {
     switch (drawerSettings.panelWidthMode) {
-      case 'stChat': return '376px'
       case 'custom': return `${Math.max(20, Math.min(80, drawerSettings.customPanelWidth))}vw`
       default: return 'min(420px, calc(100vw - 64px))'
     }
   })()
+
+  if (!settingsLoaded) return null
 
   return (
     <>
@@ -166,6 +191,7 @@ export default function ViewportDrawer() {
       <div
         className={clsx(
           styles.wrapper,
+          isCompact && styles.wrapperCompact,
           isRight ? styles.wrapperRight : styles.wrapperLeft,
           drawerOpen && styles.wrapperOpen,
         )}
@@ -203,15 +229,17 @@ export default function ViewportDrawer() {
                       key={tab.id}
                       type="button"
                       className={clsx(styles.tabBtn, showTabLabels && styles.tabBtnLabeled, activeTab === tab.id && styles.tabBtnActive)}
+                      data-tab-id={tab.id}
                       onClick={() => handleTabClick(tab.id)}
                       onContextMenu={handleTabContextMenu}
                       onTouchStart={tabQuickMenu.onTouchStart}
                       onTouchMove={tabQuickMenu.onTouchMove}
                       onTouchEnd={tabQuickMenu.onTouchEnd}
-                      title={tab.tabName}
+                      onTouchCancel={tabQuickMenu.onTouchCancel}
+                      title={translateDrawerField(tab.id, 'tabName', tab.tabName)}
                     >
                       <Icon size={20} strokeWidth={1.5} />
-                      {showTabLabels && <span className={styles.tabLabel}>{tab.shortName}</span>}
+                      {showTabLabels && <span className={styles.tabLabel}>{translateDrawerField(tab.id, 'shortName', tab.shortName)}</span>}
                     </button>
                   )
                 })}
@@ -231,6 +259,7 @@ export default function ViewportDrawer() {
                           onTouchStart={tabQuickMenu.onTouchStart}
                           onTouchMove={tabQuickMenu.onTouchMove}
                           onTouchEnd={tabQuickMenu.onTouchEnd}
+                          onTouchCancel={tabQuickMenu.onTouchCancel}
                           title={dt.title}
                         >
                           {dt.iconSvg ? (
@@ -258,7 +287,7 @@ export default function ViewportDrawer() {
                 type="button"
                 className={styles.tabBtn}
                 onClick={() => openSettings()}
-                title="Settings"
+                title={ts('title', { defaultValue: 'Settings' })}
               >
                 <Settings size={18} />
               </button>
@@ -268,14 +297,20 @@ export default function ViewportDrawer() {
           <div className={styles.panel}>
             <div className={styles.panelHeader}>
               <h2 className={styles.panelTitle}>
-                {activeTab === 'profile' && isGroupChat ? 'Group' : (activeTabConfig?.tabHeaderTitle ?? activeTabConfig?.tabName ?? 'Panel')}
+                {activeTab === 'profile' && isGroupChat
+                  ? t('group')
+                  : activeTabConfig
+                    ? translateDrawerField(
+                        activeTabConfig.id,
+                        'tabHeaderTitle',
+                        activeTabConfig.tabHeaderTitle ?? activeTabConfig.tabName,
+                      )
+                    : t('panel', { defaultValue: 'Panel' })}
               </h2>
               <CloseButton onClick={closeDrawer} />
             </div>
-            <div className={clsx(styles.panelContent, (activeTab === 'loom' || activeTab === 'lumi' || activeTab === 'browser') && styles.panelContentFull)}>
-              <ErrorBoundary key={activeTab} label={activeTabConfig?.tabName}>
-                {activeTabConfig?.component()}
-              </ErrorBoundary>
+            <div className={clsx(styles.panelContent, (activeTab === 'loom' || activeTab === 'lumi' || activeTab === 'browser' || activeTab === 'lorebook') && styles.panelContentFull)} ref={panelContentRef}>
+              <TabPanelContent tabId={activeTab} location={{ kind: 'main-drawer' }} />
             </div>
           </div>
         </div>

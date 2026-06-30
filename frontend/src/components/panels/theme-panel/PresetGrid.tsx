@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import type { ThemeConfig } from '@/types/theme'
 import { PRESETS } from '@/theme/presets'
 import { Check } from 'lucide-react'
@@ -12,6 +13,8 @@ interface PresetGridProps {
 const CHARACTER_AWARE_SWATCH = 'linear-gradient(135deg, #a78bfa 0%, #f472b6 50%, #38bdf8 100%)'
 
 export default function PresetGrid({ activeId, onSelect }: PresetGridProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'themePanel.presetNames' })
+
   return (
     <div className={styles.grid}>
       {PRESETS.map((preset) => {
@@ -32,7 +35,7 @@ export default function PresetGrid({ activeId, onSelect }: PresetGridProps) {
             <div className={styles.swatch} style={{ background: swatchBg }}>
               {isActive && <Check size={12} strokeWidth={3} />}
             </div>
-            <span className={styles.name}>{preset.name}</span>
+            <span className={styles.name}>{t(preset.id, { defaultValue: preset.name })}</span>
           </button>
         )
       })}

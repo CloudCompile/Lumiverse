@@ -54,7 +54,175 @@ const results = await spindle.generate.batch({
 | `messages` | `LlmMessageDTO[]` | The message array to send |
 | `parameters` | `Record<string, unknown>` | Optional LLM parameters (temperature, max_tokens, etc.) |
 | `connection_id` | `string` | Optional. Use a specific connection profile (see Connection Profiles below) |
+| `tools` | `ToolSchemaDTO[]` | Optional. Function/tool schemas exposed to the model (raw / quiet only). See Tool calling below |
+| `reasoning` | `GenerationReasoningOverrideDTO` | Optional. Per-request override for extended-thinking settings — see Reasoning below |
 | `signal` | `AbortSignal` | Optional. Cancel the in-flight LLM request when the signal fires (see Cancellation below) |
+
+---
+
+## Tool calling
+
+Pass tool schemas via `tools` and the model can call them. Tool calls land in `response.tool_calls` (non-stream) or the terminal `done` chunk (stream) as `ToolCallDTO[]`. You execute the tool, then send the result back as a `tool_result` part on the next user message.
+
+```ts
+const result = await spindle.generate.raw({
+  type: 'raw',
+  messages: [{ role: 'user', content: 'What is the weather in SF?' }],
+  tools: [{
+    name: 'get_weather',
+    description: 'Look up current weather for a city.',
+    parameters: {
+      type: 'object',
+      properties: { city: { type: 'string' } },
+      required: ['city'],
+    },
+  }],
+})
+
+// result.tool_calls?.[0] = { name: 'get_weather', args: { city: 'SF' }, call_id: 'toolu_…' }
+```
+
+Round-trip the call by appending two messages: an `assistant` with a `tool_use` part carrying the same `call_id`, then a `user` with a `tool_result` part keyed back to it.
+
+```ts
+const followup = await spindle.generate.raw({
+  type: 'raw',
+  messages: [
+    { role: 'user', content: 'What is the weather in SF?' },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', id: 'toolu_abc', name: 'get_weather', input: { city: 'SF' } },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_abc', content: '72F, clear' },
+      ],
+    },
+  ],
+  tools: [/* same schema */],
+})
+```
+
+### Parts
+
+| Type | Fields | Used by |
+|---|---|---|
+| `text` | `text: string` | Any role |
+| `image` | `data: string` (base64), `mime_type: string` | `user` |
+| `audio` | `data: string` (base64), `mime_type: string` | `user` |
+| `tool_use` | `id`, `name`, `input: Record<string, unknown>` | `assistant` |
+| `tool_result` | `tool_use_id`, `content: string`, `is_error?: boolean` | `user` |
+
+Use the same `call_id` returned in `ToolCallDTO` as `tool_use.id` and `tool_result.tool_use_id`. Provider adapters translate to each upstream's native shape (Anthropic content blocks, OpenAI `tool_calls` / `role:"tool"`, Gemini `functionCall` / `functionResponse`, OpenAI Responses API `function_call` / `function_call_output`).
+
+!!! note "Tool result formatting"
+    Anthropic requires the `tool_result` parts to come first in the content array of the user message that follows an assistant `tool_use`. The host enforces this; you just need to put them in a dedicated user message that immediately follows.
+
+### ToolSchemaDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string` | Function name the model uses to invoke the tool |
+| `description` | `string` | Natural-language description shown to the model |
+| `parameters` | `JSONSchema` | JSON Schema for the call arguments |
+
+### ToolCallDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string` | Tool name matching one of your `ToolSchemaDTO` entries |
+| `args` | `Record<string, unknown>` | Parsed JSON arguments |
+| `call_id` | `string` | Provider call id (Anthropic `id`, OpenAI `id`, synthetic UUID for Gemini). Pass back as `tool_use.id` / `tool_result.tool_use_id` |
+
+---
+
+## Reasoning / extended thinking
+
+Most modern frontier models expose a "thinking" knob — Anthropic's `thinking` block, Google's `thinkingConfig`, DeepSeek's `reasoning_effort`, the OpenAI-compatible `reasoning.effort`, and so on. Lumiverse wraps that surface in a single high-level shape so extensions don't have to encode each provider's quirks.
+
+By default, every generation request inherits the **resolved user reasoning settings**:
+
+1. If the request resolves a connection (`connection_id`, or `quiet` resolving the user's active connection) and that connection has a binding (`metadata.reasoningBindings`), the binding wins.
+2. Otherwise the user's global `reasoningSettings` is applied.
+3. The host translates the resolved `{ apiReasoning, reasoningEffort, thinkingDisplay }` into the provider-specific parameters before dispatching the request.
+
+You can inspect what a connection is bound to via [`spindle.connections.get()`](#connection-profiles) — the `reasoning_bindings` field is the parsed, typed view.
+
+### Per-request override
+
+Pass `reasoning` on any `generate.*` call to bypass the inherited settings for that single request:
+
+```ts
+// Force thinking off — cheaper one-shot summarization on a connection
+// that normally has high-effort reasoning enabled.
+await spindle.generate.raw({
+  messages: [{ role: 'user', content: 'TL;DR this paragraph.' }],
+  connection_id: connId,
+  reasoning: { source: 'off' },
+})
+
+// Crank the effort up just for this one call.
+await spindle.generate.quiet({
+  messages,
+  reasoning: { source: 'custom', apiReasoning: true, effort: 'max' },
+})
+
+// Anthropic — opt into summarised thinking blocks for this call.
+await spindle.generate.raw({
+  messages,
+  connection_id: anthropicConnId,
+  reasoning: {
+    source: 'custom',
+    apiReasoning: true,
+    effort: 'high',
+    thinkingDisplay: 'summarized',
+  },
+})
+
+// Echo the connection's bound settings back, then dial effort up one tier.
+const conn = await spindle.connections.get(connId)
+const bound = conn?.reasoning_bindings?.settings
+if (bound?.apiReasoning) {
+  await spindle.generate.rawStream({
+    messages,
+    connection_id: connId,
+    reasoning: { source: 'custom', apiReasoning: true, effort: 'max' },
+  })
+}
+```
+
+### GenerationReasoningOverrideDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `source` | `"inherit" \| "off" \| "custom"` | Default `"inherit"` — apply the connection binding then fall back to the user setting. `"off"` strips every provider reasoning field and applies the off-switch unconditionally. `"custom"` uses the explicit fields below. |
+| `apiReasoning` | `boolean` | Used when `source === "custom"`. Defaults to `true`. Set `false` to mean the same thing as `source: "off"`. |
+| `effort` | `ReasoningEffortDTO` | Used when `source === "custom"`. One of `"auto" \| "none" \| "minimal" \| "low" \| "medium" \| "high" \| "max" \| "xhigh"`. Defaults to `"auto"`. |
+| `thinkingDisplay` | `ThinkingDisplayDTO` | Anthropic-only. One of `"auto" \| "summarized" \| "omitted"`. Maps to `thinking.display`. Defaults to `"auto"` (model-specific default). |
+
+### Precedence
+
+Raw values supplied in `parameters` still take precedence at the field level. The override only fills in fields that aren't already set on the request — the same behaviour as the inherited settings. The single exception is `source: "off"` (or `source: "custom", apiReasoning: false`), which unconditionally strips `thinking` / `thinkingConfig` / `reasoning` / `reasoning_effort` and applies the provider's documented off-switch.
+
+That means an extension can opt out of host translation entirely by writing the provider-specific shape into `parameters` directly — `reasoning` is only a convenience layer.
+
+### Provider mapping
+
+| Provider | `apiReasoning: true` produces | Effort handling |
+|---|---|---|
+| Anthropic (Claude 4.6+ adaptive) | `thinking: { type: "adaptive" }` + `output_config.effort` | `low \| medium \| high \| max` (+ `xhigh` on Opus 4.7) |
+| Anthropic (legacy) | `thinking: { type: "enabled", budget_tokens: N }` | `low=2048, medium=8192, high=16384, max=32768` |
+| Google (Gemini / Vertex) | `thinkingConfig: { thinkingLevel, includeThoughts: true }` | `minimal \| low \| medium \| high` |
+| DeepSeek | `thinking: { type: "enabled" }` + `reasoning_effort` | `low/medium/high → "high"`, `max/xhigh → "max"` |
+| OpenRouter | `reasoning: { effort }` | `none \| minimal \| low \| medium \| high \| xhigh` |
+| NanoGPT | `reasoning: { effort }` (object form preserves `exclude` / `delta_field`) | `none \| minimal \| low \| medium \| high` |
+| Moonshot, Z.AI | `thinking: { type: "enabled" }` (toggle-only) | Effort ignored — `apiReasoning` alone gates it |
+| Generic OpenAI-compatible | `reasoning: { effort }` | Passed verbatim |
+
+When `apiReasoning: false` the host writes the provider's documented "no extended thinking" shape — `thinking: { type: "disabled" }` for Anthropic and DeepSeek, `reasoning: { exclude: true }` for NanoGPT, omission for everyone else.
 
 ---
 
@@ -289,6 +457,7 @@ When an interceptor returns `breakdown: [{ messageIndex, name? }]`, the host tur
 | `chunksAvailable` | `number` | Total chunks in the vector store. |
 | `chunksPending` | `number` | Chunks awaiting vectorization. |
 | `injectionMethod` | `string` | How memories were injected: `"macro"`, `"fallback"`, or `"disabled"`. |
+| `retrievalMode` | `string?` | How chunks were retrieved: `"vector"` (real vector/hybrid search) or `"recency"` (fallback, e.g. the query embedding failed). `retrievedChunks[].score` is `null` for recency/keyword-only hits. |
 | `queryPreview` | `string` | Truncated query text used for vector search. |
 | `settingsSource` | `string` | Whether settings came from `"global"` or `"per_chat"` overrides. |
 
@@ -554,9 +723,41 @@ if (conn) {
 | `preset_id` | `string \| null` | Associated generation preset |
 | `is_default` | `boolean` | Whether this is the user's default connection |
 | `has_api_key` | `boolean` | Whether an API key is configured (key itself is never exposed) |
-| `metadata` | `Record<string, unknown>` | Provider-specific metadata |
+| `metadata` | `Record<string, unknown>` | Raw provider-specific metadata bag (Anthropic caching flags, Google thinking budget config, the unparsed `reasoningBindings` blob, etc.) |
+| `reasoning_bindings` | `ConnectionReasoningBindingsDTO \| null` | Typed view of the connection's bound reasoning settings, parsed from `metadata.reasoningBindings`. `null` when nothing is bound — generation falls back to the user's global `reasoningSettings` in that case. |
 | `created_at` | `number` | Unix timestamp |
 | `updated_at` | `number` | Unix timestamp |
+
+### ConnectionReasoningBindingsDTO
+
+When a user binds reasoning settings to a connection from the Connection Manager UI, the snapshot is exposed here so extensions can inspect it without grovelling through `metadata`.
+
+| Field | Type | Description |
+|---|---|---|
+| `settings` | `ReasoningSettingsDTO` | The bound reasoning snapshot — see below. |
+| `promptBias` | `string` | Optional. Bound "Start Reply With" assistant prefill captured alongside the reasoning snapshot. Overrides the user's global `promptBias` for this connection. |
+
+### ReasoningSettingsDTO
+
+| Field | Type | Description |
+|---|---|---|
+| `apiReasoning` | `boolean` | Master switch — whether the provider should produce thinking output. |
+| `reasoningEffort` | `ReasoningEffortDTO` | One of `"auto" \| "none" \| "minimal" \| "low" \| "medium" \| "high" \| "max" \| "xhigh"`. See the [provider mapping table](#provider-mapping). |
+| `thinkingDisplay` | `ThinkingDisplayDTO` | Anthropic-only. `"auto" \| "summarized" \| "omitted"`. |
+| `prefix` | `string` | Opening delimiter for the delimited-reasoning parser (e.g. `"<think>\n"`). Only affects parsing, not the outgoing request. |
+| `suffix` | `string` | Closing delimiter for the delimited-reasoning parser. |
+| `autoParse` | `boolean` | Whether to auto-parse delimited reasoning out of the assistant content stream. |
+| `keepInHistory` | `number` | How many recent reasoning blocks to retain in assembled prompt history. `0` strips all, `-1` keeps everything, `N` keeps the last N. |
+
+```ts
+const conn = await spindle.connections.get(connId)
+if (conn?.reasoning_bindings) {
+  const { apiReasoning, reasoningEffort } = conn.reasoning_bindings.settings
+  spindle.log.info(
+    `Bound: thinking=${apiReasoning}, effort=${reasoningEffort}`,
+  )
+}
+```
 
 !!! note
     For user-scoped extensions, the `userId` parameter is automatically inferred from the extension owner. For operator-scoped extensions, pass `userId` to scope the query to a specific user.

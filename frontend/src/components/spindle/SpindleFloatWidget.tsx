@@ -1,9 +1,11 @@
 import { useRef, useCallback, useEffect, useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { FloatWidgetState } from '@/store/slices/spindle-placement'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/components/shared/ContextMenu'
 import { useLongPress } from '@/hooks/useLongPress'
+import { scheduleSpindleDomTask } from '@/lib/spindle/browser-scheduler'
 import styles from './SpindleFloatWidget.module.css'
 
 interface Props {
@@ -11,12 +13,14 @@ interface Props {
 }
 
 export default function SpindleFloatWidget({ widget }: Props) {
+  const { t } = useTranslation('shared', { keyPrefix: 'spindle' })
   const updateFloatWidget = useStore((s) => s.updateFloatWidget)
   const setPlacementHidden = useStore((s) => s.setPlacementHidden)
   const isMobile = useIsMobile()
 
   const dragging = useRef(false)
   const offset = useRef({ x: 0, y: 0 })
+  const contentHostRef = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState({ x: widget.x, y: widget.y })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
 
@@ -27,6 +31,18 @@ export default function SpindleFloatWidget({ widget }: Props) {
   useEffect(() => {
     setPos({ x: widget.x, y: widget.y })
   }, [widget.x, widget.y])
+
+  useEffect(() => {
+    const host = contentHostRef.current
+    if (!host) return
+
+    return scheduleSpindleDomTask(() => {
+      if (!host.isConnected) return
+      if (!host.contains(widget.root)) {
+        host.replaceChildren(widget.root)
+      }
+    }, { phase: 'paint' })
+  }, [widget.root])
 
   const clampPos = useCallback(
     (x: number, y: number) => {
@@ -110,12 +126,12 @@ export default function SpindleFloatWidget({ widget }: Props) {
   const menuItems: ContextMenuEntry[] = useMemo(() => [
     {
       key: 'hide',
-      label: 'Hide Widget',
+      label: t('hideWidget'),
       onClick: () => { setPlacementHidden(widget.id, true); setContextMenu(null) },
     },
     {
       key: 'reset',
-      label: 'Reset Position',
+      label: t('resetPosition'),
       onClick: () => {
         const pad = 12
         const resetWidth = widget.defaultWidth
@@ -132,6 +148,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
       },
     },
   ], [
+    t,
     setPlacementHidden,
     updateFloatWidget,
     widget.defaultHeight,
@@ -160,11 +177,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
         onTouchStart={(e) => { if (!widget.root.contains(e.target as Node)) longPress.onTouchStart(e) }}
         onContextMenu={handleContextMenu}
       >
-        <div className={styles.content} ref={(el) => {
-          if (el && !el.contains(widget.root)) {
-            el.replaceChildren(widget.root)
-          }
-        }} />
+        <div className={styles.content} ref={contentHostRef} />
       </div>
 
       <ContextMenu

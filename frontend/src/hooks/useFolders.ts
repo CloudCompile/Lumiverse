@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { settingsApi } from '@/api/settings'
 
-type FolderSettingsKey = 'personaFolders' | 'regexScriptFolders'
+type FolderSettingsKey = 'personaFolders' | 'regexScriptFolders' | 'worldBookFolders'
 
 /**
  * Manages folder names backed by a settings key, merged with folders

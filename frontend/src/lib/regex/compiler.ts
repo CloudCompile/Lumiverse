@@ -1,5 +1,7 @@
-import type { RegexScript, RegexPlacement, RegexMacroMode } from '@/types/regex'
+import type { RegexScript, RegexPlacement, RegexMacroMode, RegexPerformanceMetadata } from '@/types/regex'
 import type { DisplayMacroContext } from '@/lib/resolveDisplayMacros'
+import { isDisplayChatOwned, getDisplayResolverForChat } from '@/lib/spindle/display-resolver-registry'
+import type { SpindleDisplayContext } from 'lumiverse-spindle-types'
 
 interface DisplayRegexMatch {
   fullMatch: string
@@ -139,6 +141,31 @@ interface ApplyDisplayRegexContext {
   resolvedFindPatterns?: Map<string, string>
   resolvedReplacements?: Map<string, string>
   dynamicMacros?: Record<string, string>
+  messageId?: string
+  messageIndex?: number
+  role?: 'user' | 'assistant' | 'system'
+}
+
+interface SlowRegexReport {
+  script: RegexScript
+  elapsedMs: number
+  timedOut: boolean
+  thresholdMs: number
+}
+
+const DISPLAY_SLOW_REGEX_WARNING_MS = 5_000
+
+function getRegexPerformanceMetadata(script: RegexScript): RegexPerformanceMetadata | null {
+  const raw = script.metadata?.regex_performance
+  if (!raw || typeof raw !== 'object') return null
+  if (raw.slow !== true || typeof raw.version !== 'number') return null
+  return raw as RegexPerformanceMetadata
+}
+
+function shouldReportSlowRegex(script: RegexScript, elapsedMs: number): boolean {
+  if (elapsedMs < DISPLAY_SLOW_REGEX_WARNING_MS) return false
+  const current = getRegexPerformanceMetadata(script)
+  return !current || current.version !== script.updated_at
 }
 
 function mapToRecord(map?: Map<string, string>): Record<string, string> | undefined {
@@ -146,11 +173,17 @@ function mapToRecord(map?: Map<string, string>): Record<string, string> | undefi
   return Object.fromEntries(map.entries())
 }
 
+export interface DisplayRegexBackendResult {
+  result: string
+  touchedVars?: ReadonlySet<string>
+  cacheable?: boolean
+}
+
 async function applyDisplayRegexOnBackend(
   content: string,
   scripts: RegexScript[],
   context: ApplyDisplayRegexContext,
-): Promise<string | null> {
+): Promise<DisplayRegexBackendResult | null> {
   try {
     const res = await fetch('/api/v1/regex-scripts/apply', {
       method: 'POST',
@@ -168,12 +201,20 @@ async function applyDisplayRegexOnBackend(
           persona_id: context.personaId,
           is_user: context.isUser,
           depth: context.depth,
+          ...(context.messageId ? { message_id: context.messageId } : {}),
+          ...(typeof context.messageIndex === 'number' ? { message_index: context.messageIndex } : {}),
+          ...(context.role ? { role: context.role } : {}),
         },
       }),
     })
     if (!res.ok) return null
-    const body = await res.json() as { result?: string }
-    return typeof body.result === 'string' ? body.result : null
+    const body = await res.json() as { result?: string; touched_vars?: string[]; cacheable?: boolean }
+    if (typeof body.result !== 'string') return null
+    return {
+      result: body.result,
+      touchedVars: Array.isArray(body.touched_vars) ? new Set(body.touched_vars) : undefined,
+      cacheable: typeof body.cacheable === 'boolean' ? body.cacheable : undefined,
+    }
   } catch {
     return null
   }
@@ -183,6 +224,7 @@ export function applyDisplayRegex(
   content: string,
   scripts: RegexScript[],
   context: ApplyDisplayRegexContext,
+  onSlowRegex?: (report: SlowRegexReport) => void,
 ): string {
   let result = content
 
@@ -208,6 +250,7 @@ export function applyDisplayRegex(
     const regex = compileRegex(findRegex, script.flags)
     if (!regex) continue
 
+    const startedAt = performance.now()
     try {
       let replaceString = script.replace_string
 
@@ -223,6 +266,8 @@ export function applyDisplayRegex(
             ? resolveReplacementMacros(withCaptures, 'raw', context.macroCtx)
             : withCaptures
         })
+      } else if (script.substitute_macros === 'after') {
+        result = result.replace(regex, replaceString)
       } else {
         // Prefer backend-resolved replacement string (full macro engine)
         if (script.substitute_macros !== 'none') {
@@ -246,6 +291,16 @@ export function applyDisplayRegex(
           result = result.replaceAll(trim, '')
         }
       }
+
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      if (shouldReportSlowRegex(script, elapsedMs)) {
+        onSlowRegex?.({
+          script,
+          elapsedMs,
+          timedOut: false,
+          thresholdMs: DISPLAY_SLOW_REGEX_WARNING_MS,
+        })
+      }
     } catch {
       // Skip invalid regex silently
     }
@@ -254,12 +309,52 @@ export function applyDisplayRegex(
   return result
 }
 
+function toSpindleDisplayContext(context: ApplyDisplayRegexContext): SpindleDisplayContext {
+  return {
+    isUser: context.isUser,
+    depth: context.depth,
+    ...(context.chatId ? { chatId: context.chatId } : {}),
+    ...(context.characterId ? { characterId: context.characterId } : {}),
+    ...(context.personaId ? { personaId: context.personaId } : {}),
+    ...(context.messageId ? { messageId: context.messageId } : {}),
+    ...(typeof context.messageIndex === 'number' ? { messageIndex: context.messageIndex } : {}),
+    ...(context.role ? { role: context.role } : {}),
+    ...(context.dynamicMacros ? { dynamicMacros: context.dynamicMacros } : {}),
+  }
+}
+
 export async function applyDisplayRegexAsync(
   content: string,
   scripts: RegexScript[],
   context: ApplyDisplayRegexContext,
   resolveRawTemplates: (templates: Record<string, string>) => Promise<Record<string, string>>,
-): Promise<string> {
+): Promise<DisplayRegexBackendResult> {
+  if (context.chatId && isDisplayChatOwned(context.chatId)) {
+    const resolver = getDisplayResolverForChat(context.chatId)
+    if (resolver) {
+      try {
+        const local = await resolver.applyScripts({
+          content,
+          scripts,
+          context: toSpindleDisplayContext(context),
+          ...(context.resolvedFindPatterns ? { resolvedFindPatterns: mapToRecord(context.resolvedFindPatterns) } : {}),
+          ...(context.resolvedReplacements ? { resolvedReplacements: mapToRecord(context.resolvedReplacements) } : {}),
+        })
+        if (local) {
+          return {
+            result: local.content,
+            ...(local.touchedVars ? { touchedVars: new Set(local.touchedVars) } : {}),
+            ...(typeof local.cacheable === 'boolean' ? { cacheable: local.cacheable } : {}),
+          }
+        }
+        console.error(`[display] resolver.applyScripts returned null for owned chat=${context.chatId}; showing raw (no backend fallback)`)
+      } catch (err) {
+        console.error(`[display] resolver.applyScripts threw for owned chat=${context.chatId}; showing raw (no backend fallback)`, err)
+      }
+    }
+    return { result: content, cacheable: false }
+  }
+
   const backendResult = await applyDisplayRegexOnBackend(content, scripts, context)
   if (backendResult !== null) return backendResult
 
@@ -315,6 +410,14 @@ export async function applyDisplayRegexAsync(
             fallbackReplacements.map((value, index) => resolvedTemplates[`${script.id}:${index}`] ?? value),
           )
         }
+      } else if (script.substitute_macros === 'after') {
+        const substituted = result.replace(regex, script.replace_string)
+        if (hasMacroSyntax(substituted)) {
+          const resolved = await resolveRawTemplates({ [`${script.id}:body`]: substituted })
+          result = resolved[`${script.id}:body`] ?? substituted
+        } else {
+          result = substituted
+        }
       } else {
         let replaceString = script.replace_string
         if (script.substitute_macros !== 'none') {
@@ -341,5 +444,5 @@ export async function applyDisplayRegexAsync(
     }
   }
 
-  return result
+  return { result, cacheable: false }
 }

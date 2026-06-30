@@ -9,8 +9,11 @@
  * policy, then call `playNotificationPing()` freely from WebSocket handlers.
  */
 
+import { BASE_URL } from '@/api/client'
+
 const SILENCE_SRC = '/silence.mp3'
-const PING_SRC = '/message-received.mp3'
+const DEFAULT_PING_SRC = '/message-received.mp3'
+const CUSTOM_PING_PATH = `${BASE_URL}/notification-sounds/completion`
 
 let audio: HTMLAudioElement | null = null
 let unlocked = false
@@ -76,11 +79,21 @@ export function installNotificationAudioPrimer(): () => void {
   return dispose
 }
 
-/** Play the notification ping. No-ops if the element was never unlocked. */
-export function playNotificationPing(): void {
+/**
+ * Play the notification ping. No-ops if the element was never unlocked.
+ *
+ * Pass `customSoundVersion` (e.g. the user's `uploadedAt` unix-seconds
+ * timestamp) to route playback through the user-uploaded sound at
+ * `/api/v1/notification-sounds/completion`. The version is appended as a
+ * query string so a re-upload busts the browser's audio cache.
+ */
+export function playNotificationPing(customSoundVersion?: number | null): void {
   if (!unlocked) return
   const el = getAudio()
-  el.src = PING_SRC
+  const nextSrc = customSoundVersion
+    ? `${CUSTOM_PING_PATH}?v=${customSoundVersion}`
+    : DEFAULT_PING_SRC
+  el.src = nextSrc
   el.currentTime = 0
   el.play().catch(() => {
     // Swallow — user may have revoked audio permission

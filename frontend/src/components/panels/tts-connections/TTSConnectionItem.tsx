@@ -1,17 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Volume2, Trash2, Edit3, Zap, Check, Loader, Star, Copy, MoreVertical } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+
+import { Trash2, Edit3, Zap, Star, Copy, MoreVertical, Volume2 } from 'lucide-react'
 import { ttsConnectionsApi } from '@/api/tts-connections'
+import { formatTtsConnectionVoiceLabel, isQwenTtsProvider } from '@/lib/qwenTts'
+import { useStore } from '@/store'
 import type { TtsConnectionProfile, TtsProviderInfo, CreateTtsConnectionInput } from '@/types/api'
 import TTSConnectionForm from './TTSConnectionForm'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
+import ProviderIcon from '@/components/shared/ProviderIcon'
 import styles from '../connection-manager/ConnectionItem.module.css'
 import clsx from 'clsx'
-
-const PROVIDER_COLORS: Record<string, string> = {
-  openai_tts: '#10a37f',
-  elevenlabs: '#8b5cf6',
-  kokoro: '#f59e0b',
-}
 
 interface Props {
   profile: TtsConnectionProfile
@@ -21,11 +20,17 @@ interface Props {
   onDelete: () => void
 }
 
-export default function TTSConnectionItem({ profile, providers, onUpdate, onDuplicate, onDelete }: Props) {
+export default function TTSConnectionItem({
+ profile, providers, onUpdate, onDuplicate, onDelete }: Props) {
+  const { t: tc } = useTranslation('common')
+  const { t } = useTranslation('panels')
+  const openModal = useStore((s) => s.openModal)
   const [editing, setEditing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [menuPos, setMenuPos] = useState<ContextMenuPos | null>(null)
+  const isQwen = isQwenTtsProvider(profile.provider)
+  const voiceLabel = formatTtsConnectionVoiceLabel(profile)
 
   useEffect(() => {
     if (!testResult) return
@@ -40,11 +45,11 @@ export default function TTSConnectionItem({ profile, providers, onUpdate, onDupl
       const result = await ttsConnectionsApi.test(profile.id)
       setTestResult({ success: result.success, message: result.message })
     } catch (err: any) {
-      setTestResult({ success: false, message: err.message || 'Connection failed' })
+      setTestResult({ success: false, message: err.message || t('connectionItem.connectionFailed') })
     } finally {
       setTesting(false)
     }
-  }, [profile.id])
+  }, [profile.id, t])
 
   const handleSaveEdit = useCallback(async (input: CreateTtsConnectionInput) => {
     try {
@@ -55,8 +60,6 @@ export default function TTSConnectionItem({ profile, providers, onUpdate, onDupl
       console.error('[TTSConnectionItem] Failed to update:', err)
     }
   }, [profile.id, onUpdate])
-
-  const providerColor = PROVIDER_COLORS[profile.provider] || 'var(--lumiverse-text-dim)'
 
   if (editing) {
     return (
@@ -75,15 +78,7 @@ export default function TTSConnectionItem({ profile, providers, onUpdate, onDupl
     <div className={styles.item}>
       <div className={styles.itemRow}>
         <div className={styles.itemBtn} style={{ cursor: 'default' }}>
-          <div
-            className={styles.itemIcon}
-            style={{
-              background: `color-mix(in srgb, ${providerColor} 10%, transparent)`,
-              color: providerColor,
-            }}
-          >
-            <Volume2 size={16} />
-          </div>
+          <ProviderIcon kind="tts" provider={profile.provider} size={32} iconSize={16} className={styles.itemIcon} />
           <div className={styles.itemInfo}>
             <span className={styles.itemName}>
               {profile.name}
@@ -92,12 +87,12 @@ export default function TTSConnectionItem({ profile, providers, onUpdate, onDupl
             <span className={styles.itemMeta}>
               {profile.provider}
               {profile.model ? ` / ${profile.model}` : ''}
-              {profile.voice ? ` / ${profile.voice}` : ''}
+              {voiceLabel ? ` / ${voiceLabel}` : ''}
             </span>
           </div>
         </div>
         <div className={styles.itemActions}>
-          <button type="button" className={styles.actionBtn} onClick={() => setEditing(true)} title="Edit">
+          <button type="button" className={styles.actionBtn} onClick={() => setEditing(true)} title={tc('actions.edit')}>
             <Edit3 size={13} />
           </button>
           <button
@@ -107,7 +102,7 @@ export default function TTSConnectionItem({ profile, providers, onUpdate, onDupl
               const rect = e.currentTarget.getBoundingClientRect()
               setMenuPos({ x: rect.right, y: rect.bottom + 4 })
             }}
-            title="More actions"
+            title={t('connectionItem.moreActions')}
           >
             <MoreVertical size={13} />
           </button>
@@ -115,10 +110,21 @@ export default function TTSConnectionItem({ profile, providers, onUpdate, onDupl
             position={menuPos}
             onClose={() => setMenuPos(null)}
             items={[
-              { key: 'test', label: testing ? 'Testing...' : 'Test connection', icon: <Zap size={14} />, onClick: () => { setMenuPos(null); handleTest() }, disabled: testing },
-              { key: 'duplicate', label: 'Duplicate', icon: <Copy size={14} />, onClick: () => { setMenuPos(null); onDuplicate() } },
+              { key: 'test', label: testing ? t('connectionItem.testing') : t('connectionItem.testConnection'), icon: <Zap size={14} />, onClick: () => { setMenuPos(null); handleTest() }, disabled: testing },
+              ...(isQwen
+                ? [{
+                    key: 'qwen-clones',
+                    label: t('qwenCustomVoiceManager.menuAction'),
+                    icon: <Volume2 size={14} />,
+                    onClick: () => {
+                      setMenuPos(null)
+                      openModal('qwenCustomVoice', { connectionId: profile.id })
+                    },
+                  }]
+                : []),
+              { key: 'duplicate', label: t('connectionItem.duplicate'), icon: <Copy size={14} />, onClick: () => { setMenuPos(null); onDuplicate() } },
               { key: 'div', type: 'divider' as const },
-              { key: 'delete', label: 'Delete', icon: <Trash2 size={14} />, onClick: () => { setMenuPos(null); onDelete() }, danger: true },
+              { key: 'delete', label: t('connectionItem.delete'), icon: <Trash2 size={14} />, onClick: () => { setMenuPos(null); onDelete() }, danger: true },
             ] satisfies ContextMenuEntry[]}
           />
         </div>

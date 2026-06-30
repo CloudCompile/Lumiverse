@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ModalShell } from '@/components/shared/ModalShell'
 import css from './InputPromptModal.module.css'
 
@@ -30,8 +31,8 @@ export function InputPromptModal({
   message,
   placeholder,
   defaultValue = '',
-  submitLabel = 'Submit',
-  cancelLabel = 'Cancel',
+  submitLabel,
+  cancelLabel,
   secondaryLabel,
   onSubmit,
   onCancel,
@@ -41,6 +42,10 @@ export function InputPromptModal({
   zIndex,
   attribution,
 }: InputPromptModalProps) {
+  const { t } = useTranslation('shared', { keyPrefix: 'inputPrompt' })
+  const { t: tc } = useTranslation('common')
+  const resolvedSubmitLabel = submitLabel ?? t('submit')
+  const resolvedCancelLabel = cancelLabel ?? tc('actions.cancel')
   const [value, setValue] = useState(defaultValue)
   const inputRef = useRef<HTMLTextAreaElement | HTMLInputElement>(null)
 
@@ -111,7 +116,7 @@ export function InputPromptModal({
             className={`${css.btn} ${css.btnCancel}`}
             onClick={onCancel}
           >
-            {cancelLabel}
+            {resolvedCancelLabel}
           </button>
 
           {secondaryLabel && onSecondary && (
@@ -130,7 +135,7 @@ export function InputPromptModal({
             disabled={!canSubmit}
             onClick={() => onSubmit(value)}
           >
-            {submitLabel}
+            {resolvedSubmitLabel}
           </button>
         </div>
       </div>

@@ -1,6 +1,16 @@
 import { get, del, post, upload, patch, BASE_URL } from './client'
 import type { CharacterGalleryItem } from '@/types/api'
 
+export interface BulkGallerySkippedFile {
+  name: string
+  reason: string
+}
+
+export interface BulkGalleryUploadResult {
+  items: CharacterGalleryItem[]
+  skipped: BulkGallerySkippedFile[]
+}
+
 export const characterGalleryApi = {
   list(characterId: string) {
     return get<CharacterGalleryItem[]>(`/characters/${characterId}/gallery`)
@@ -16,7 +26,11 @@ export const characterGalleryApi = {
   uploadMany(characterId: string, files: File[]) {
     const form = new FormData()
     for (const file of files) form.append('images', file)
-    return upload<CharacterGalleryItem[]>(`/characters/${characterId}/gallery/bulk`, form, { timeout: 0 })
+    return upload<BulkGalleryUploadResult>(
+      `/characters/${characterId}/gallery/bulk`,
+      form,
+      { timeout: 0 },
+    )
   },
 
   link(characterId: string, imageId: string, caption?: string) {

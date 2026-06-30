@@ -1,5 +1,10 @@
 /* ── Bubble mode card ── */
 .card {
+  /* User-tunable bubble fill alpha. --lcs-bubble-opacity (set on :root by
+     ChatView) scales the theme's glass fill toward transparent; at the default
+     1 these resolve to the unmodified glass colors, so the look is unchanged. */
+  --lcs-bubble-bg: color-mix(in srgb, var(--lcs-glass-bg) calc(var(--lcs-bubble-opacity, 1) * 100%), transparent);
+  --lcs-bubble-bg-hover: color-mix(in srgb, var(--lcs-glass-bg-hover, rgba(24, 22, 36, 0.65)) calc(var(--lcs-bubble-opacity, 1) * 100%), transparent);
   display: flex;
   flex-shrink: 0;
   gap: 10px;
@@ -11,7 +16,7 @@
   contain: layout style paint;
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.022) 0%, rgba(255, 255, 255, 0.007) 40%, rgba(255, 255, 255, 0.013) 100%),
-    var(--lcs-glass-bg);
+    var(--lcs-bubble-bg);
   box-shadow: 0 0 0 0.5px var(--lcs-glass-border);
   backdrop-filter: none;
   transition:
@@ -44,7 +49,7 @@
   background:
     linear-gradient(145deg, var(--lcs-glass-char-tint, rgba(100, 120, 255, 0.03)) 0%, transparent 40%),
     linear-gradient(145deg, rgba(255, 255, 255, 0.022) 0%, rgba(255, 255, 255, 0.007) 40%, rgba(255, 255, 255, 0.013) 100%),
-    var(--lcs-glass-bg);
+    var(--lcs-bubble-bg);
 }
 
 /* User tint */
@@ -53,7 +58,7 @@
   background:
     linear-gradient(225deg, var(--lcs-glass-user-tint, rgba(255, 180, 100, 0.03)) 0%, transparent 40%),
     linear-gradient(145deg, rgba(255, 255, 255, 0.022) 0%, rgba(255, 255, 255, 0.007) 40%, rgba(255, 255, 255, 0.013) 100%),
-    var(--lcs-glass-bg);
+    var(--lcs-bubble-bg);
 }
 
 /* Left-aligned user override — mirrors character layout */
@@ -63,8 +68,16 @@
 
 /* Virtualized rows only mount near the viewport, so avoid scroll-time DOM
    attribute toggles here. Toggling a public attribute let custom CSS change
-   row size during measurement, which could feed back into virtualization. */
+   row size during measurement, which could feed back into virtualization.
+
+   Heavy drop shadows are gated behind data-glass so that disabling glass
+   effects (Theme > "Disable glass effects") also drops the expensive GPU
+   shadow stack. The non-glass fallback is a hairline border shadow only. */
 .card {
+  box-shadow: 0 0 0 0.5px var(--lcs-glass-border);
+}
+
+:global([data-glass]) .card {
   box-shadow:
     0 0 0 0.5px var(--lcs-glass-border),
     0 2px 6px rgba(0, 0, 0, 0.2),
@@ -77,27 +90,56 @@
   backdrop-filter: blur(var(--lcs-glass-strong-blur, 12px)) saturate(1.2);
 }
 
+:global([data-component='ChatView'][data-streaming]) .card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: 0 0 0 0.5px var(--lcs-glass-border) !important;
+}
+
+:global([data-component='ChatView'][data-streaming]) .avatarBg,
+:global([data-component='ChatView'][data-streaming]) .avatarBgScrim {
+  display: none !important;
+}
+
 .card:hover {
+  box-shadow:
+    0 0 0 0.5px var(--lcs-glass-border-hover, rgba(255, 255, 255, 0.1)),
+    0 1px 2px rgba(0, 0, 0, 0.28);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.028) 0%, rgba(255, 255, 255, 0.01) 40%, rgba(255, 255, 255, 0.018) 100%),
+    var(--lcs-bubble-bg-hover);
+}
+
+:global([data-glass]) .card:hover {
   box-shadow:
     0 0 0 0.5px var(--lcs-glass-border-hover, rgba(255, 255, 255, 0.1)),
     0 1px 2px rgba(0, 0, 0, 0.28),
     0 4px 16px rgba(0, 0, 0, 0.22),
     0 20px 56px rgba(0, 0, 0, 0.12),
     inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.028) 0%, rgba(255, 255, 255, 0.01) 40%, rgba(255, 255, 255, 0.018) 100%),
-    var(--lcs-glass-bg-hover, rgba(24, 22, 36, 0.65));
+}
+
+/* Light themes use a light hover fill fallback, so derive the bubble hover var
+   from it instead of the dark default. */
+:global([data-theme-mode='light']) .card {
+  --lcs-bubble-bg-hover: color-mix(in srgb, var(--lcs-glass-bg-hover, rgba(255, 255, 255, 0.75)) calc(var(--lcs-bubble-opacity, 1) * 100%), transparent);
 }
 
 :global([data-theme-mode='light']) .card:hover {
   box-shadow:
     0 0 0 0.5px rgba(0, 0, 0, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.04);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 40%, rgba(255, 255, 255, 0.04) 100%),
+    var(--lcs-bubble-bg-hover);
+}
+
+:global([data-glass][data-theme-mode='light']) .card:hover {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.06),
     0 1px 2px rgba(0, 0, 0, 0.04),
     0 4px 12px rgba(0, 0, 0, 0.05),
     inset 0 0.5px 0 rgba(255, 255, 255, 0.5);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 40%, rgba(255, 255, 255, 0.04) 100%),
-    var(--lcs-glass-bg-hover, rgba(255, 255, 255, 0.75));
 }
 
 /* Hide dissolving avatar background when user opts out */
@@ -107,14 +149,18 @@
 
 /* Disable bubble hover effects when user opts out */
 :global([data-no-bubble-hover]) .card:hover {
+  box-shadow: 0 0 0 0.5px var(--lcs-glass-border);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.022) 0%, rgba(255, 255, 255, 0.007) 40%, rgba(255, 255, 255, 0.013) 100%),
+    var(--lcs-bubble-bg);
+}
+
+:global([data-glass][data-no-bubble-hover]) .card:hover {
   box-shadow:
     0 0 0 0.5px var(--lcs-glass-border),
     0 1px 2px rgba(0, 0, 0, 0.2),
     0 4px 16px rgba(0, 0, 0, 0.14),
     0 12px 48px rgba(0, 0, 0, 0.08);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.022) 0%, rgba(255, 255, 255, 0.007) 40%, rgba(255, 255, 255, 0.013) 100%),
-    var(--lcs-glass-bg, rgba(18, 16, 28, 0.55));
 }
 
 :global([data-no-bubble-hover]) .card:hover .avatarBgImg {
@@ -187,6 +233,21 @@
 .streaming {
   will-change: opacity, transform;
   backdrop-filter: none;
+}
+
+:global([data-style-mode='extension-relaxed']) .streaming {
+  will-change: opacity;
+}
+
+:global([data-style-mode='extension-relaxed']) .card {
+  contain: style;
+}
+
+/* Allow card authored extension-relaxed content to render at arbitrary z levels,
+  as long as they stay below the sidebars. */
+:global([data-style-mode='extension-relaxed']) .bubble,
+:global([data-style-mode='extension-relaxed']) .content {
+  z-index: auto;
 }
 
 /* ── Bubble inner content ── */
@@ -653,4 +714,23 @@
   .streaming {
     will-change: auto;
   }
+}
+
+/* ── Scroll-time CSS suppression ──
+   While the user is actively scrolling, strip the most expensive raster
+   operations from every card (blur, heavy shadow, dissolving avatar mask).
+   We intentionally keep the static background fill/tint gradients intact;
+   stripping them via `background: var(--lcs-bubble-bg)` made the card color
+   visibly shift during scroll, which users noticed. The remaining properties
+   still save the costly per-card raster layers. */
+:global([data-scrolling]) .card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: 0 0 0 0.5px var(--lcs-glass-border) !important;
+  transition: none !important;
+}
+
+:global([data-scrolling]) .avatarBg,
+:global([data-scrolling]) .avatarBgScrim {
+  display: none !important;
 }

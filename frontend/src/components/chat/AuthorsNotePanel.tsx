@@ -1,14 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { CloseButton } from '@/components/shared/CloseButton'
 import NumericInput from '@/components/shared/NumericInput'
 import { chatsApi } from '@/api/chats'
 import styles from './AuthorsNotePanel.module.css'
-
-const ROLES = [
-  { value: 'system', label: 'System' },
-  { value: 'user', label: 'User' },
-  { value: 'assistant', label: 'Assistant' },
-] as const
 
 interface AuthorsNote {
   content: string
@@ -23,6 +18,7 @@ interface AuthorsNotePanelProps {
 }
 
 export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNotePanelProps) {
+  const { t } = useTranslation('chat')
   const [noteText, setNoteText] = useState('')
   const [depth, setDepth] = useState(4)
   const [role, setRole] = useState<'system' | 'user' | 'assistant'>('system')
@@ -30,8 +26,6 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const currentNoteRef = useRef<AuthorsNote>({ content: '', depth: 4, role: 'system' })
 
-  // Load from chat metadata on open. Cancel flag guards against a stale
-  // response landing after the panel closed or the chatId changed.
   useEffect(() => {
     if (!isOpen || !chatId) return
     let cancelled = false
@@ -58,14 +52,9 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
 
   const scheduleSave = useCallback((updates: Partial<AuthorsNote>) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    // Update ref eagerly so the latest field values are always what get saved,
-    // even if multiple fields change before the debounce fires.
     currentNoteRef.current = { ...currentNoteRef.current, ...updates }
     saveTimerRef.current = setTimeout(() => {
       const next = currentNoteRef.current
-      // Atomic merge via PATCH so concurrent server-side writers (expression
-      // detection, council caching, deferred WI/chat-var persistence) can't
-      // clobber the author's note, and vice versa. `null` deletes the key.
       const payload: Record<string, any> = next.content?.trim()
         ? { authors_note: next }
         : { authors_note: null }
@@ -98,7 +87,6 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
     scheduleSave({ role: val })
   }, [scheduleSave])
 
-  // Escape to close
   useEffect(() => {
     if (!isOpen) return
     const handleKey = (e: KeyboardEvent) => {
@@ -110,11 +98,13 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
 
   if (!isOpen) return null
 
+  const roles = ['system', 'user', 'assistant'] as const
+
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
         <span className={styles.title}>
-          Author's Note {enabled ? '· Active' : ''}
+          {t('authorsNote.title')}{enabled ? ` ${t('authorsNote.active')}` : ''}
         </span>
         <CloseButton onClick={onClose} size="sm" iconSize={12} className={styles.closeBtn} />
       </div>
@@ -122,17 +112,19 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
       <div className={styles.body}>
         <div className={styles.field}>
           <textarea
+            name="authors-note"
+            aria-label={t('authorsNote.ariaLabel')}
             className={styles.textarea}
             rows={3}
             value={noteText}
             onChange={handleTextChange}
-            placeholder="Write instructions or context for the AI..."
+            placeholder={t('authorsNote.placeholder')}
           />
         </div>
 
         <div className={styles.row}>
           <div className={styles.field}>
-            <label className={styles.label}>Depth</label>
+            <label className={styles.label}>{t('authorsNote.depth')}</label>
             <NumericInput
               className={styles.input}
               min={0}
@@ -143,10 +135,16 @@ export default function AuthorsNotePanel({ chatId, isOpen, onClose }: AuthorsNot
             />
           </div>
           <div className={styles.field}>
-            <label className={styles.label}>Role</label>
-            <select className={styles.select} value={role} onChange={handleRoleChange}>
-              {ROLES.map((r) => (
-                <option key={r.value} value={r.value}>{r.label}</option>
+            <label className={styles.label}>{t('authorsNote.role')}</label>
+            <select
+              name="authors-note-role"
+              aria-label={t('authorsNote.roleAria')}
+              className={styles.select}
+              value={role}
+              onChange={handleRoleChange}
+            >
+              {roles.map((r) => (
+                <option key={r} value={r}>{t(`roles.${r}`)}</option>
               ))}
             </select>
           </div>

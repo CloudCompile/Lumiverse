@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Bell, BellOff, Smartphone, Trash2, Send, Shield } from 'lucide-react'
 import { IconBellRinging } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -8,6 +9,7 @@ import styles from './NotificationSettings.module.css'
 import clsx from 'clsx'
 
 export default function NotificationSettings() {
+  const { t } = useTranslation('settings')
   const prefs = useStore((s) => s.pushNotificationPreferences)
   const setSetting = useStore((s) => s.setSetting)
   const addToast = useStore((s) => s.addToast)
@@ -31,10 +33,10 @@ export default function NotificationSettings() {
   const [testing, setTesting] = useState(false)
 
   const describeTestFailure = (reason?: 'no_subscriptions' | 'disabled' | 'event_disabled' | 'user_active') => {
-    if (reason === 'disabled') return 'Push notifications are disabled in settings'
-    if (reason === 'event_disabled') return 'Generation completed notifications are disabled'
-    if (reason === 'user_active') return 'Push notifications are suppressed while you are actively viewing Lumiverse'
-    return 'No subscriptions to send to'
+    if (reason === 'disabled') return t('notifications.failDisabled')
+    if (reason === 'event_disabled') return t('notifications.failEventDisabled')
+    if (reason === 'user_active') return t('notifications.failUserActive')
+    return t('notifications.failNoSubscriptions')
   }
 
   const updatePrefs = (patch: Partial<typeof prefs>) => {
@@ -49,16 +51,19 @@ export default function NotificationSettings() {
   }
 
   const handleSubscribe = async () => {
+    // Start the browser permission request before any React state update. Safari
+    // web apps are strict about preserving transient user activation for prompts.
+    const subscribeAttempt = subscribe()
     setSubscribing(true)
     try {
-      const ok = await subscribe()
+      const ok = await subscribeAttempt
       if (ok) {
-        addToast({ type: 'success', message: 'Push notifications enabled for this device' })
+        addToast({ type: 'success', message: t('notifications.toastEnabled') })
       } else {
-        addToast({ type: 'warning', message: 'Notification permission was denied' })
+        addToast({ type: 'warning', message: t('notifications.toastDenied') })
       }
     } catch (err: any) {
-      addToast({ type: 'error', message: err.message || 'Failed to subscribe' })
+      addToast({ type: 'error', message: err.message || t('notifications.toastSubscribeFailed') })
     } finally {
       setSubscribing(false)
     }
@@ -69,12 +74,12 @@ export default function NotificationSettings() {
     try {
       const result = await testPush()
       if (result.success) {
-        addToast({ type: 'info', message: 'Test notification sent' })
+        addToast({ type: 'info', message: t('notifications.toastTestSent') })
       } else {
         addToast({ type: 'warning', message: describeTestFailure(result.reason) })
       }
     } catch (err: any) {
-      addToast({ type: 'error', message: err.message || 'Test failed' })
+      addToast({ type: 'error', message: err.message || t('notifications.toastTestFailed') })
     } finally {
       setTesting(false)
     }
@@ -83,9 +88,9 @@ export default function NotificationSettings() {
   const handleUnsubscribeDevice = async (id: string) => {
     try {
       await unsubscribe(id)
-      addToast({ type: 'info', message: 'Device removed' })
+      addToast({ type: 'info', message: t('notifications.toastDeviceRemoved') })
     } catch {
-      addToast({ type: 'error', message: 'Failed to remove device' })
+      addToast({ type: 'error', message: t('notifications.toastRemoveFailed') })
     }
   }
 
@@ -96,8 +101,8 @@ export default function NotificationSettings() {
           <BellOff size={16} />
           <span>
             {supportChecked
-              ? (unsupportedReason || 'Push notifications are not supported in this browser.')
-              : 'Checking push notification support...'}
+              ? (unsupportedReason || t('notifications.unsupported'))
+              : t('notifications.checking')}
           </span>
         </div>
       </div>
@@ -106,11 +111,10 @@ export default function NotificationSettings() {
 
   return (
     <div className={styles.container}>
-      {/* ── Status Section ──────────────────────────────────────────── */}
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <Bell size={14} />
-          <span>Push Status</span>
+          <span>{t('notifications.pushStatus')}</span>
           <div className={styles.sectionHeaderActions}>
             {!isSubscribed ? (
               <button
@@ -119,7 +123,7 @@ export default function NotificationSettings() {
                 disabled={subscribing}
               >
                 <IconBellRinging size={12} />
-                {subscribing ? 'Subscribing...' : 'Enable'}
+                {subscribing ? t('notifications.subscribing') : t('notifications.enable')}
               </button>
             ) : (
               <>
@@ -129,13 +133,13 @@ export default function NotificationSettings() {
                   disabled={testing}
                 >
                   <Send size={12} />
-                  {testing ? 'Sending...' : 'Test'}
+                  {testing ? t('notifications.sending') : t('notifications.test')}
                 </button>
                 <button
                   className={clsx(styles.actionBtn, styles.actionBtnDanger)}
                   onClick={unsubscribeAll}
                 >
-                  Unsubscribe All
+                  {t('notifications.unsubscribeAll')}
                 </button>
               </>
             )}
@@ -143,28 +147,28 @@ export default function NotificationSettings() {
         </div>
         <div className={styles.grid}>
           <div className={styles.infoRow}>
-            <span className={styles.infoLabel}>Permission</span>
+            <span className={styles.infoLabel}>{t('notifications.permission')}</span>
             <span className={styles.infoValue}>
               <span className={clsx(styles.statusDot, permissionState === 'granted' ? styles.statusActive : styles.statusInactive)} />
               {permissionState}
             </span>
           </div>
           <div className={styles.infoRow}>
-            <span className={styles.infoLabel}>This Device</span>
+            <span className={styles.infoLabel}>{t('notifications.thisDevice')}</span>
             <span className={styles.infoValue}>
               <span className={clsx(styles.statusDot, isSubscribed ? styles.statusActive : styles.statusInactive)} />
-              {isSubscribed ? 'Subscribed' : 'Not subscribed'}
+              {isSubscribed ? t('notifications.subscribed') : t('notifications.notSubscribed')}
             </span>
           </div>
           <div className={styles.infoRow}>
-            <span className={styles.infoLabel}>Service Worker</span>
+            <span className={styles.infoLabel}>{t('notifications.serviceWorker')}</span>
             <span className={styles.infoValue}>
               <span className={clsx(styles.statusDot, registrationStatus === 'ready' ? styles.statusActive : styles.statusInactive)} />
-              {describeRegistrationStatus(registrationStatus)}
+              {describeRegistrationStatus(registrationStatus, t)}
             </span>
           </div>
           <div className={styles.infoRow}>
-            <span className={styles.infoLabel}>Total Devices</span>
+            <span className={styles.infoLabel}>{t('notifications.totalDevices')}</span>
             <span className={styles.infoValue}>{subscriptions.length}</span>
           </div>
         </div>
@@ -173,18 +177,17 @@ export default function NotificationSettings() {
         )}
       </div>
 
-      {/* ── Events Section ──────────────────────────────────────────── */}
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <Shield size={14} />
-          <span>Notification Events</span>
+          <span>{t('notifications.eventsTitle')}</span>
         </div>
         <div className={styles.toggleRow}>
           <Toggle.Checkbox
             checked={prefs.enabled}
             onChange={(v) => updatePrefs({ enabled: v })}
-            label="Enable push notifications"
-            hint="Master toggle"
+            label={t('notifications.enablePush')}
+            hint={t('notifications.enablePushHint')}
           />
         </div>
         <div className={clsx(styles.toggleRow, !prefs.enabled && styles.toggleRowDisabled)}>
@@ -192,8 +195,8 @@ export default function NotificationSettings() {
             checked={prefs.events.generation_ended}
             onChange={(v) => updateEventPref('generation_ended', v)}
             disabled={!prefs.enabled}
-            label="Generation completed"
-            hint="When a character finishes responding"
+            label={t('notifications.generationCompleted')}
+            hint={t('notifications.generationCompletedHint')}
           />
         </div>
         <div className={clsx(styles.toggleRow, !prefs.enabled && styles.toggleRowDisabled)}>
@@ -201,32 +204,31 @@ export default function NotificationSettings() {
             checked={prefs.events.generation_error}
             onChange={(v) => updateEventPref('generation_error', v)}
             disabled={!prefs.enabled}
-            label="Generation failed"
-            hint="When a generation encounters an error"
+            label={t('notifications.generationFailed')}
+            hint={t('notifications.generationFailedHint')}
           />
         </div>
       </div>
 
-      {/* ── Devices Section ─────────────────────────────────────────── */}
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <Smartphone size={14} />
-          <span>Registered Devices ({subscriptions.length})</span>
+          <span>{t('notifications.devicesTitle', { count: subscriptions.length })}</span>
         </div>
         {subscriptions.length === 0 ? (
-          <div className={styles.emptyRow}>No devices registered</div>
+          <div className={styles.emptyRow}>{t('notifications.noDevices')}</div>
         ) : (
           subscriptions.map((sub) => (
             <div key={sub.id} className={styles.deviceRow}>
               <Smartphone size={13} className={styles.deviceIcon} />
-              <span className={styles.deviceName}>{parseUserAgent(sub.user_agent)}</span>
+              <span className={styles.deviceName}>{parseUserAgent(sub.user_agent, t)}</span>
               <span className={styles.deviceDate}>
                 {new Date(sub.created_at * 1000).toLocaleDateString()}
               </span>
               <button
                 className={styles.deviceRemove}
                 onClick={() => handleUnsubscribeDevice(sub.id)}
-                title="Remove device"
+                title={t('notifications.removeDevice')}
               >
                 <Trash2 size={13} />
               </button>
@@ -238,8 +240,8 @@ export default function NotificationSettings() {
   )
 }
 
-function parseUserAgent(ua: string): string {
-  if (!ua) return 'Unknown device'
+function parseUserAgent(ua: string, t: (key: string) => string): string {
+  if (!ua) return t('notifications.unknownDevice')
   if (ua.includes('Chrome') && !ua.includes('Edg')) return 'Chrome'
   if (ua.includes('Edg')) return 'Edge'
   if (ua.includes('Firefox')) return 'Firefox'
@@ -247,9 +249,12 @@ function parseUserAgent(ua: string): string {
   return 'Browser'
 }
 
-function describeRegistrationStatus(status: 'ready' | 'pending' | 'missing' | 'error'): string {
-  if (status === 'ready') return 'Ready'
-  if (status === 'pending') return 'Activating'
-  if (status === 'missing') return 'Missing'
-  return 'Error'
+function describeRegistrationStatus(
+  status: 'ready' | 'pending' | 'missing' | 'error',
+  t: (key: string) => string,
+): string {
+  if (status === 'ready') return t('notifications.regReady')
+  if (status === 'pending') return t('notifications.regActivating')
+  if (status === 'missing') return t('notifications.regMissing')
+  return t('notifications.regError')
 }

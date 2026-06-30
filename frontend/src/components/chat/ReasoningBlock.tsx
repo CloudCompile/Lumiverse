@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useEffect, useRef, useDeferredValue } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Marked } from 'marked'
 import { healFormattingArtifacts } from '@/lib/formatHealing'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
@@ -45,6 +46,7 @@ function formatDuration(ms: number) {
 }
 
 export default function ReasoningBlock({ reasoning, reasoningDuration, reasoningStartedAt, isStreaming, variant = 'default', align }: ReasoningBlockProps) {
+  const { t } = useTranslation('chat')
   const [isOpen, setIsOpen] = useState(false)
   const [liveElapsed, setLiveElapsed] = useState(0)
   const [renderMode, setRenderMode] = useState<ReasoningRenderMode>(() => (
@@ -53,6 +55,7 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
   const timerRef = useRef<number | null>(null)
   const startTimeRef = useRef<number | null>(null)
   const shouldPreferPlainText = reasoning.length >= LARGE_REASONING_RENDER_THRESHOLD
+  const wasLargeReasoningRef = useRef(shouldPreferPlainText)
   const deferredReasoning = useDeferredValue(reasoning)
 
   const toggle = useCallback(() => {
@@ -102,16 +105,19 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
   }, [isStreaming, reasoningDuration, reasoningStartedAt])
 
   useEffect(() => {
-    if (shouldPreferPlainText && isStreaming && renderMode === 'markdown') {
+    const crossedLargeThreshold = shouldPreferPlainText && !wasLargeReasoningRef.current
+    wasLargeReasoningRef.current = shouldPreferPlainText
+
+    if (crossedLargeThreshold && isStreaming && renderMode === 'markdown') {
       setRenderMode('text')
     }
   }, [shouldPreferPlainText, isStreaming, renderMode])
 
   const label = reasoningDuration
-    ? `Thought for ${formatDuration(reasoningDuration)}`
+    ? t('reasoning.thoughtFor', { duration: formatDuration(reasoningDuration) })
     : isStreaming && liveElapsed > 0
-      ? `Thinking for ${formatDuration(liveElapsed)}`
-      : 'Thinking'
+      ? t('reasoning.thinkingFor', { duration: formatDuration(liveElapsed) })
+      : t('reasoning.thinking')
 
   // Skip markdown parsing whenever the block is collapsed — the rendered HTML
   // is not visible, so building it eagerly is pure waste for long reasoning.
@@ -139,15 +145,15 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
         <div className={styles.bodyInner}>
           {shouldPreferPlainText && (
             <div className={styles.bodyToolbar}>
-              <span className={styles.bodyHint}>Large reasoning blocks open in text mode first.</span>
-              <div className={styles.modeSwitch} aria-label="Reasoning render mode">
+              <span className={styles.bodyHint}>{t('reasoning.largeBlockHint')}</span>
+              <div className={styles.modeSwitch} aria-label={t('reasoning.renderModeAria')}>
                 <button
                   type="button"
                   className={clsx(styles.modeButton, renderMode === 'text' && styles.modeButtonActive)}
                   onClick={setTextMode}
                   aria-pressed={renderMode === 'text'}
                 >
-                  Text
+                  {t('reasoning.text')}
                 </button>
                 <button
                   type="button"
@@ -155,7 +161,7 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
                   onClick={setMarkdownMode}
                   aria-pressed={renderMode === 'markdown'}
                 >
-                  Markdown
+                  {t('reasoning.markdown')}
                 </button>
               </div>
             </div>

@@ -3,6 +3,7 @@ import { username, admin, bearer } from "better-auth/plugins";
 import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";
+import { seedDefaultPreset } from "./default-preset";
 import { getAllowedOrigins } from "../services/trusted-hosts.service";
 
 // ─── Signup gate ────────────────────────────────────────────────────────
@@ -11,6 +12,9 @@ import { getAllowedOrigins } from "../services/trusted-hosts.service";
 
 let creationNonce: string | null = null;
 let creationNonceExpiry = 0;
+// Race-condition guard: prevents two concurrent user-creation requests from
+// both passing the nonce check (audit M-02 / auth race-condition finding).
+let _creationLock = false;
 
 export const CREATION_NONCE_HEADER = "x-lumiverse-creation-nonce";
 
@@ -95,15 +99,22 @@ export const auth = betterAuth({
           return false;
         },
         after: async (user) => {
-          // BetterAuth swallows hook exceptions, so a failed directory
-          // provision used to leave the operator without any signal that
-          // the user couldn't write to disk. Surface the failure to the
-          // log instead of silently dropping it.
+          // BetterAuth swallows hook exceptions, so surface directory or
+          // preset-seed failures independently instead of dropping the user
+          // into a half-provisioned state with no signal in the logs.
           try {
             provisionUserDirectories(user.id);
           } catch (err) {
             console.error(
               `[Auth] Failed to provision directories for user ${user.id}:`,
+              err instanceof Error ? err.message : err,
+            );
+          }
+          try {
+            seedDefaultPreset(user.id, { setActive: true });
+          } catch (err) {
+            console.error(
+              `[Auth] Failed to seed default preset for user ${user.id}:`,
               err instanceof Error ? err.message : err,
             );
           }

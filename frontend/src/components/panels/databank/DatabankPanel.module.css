@@ -280,6 +280,79 @@
   color: var(--lumiverse-danger);
 }
 
+.fusePickerHint {
+  padding: 6px 8px 4px;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  line-height: 1.4;
+}
+
+.fuseStatus {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lumiverse-primary) 20%, transparent);
+  color: var(--lumiverse-primary);
+  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+}
+
+/* ── Document Editor ── */
+.editorHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.editorTitleGroup {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.editorTitle {
+  font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editorSubtitle {
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editorBody {
+  display: flex;
+  flex-direction: column;
+}
+
+.editorTextarea {
+  width: 100%;
+  min-height: 480px;
+  padding: 12px 14px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-bg);
+  color: var(--lumiverse-text);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: calc(12.5px * var(--lumiverse-font-scale, 1));
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+  tab-size: 4;
+}
+
+.editorTextarea:focus {
+  border-color: var(--lumiverse-primary);
+}
+
 /* ── Bank Details ── */
 .bankDetails {
   display: flex;

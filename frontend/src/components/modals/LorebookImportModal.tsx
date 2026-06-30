@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
@@ -18,10 +19,10 @@ export default function LorebookImportModal({
   lorebooks,
   onClose,
 }: LorebookImportModalProps) {
+  const { t } = useTranslation('modals')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [importing, setImporting] = useState(false)
 
-  // Reset selections when lorebooks change (select all by default)
   useEffect(() => {
     setSelected(new Set(lorebooks.map((l) => l.characterId)))
   }, [lorebooks])
@@ -55,7 +56,7 @@ export default function LorebookImportModal({
     try {
       const toImport = lorebooks.filter((l) => selected.has(l.characterId))
       await Promise.allSettled(
-        toImport.map((l) => worldBooksApi.importCharacterBook(l.characterId))
+        toImport.map((l) => worldBooksApi.importCharacterBook(l.characterId)),
       )
     } finally {
       setImporting(false)
@@ -67,7 +68,7 @@ export default function LorebookImportModal({
     <ModalShell isOpen={isOpen && lorebooks.length > 0} onClose={onClose} maxWidth={580}>
       <div className={styles.header}>
         <div className={styles.headerLeft}>
-          <span className={styles.title}>Embedded Lorebooks</span>
+          <span className={styles.title}>{t('lorebookImport.title')}</span>
           <span className={styles.badge}>{lorebooks.length}</span>
         </div>
         <CloseButton onClick={onClose} />
@@ -78,7 +79,7 @@ export default function LorebookImportModal({
           <Toggle.Checkbox
             checked={allSelected}
             onChange={toggleAll}
-            label="Select All"
+            label={t('lorebookImport.selectAll')}
           />
         </div>
 
@@ -92,10 +93,13 @@ export default function LorebookImportModal({
               />
               <div className={styles.lorebookInfo}>
                 <span className={styles.lorebookName}>{lb.lorebookName}</span>
-                <span className={styles.lorebookMeta}>from {lb.characterName}</span>
+                <span className={styles.lorebookMeta}>
+                  {t('lorebookImport.fromCharacter', { name: lb.characterName })}
+                </span>
               </div>
               <span className={styles.entryBadge}>
-                {lb.entryCount} {lb.entryCount === 1 ? 'entry' : 'entries'}
+                {lb.entryCount}{' '}
+                {lb.entryCount === 1 ? t('lorebookImport.entry') : t('lorebookImport.entries')}
               </span>
             </label>
           ))}
@@ -104,7 +108,7 @@ export default function LorebookImportModal({
 
       <div className={styles.footer}>
         <Button variant="ghost" onClick={onClose}>
-          Skip
+          {t('lorebookImport.skip')}
         </Button>
         <Button
           variant="primary"
@@ -112,10 +116,10 @@ export default function LorebookImportModal({
           onClick={handleImport}
         >
           {importing
-            ? 'Importing...'
+            ? t('lorebookImport.importing')
             : allSelected
-              ? 'Import All'
-              : `Import ${selected.size} Selected`}
+              ? t('lorebookImport.importAll')
+              : t('lorebookImport.importSelected', { count: selected.size })}
         </Button>
       </div>
     </ModalShell>

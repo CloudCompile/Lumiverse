@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import type { Pack } from '@/types/api'
 import LazyImage from '@/components/shared/LazyImage'
 import { Badge } from '@/components/shared/Badge'
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export default function PackCard({ pack, onClick }: Props) {
+  const { t } = useTranslation('panels')
   const initial = pack.name.charAt(0) || '?'
 
   return (
@@ -22,10 +24,10 @@ export default function PackCard({ pack, onClick }: Props) {
       </div>
       <div className={styles.cardBody}>
         <div className={styles.cardName}>{pack.name}</div>
-        {pack.author && <div className={styles.cardAuthor}>by {pack.author}</div>}
+        {pack.author && <div className={styles.cardAuthor}>{t('packBrowser.packCard.byAuthor', { author: pack.author })}</div>}
         <div className={styles.cardBadges}>
           <Badge color={pack.is_custom ? 'primary' : 'success'} size="sm">
-            {pack.is_custom ? 'Custom' : 'Downloaded'}
+            {pack.is_custom ? t('packBrowser.packCard.badgeCustom') : t('packBrowser.packCard.badgeDownloaded')}
           </Badge>
           <Badge size="sm">v{pack.version}</Badge>
         </div>

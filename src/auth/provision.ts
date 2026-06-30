@@ -1,5 +1,5 @@
 import { mkdirSync, existsSync } from "fs";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { env } from "../env";
 
 // BetterAuth's default generator produces 32-char alphanumeric IDs; our
@@ -31,6 +31,9 @@ export function provisionUserDirectories(userId: string): void {
   const storagePath = join(userDir, "storage");
   const extensionsPath = join(userDir, "extensions");
 
+  // L-15: mkdirSync throws on failure (e.g. permission denied, disk full).
+  // Let the error propagate so callers know the user's workspace could not
+  // be set up, rather than silently continuing with a missing directory.
   if (!existsSync(storagePath)) mkdirSync(storagePath, { recursive: true });
   if (!existsSync(extensionsPath)) mkdirSync(extensionsPath, { recursive: true });
 }

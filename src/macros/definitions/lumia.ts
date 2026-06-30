@@ -8,7 +8,7 @@
  *                        selectedBehaviors, selectedPersonalities, chimeraMode,
  *                        quirks, quirksEnabled, allItems
  *   env.extra.council – councilMode, members, toolsSettings, memberItems,
- *                        toolResults, namedResults
+ *                        toolResults, namedResults, historicalDeliberationBlock
  *   env.extra.ooc     – enabled, interval, style
  */
 
@@ -146,6 +146,7 @@ function getCouncil(ctx: MacroExecContext) {
       error?: string;
     }>;
     namedResults: Record<string, string>;
+    historicalDeliberationBlock?: string;
   };
 }
 
@@ -573,7 +574,13 @@ function buildDeliberationContent(ctx: MacroExecContext): string {
   const successResults = results.filter((r) => r.success);
   if (successResults.length === 0) return "";
 
-  const lines: string[] = ["## Council Deliberation\n"];
+  const lines: string[] = [];
+  const historical = council.historicalDeliberationBlock?.trim();
+  if (historical) {
+    lines.push(historical);
+    lines.push("");
+  }
+  lines.push("## Council Deliberation\n");
   lines.push("The following contributions have been gathered from council members:\n");
 
   // Group by member
@@ -634,6 +641,7 @@ export function registerLumiaMacros(): void {
   // ---- randomLumia ----
   registry.registerMacro({
     builtIn: true,
+    volatile: true,
     name: "randomLumia",
     category: "Lumia",
     description: "Random Lumia from all loaded packs. Optional arg: name, phys, pers, behav.",

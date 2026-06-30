@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Layers } from 'lucide-react'
 import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
@@ -11,15 +12,10 @@ interface AlternateFieldVariant {
   content: string
 }
 
-const FIELD_LABELS: Record<string, string> = {
-  description: 'Description',
-  personality: 'Personality',
-  scenario: 'Scenario',
-}
-
 const FIELDS = ['description', 'personality', 'scenario'] as const
 
 export default function AlternateFieldSwitcher({ chatId }: { chatId: string }) {
+  const { t } = useTranslation('chat')
   const [open, setOpen] = useState(false)
   const [selections, setSelections] = useState<Record<string, string>>({})
   const [chatMetadata, setChatMetadata] = useState<Record<string, any> | null>(null)
@@ -37,7 +33,10 @@ export default function AlternateFieldSwitcher({ chatId }: { chatId: string }) {
   const hasAlternates =
     altFields && Object.values(altFields).some((arr) => Array.isArray(arr) && arr.length > 0)
 
-  // Load chat metadata on mount / chatId change
+  const fieldLabel = useCallback((field: string) => {
+    return t(`fields.${field}` as 'fields.description')
+  }, [t])
+
   useEffect(() => {
     if (!chatId || !hasAlternates) return
     let cancelled = false
@@ -49,7 +48,6 @@ export default function AlternateFieldSwitcher({ chatId }: { chatId: string }) {
     return () => { cancelled = true }
   }, [chatId, hasAlternates])
 
-  // Close on outside click
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent) => {
@@ -97,7 +95,7 @@ export default function AlternateFieldSwitcher({ chatId }: { chatId: string }) {
         type="button"
         className={clsx(styles.triggerBtn, open && styles.triggerBtnActive)}
         onClick={() => setOpen((v) => !v)}
-        title="Alternate fields"
+        title={t('alternateFieldSwitcher.title')}
       >
         <Layers size={14} />
         {hasActiveSelection && <span className={styles.badge} />}
@@ -105,21 +103,24 @@ export default function AlternateFieldSwitcher({ chatId }: { chatId: string }) {
 
       {open && (
         <div className={styles.popover}>
-          <div className={styles.popoverTitle}>Alternate Fields</div>
+          <div className={styles.popoverTitle}>{t('alternateFieldSwitcher.panelTitle')}</div>
           {FIELDS.map((field) => {
             const variants = altFields?.[field]
             if (!Array.isArray(variants) || variants.length === 0) return null
             const selectedId = selections[field] || null
+            const label = fieldLabel(field)
 
             return (
               <div key={field} className={styles.fieldRow}>
-                <span className={styles.fieldLabel}>{FIELD_LABELS[field]}</span>
+                <span className={styles.fieldLabel}>{label}</span>
                 <select
+                  name={`alt-field-${field}`}
+                  aria-label={label}
                   className={styles.fieldSelect}
                   value={selectedId || ''}
                   onChange={(e) => handleSelect(field, e.target.value || null)}
                 >
-                  <option value="">Default</option>
+                  <option value="">{t('defaultOption')}</option>
                   {variants.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.label}

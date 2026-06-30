@@ -11,8 +11,8 @@ const APPLY_MAX_SCRIPT_COUNT = 500;
 const APPLY_MAX_PATTERN_LENGTH = 10_000;
 const APPLY_MAX_RESOLVED_TEMPLATE_LENGTH = 100_000;
 const APPLY_VALID_PLACEMENTS = new Set<RegexPlacement>(["user_input", "ai_output", "world_info", "reasoning"]);
-const APPLY_VALID_FLAGS = new Set(["g", "i", "m", "s", "u"]);
-const APPLY_VALID_MACRO_MODES = new Set<RegexMacroMode>(["none", "raw", "escaped"]);
+const APPLY_VALID_FLAGS = new Set(["d", "g", "i", "m", "s", "u", "v", "y"]);
+const APPLY_VALID_MACRO_MODES = new Set<RegexMacroMode>(["none", "raw", "escaped", "after"]);
 
 function isStringRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -58,7 +58,8 @@ function normalizeDisplayScripts(value: unknown, userId: string): RegexScript[] 
     ))) {
       return "script placement is invalid";
     }
-    if (target !== "display") return "only display regex scripts can be applied";
+    const normalizedTarget: RegexTarget[] = Array.isArray(target) ? target : (typeof target === "string" ? [target] : ["display"]);
+    if (!normalizedTarget.includes("display")) return "only display regex scripts can be applied";
     if (!APPLY_VALID_MACRO_MODES.has(substituteMacros as RegexMacroMode)) return "script substitute_macros is invalid";
 
     scripts.push({
@@ -72,7 +73,7 @@ function normalizeDisplayScripts(value: unknown, userId: string): RegexScript[] 
       placement,
       scope: raw.scope === "character" || raw.scope === "chat" ? raw.scope : "global",
       scope_id: typeof raw.scope_id === "string" ? raw.scope_id : null,
-      target,
+      target: normalizedTarget,
       min_depth: typeof raw.min_depth === "number" ? raw.min_depth : null,
       max_depth: typeof raw.max_depth === "number" ? raw.max_depth : null,
       trim_strings: Array.isArray(raw.trim_strings)
@@ -170,7 +171,12 @@ app.post("/apply", async (c) => {
     ? Object.fromEntries(Object.entries(body.dynamic_macros).filter(([, v]) => typeof v === "string")) as Record<string, string>
     : undefined;
 
-  const result = await applyDisplayRegex({
+  const ctxRole = typeof context.role === "string"
+    && (context.role === "user" || context.role === "assistant" || context.role === "system")
+    ? (context.role as "user" | "assistant" | "system")
+    : undefined;
+
+  const applied = await applyDisplayRegex({
     content,
     scripts: scripts.filter((script) => !script.disabled),
     context: {
@@ -179,14 +185,22 @@ app.post("/apply", async (c) => {
       persona_id: typeof context.persona_id === "string" ? context.persona_id : undefined,
       is_user: !!context.is_user,
       depth: typeof context.depth === "number" ? context.depth : 0,
+      ...(typeof context.message_id === "string" ? { message_id: context.message_id } : {}),
+      ...(typeof context.message_index === "number" ? { message_index: context.message_index } : {}),
+      ...(ctxRole ? { role: ctxRole } : {}),
     },
     userId,
     resolvedFindPatterns: normalizeResolvedMap(body.resolved_find_patterns),
     resolvedReplacements: normalizeResolvedMap(body.resolved_replacements),
     dynamicMacros,
+    signal: c.req.raw.signal,
   });
 
-  return c.json({ result });
+  return c.json({
+    result: applied.result,
+    touched_vars: Array.from(applied.touchedVars),
+    cacheable: applied.cacheable,
+  });
 });
 
 // POST /test — test regex
@@ -266,6 +280,25 @@ app.post("/:id/duplicate", (c) => {
   const script = svc.duplicateRegexScript(userId, c.req.param("id"));
   if (!script) return c.json({ error: "Not found" }, 404);
   return c.json(script, 201);
+});
+
+// POST /:id/report-performance — persist slow/timed-out regex warning metadata
+app.post("/:id/report-performance", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const elapsedMs = Number(body?.elapsed_ms);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+    return c.json({ error: "elapsed_ms must be a non-negative number" }, 400);
+  }
+
+  const result = svc.reportRegexScriptPerformance(userId, c.req.param("id"), {
+    elapsedMs,
+    timedOut: !!body?.timed_out,
+    thresholdMs: Number.isFinite(Number(body?.threshold_ms)) ? Number(body.threshold_ms) : undefined,
+    source: typeof body?.source === "string" ? body.source : undefined,
+  });
+  if (!result.script) return c.json({ error: "Not found" }, 404);
+  return c.json(result.script);
 });
 
 // PUT /:id/toggle — quick enable/disable

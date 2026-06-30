@@ -46,6 +46,11 @@
   border: 1px solid var(--lumiverse-border);
 }
 
+.rouletteIcon {
+  background: color-mix(in srgb, #0f9f8f 14%, transparent);
+  color: #0f9f8f;
+}
+
 .itemInfo {
   display: flex;
   flex-direction: column;
@@ -86,6 +91,15 @@
 .itemReasoningMeta {
   font-size: calc(10px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+.itemCachingMeta {
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  color: #d97757;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

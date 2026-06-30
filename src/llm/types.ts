@@ -5,26 +5,86 @@ import type { MacroEnv } from "../macros/types";
 export interface LlmTextPart {
   type: "text";
   text: string;
+  cache_control?: Record<string, unknown>;
 }
 
 export interface LlmImagePart {
   type: "image";
   data: string;      // base64-encoded
   mime_type: string;  // e.g. "image/png", "image/jpeg"
+  cache_control?: Record<string, unknown>;
 }
 
 export interface LlmAudioPart {
   type: "audio";
   data: string;      // base64-encoded
   mime_type: string;  // e.g. "audio/wav", "audio/mp3"
+  cache_control?: Record<string, unknown>;
 }
 
-export type LlmMessagePart = LlmTextPart | LlmImagePart | LlmAudioPart;
+export interface LlmToolUsePart {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  cache_control?: Record<string, unknown>;
+  thought_signature?: string;
+}
+
+export interface LlmToolResultPart {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+  cache_control?: Record<string, unknown>;
+}
+
+export type LlmMessagePart =
+  | LlmTextPart
+  | LlmImagePart
+  | LlmAudioPart
+  | LlmToolUsePart
+  | LlmToolResultPart;
+
+export interface DisplayContentPartSummary {
+  type: string;
+  count: number;
+}
+
+/**
+ * A provider-native reasoning block that must be replayed verbatim on tool-use
+ * continuations to preserve interleaved thinking. Currently produced by
+ * Anthropic (extended/adaptive thinking): a `thinking` block carries the
+ * model's reasoning text plus an opaque `signature` that the server decrypts to
+ * reconstruct the full thinking; a `redacted_thinking` block carries an opaque
+ * encrypted `data` payload. Both are opaque to Lumiverse and must be passed
+ * back unmodified, in order, before the assistant turn's `tool_use` blocks.
+ */
+export interface LlmThinkingBlock {
+  type: "thinking" | "redacted_thinking";
+  /** Reasoning text for `thinking` blocks (may be summarized or empty when display is omitted). */
+  thinking?: string;
+  /** Opaque signature for `thinking` blocks — replay unmodified. */
+  signature?: string;
+  /** Opaque encrypted payload for `redacted_thinking` blocks — replay unmodified. */
+  data?: string;
+}
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
   content: string | LlmMessagePart[];
   name?: string;
+  cache_control?: Record<string, unknown>;
+  /** Provider-returned reasoning payload required by some OpenAI-compatible tool-call continuations. */
+  reasoning_content?: string;
+  /** Provider-native reasoning blocks (Anthropic thinking blocks with
+   *  signatures) replayed verbatim on tool-use continuations for interleaved
+   *  thinking. Providers that don't use this carrier ignore the field. */
+  thinking_blocks?: LlmThinkingBlock[];
+  /** OpenRouter's opaque, normalized reasoning blocks (`reasoning_details`).
+   *  Replayed verbatim (entire sequence, unmodified) on the assistant message
+   *  to preserve chain-of-thought across tool calls. Opaque to Lumiverse. */
+  reasoning_details?: Record<string, unknown>[];
 }
 
 /** Helper: extract the text content from an LlmMessage regardless of format. */
@@ -34,6 +94,69 @@ export function getTextContent(msg: LlmMessage): string {
     .filter((p): p is LlmTextPart => p.type === "text")
     .map((p) => p.text)
     .join("");
+}
+
+export function describeContentForDisplay(
+  content: string | LlmMessagePart[],
+): { text: string; contentParts: DisplayContentPartSummary[] } {
+  if (typeof content === "string") {
+    return { text: content, contentParts: [] };
+  }
+
+  const partCounts = new Map<string, number>();
+  const countPart = (type: string) => {
+    partCounts.set(type, (partCounts.get(type) ?? 0) + 1);
+  };
+
+  const text = content
+    .map((part) => {
+      switch (part.type) {
+        case "text":
+          return part.text;
+        case "image":
+          countPart("image");
+          return `[image: ${part.mime_type}]`;
+        case "audio":
+          countPart("audio");
+          return `[audio: ${part.mime_type}]`;
+        case "tool_use":
+          countPart("tool_use");
+          return `[tool_call: ${part.name}(${JSON.stringify(part.input)})]`;
+        case "tool_result":
+          countPart("tool_result");
+          return `[tool_result${part.is_error ? " (error)" : ""}: ${part.content}]`;
+        default: {
+          const rawType =
+            typeof (part as { type?: unknown }).type === "string"
+              ? (part as { type: string }).type
+              : "part";
+          countPart(rawType);
+          return `[${rawType}]`;
+        }
+      }
+    })
+    .join("\n");
+
+  return {
+    text,
+    contentParts: [...partCounts.entries()].map(([type, count]) => ({
+      type,
+      count,
+    })),
+  };
+}
+
+/**
+ * Flatten message content to a human-readable string for display-only surfaces
+ * (e.g. the dry-run prompt viewer) that can't render multimodal parts. Text is
+ * inlined in order; non-text parts become bracketed placeholders so an
+ * image/audio/tool part is still visible. Unlike {@link getTextContent}, this
+ * never silently drops media — important for a debugging view.
+ */
+export function flattenContentForDisplay(
+  content: string | LlmMessagePart[],
+): string {
+  return describeContentForDisplay(content).text;
 }
 
 export interface GenerationRequest {
@@ -53,6 +176,14 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>; // JSON Schema
   strict?: boolean;
   inputExamples?: Array<Record<string, unknown>>;
+  cache_control?: Record<string, unknown>;
+}
+
+export interface GenerationUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  provider_raw?: Record<string, unknown>;
 }
 
 export interface GenerationParameters {
@@ -71,6 +202,7 @@ export interface ToolCallResult {
   args: Record<string, unknown>;
   /** Provider call ID (e.g. Anthropic `id`, OpenAI `id`). Synthetic UUID for providers that don't supply one. */
   call_id: string;
+  thought_signature?: string;
 }
 
 export interface GenerationResponse {
@@ -79,11 +211,13 @@ export interface GenerationResponse {
   finish_reason: string;
   /** Present when the LLM requested function calls instead of (or in addition to) generating text. */
   tool_calls?: ToolCallResult[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  /** Provider-native reasoning blocks captured this turn (Anthropic), to replay
+   *  on tool-use continuations for interleaved thinking. */
+  thinking_blocks?: LlmThinkingBlock[];
+  /** OpenRouter `reasoning_details` captured this turn, to replay on tool-use
+   *  continuations. */
+  reasoning_details?: Record<string, unknown>[];
+  usage?: GenerationUsage;
 }
 
 export interface StreamChunk {
@@ -92,11 +226,14 @@ export interface StreamChunk {
   finish_reason?: string;
   /** Accumulated function calls (set on the final chunk when finish_reason indicates tool use). */
   tool_calls?: ToolCallResult[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  /** Provider-native reasoning blocks (set on the final chunk alongside
+   *  tool_calls) — Anthropic thinking blocks with signatures for interleaved
+   *  thinking continuations. */
+  thinking_blocks?: LlmThinkingBlock[];
+  /** OpenRouter `reasoning_details`, accumulated across stream chunks and set on
+   *  the final chunk alongside tool_calls. */
+  reasoning_details?: Record<string, unknown>[];
+  usage?: GenerationUsage;
 }
 
 // --- Prompt Assembly Types ---
@@ -122,12 +259,16 @@ export interface AssemblyContext {
   impersonateInput?: string;
   /** For regenerate: exclude this message from chat history (it has a blank swipe). */
   excludeMessageId?: string;
+  /** For regenerate/swipe: content of the active target swipe before it was replaced. */
+  rejectedSwipe?: string;
   /** For group chats: generate a response as this specific character. */
   targetCharacterId?: string;
   /** Council tool results (passed from generate.service when council executes before assembly). */
   councilToolResults?: CouncilToolResultSummary[];
   /** Named council tool results (variable_name → content). */
   councilNamedResults?: Record<string, string>;
+  /** Prior retained council deliberations formatted as a historical baseline block. */
+  councilHistoricalDeliberationBlock?: string;
   /** Pre-computed vector-activated world info entries from the generation pipeline.
    *  When provided, assembly reuses these instead of re-running vector retrieval. */
   precomputedVectorEntries?: import("../services/prompt-assembly.service").VectorActivatedEntry[];
@@ -135,6 +276,9 @@ export interface AssemblyContext {
   regenFeedback?: string;
   /** Where to inject regen feedback: 'system' (last system msg) or 'user' (last user msg). */
   regenFeedbackPosition?: "system" | "user";
+  /** When true, an extension owns this chat's `target:prompt` regex and the
+   *  host skips its own per-message prompt-regex pass. */
+  skipPromptRegex?: boolean;
   /** Pre-fetched data to avoid redundant DB calls during assembly.
    *  When provided, assembly reads from this instead of querying DB. */
   prefetched?: PrefetchedData;
@@ -163,7 +307,7 @@ export interface PrefetchedData {
   worldInfoSources: {
     entries: import("../types/world-book").WorldBookEntry[];
     worldBookIds: string[];
-    bookSourceMap: Map<string, import("../services/prompt-assembly.service").BookSource>;
+    bookSourceMap: Map<string, import("../services/world-info-sources.service").BookSource>;
   };
   /** Group chat members, batch-loaded. */
   groupCharacters?: Map<string, import("../types/character").Character>;
@@ -188,7 +332,7 @@ export interface ActivatedWorldInfoEntry {
   keys: string[];
   source: 'keyword' | 'vector';
   score?: number;
-  bookSource?: 'character' | 'persona' | 'chat' | 'global';
+  bookSource?: 'character' | 'persona' | 'chat' | 'global' | 'peer';
   bookId?: string;
 }
 
@@ -198,8 +342,12 @@ export interface MemoryStats {
   chunksAvailable: number;
   chunksPending: number;
   injectionMethod: "macro" | "fallback" | "disabled";
+  /** How chunks were retrieved: real vector/hybrid search vs. the recency
+   *  fallback (e.g. when the query embedding failed). null score = a
+   *  keyword-only or recency hit with no vector distance. */
+  retrievalMode?: "vector" | "recency" | "empty" | "disabled";
   retrievedChunks: Array<{
-    score: number;
+    score: number | null;
     tokenEstimate: number;
     messageRange: [number, number];
     preview: string;
@@ -306,6 +454,14 @@ export interface AssemblyResult {
       rerankRejected: number;
       topK: number;
       blockerMessages: string[];
+      timingsMs?: {
+        queryBuild: number;
+        queryEmbed: number;
+        search: number;
+        ranking: number;
+        merge: number;
+        total: number;
+      };
     };
   };
   /** Statistics from long-term memory retrieval. */

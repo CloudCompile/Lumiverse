@@ -1,5 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore, type ReactElement } from 'react'
 import { createSandboxFrame } from './sandbox-frame'
+import { scheduleSpindleDomTask } from './browser-scheduler'
 
 export interface SpindleMessageWidgetRenderOptions {
   messageId: string
@@ -17,6 +18,7 @@ interface MessageWidgetRecord extends SpindleMessageWidgetRenderOptions {
 
 const widgetsByMessage = new Map<string, MessageWidgetRecord[]>()
 const listeners = new Set<() => void>()
+const widgetHeightCache = new Map<string, number>()
 let version = 0
 
 export function subscribeMessageWidgets(listener: () => void): () => void {
@@ -81,29 +83,59 @@ export function SpindleMessageWidgets({ messageId }: { messageId?: string }): Re
 
 function MessageWidgetFrame({ widget }: { widget: MessageWidgetRecord }): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const widgetKey = `${widget.extensionId}:${widget.messageId}:${widget.widgetId}:${hashWidgetHtml(widget.html)}`
 
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
-    const frame = createSandboxFrame(widget.extensionId, {
-      html: widget.html,
-      autoResize: true,
-      minHeight: widget.minHeight ?? 40,
-      maxHeight: widget.maxHeight ?? 4000,
-    }, widget.corsProxy)
-    frame.element.setAttribute('data-spindle-message-widget', widget.widgetId)
-    frame.element.setAttribute('data-spindle-extension-id', widget.extensionId)
-    frame.element.style.margin = '12px 0'
-    const unsubscribe = frame.onMessage((payload) => widget.onMessage?.(payload))
-    host.replaceChildren(frame.element)
+
+    let dispose: (() => void) | null = null
+    const cancel = scheduleSpindleDomTask(() => {
+      if (!host.isConnected) return
+
+      const cachedHeight = widgetHeightCache.get(widgetKey)
+      const frame = createSandboxFrame(widget.extensionId, {
+        html: widget.html,
+        autoResize: true,
+        minHeight: widget.minHeight ?? 40,
+        maxHeight: widget.maxHeight ?? 4000,
+        ...(cachedHeight ? { initialHeight: cachedHeight } : {}),
+      }, widget.corsProxy)
+      frame.element.setAttribute('data-spindle-message-widget', widget.widgetId)
+      frame.element.setAttribute('data-spindle-extension-id', widget.extensionId)
+      frame.element.style.margin = '12px 0'
+      const unsubscribe = frame.onMessage((payload) => widget.onMessage?.(payload))
+      const resizeObserver = new ResizeObserver(() => {
+        const height = Math.round(frame.element.getBoundingClientRect().height)
+        if (height > 0) widgetHeightCache.set(widgetKey, height)
+      })
+      resizeObserver.observe(frame.element)
+      host.replaceChildren(frame.element)
+
+      dispose = () => {
+        unsubscribe()
+        resizeObserver.disconnect()
+        frame.destroy()
+        host.replaceChildren()
+      }
+    })
+
     return () => {
-      unsubscribe()
-      frame.destroy()
-      host.replaceChildren()
+      cancel()
+      dispose?.()
     }
-  }, [widget])
+  }, [widget, widgetKey])
 
   return <div ref={hostRef} data-spindle-message-widget-host={widget.widgetId} />
+}
+
+function hashWidgetHtml(html: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < html.length; i += 1) {
+    hash ^= html.charCodeAt(i)
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0
+  }
+  return hash.toString(16)
 }
 
 function notify(): void {

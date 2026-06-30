@@ -382,12 +382,16 @@
   align-items: center;
   gap: 10px;
   flex: 1;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .chanceHint {
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-dim);
-  white-space: nowrap;
+  flex: 1 1 0;
+  min-width: 0;
+  line-height: 1.35;
 }
 
 .memberDivider {
@@ -470,6 +474,43 @@
 
 .toolPillRemove:hover {
   opacity: 1;
+}
+
+.toolHistoryControls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--lumiverse-bg) 70%, transparent);
+}
+
+.toolHistoryRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.toolHistoryInfo {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toolHistoryName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  color: var(--lumiverse-text-muted);
+}
+
+.toolHistoryHint {
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
 }
 
 .noTools {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Plus } from 'lucide-react'
 import { mcpServersApi } from '@/api/mcp-servers'
 import type { McpServerProfile, CreateMcpServerInput } from '@/api/mcp-servers'
@@ -9,6 +10,8 @@ import McpServerItem from './McpServerItem'
 import styles from '../../panels/ConnectionManager.module.css'
 
 export default function McpServerSettings() {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
   const servers = useStore((s) => s.mcpServers)
   const setServers = useStore((s) => s.setMcpServers)
   const addServer = useStore((s) => s.addMcpServer)
@@ -109,7 +112,7 @@ export default function McpServerSettings() {
   }, [])
 
   if (loading) {
-    return <div className={styles.loading}>Loading MCP servers...</div>
+    return <div className={styles.loading}>{t('mcp.loading')}</div>
   }
 
   return (
@@ -120,7 +123,7 @@ export default function McpServerSettings() {
         disabled={creating}
       >
         <Plus size={14} />
-        Add MCP Server
+        {t('mcp.addServer')}
       </button>
 
       {creating && (
@@ -132,7 +135,8 @@ export default function McpServerSettings() {
 
       {servers.length === 0 && !creating && (
         <div className={styles.empty}>
-          No MCP servers configured. Add one to enable external tool access.
+          <div>{t('mcp.noServers')}</div>
+          <div className={styles.emptyHint}>{t('mcp.noServersHint')}</div>
         </div>
       )}
 
@@ -153,11 +157,11 @@ export default function McpServerSettings() {
 
       {deleteTarget && (
         <ConfirmationModal
-          title="Delete MCP Server"
-          message={`Are you sure you want to delete "${deleteTarget.name}"? This will disconnect and remove the server configuration.`}
+          title={t('mcp.deleteTitle')}
+          message={t('mcp.deleteMessage', { name: deleteTarget.name })}
           isOpen={true}
           variant="danger"
-          confirmText="Delete"
+          confirmText={tc('actions.delete')}
           onConfirm={confirmDelete}
           onCancel={() => setDeleteTarget(null)}
         />

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { BookOpen, Globe, User, UserRound } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
@@ -17,6 +18,8 @@ interface Props {
 }
 
 export default function PostImportWorldBookModal({ book, onClose }: Props) {
+  const { t } = useTranslation('modals', { keyPrefix: 'postImportWorldBook' })
+
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const activeChatId = useStore((s) => s.activeChatId)
@@ -34,6 +37,11 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
   const activeCharacter = characters.find((character) => character.id === activeCharacterId) || null
   const activePersona = personas.find((persona) => persona.id === activePersonaId) || null
   const recommendedTarget = activeCharacter ? 'character' : activePersona ? 'persona' : 'global'
+
+  const badgeLabel = (target: 'character' | 'persona' | 'global', available: boolean) => {
+    if (!available) return t('badgeUnavailable')
+    return recommendedTarget === target ? t('badgeRecommended') : t('badgeAvailable')
+  }
 
   const finish = (message: string) => {
     addToast({ type: 'success', message })
@@ -58,9 +66,9 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
         ),
       })
       updateCharacter(activeCharacterId, updated)
-      finish(`Attached "${book.name}" to ${updated.name}.`)
+      finish(t('toastAttachedCharacter', { book: book.name, target: updated.name }))
     } catch (err: any) {
-      setError(err?.body?.error || err?.message || 'Failed to attach book to the current character')
+      setError(err?.body?.error || err?.message || t('errorAttachCharacter'))
     } finally {
       setBusy(null)
     }
@@ -79,9 +87,9 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
         attached_world_book_id: book.id,
       })
       updatePersona(activePersonaId, updated)
-      finish(`Attached "${book.name}" to ${updated.name}.`)
+      finish(t('toastAttachedPersona', { book: book.name, target: updated.name }))
     } catch (err: any) {
-      setError(err?.body?.error || err?.message || 'Failed to attach book to the active persona')
+      setError(err?.body?.error || err?.message || t('errorAttachPersona'))
     } finally {
       setBusy(null)
     }
@@ -97,9 +105,9 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
       }
       const next = Array.from(new Set([...(globalWorldBooks ?? []), book.id]))
       setSetting('globalWorldBooks', next)
-      finish(`Added "${book.name}" to global world books.`)
+      finish(t('toastAddedGlobal', { book: book.name }))
     } catch (err: any) {
-      setError(err?.message || 'Failed to add book to global world books')
+      setError(err?.message || t('errorAddGlobal'))
     } finally {
       setBusy(null)
     }
@@ -109,109 +117,107 @@ export default function PostImportWorldBookModal({ book, onClose }: Props) {
     <ModalShell isOpen onClose={onClose} maxWidth={700} zIndex={10002} className={styles.modal}>
       <div className={styles.header}>
         <div>
-          <div className={styles.eyebrow}>Import Complete</div>
-          <h2 className={styles.title}>Choose where "{book.name}" should be active</h2>
+          <div className={styles.eyebrow}>{t('eyebrow')}</div>
+          <h2 className={styles.title}>{t('title', { name: book.name })}</h2>
         </div>
         <CloseButton onClick={onClose} />
       </div>
 
-      <div className={styles.intro}>
-        <p className={styles.copy}>
-          Standalone imports stay unattached until you pick a target.
-        </p>
-        <p className={styles.copySubtle}>
-          You can attach this lorebook to a character, tie it to the active persona, or make it globally available.
-        </p>
-      </div>
+      <div className={styles.body}>
+        <div className={styles.intro}>
+          <p className={styles.copy}>{t('intro')}</p>
+          <p className={styles.copySubtle}>{t('introSubtle')}</p>
+        </div>
 
-      {error && <div className={styles.error}>{error}</div>}
+        {error && <div className={styles.error}>{error}</div>}
 
-      <div className={styles.actions}>
-        <button
-          type="button"
-          className={clsx(
-            styles.actionCard,
-            recommendedTarget === 'character' && activeCharacter && styles.actionCardRecommended,
-          )}
-          onClick={attachToCharacter}
-          disabled={!activeCharacter || busy !== null}
-        >
-          <div className={styles.actionTopRow}>
-            <span className={styles.actionIcon}><User size={15} /></span>
-            <span className={clsx(styles.actionBadge, !activeCharacter && styles.actionBadgeMuted)}>
-              {activeCharacter
-                ? recommendedTarget === 'character' ? 'Recommended' : 'Available'
-                : 'Unavailable'}
+        <div className={styles.actions}>
+          <button
+            type="button"
+            className={clsx(
+              styles.actionCard,
+              recommendedTarget === 'character' && activeCharacter && styles.actionCardRecommended,
+            )}
+            onClick={attachToCharacter}
+            disabled={!activeCharacter || busy !== null}
+          >
+            <div className={styles.actionTopRow}>
+              <span className={styles.actionIcon}><User size={15} /></span>
+              <span className={clsx(styles.actionBadge, !activeCharacter && styles.actionBadgeMuted)}>
+                {badgeLabel('character', !!activeCharacter)}
+              </span>
+            </div>
+            <span className={styles.actionEyebrow}>{t('characterEyebrow')}</span>
+            <span className={styles.actionTitle}>
+              {activeCharacter ? activeCharacter.name : t('noActiveCharacter')}
             </span>
-          </div>
-          <span className={styles.actionEyebrow}>Current character</span>
-          <span className={styles.actionTitle}>{activeCharacter ? activeCharacter.name : 'No active character'}</span>
-          <span className={styles.actionMeta}>
-            {activeCharacter
-              ? 'Attach this lorebook to the character you are currently chatting with.'
-              : 'Open a character chat first, then attach the lorebook here.'}
-          </span>
-          <span className={styles.actionHint}>{busy === 'character' ? 'Attaching...' : 'Attach now'}</span>
-        </button>
-
-        <button
-          type="button"
-          className={clsx(
-            styles.actionCard,
-            recommendedTarget === 'persona' && activePersona && styles.actionCardRecommended,
-          )}
-          onClick={attachToPersona}
-          disabled={!activePersona || busy !== null}
-        >
-          <div className={styles.actionTopRow}>
-            <span className={styles.actionIcon}><UserRound size={15} /></span>
-            <span className={clsx(styles.actionBadge, !activePersona && styles.actionBadgeMuted)}>
-              {activePersona
-                ? recommendedTarget === 'persona' ? 'Recommended' : 'Available'
-                : 'Unavailable'}
+            <span className={styles.actionMeta}>
+              {activeCharacter ? t('characterMetaActive') : t('characterMetaInactive')}
             </span>
-          </div>
-          <span className={styles.actionEyebrow}>Active persona</span>
-          <span className={styles.actionTitle}>{activePersona ? activePersona.name : 'No active persona'}</span>
-          <span className={styles.actionMeta}>
-            {activePersona
-              ? 'Use this lorebook whenever this persona is active.'
-              : 'Set an active persona first if you want the lorebook to follow that persona.'}
-          </span>
-          <span className={styles.actionHint}>{busy === 'persona' ? 'Attaching...' : 'Attach now'}</span>
-        </button>
-
-        <button
-          type="button"
-          className={clsx(
-            styles.actionCard,
-            recommendedTarget === 'global' && styles.actionCardRecommended,
-          )}
-          onClick={addToGlobalBooks}
-          disabled={busy !== null}
-        >
-          <div className={styles.actionTopRow}>
-            <span className={styles.actionIcon}><Globe size={15} /></span>
-            <span className={styles.actionBadge}>
-              {recommendedTarget === 'global' ? 'Recommended' : 'Available'}
+            <span className={styles.actionHint}>
+              {busy === 'character' ? t('attaching') : t('attachNow')}
             </span>
-          </div>
-          <span className={styles.actionEyebrow}>Global books</span>
-          <span className={styles.actionTitle}>Always active</span>
-          <span className={styles.actionMeta}>
-            Make this lorebook available in every chat until you remove it from global books.
-          </span>
-          <span className={styles.actionHint}>{busy === 'global' ? 'Saving...' : 'Add globally'}</span>
-        </button>
+          </button>
+
+          <button
+            type="button"
+            className={clsx(
+              styles.actionCard,
+              recommendedTarget === 'persona' && activePersona && styles.actionCardRecommended,
+            )}
+            onClick={attachToPersona}
+            disabled={!activePersona || busy !== null}
+          >
+            <div className={styles.actionTopRow}>
+              <span className={styles.actionIcon}><UserRound size={15} /></span>
+              <span className={clsx(styles.actionBadge, !activePersona && styles.actionBadgeMuted)}>
+                {badgeLabel('persona', !!activePersona)}
+              </span>
+            </div>
+            <span className={styles.actionEyebrow}>{t('personaEyebrow')}</span>
+            <span className={styles.actionTitle}>
+              {activePersona ? activePersona.name : t('noActivePersona')}
+            </span>
+            <span className={styles.actionMeta}>
+              {activePersona ? t('personaMetaActive') : t('personaMetaInactive')}
+            </span>
+            <span className={styles.actionHint}>
+              {busy === 'persona' ? t('attaching') : t('attachNow')}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className={clsx(
+              styles.actionCard,
+              recommendedTarget === 'global' && styles.actionCardRecommended,
+            )}
+            onClick={addToGlobalBooks}
+            disabled={busy !== null}
+          >
+            <div className={styles.actionTopRow}>
+              <span className={styles.actionIcon}><Globe size={15} /></span>
+              <span className={styles.actionBadge}>
+                {badgeLabel('global', true)}
+              </span>
+            </div>
+            <span className={styles.actionEyebrow}>{t('globalEyebrow')}</span>
+            <span className={styles.actionTitle}>{t('globalTitle')}</span>
+            <span className={styles.actionMeta}>{t('globalMeta')}</span>
+            <span className={styles.actionHint}>
+              {busy === 'global' ? t('saving') : t('addGlobally')}
+            </span>
+          </button>
+        </div>
       </div>
 
       <div className={styles.footer}>
         <div className={styles.footerHint}>
           <BookOpen size={13} />
-          <span>You can still attach it later from the character, persona, or world-book panel.</span>
+          <span>{t('footerHint')}</span>
         </div>
         <button type="button" className={styles.skipBtn} onClick={onClose}>
-          Skip for now
+          {t('skipForNow')}
         </button>
       </div>
     </ModalShell>

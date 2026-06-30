@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Star, Pencil } from 'lucide-react'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import { getTagColor } from '@/lib/tagColors'
@@ -28,6 +29,7 @@ export default memo(function CharacterRow({
   onToggleFavorite,
   onToggleBatch,
 }: CharacterRowProps) {
+  const { t } = useTranslation('panels')
   const avatarUrl = getCharacterAvatarThumbUrl(character) ?? ''
   const tags = character.tags?.slice(0, 3) || []
 
@@ -70,7 +72,7 @@ export default memo(function CharacterRow({
       <div className={styles.info}>
         <span className={styles.name}>{character.name}</span>
         {character.creator && (
-          <span className={styles.creator}>by {character.creator}</span>
+          <span className={styles.creator}>{t('characterProfile.byCreator', { creator: character.creator })}</span>
         )}
         {tags.length > 0 && (
           <div className={styles.tags}>
@@ -97,7 +99,7 @@ export default memo(function CharacterRow({
             e.stopPropagation()
             onEdit(character.id)
           }}
-          title="Edit character"
+          title={t('characterBrowser.editCharacter')}
         >
           <Pencil size={12} />
         </button>
@@ -110,7 +112,7 @@ export default memo(function CharacterRow({
             e.stopPropagation()
             onToggleFavorite(character.id)
           }}
-          title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+          title={isFavorite ? t('characterBrowser.removeFromFavorites') : t('characterBrowser.addToFavorites')}
         >
           <Star size={14} fill={isFavorite ? 'currentColor' : 'none'} />
         </button>

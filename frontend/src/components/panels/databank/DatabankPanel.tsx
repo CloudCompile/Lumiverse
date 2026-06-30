@@ -1,11 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Database, Plus, Trash2, Upload, Search, FileText, RefreshCw, Globe, User, MessageSquare, X, ChevronDown, Check } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { Database, Plus, Trash2, Upload, Search, FileText, RefreshCw, Globe, User, MessageSquare, X, ChevronDown, Check, Combine, ArrowLeft, Save } from 'lucide-react'
 import { useStore } from '@/store'
 import { databankApi } from '@/api/databank'
 import { settingsApi } from '@/api/settings'
 import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
 import NumericInput from '@/components/shared/NumericInput'
+import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
+import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { Databank, DatabankDocument } from '@/api/databank'
 import type { DatabankSettings } from '@/types/databank-settings'
 import styles from './DatabankPanel.module.css'
@@ -35,16 +38,25 @@ function formatFileSize(bytes: number): string {
 }
 
 function StatusBadge({ status }: { status: DatabankDocument['status'] }) {
+  const { t } = useTranslation('panels')
   const cls = {
     pending: styles.statusPending,
     processing: styles.statusProcessing,
     ready: styles.statusReady,
     error: styles.statusError,
   }[status]
-  return <span className={`${styles.statusBadge} ${cls}`}>{status}</span>
+  return <span className={`${styles.statusBadge} ${cls}`}>{t(`databankPanel.status.${status}`)}</span>
+}
+
+function scopeLabel(scope: string, t: (key: string) => string): string {
+  if (scope === 'global') return t('databankPanel.scopeGlobal')
+  if (scope === 'character') return t('databankPanel.scopeCharacter')
+  if (scope === 'chat') return t('databankPanel.scopeChat')
+  return scope
 }
 
 export default function DatabankPanel() {
+  const { t } = useTranslation('panels')
   const {
     databanks, databankDocuments, selectedDatabankId, databankScopeFilter,
     setDatabanks, addDatabank, removeDatabank, updateDatabank: updateBankStore,
@@ -62,6 +74,15 @@ export default function DatabankPanel() {
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Document editor ──
+  const [editingDocId, setEditingDocId] = useState<string | null>(null)
+  const [editingName, setEditingName] = useState('')
+  const [editingContent, setEditingContent] = useState('')
+  const [editingDirty, setEditingDirty] = useState(false)
+  const [editorLoading, setEditorLoading] = useState(false)
+  const [editorSaving, setEditorSaving] = useState(false)
+  const [editorError, setEditorError] = useState<string | null>(null)
 
   // ── Cross-reference: all user databanks (for selectors) ──
   const [allBanks, setAllBanks] = useState<Databank[]>([])
@@ -113,14 +134,14 @@ export default function DatabankPanel() {
     if (!databankSettingsLoadedRef.current || !databankSettingsDirtyRef.current) return
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     setDatabankSettingsSaving(true)
-    setDatabankSettingsStatus('Saving databank settings...')
+    setDatabankSettingsStatus(t('databankPanel.savingSettings'))
     saveTimerRef.current = setTimeout(async () => {
       try {
         await settingsApi.put('databankSettings', databankSettings)
         databankSettingsDirtyRef.current = false
-        setDatabankSettingsStatus('Databank settings saved')
+        setDatabankSettingsStatus(t('databankPanel.settingsSaved'))
       } catch (e: any) {
-        setDatabankSettingsStatus(e?.body?.error || e?.message || 'Failed to save databank settings')
+        setDatabankSettingsStatus(e?.body?.error || e?.message || t('databankPanel.settingsSaveFailed'))
       } finally {
         setDatabankSettingsSaving(false)
       }
@@ -128,7 +149,7 @@ export default function DatabankPanel() {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     }
-  }, [databankSettings])
+  }, [databankSettings, t])
 
   // Load character databank bindings
   useEffect(() => {
@@ -199,7 +220,7 @@ export default function DatabankPanel() {
       return
     }
     try {
-      const result = await databankApi.listDocuments(selectedDatabankId)
+      const result = await databankApi.listDocuments(selectedDatabankId, { limit: 1000 })
       setDatabankDocuments(result.data)
     } catch {
       setDatabankDocuments([])
@@ -214,7 +235,7 @@ export default function DatabankPanel() {
     if (hasProcessing && selectedDatabankId) {
       pollRef.current = setInterval(async () => {
         try {
-          const result = await databankApi.listDocuments(selectedDatabankId)
+          const result = await databankApi.listDocuments(selectedDatabankId, { limit: 1000 })
           setDatabankDocuments(result.data)
           const stillProcessing = result.data.some((d) => d.status === 'pending' || d.status === 'processing')
           if (!stillProcessing && pollRef.current) {
@@ -236,7 +257,7 @@ export default function DatabankPanel() {
         : databankScopeFilter === 'chat' ? activeChatId
         : undefined
       const bank = await databankApi.create({
-        name: 'New Databank',
+        name: t('databankPanel.newDatabank'),
         scope: databankScopeFilter,
         scope_id: scopeId || undefined,
       })
@@ -245,7 +266,7 @@ export default function DatabankPanel() {
     } catch (e: any) {
       setError(e.message)
     }
-  }, [databankScopeFilter, activeCharacterId, activeChatId, addDatabank, setSelectedDatabankId])
+  }, [databankScopeFilter, activeCharacterId, activeChatId, addDatabank, setSelectedDatabankId, t])
 
   // ── Delete bank ──
   const handleDeleteBank = useCallback(async () => {
@@ -307,10 +328,10 @@ export default function DatabankPanel() {
       updateDatabankDocument(docId, { status: 'pending', errorMessage: null })
       await databankApi.reprocessDocument(selectedDatabankId, docId)
     } catch (e: any) {
-      setError(e?.body?.error || e?.message || 'Failed to reprocess document')
+      setError(e?.body?.error || e?.message || t('databankPanel.reprocessDocFailed'))
       await loadDocs()
     }
-  }, [selectedDatabankId, updateDatabankDocument, loadDocs])
+  }, [selectedDatabankId, updateDatabankDocument, loadDocs, t])
 
   const handleReprocessAll = useCallback(async () => {
     const docsToReprocess = databankDocuments.filter((doc) => doc.status !== 'pending' && doc.status !== 'processing')
@@ -324,12 +345,49 @@ export default function DatabankPanel() {
         await databankApi.reprocessDocument(selectedDatabankId, docId)
       }
     } catch (e: any) {
-      setError(e?.body?.error || e?.message || 'Failed to reprocess databank documents')
+      setError(e?.body?.error || e?.message || t('databankPanel.reprocessAllFailed'))
       await loadDocs()
     } finally {
       setReprocessingAll(false)
     }
-  }, [selectedDatabankId, databankDocuments, updateDatabankDocument, loadDocs])
+  }, [selectedDatabankId, databankDocuments, updateDatabankDocument, loadDocs, t])
+
+  // ── Fuse ──
+  const [fusePickerOpen, setFusePickerOpen] = useState(false)
+  const [fusing, setFusing] = useState(false)
+  const [fuseStatus, setFuseStatus] = useState<string | null>(null)
+  const [pendingFuse, setPendingFuse] = useState<{ sourceBankId: string; sourceName: string; sourceCount: number } | null>(null)
+
+  const requestFuse = useCallback((sourceBankId: string, sourceName: string, sourceCount: number) => {
+    if (!selectedDatabankId) return
+    setFusePickerOpen(false)
+    setPendingFuse({ sourceBankId, sourceName, sourceCount })
+  }, [selectedDatabankId])
+
+  const confirmFuse = useCallback(async () => {
+    if (!selectedDatabankId || !pendingFuse) return
+    setError(null)
+    setFuseStatus(null)
+    setFusing(true)
+    try {
+      const result = await databankApi.fuse(selectedDatabankId, pendingFuse.sourceBankId)
+      removeDatabank(pendingFuse.sourceBankId)
+      updateBankStore(selectedDatabankId, {
+        name: result.databank.name,
+        description: result.databank.description,
+        documentCount: result.databank.documentCount,
+      })
+      setFuseStatus(t('databankPanel.fuseResult', { moved: result.moved, skipped: result.skipped }))
+      // Refresh document list and the cross-reference bank list
+      await loadDocs()
+      databankApi.list({ limit: 200 }).then((r) => setAllBanks(r.data)).catch(() => {})
+      setPendingFuse(null)
+    } catch (e: any) {
+      setError(e?.body?.error || e?.message || t('databankPanel.fuseFailed'))
+    } finally {
+      setFusing(false)
+    }
+  }, [selectedDatabankId, pendingFuse, removeDatabank, updateBankStore, loadDocs, t])
 
   // ── Scrape URL ──
   const [scrapeUrl, setScrapeUrl] = useState('')
@@ -344,11 +402,77 @@ export default function DatabankPanel() {
       addDatabankDocument(doc)
       setScrapeUrl('')
     } catch (e: any) {
-      setError(e.body?.error || e.message || 'Failed to scrape URL')
+      setError(e.body?.error || e.message || t('databankPanel.scrapeFailed'))
     } finally {
       setScraping(false)
     }
-  }, [selectedDatabankId, scrapeUrl, addDatabankDocument])
+  }, [selectedDatabankId, scrapeUrl, addDatabankDocument, t])
+
+  // ── Open document editor ──
+  const handleOpenDocEditor = useCallback(async (doc: DatabankDocument) => {
+    if (!selectedDatabankId) return
+    setEditingDocId(doc.id)
+    setEditingName(doc.name)
+    setEditingContent('')
+    setEditingDirty(false)
+    setEditorError(null)
+    setEditorLoading(true)
+    try {
+      const result = await databankApi.getDocumentContent(selectedDatabankId, doc.id)
+      setEditingContent(result.content ?? '')
+    } catch (e: any) {
+      setEditorError(e?.body?.error || e?.message || t('databankPanel.loadDocFailed'))
+    } finally {
+      setEditorLoading(false)
+    }
+  }, [selectedDatabankId, t])
+
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false)
+
+  const closeDocEditor = useCallback(() => {
+    setEditingDocId(null)
+    setEditingContent('')
+    setEditingName('')
+    setEditingDirty(false)
+    setEditorError(null)
+    setDiscardConfirmOpen(false)
+  }, [])
+
+  const handleCloseDocEditor = useCallback(() => {
+    if (editingDirty) {
+      setDiscardConfirmOpen(true)
+      return
+    }
+    closeDocEditor()
+  }, [editingDirty, closeDocEditor])
+
+  const handleSaveDocEditor = useCallback(async () => {
+    if (!selectedDatabankId || !editingDocId) return
+    setEditorError(null)
+    setEditorSaving(true)
+    try {
+      const updated = await databankApi.updateDocumentContent(selectedDatabankId, editingDocId, editingContent)
+      updateDatabankDocument(updated.id, {
+        fileSize: updated.fileSize,
+        contentHash: updated.contentHash,
+        mimeType: updated.mimeType,
+        filePath: updated.filePath,
+        status: updated.status,
+        errorMessage: updated.errorMessage,
+        totalChunks: updated.totalChunks,
+        updatedAt: updated.updatedAt,
+      })
+      setEditingDirty(false)
+      // Return to the list so the user sees the reprocessing badge tick over.
+      setEditingDocId(null)
+      setEditingContent('')
+      setEditingName('')
+    } catch (e: any) {
+      setEditorError(e?.body?.error || e?.message || t('databankPanel.saveDocFailed'))
+    } finally {
+      setEditorSaving(false)
+    }
+  }, [selectedDatabankId, editingDocId, editingContent, updateDatabankDocument, t])
 
   // ── Rename document ──
   const handleRenameDoc = useCallback(async (docId: string, newName: string) => {
@@ -377,6 +501,75 @@ export default function DatabankPanel() {
   const activeCharBanks = allBanks.filter((b) => charDatabankIds.includes(b.id))
   const activeChatBanks = allBanks.filter((b) => chatDatabankIds.includes(b.id))
 
+  // ── Document editor view ──
+  if (editingDocId) {
+    return (
+      <div className={styles.panel}>
+        <div className={styles.editorHeader}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handleCloseDocEditor}
+            title={t('databankPanel.backToDocuments')}
+          >
+            <ArrowLeft size={14} />
+          </button>
+          <div className={styles.editorTitleGroup}>
+            <div className={styles.editorTitle}>{editingName || t('databankPanel.untitledDocument')}</div>
+            <div className={styles.editorSubtitle}>
+              {editorLoading ? t('databankPanel.loadingContent') : editingDirty ? t('databankPanel.unsavedChanges') : t('databankPanel.editsRechunkHint')}
+            </div>
+          </div>
+          <button
+            type="button"
+            className={styles.secondaryBtn}
+            onClick={handleSaveDocEditor}
+            disabled={editorSaving || editorLoading || !editingDirty}
+            title={t('databankPanel.saveAndReprocess')}
+          >
+            <Save size={13} />
+            <span>{editorSaving ? t('databankPanel.saving') : t('databankPanel.save')}</span>
+          </button>
+        </div>
+        {editorError && (
+          <div style={{ color: 'var(--lumiverse-danger)', fontSize: 11, padding: '0 4px' }}>{editorError}</div>
+        )}
+        <div className={styles.editorBody}>
+          {editorLoading ? (
+            <div className={styles.emptyState}>
+              <RefreshCw size={20} className={`${styles.emptyIcon} ${styles.spin}`} />
+              <div className={styles.emptyText}>{t('databankPanel.loadingDocument')}</div>
+            </div>
+          ) : (
+            <ExpandableTextarea
+              className={styles.editorTextarea}
+              value={editingContent}
+              onChange={(value) => {
+                setEditingContent(value)
+                setEditingDirty(true)
+              }}
+              title={editingName || t('databankPanel.document')}
+              placeholder={t('databankPanel.editContentPlaceholder')}
+              spellCheck={false}
+              markdownOnly
+            />
+          )}
+        </div>
+
+        <ConfirmationModal
+          isOpen={discardConfirmOpen}
+          onConfirm={closeDocEditor}
+          onCancel={() => setDiscardConfirmOpen(false)}
+          title={t('databankPanel.discardTitle')}
+          message={t('databankPanel.discardMessage')}
+          variant="warning"
+          confirmText={t('databankPanel.discard')}
+          cancelText={t('databankPanel.keepEditing')}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className={styles.panel}>
       {/* Cross-reference: Character attachments */}
@@ -385,7 +578,7 @@ export default function DatabankPanel() {
           <div className={styles.attachHeader}>
             <User size={12} className={styles.attachIcon} />
             <span className={styles.attachLabel}>
-              {characters.find(c => c.id === activeCharacterId)?.name || 'Character'} Databanks
+              {t('databankPanel.characterDatabanks', { name: characters.find(c => c.id === activeCharacterId)?.name || t('databankPanel.character') })}
             </span>
             <button
               type="button"
@@ -393,14 +586,14 @@ export default function DatabankPanel() {
               onClick={() => setCharPickerOpen((p) => !p)}
             >
               <Plus size={11} />
-              <span>Attach</span>
+              <span>{t('databankPanel.attach')}</span>
               <ChevronDown size={10} className={charPickerOpen ? styles.chevronOpen : ''} />
             </button>
           </div>
           {charPickerOpen && (
             <div className={styles.attachPicker}>
               {allBanks.length === 0 ? (
-                <div className={styles.attachPickerEmpty}>No databanks available</div>
+                <div className={styles.attachPickerEmpty}>{t('databankPanel.noDatabanksAvailable')}</div>
               ) : (
                 allBanks.map((b) => {
                   const isActive = charDatabankIds.includes(b.id)
@@ -413,7 +606,7 @@ export default function DatabankPanel() {
                     >
                       <span className={styles.attachCheck}>{isActive ? <Check size={11} /> : null}</span>
                       <span className={styles.attachPickerName}>{b.name}</span>
-                      <span className={styles.attachPickerScope}>{b.scope}</span>
+                      <span className={styles.attachPickerScope}>{scopeLabel(b.scope, t)}</span>
                     </button>
                   )
                 })
@@ -433,7 +626,7 @@ export default function DatabankPanel() {
             </div>
           )}
           {activeCharBanks.length === 0 && !charPickerOpen && (
-            <span className={styles.attachHint}>No databanks attached to this character</span>
+            <span className={styles.attachHint}>{t('databankPanel.noCharacterAttached')}</span>
           )}
         </div>
       )}
@@ -443,21 +636,21 @@ export default function DatabankPanel() {
         <div className={styles.attachSection}>
           <div className={styles.attachHeader}>
             <MessageSquare size={12} className={styles.attachIcon} />
-            <span className={styles.attachLabel}>This Chat</span>
+            <span className={styles.attachLabel}>{t('databankPanel.thisChat')}</span>
             <button
               type="button"
               className={styles.attachAddBtn}
               onClick={() => setChatPickerOpen((p) => !p)}
             >
               <Plus size={11} />
-              <span>Attach</span>
+              <span>{t('databankPanel.attach')}</span>
               <ChevronDown size={10} className={chatPickerOpen ? styles.chevronOpen : ''} />
             </button>
           </div>
           {chatPickerOpen && (
             <div className={styles.attachPicker}>
               {allBanks.length === 0 ? (
-                <div className={styles.attachPickerEmpty}>No databanks available</div>
+                <div className={styles.attachPickerEmpty}>{t('databankPanel.noDatabanksAvailable')}</div>
               ) : (
                 allBanks.map((b) => {
                   const isActive = chatDatabankIds.includes(b.id)
@@ -470,7 +663,7 @@ export default function DatabankPanel() {
                     >
                       <span className={styles.attachCheck}>{isActive ? <Check size={11} /> : null}</span>
                       <span className={styles.attachPickerName}>{b.name}</span>
-                      <span className={styles.attachPickerScope}>{b.scope}</span>
+                      <span className={styles.attachPickerScope}>{scopeLabel(b.scope, t)}</span>
                     </button>
                   )
                 })
@@ -490,7 +683,7 @@ export default function DatabankPanel() {
             </div>
           )}
           {activeChatBanks.length === 0 && !chatPickerOpen && (
-            <span className={styles.attachHint}>No databanks attached to this chat</span>
+            <span className={styles.attachHint}>{t('databankPanel.noChatAttached')}</span>
           )}
         </div>
       )}
@@ -503,7 +696,7 @@ export default function DatabankPanel() {
             className={`${styles.scopeBtn} ${databankScopeFilter === s ? styles.scopeBtnActive : ''}`}
             onClick={() => setDatabankScopeFilter(s)}
           >
-            {s === 'global' ? 'Global' : s === 'character' ? 'Character' : 'Chat'}
+            {s === 'global' ? t('databankPanel.scopeGlobal') : s === 'character' ? t('databankPanel.scopeCharacter') : t('databankPanel.scopeChat')}
           </button>
         ))}
       </div>
@@ -511,16 +704,16 @@ export default function DatabankPanel() {
       <div className={styles.bankDetails}>
         <div className={styles.settingsHeaderRow}>
           <div>
-            <div className={styles.settingsTitle}>Databank Retrieval</div>
-            <div className={styles.settingsHint}>Applies to all databanks. Reprocess existing documents after changing chunk sizes.</div>
+            <div className={styles.settingsTitle}>{t('databankPanel.retrievalTitle')}</div>
+            <div className={styles.settingsHint}>{t('databankPanel.retrievalHint')}</div>
           </div>
           <span className={styles.settingsStatus}>
-            {databankSettingsLoading ? 'Loading...' : databankSettingsSaving ? 'Saving...' : databankSettingsStatus ?? 'Ready'}
+            {databankSettingsLoading ? t('databankPanel.loading') : databankSettingsSaving ? t('databankPanel.saving') : databankSettingsStatus ?? t('databankPanel.ready')}
           </span>
         </div>
         <div className={styles.settingsGrid}>
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Chunk Target Tokens</label>
+            <label className={styles.fieldLabel}>{t('databankPanel.chunkTargetTokens')}</label>
             <NumericInput
               className={styles.fieldInput}
               min={200}
@@ -532,7 +725,7 @@ export default function DatabankPanel() {
             />
           </div>
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Chunk Max Tokens</label>
+            <label className={styles.fieldLabel}>{t('databankPanel.chunkMaxTokens')}</label>
             <NumericInput
               className={styles.fieldInput}
               min={200}
@@ -544,7 +737,7 @@ export default function DatabankPanel() {
             />
           </div>
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Chunk Overlap Tokens</label>
+            <label className={styles.fieldLabel}>{t('databankPanel.chunkOverlapTokens')}</label>
             <NumericInput
               className={styles.fieldInput}
               min={0}
@@ -556,7 +749,7 @@ export default function DatabankPanel() {
             />
           </div>
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Retrieved Chunks</label>
+            <label className={styles.fieldLabel}>{t('databankPanel.retrievedChunks')}</label>
             <NumericInput
               className={styles.fieldInput}
               min={1}
@@ -576,15 +769,15 @@ export default function DatabankPanel() {
           className={`${styles.bankSelect} ${styles.scopeCharPicker}`}
           value={activeCharacterId || ''}
           disabled
-          title="Automatically scoped to the active character"
+          title={t('databankPanel.autoScopedCharacter')}
         >
-          <option value="">{activeCharacterId ? characters.find(c => c.id === activeCharacterId)?.name || 'Active Character' : 'No character active'}</option>
+          <option value="">{activeCharacterId ? characters.find(c => c.id === activeCharacterId)?.name || t('databankPanel.activeCharacter') : t('databankPanel.noCharacterActive')}</option>
         </select>
       )}
 
       {/* Chat scope hint */}
       {databankScopeFilter === 'chat' && !activeChatId && (
-        <div className={styles.emptyHint}>Open a chat to manage chat-scoped banks</div>
+        <div className={styles.emptyHint}>{t('databankPanel.openChatForBanks')}</div>
       )}
 
       {/* Bank selector bar */}
@@ -594,28 +787,72 @@ export default function DatabankPanel() {
           value={selectedDatabankId || ''}
           onChange={(e) => setSelectedDatabankId(e.target.value || null)}
         >
-          <option value="">Select a databank...</option>
+          <option value="">{t('databankPanel.selectDatabank')}</option>
           {databanks.map((b) => (
             <option key={b.id} value={b.id}>{b.name} ({b.documentCount ?? 0})</option>
           ))}
         </select>
-        <button className={styles.actionBtn} onClick={handleCreate} title="Create databank">
+        <button className={styles.actionBtn} onClick={handleCreate} title={t('databankPanel.createDatabank')}>
           <Plus size={14} />
         </button>
         {selectedDatabankId && (
-          <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={handleDeleteBank} title="Delete databank">
-            <Trash2 size={14} />
-          </button>
+          <>
+            <button
+              className={styles.actionBtn}
+              onClick={() => setFusePickerOpen((p) => !p)}
+              title={t('databankPanel.fuseIntoThis')}
+              disabled={fusing}
+            >
+              <Combine size={14} className={fusing ? styles.spin : ''} />
+            </button>
+            <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={handleDeleteBank} title={t('databankPanel.deleteDatabank')}>
+              <Trash2 size={14} />
+            </button>
+          </>
         )}
       </div>
 
+      {selectedDatabankId && fusePickerOpen && (
+        <div className={styles.attachPicker}>
+          {(() => {
+            const candidates = allBanks.filter((b) => b.id !== selectedDatabankId)
+            if (candidates.length === 0) {
+              return <div className={styles.attachPickerEmpty}>{t('databankPanel.noOtherToFuse')}</div>
+            }
+            return (
+              <>
+                <div className={styles.fusePickerHint}>
+                  {t('databankPanel.fusePickerHint', { name: databanks.find((b) => b.id === selectedDatabankId)?.name ?? '' })}
+                </div>
+                {candidates.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    className={styles.attachPickerItem}
+                    onClick={() => requestFuse(b.id, b.name, b.documentCount ?? 0)}
+                    disabled={fusing}
+                  >
+                    <span className={styles.attachCheck}><Combine size={11} /></span>
+                    <span className={styles.attachPickerName}>{b.name}</span>
+                    <span className={styles.attachPickerScope}>
+                      {t('databankPanel.docCountScope', { count: b.documentCount ?? 0, scope: scopeLabel(b.scope, t) })}
+                    </span>
+                  </button>
+                ))}
+              </>
+            )
+          })()}
+        </div>
+      )}
+
+      {fuseStatus && <div className={styles.fuseStatus}>{fuseStatus}</div>}
       {error && <div style={{ color: 'var(--lumiverse-danger)', fontSize: 11, padding: '0 4px' }}>{error}</div>}
 
       {/* Bank details */}
       {selectedBank && (
         <div className={styles.bankDetails}>
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Name</label>
+            <label className={styles.fieldLabel}>{t('databankPanel.name')}</label>
             <input
               className={styles.fieldInput}
               value={selectedBank.name}
@@ -626,7 +863,7 @@ export default function DatabankPanel() {
             />
           </div>
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>Description</label>
+            <label className={styles.fieldLabel}>{t('databankPanel.description')}</label>
             <textarea
               className={styles.fieldInput}
               rows={2}
@@ -638,7 +875,7 @@ export default function DatabankPanel() {
             />
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span className={styles.scopeBadge}>{selectedBank.scope}</span>
+            <span className={styles.scopeBadge}>{scopeLabel(selectedBank.scope, t)}</span>
           </div>
         </div>
       )}
@@ -651,12 +888,12 @@ export default function DatabankPanel() {
               className={styles.secondaryBtn}
               onClick={handleReprocessAll}
               disabled={reprocessingAll || reprocessableDocs.length === 0}
-              title="Reprocess all documents in this databank"
+              title={t('databankPanel.reprocessAllTitle')}
             >
               <RefreshCw size={13} className={reprocessingAll ? styles.spin : ''} />
-              <span>{reprocessingAll ? 'Reprocessing...' : 'Reprocess All'}</span>
+              <span>{reprocessingAll ? t('databankPanel.reprocessing') : t('databankPanel.reprocessAll')}</span>
             </button>
-            <span className={styles.toolbarHint}>Needed for existing documents after chunk-size changes.</span>
+            <span className={styles.toolbarHint}>{t('databankPanel.reprocessAllHint')}</span>
           </div>
           <div
             className={`${styles.uploadZone} ${dragging ? styles.uploadZoneDragging : ''}`}
@@ -666,7 +903,7 @@ export default function DatabankPanel() {
             onClick={() => fileInputRef.current?.click()}
           >
             <Upload size={24} className={styles.uploadIcon} />
-            <span>{loading ? 'Uploading...' : 'Drop files here or click to browse'}</span>
+            <span>{loading ? t('databankPanel.uploading') : t('databankPanel.dropFiles')}</span>
             <span className={styles.uploadHint}>.txt, .md, .csv, .json, .xml, .html, .yaml, .log, .rst, .rtf</span>
           </div>
           <input
@@ -686,7 +923,7 @@ export default function DatabankPanel() {
           <Globe size={14} className={styles.docSearchIcon} />
           <input
             className={styles.docSearchInput}
-            placeholder="Paste a URL to scrape..."
+            placeholder={t('databankPanel.scrapeUrlPlaceholder')}
             value={scrapeUrl}
             onChange={(e) => setScrapeUrl(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handleScrape() }}
@@ -696,7 +933,7 @@ export default function DatabankPanel() {
             className={styles.actionBtn}
             onClick={handleScrape}
             disabled={scraping || !scrapeUrl.trim()}
-            title="Scrape web page"
+            title={t('databankPanel.scrapeWebPage')}
           >
             {scraping ? <RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Plus size={14} />}
           </button>
@@ -709,7 +946,7 @@ export default function DatabankPanel() {
           <Search size={14} className={styles.docSearchIcon} />
           <input
             className={styles.docSearchInput}
-            placeholder="Search documents..."
+            placeholder={t('databankPanel.searchDocuments')}
             value={docSearch}
             onChange={(e) => setDocSearch(e.target.value)}
           />
@@ -720,22 +957,29 @@ export default function DatabankPanel() {
       {selectedDatabankId && (
         <div className={styles.docList}>
           {filteredDocs.map((doc) => (
-            <div key={doc.id} className={styles.docRow}>
+            <div
+              key={doc.id}
+              className={styles.docRow}
+              onClick={() => handleOpenDocEditor(doc)}
+              title={t('databankPanel.openDocument')}
+              role="button"
+            >
               <FileText size={16} className={styles.docIcon} />
               <div className={styles.docInfo}>
                 <input
                   className={styles.docNameInput}
                   defaultValue={doc.name}
+                  onClick={(e) => e.stopPropagation()}
                   onBlur={(e) => {
                     const val = e.target.value.trim()
                     if (val && val !== doc.name) handleRenameDoc(doc.id, val)
                   }}
                   onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-                  title="Click to rename"
+                  title={t('databankPanel.clickToRename')}
                 />
                 <div className={styles.docMeta}>
                   {formatFileSize(doc.fileSize)}
-                  {doc.totalChunks > 0 && ` \u00B7 ${doc.totalChunks} chunks`}
+                  {doc.totalChunks > 0 && ` \u00B7 ${t('databankPanel.chunkCount', { count: doc.totalChunks })}`}
                   {doc.slug && <span> &middot; #{doc.slug}</span>}
                   {doc.errorMessage && <span> &middot; {doc.errorMessage}</span>}
                 </div>
@@ -745,7 +989,7 @@ export default function DatabankPanel() {
                 <button
                   className={styles.smallActionBtn}
                   onClick={(e) => { e.stopPropagation(); handleReprocessDoc(doc.id) }}
-                  title="Reprocess document"
+                  title={t('databankPanel.reprocessDocument')}
                   disabled={doc.status === 'pending' || doc.status === 'processing'}
                 >
                   <RefreshCw size={12} />
@@ -753,7 +997,7 @@ export default function DatabankPanel() {
                 <button
                   className={styles.smallDeleteBtn}
                   onClick={(e) => { e.stopPropagation(); handleDeleteDoc(doc.id) }}
-                  title="Delete document"
+                  title={t('databankPanel.deleteDocument')}
                 >
                   <Trash2 size={12} />
                 </button>
@@ -767,20 +1011,34 @@ export default function DatabankPanel() {
       {!selectedDatabankId && databanks.length === 0 && (
         <div className={styles.emptyState}>
           <Database size={32} className={styles.emptyIcon} />
-          <div className={styles.emptyText}>No databanks yet</div>
-          <div className={styles.emptyHint}>
-            Create a databank to upload reference documents that the AI can access during conversations.
-          </div>
+          <div className={styles.emptyText}>{t('databankPanel.noDatabanksYet')}</div>
+          <div className={styles.emptyHint}>{t('databankPanel.noDatabanksYetHint')}</div>
         </div>
       )}
 
       {selectedDatabankId && databankDocuments.length === 0 && !loading && (
         <div className={styles.emptyState}>
           <FileText size={24} className={styles.emptyIcon} />
-          <div className={styles.emptyText}>No documents</div>
-          <div className={styles.emptyHint}>Upload text files to populate this databank.</div>
+          <div className={styles.emptyText}>{t('databankPanel.noDocuments')}</div>
+          <div className={styles.emptyHint}>{t('databankPanel.noDocumentsHint')}</div>
         </div>
       )}
+
+      <ConfirmationModal
+        isOpen={!!pendingFuse}
+        onConfirm={confirmFuse}
+        onCancel={() => { if (!fusing) setPendingFuse(null) }}
+        title={t('databankPanel.fuseTitle')}
+        message={pendingFuse ? t('databankPanel.fuseMessage', {
+          count: pendingFuse.sourceCount,
+          sourceName: pendingFuse.sourceName,
+          targetName: databanks.find((b) => b.id === selectedDatabankId)?.name ?? t('databankPanel.thisDatabank'),
+        }) : ''}
+        variant="danger"
+        confirmText={t('databankPanel.fuse')}
+        loading={fusing}
+        loadingText={t('databankPanel.fusing')}
+      />
     </div>
   )
 }

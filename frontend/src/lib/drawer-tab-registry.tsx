@@ -1,24 +1,30 @@
 import type { ComponentType, ReactNode } from 'react'
+import { createRoot } from 'react-dom/client'
 import {
-  User, Wand2, GitFork, Link2, Package, Zap,
+  User, Wand2, GitFork, Link2, Package, Zap, Gamepad2,
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
-  GitBranch, Globe, Wallpaper, Replace, Library, Sparkles, Database,
+  GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
 import { wsClient } from '@/ws/client'
+import i18n from '@/i18n'
 import type { Command, CommandScope } from '@/lib/commands'
 import type { DrawerTabState, ExtensionCommandState } from '@/store/slices/spindle-placement'
+import { CORE_DRAWER_TAB_IDS } from './core-drawer-tab-ids'
+import ErrorBoundary from '@/components/shared/ErrorBoundary'
+import { RouterContextBridge } from './router-bridge'
 import CharacterProfile from '@/components/panels/CharacterProfile'
 import CharacterBrowser from '@/components/panels/CharacterBrowser'
 import PersonaManager from '@/components/panels/PersonaManager'
 import ConnectionManager from '@/components/panels/ConnectionManager'
 import ImageGenConnectionManager from '@/components/panels/image-gen-connections/ImageGenConnectionManager'
+import STTConnectionManager from '@/components/panels/stt-connections/STTConnectionManager'
 import TTSConnectionManager from '@/components/panels/tts-connections/TTSConnectionManager'
 import PresetManager from '@/components/panels/PresetManager'
 import LoomBuilder from '@/components/panels/LoomBuilder'
-import DreamWeaverPanel from '@/components/panels/DreamWeaverPanel'
+import WeaverPanel from '@/components/panels/WeaverPanel'
 import SummaryEditor from '@/components/panels/SummaryEditor'
 import ThemePanel from '@/components/panels/ThemePanel'
 import WorldBookPanel from '@/components/panels/world-book/WorldBookPanel'
@@ -36,6 +42,7 @@ import BranchTreePanel from '@/components/panels/BranchTreePanel'
 import RegexPanel from '@/components/panels/RegexPanel'
 import MemoryCortexPanel from '@/components/panels/memory-cortex/MemoryCortexPanel'
 import DatabankPanel from '@/components/panels/databank/DatabankPanel'
+import MultiplayerPanel from '@/components/panels/multiplayer/MultiplayerPanel'
 
 export interface DrawerTabEntry {
   id: string
@@ -53,21 +60,15 @@ export interface DrawerTabEntry {
   keywords: string[]
   /** Optional scope restriction for command palette filtering */
   scope?: CommandScope
-  /** React component factory to render the panel content */
-  component: () => ReactNode
+  /**
+   * Mount the tab content into a persistent root element.
+   * Returns a cleanup function. Called once by ensureRegistryRoot on
+   * first request, then cached.
+   */
+  mount: (root: HTMLElement) => () => void
 }
 
-export const CORE_DRAWER_TAB_IDS = new Set([
-  'profile',
-  'presets',
-  'loom',
-  'characters',
-  'personas',
-  'branches',
-  'spindle',
-  'theme',
-  'lorebook',
-])
+export { CORE_DRAWER_TAB_IDS } from './core-drawer-tab-ids'
 
 export function isDrawerTabCore(tabId: string): boolean {
   return CORE_DRAWER_TAB_IDS.has(tabId)
@@ -78,6 +79,42 @@ export function sanitizeHiddenDrawerTabIds(hiddenTabIds?: string[] | null): stri
   return [...new Set(hiddenTabIds.filter((tabId): tabId is string => typeof tabId === 'string' && !isDrawerTabCore(tabId)))]
 }
 
+export function sanitizeDrawerTabOrder(tabOrder?: string[] | null): string[] {
+  if (!Array.isArray(tabOrder)) return []
+  return [...new Set(tabOrder.filter((tabId): tabId is string => typeof tabId === 'string' && tabId.length > 0))]
+}
+
+/**
+ * Order a list of tabs (built-in or extension) by the user's saved tabOrder.
+ * Tabs not present in `order` are appended in their original registry order.
+ */
+export function applyDrawerTabOrder<T extends { id: string }>(items: T[], order: string[]): T[] {
+  if (!order.length || items.length <= 1) return items
+  const orderIndex = new Map<string, number>()
+  order.forEach((id, idx) => { if (!orderIndex.has(id)) orderIndex.set(id, idx) })
+  const indexed = items.map((item, idx) => ({ item, originalIdx: idx }))
+  indexed.sort((a, b) => {
+    const ai = orderIndex.has(a.item.id) ? orderIndex.get(a.item.id)! : Number.POSITIVE_INFINITY
+    const bi = orderIndex.has(b.item.id) ? orderIndex.get(b.item.id)! : Number.POSITIVE_INFINITY
+    if (ai !== bi) return ai - bi
+    return a.originalIdx - b.originalIdx
+  })
+  return indexed.map((entry) => entry.item)
+}
+
+function mountReactComponent(root: HTMLElement, element: ReactNode, tabId?: string): () => void {
+  const reactRoot = createRoot(root)
+  // This is a detached React root, so it does not inherit the app's
+  // <RouterProvider> context. RouterContextBridge re-provides it so panels that
+  // call useNavigate()/useParams() (e.g. the character gallery) don't crash.
+  reactRoot.render(
+    <RouterContextBridge>
+      <ErrorBoundary label={tabId}>{element}</ErrorBoundary>
+    </RouterContextBridge>,
+  )
+  return () => { reactRoot.unmount() }
+}
+
 export const DRAWER_TABS: DrawerTabEntry[] = [
   {
     id: 'profile',
@@ -86,7 +123,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'View and edit the active character',
     tabIcon: User,
     keywords: ['character', 'avatar', 'info', 'edit', 'card', 'description', 'bio', 'greeting', 'first message'],
-    component: () => <CharacterProfile />,
+    mount: (root) => mountReactComponent(root, <CharacterProfile />),
   },
   {
     id: 'presets',
@@ -96,7 +133,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Wand2,
     tabHeaderTitle: 'Reasoning',
     keywords: ['reasoning', 'cot', 'chain of thought', 'thinking', 'reasoning effort', 'api reasoning', 'prompt bias', 'start reply with', 'prefix', 'suffix'],
-    component: () => <PresetManager />,
+    mount: (root) => mountReactComponent(root, <PresetManager />),
   },
   {
     id: 'loom',
@@ -105,16 +142,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Configure narrative structure and story beats',
     tabIcon: GitFork,
     keywords: ['narrative', 'story', 'lore', 'structure', 'beats', 'loom', 'pacing', 'plot', 'sovereign hand', 'director'],
-    component: () => <LoomBuilder compact />,
+    mount: (root) => mountReactComponent(root, <LoomBuilder compact />),
   },
   {
-    id: 'dream-weaver',
-    shortName: 'Dream',
-    tabName: 'Dream Weaver',
-    tabDescription: 'Create characters from your imagination',
-    tabIcon: Sparkles,
-    keywords: ['dream', 'weave', 'create'],
-    component: () => <DreamWeaverPanel />,
+    id: 'weaver',
+    shortName: 'Weaver',
+    tabName: 'Weaver',
+    tabDescription: 'Craft a character from your idea',
+    tabIcon: Feather,
+    keywords: ['weaver', 'dream', 'character', 'create', 'ai'],
+    mount: (root) => mountReactComponent(root, <WeaverPanel />),
   },
   {
     id: 'connections',
@@ -124,19 +161,23 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Link2,
     tabHeaderTitle: 'Connections',
     keywords: ['api', 'provider', 'key', 'openai', 'anthropic', 'model', 'endpoint', 'google', 'vertex', 'claude', 'gemini', 'openrouter', 'deepseek', 'url', 'secret'],
-    component: () => (
-      <>
+    mount: (root) => mountReactComponent(root, (
+      <div className="connections-stack">
         <ConnectionManager />
         <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--lumiverse-border)' }}>
-          <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>Image Generation</h3>
+          <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>{i18n.t('connections.imageGeneration', { ns: 'panels' })}</h3>
           <ImageGenConnectionManager />
         </div>
         <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--lumiverse-border)' }}>
-          <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>Text-to-Speech</h3>
+          <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>{i18n.t('connections.speechToText', { ns: 'panels' })}</h3>
+          <STTConnectionManager />
+        </div>
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--lumiverse-border)' }}>
+          <h3 style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--lumiverse-text-secondary)' }}>{i18n.t('connections.textToSpeech', { ns: 'panels' })}</h3>
           <TTSConnectionManager />
         </div>
-      </>
-    ),
+      </div>
+    )),
   },
   {
     id: 'browser',
@@ -146,7 +187,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Package,
     tabHeaderTitle: 'Browser',
     keywords: ['packs', 'content', 'download', 'browse', 'browser', 'install', 'marketplace', 'library', 'search'],
-    component: () => <PackBrowser />,
+    mount: (root) => mountReactComponent(root, <PackBrowser />),
   },
   {
     id: 'characters',
@@ -156,7 +197,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Users,
     tabHeaderTitle: 'Characters',
     keywords: ['character', 'list', 'import', 'card', 'browse', 'export', 'png', 'charx', 'gallery', 'switch', 'select'],
-    component: () => <CharacterBrowser />,
+    mount: (root) => mountReactComponent(root, <CharacterBrowser />),
   },
   {
     id: 'personas',
@@ -165,7 +206,17 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Manage your user personas',
     tabIcon: Drama,
     keywords: ['persona', 'identity', 'user', 'avatar', 'name', 'sender', 'you', 'addons'],
-    component: () => <PersonaManager />,
+    mount: (root) => mountReactComponent(root, <PersonaManager />),
+  },
+  {
+    id: 'multiplayer',
+    shortName: 'Party',
+    tabName: 'Multiplayer',
+    tabDescription: 'Host or join a room and chat with bots alongside friends',
+    tabIcon: Gamepad2,
+    tabHeaderTitle: 'Multiplayer',
+    keywords: ['multiplayer', 'room', 'party', 'friends', 'group', 'coop', 'co-op', 'join', 'host', 'invite', 'turn'],
+    mount: (root) => mountReactComponent(root, <MultiplayerPanel />),
   },
   {
     id: 'lorebook',
@@ -175,7 +226,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Library,
     tabHeaderTitle: 'Lorebook',
     keywords: ['lorebook', 'world', 'lore', 'book', 'entries', 'worldbook', 'world info', 'wi', 'keywords', 'triggers', 'knowledge'],
-    component: () => <WorldBookPanel />,
+    mount: (root) => mountReactComponent(root, <WorldBookPanel />),
   },
   {
     id: 'cortex',
@@ -185,7 +236,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Brain,
     tabHeaderTitle: 'Memory',
     keywords: ['memory', 'cortex', 'embeddings', 'recall', 'brain', 'entities', 'relationships', 'salience', 'vector', 'long term', 'ltcm', 'facts'],
-    component: () => <MemoryCortexPanel />,
+    mount: (root) => mountReactComponent(root, <MemoryCortexPanel />),
   },
   {
     id: 'databank',
@@ -195,7 +246,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Database,
     tabHeaderTitle: 'Databank',
     keywords: ['databank', 'knowledge', 'documents', 'upload', 'files', 'bank', 'reference', 'data', 'rag'],
-    component: () => <DatabankPanel />,
+    mount: (root) => mountReactComponent(root, <DatabankPanel />),
   },
   {
     id: 'create',
@@ -205,7 +256,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: PenTool,
     tabHeaderTitle: 'Create',
     keywords: ['create', 'workshop', 'editor', 'build', 'new', 'lumia', 'loom', 'author', 'write', 'draft', 'custom'],
-    component: () => <ContentWorkshop />,
+    mount: (root) => mountReactComponent(root, <ContentWorkshop />),
   },
   {
     id: 'ooc',
@@ -214,7 +265,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Out-of-character comment display settings',
     tabIcon: MessageCircle,
     keywords: ['ooc', 'out of character', 'comments', 'irc', 'social', 'chat', 'meta', 'parentheses', 'brackets'],
-    component: () => <OOCPanel />,
+    mount: (root) => mountReactComponent(root, <OOCPanel />),
   },
   {
     id: 'prompt',
@@ -224,7 +275,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: FileText,
     tabHeaderTitle: 'Composition',
     keywords: ['composition', 'compose', 'lumia', 'loom', 'sovereign hand', 'context filters', 'narrative', 'selection', 'modes'],
-    component: () => <PromptPanel />,
+    mount: (root) => mountReactComponent(root, <PromptPanel />),
   },
   {
     id: 'council',
@@ -233,7 +284,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Configure the Lumia Council and tool functions',
     tabIcon: IconUsersGroup,
     keywords: ['council', 'tools', 'agents', 'lumia', 'functions', 'tool use', 'sidecar', 'function calling'],
-    component: () => <CouncilManager />,
+    mount: (root) => mountReactComponent(root, <CouncilManager />),
   },
   {
     id: 'summary',
@@ -242,7 +293,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Configure context summarization and truncation',
     tabIcon: ScrollText,
     keywords: ['summary', 'context', 'truncation', 'compress', 'summarize', 'shorten', 'overflow', 'window', 'limit'],
-    component: () => <SummaryEditor />,
+    mount: (root) => mountReactComponent(root, <SummaryEditor />),
   },
   {
     id: 'feedback',
@@ -252,7 +303,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: MessageSquareReply,
     tabHeaderTitle: 'Feedback',
     keywords: ['feedback', 'council', 'results', 'tools', 'output', 'debug', 'log', 'response', 'execution', 'trace'],
-    component: () => <CouncilFeedback />,
+    mount: (root) => mountReactComponent(root, <CouncilFeedback />),
   },
   {
     id: 'worldinfo',
@@ -262,7 +313,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Globe,
     tabHeaderTitle: 'World Info',
     keywords: ['world info', 'activation', 'lorebook', 'active', 'entries', 'triggered', 'wi', 'matched', 'fired'],
-    component: () => <WorldInfoFeedback />,
+    mount: (root) => mountReactComponent(root, <WorldInfoFeedback />),
   },
   {
     id: 'imagegen',
@@ -272,7 +323,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Image,
     tabHeaderTitle: 'Image Gen',
     keywords: ['image', 'generation', 'scene', 'art', 'picture', 'ai', 'background', 'novelai', 'nai', 'dalle', 'illustration'],
-    component: () => <ImageGenPanel />,
+    mount: (root) => mountReactComponent(root, <ImageGenPanel />),
   },
   {
     id: 'wallpaper',
@@ -281,7 +332,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Set global or per-chat background wallpapers',
     tabIcon: Wallpaper,
     keywords: ['wallpaper', 'background', 'backdrop', 'image', 'video', 'animated', 'mp4', 'webm', 'gif', 'scenery', 'chat background'],
-    component: () => <WallpaperPanel />,
+    mount: (root) => mountReactComponent(root, <WallpaperPanel />),
   },
   {
     id: 'regex',
@@ -291,7 +342,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Replace,
     tabHeaderTitle: 'Regex',
     keywords: ['regex', 'find', 'replace', 'script', 'transform', 'filter', 'pattern', 'substitution', 'text', 'output', 'display', 'rewrite', 'format'],
-    component: () => <RegexPanel />,
+    mount: (root) => mountReactComponent(root, <RegexPanel />),
   },
   {
     id: 'branches',
@@ -301,7 +352,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: GitBranch,
     tabHeaderTitle: 'Branches',
     keywords: ['branch', 'fork', 'history', 'tree', 'navigate', 'alternate', 'swipe', 'undo', 'timeline', 'rewind', 'path'],
-    component: () => <BranchTreePanel />,
+    mount: (root) => mountReactComponent(root, <BranchTreePanel />),
   },
   {
     id: 'theme',
@@ -310,7 +361,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabDescription: 'Customize colors, accent, and visual style',
     tabIcon: Palette,
     keywords: ['theme', 'colors', 'accent', 'appearance', 'dark', 'light', 'glass', 'radius', 'font', 'css', 'style', 'customize', 'ui', 'mode'],
-    component: () => <ThemePanel />,
+    mount: (root) => mountReactComponent(root, <ThemePanel />),
   },
   {
     id: 'spindle',
@@ -320,7 +371,7 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Puzzle,
     tabHeaderTitle: 'Extensions',
     keywords: ['extensions', 'spindle', 'plugins', 'addons', 'install', 'manage', 'enable', 'disable', 'uninstall', 'github'],
-    component: () => <SpindlePanel />,
+    mount: (root) => mountReactComponent(root, <SpindlePanel />),
   },
 ]
 
@@ -334,8 +385,48 @@ export function adaptExtensionTabs(tabs: DrawerTabState[]): DrawerTabEntry[] {
     tabIcon: Puzzle,
     tabHeaderTitle: dt.headerTitle,
     keywords: ['extension', 'spindle', dt.extensionId, ...(dt.keywords ?? [])],
-    component: () => null,
+    mount: () => () => {},
   }))
+}
+
+// ── Persistent tab roots (built-in tabs) ──
+//
+// Roots are mounted lazily on first request via `ensureRegistryRoot`.
+// Once mounted, a tab's root is cached and reused — matching the
+// original "persistent root" design (state survives tab switches).
+
+const _registryRoots = new Map<string, HTMLElement>()
+const _registryCleanups = new Map<string, () => void>()
+
+/**
+ * Mount a single built-in tab's persistent root on first request, then
+ * cache. Subsequent calls are O(1) lookups. Returns undefined if the
+ * tabId is not in DRAWER_TABS or if the mount throws.
+ *
+ * Roots are kept detached until reparented into a TabPanelContent /
+ * ContainerTabContent via replaceChildren.
+ */
+export function ensureRegistryRoot(tabId: string): HTMLElement | undefined {
+  const existing = _registryRoots.get(tabId)
+  if (existing) return existing
+
+  const tab = DRAWER_TABS.find((t) => t.id === tabId)
+  if (!tab) return undefined
+
+  const root = document.createElement('div')
+  root.setAttribute('data-spindle-drawer-tab', tabId)
+  root.style.width = '100%'
+  root.style.height = '100%'
+  _registryRoots.set(tabId, root)
+  try {
+    const cleanup = tab.mount(root)
+    _registryCleanups.set(tabId, cleanup)
+    return root
+  } catch (err) {
+    console.error(`[Spindle mount] ${tabId}`, err)
+    _registryRoots.delete(tabId)
+    return undefined
+  }
 }
 
 /** Generate Panel commands from the registry for the command palette. */
@@ -346,7 +437,7 @@ export function registryToCommands(entries: DrawerTabEntry[]): Command[] {
     description: entry.tabDescription,
     icon: entry.tabIcon,
     keywords: entry.keywords,
-    group: 'Panels' as const,
+    group: 'panels',
     scope: entry.scope,
     run: () => useStore.getState().openDrawer(entry.id),
   }))
@@ -360,7 +451,7 @@ export function extensionTabsToCommands(tabs: DrawerTabState[]): Command[] {
     description: tab.description ?? `Open ${tab.title} extension tab`,
     icon: Puzzle,
     keywords: ['extension', 'spindle', tab.extensionId, ...(tab.keywords ?? [])],
-    group: 'Extensions' as const,
+    group: 'extensions',
     run: () => useStore.getState().openDrawer(tab.id),
   }))
 }
@@ -376,7 +467,7 @@ export function extensionCommandsToCommands(entries: ExtensionCommandState[]): C
         description: cmd.description,
         icon: Terminal,
         keywords: ['extension', entry.extensionName, ...(cmd.keywords ?? [])],
-        group: 'Extensions' as const,
+        group: 'extensions',
         scope: cmd.scope as CommandScope | undefined,
         run: () => {
           const state = useStore.getState()

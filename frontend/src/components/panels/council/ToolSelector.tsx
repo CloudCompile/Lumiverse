@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { CouncilToolDefinition, CouncilToolCategory } from 'lumiverse-spindle-types'
 import { Toggle } from '@/components/shared/Toggle'
 import styles from '../CouncilManager.module.css'
@@ -9,13 +10,7 @@ interface ToolSelectorProps {
   onChange: (selected: string[]) => void
 }
 
-const CATEGORY_LABELS: Record<Exclude<CouncilToolCategory, 'extension'>, string> = {
-  story_direction: 'Story Direction',
-  character_accuracy: 'Character Accuracy',
-  writing_quality: 'Writing Quality',
-  context: 'Context',
-  content: 'Content',
-}
+const UNKNOWN_EXTENSION_KEY = '__unknown_extension__'
 
 const BUILTIN_CATEGORY_ORDER: Exclude<CouncilToolCategory, 'extension'>[] = [
   'story_direction',
@@ -26,6 +21,8 @@ const BUILTIN_CATEGORY_ORDER: Exclude<CouncilToolCategory, 'extension'>[] = [
 ]
 
 export default function ToolSelector({ tools, selected, onChange }: ToolSelectorProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'councilManager.tools' })
+
   const { builtinGroups, extensionGroups } = useMemo(() => {
     // Group built-in/DLC tools by category
     const builtin = new Map<string, CouncilToolDefinition[]>()
@@ -38,7 +35,7 @@ export default function ToolSelector({ tools, selected, onChange }: ToolSelector
 
     for (const tool of tools) {
       if (tool.category === 'extension') {
-        const extName = tool.extensionName || 'Unknown Extension'
+        const extName = tool.extensionName || UNKNOWN_EXTENSION_KEY
         const list = extensions.get(extName) || []
         list.push(tool)
         extensions.set(extName, list)
@@ -70,7 +67,7 @@ export default function ToolSelector({ tools, selected, onChange }: ToolSelector
         if (catTools.length === 0) return null
         return (
           <div key={cat} className={styles.toolCategory}>
-            <div className={styles.toolCategoryLabel}>{CATEGORY_LABELS[cat]}</div>
+            <div className={styles.toolCategoryLabel}>{t(`toolCategories.${cat}`)}</div>
             {catTools.map((tool) => (
               <div key={tool.name} title={tool.description}>
                 <Toggle.Checkbox
@@ -91,8 +88,8 @@ export default function ToolSelector({ tools, selected, onChange }: ToolSelector
         return (
           <div key={`ext:${extName}`} className={styles.toolCategory}>
             <div className={styles.toolCategoryLabelExt}>
-              {extName}
-              <span className={styles.toolExtBadge}>Extension</span>
+              {extName === UNKNOWN_EXTENSION_KEY ? t('unknownExtension') : extName}
+              <span className={styles.toolExtBadge}>{t('extensionBadge')}</span>
             </div>
             {extTools.map((tool) => (
               <div key={tool.name} title={tool.description}>

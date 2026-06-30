@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import clsx from 'clsx'
+import { useTranslation } from 'react-i18next'
 import { RefreshCw, Search } from 'lucide-react'
 import { TextInput } from '@/components/shared/FormComponents'
 import { Spinner } from '@/components/shared/Spinner'
@@ -34,11 +35,14 @@ export default function ModelCombobox({
   placeholder,
   autoRefreshOnFocus = false,
   refreshKey,
-  emptyMessage = 'No models found. Enter one manually.',
-  loadingMessage = 'Loading models...',
+  emptyMessage: emptyMessageProp,
+  loadingMessage: loadingMessageProp,
   browseHint,
   appearance = 'compact',
 }: ModelComboboxProps) {
+  const { t } = useTranslation('shared', { keyPrefix: 'modelCombobox' })
+  const emptyMessage = emptyMessageProp ?? t('emptyDefault')
+  const loadingMessage = loadingMessageProp ?? t('loading')
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const autoRefreshedRef = useRef(false)
@@ -113,7 +117,7 @@ export default function ModelCombobox({
             className={clsx(styles.refreshBtn, appearance === 'editor' && styles.refreshBtnEditor)}
             onClick={handleRefresh}
             disabled={loading || disabled}
-            title="Refresh models"
+            title={t('refreshModels')}
           >
             {loading ? <Spinner size={14} /> : <RefreshCw size={14} />}
           </button>
@@ -142,7 +146,7 @@ export default function ModelCombobox({
       )}
       {shouldShowDropdown && !loading && models.length > 0 && filtered.length === 0 && (
         <div className={styles.dropdown}>
-          <div className={styles.dropdownEmpty}>No matching models</div>
+          <div className={styles.dropdownEmpty}>{t('noMatching')}</div>
         </div>
       )}
       {shouldShowDropdown && !loading && models.length === 0 && (

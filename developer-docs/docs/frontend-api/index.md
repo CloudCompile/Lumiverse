@@ -36,12 +36,14 @@ Frontend UI can follow two supported rendering paths:
 
 | Category | Permission | Description |
 |----------|-----------|-------------|
-| [DOM Helper](dom-helper.md) | Free | Inject sanitized HTML/CSS in the host DOM and create host-managed sandbox frames |
+| [DOM Helper](dom-helper.md) | Free | Inject sanitized HTML/CSS in the host DOM, target specific chat messages with virtualizer-safe replay, and create host-managed sandbox frames |
 | [UI Event Helpers](ui-events-helper.md) | Free | Keyboard/Drawer/Settings state and DOM Action delegation |
 | [HTML Islands](html-islands.md) | Free | Auto-isolation of styled HTML in messages, and how to opt out |
 | [Events](events.md) | Free | Subscribe to WebSocket events, emit custom events |
 | [UI Placement](ui-placement.md) | Varies | Drawer tabs, float widgets, dock panels, modals, context menus, input bar actions |
+| [Shared Components](shared-components.md) | Free | Mount Lumiverse's first-party React components — model picker, form atoms, searchable selects, pagination — into extension-owned DOM |
 | [Backend Communication](backend-communication.md) | Free | Send/receive messages to/from backend worker |
 | [Frontend Process Lifecycle](processes.md) | Free | Register backend-spawned frontend process handlers |
 | [Message Tags](message-tags.md) | Free | Intercept custom XML tags in chat messages |
+| [Display Resolver](display-resolver.md) | Free | Resolve message display (macros, format, regex) in the browser for chats your extension owns |
 | [File Uploads](file-uploads.md) | Free | Open file picker and read selected files |

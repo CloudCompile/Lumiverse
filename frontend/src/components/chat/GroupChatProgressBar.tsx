@@ -1,9 +1,11 @@
+import { useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import styles from './GroupChatProgressBar.module.css'
 import clsx from 'clsx'
 
 export default function GroupChatProgressBar() {
+  const { t } = useTranslation('chat')
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
   const characters = useStore((s) => s.characters)
   const activeGroupCharacterId = useStore((s) => s.activeGroupCharacterId)
@@ -30,7 +32,7 @@ export default function GroupChatProgressBar() {
                   isActive && styles.dotActive,
                   hasSpoken && !isActive && styles.dotSpoken
                 )}
-                title={char?.name || 'Character'}
+                title={char?.name || t('characterFallback')}
               >
                 {char?.avatar_path || char?.image_id ? (
                   <img
@@ -50,8 +52,12 @@ export default function GroupChatProgressBar() {
       </div>
       <span className={styles.status}>
         {activeGroupCharacterId
-          ? `${characters.find((c) => c.id === activeGroupCharacterId)?.name || 'Character'} is speaking... (${spokenCount}/${total})`
-          : `${spokenCount}/${total} spoken`}
+          ? t('groupChat.isSpeaking', {
+              name: characters.find((c) => c.id === activeGroupCharacterId)?.name || t('characterFallback'),
+              spoken: spokenCount,
+              total,
+            })
+          : t('groupChat.spokenProgress', { spoken: spokenCount, total })}
       </span>
     </div>
   )

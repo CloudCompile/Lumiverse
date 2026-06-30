@@ -1,4 +1,6 @@
 import { X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+
 import clsx from 'clsx'
 import styles from './CloseButton.module.css'
 
@@ -19,13 +21,14 @@ export function CloseButton({
   iconSize,
   className,
 }: CloseButtonProps) {
+  const { t: tc } = useTranslation('common')
   const resolvedIconSize = iconSize ?? (size === 'sm' ? 14 : 16)
 
   return (
     <button
       type="button"
       onClick={onClick}
-      aria-label="Close"
+      aria-label={tc('actions.close')}
       className={clsx(
         styles.closeBtn,
         styles[size],

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { BookOpen } from 'lucide-react'
 import type { PropDoc } from '@/lib/componentTemplates'
 import styles from './PropsReference.module.css'
@@ -9,18 +10,20 @@ interface PropsReferenceProps {
 }
 
 export default function PropsReference({ props, componentName }: PropsReferenceProps) {
+  const { t } = useTranslation('modals', { keyPrefix: 'propsReference' })
+
   if (props.length === 0) {
     return (
       <div className={styles.panel}>
         <div className={styles.header}>
           <span className={styles.headerLabel}>
             <BookOpen size={13} />
-            Props Reference
+            {t('title')}
           </span>
         </div>
         <div className={styles.list}>
           <div className={styles.emptyNote}>
-            No configurable props for {componentName}.
+            {t('noProps', { name: componentName })}
           </div>
         </div>
       </div>
@@ -32,7 +35,7 @@ export default function PropsReference({ props, componentName }: PropsReferenceP
       <div className={styles.header}>
         <span className={styles.headerLabel}>
           <BookOpen size={13} />
-          Props Reference — {props.length}
+          {t('titleWithCount', { count: props.length })}
         </span>
       </div>
       <div className={styles.list}>
@@ -41,23 +44,12 @@ export default function PropsReference({ props, componentName }: PropsReferenceP
             <div className={styles.propRow}>
               <div className={styles.propHeader}>
                 <span className={styles.propName}>{prop.name}</span>
-                <span className={styles.propType}>{prop.type}</span>
+                {prop.type && <span className={styles.propType}>{prop.type}</span>}
               </div>
-              {prop.description && prop.description !== 'No description' && (
-                <span className={styles.propDesc}>{prop.description}</span>
-              )}
+              <div className={clsx(styles.propDesc, !prop.description && styles.propDescMuted)}>
+                {prop.description || t('noDescription')}
+              </div>
             </div>
-            {prop.children?.map((child) => (
-              <div key={child.name} className={clsx(styles.propRow, styles.childRow)}>
-                <div className={styles.propHeader}>
-                  <span className={styles.propName}>{child.name}</span>
-                  <span className={styles.propType}>{child.type}</span>
-                </div>
-                {child.description && child.description !== 'No description' && (
-                  <span className={styles.propDesc}>{child.description}</span>
-                )}
-              </div>
-            ))}
           </div>
         ))}
       </div>

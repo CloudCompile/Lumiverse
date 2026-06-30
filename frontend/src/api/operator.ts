@@ -48,6 +48,41 @@ export interface OperatorSharpStatus {
   defaults: ResolvedSharpSettings
 }
 
+export interface DnsSettings {
+  dohFallbackEnabled?: boolean
+  dohEndpoint?: string
+}
+
+export interface DiskWarningSettings {
+  /** 0..1 ratio; 0.9 = 90% used */
+  usagePercentThreshold?: number | null
+  minFreeBytesThreshold?: number | null
+}
+
+export interface ResolvedDiskWarningSettings {
+  usagePercentThreshold: number
+  minFreeBytesThreshold: number
+}
+
+export interface OperatorDiskWarningStatus {
+  settingsKey: string
+  configuredSettings: DiskWarningSettings
+  effectiveSettings: ResolvedDiskWarningSettings
+  defaults: ResolvedDiskWarningSettings
+}
+
+export interface ResolvedDnsSettings {
+  dohFallbackEnabled: boolean
+  dohEndpoint: string
+}
+
+export interface OperatorDnsStatus {
+  settingsKey: string
+  configuredSettings: DnsSettings
+  effectiveSettings: ResolvedDnsSettings
+  defaults: ResolvedDnsSettings
+}
+
 export interface DatabaseMaintenanceSettings {
   optimizeIntervalHours?: number | null
   analyzeIntervalHours?: number | null
@@ -184,6 +219,10 @@ export const operatorApi = {
   getDatabase: () => get<OperatorDatabaseStatus>('/operator/database'),
   getSharp: () => get<OperatorSharpStatus>('/operator/sharp'),
   putSharp: (settings: SharpSettings) => put<OperatorSharpStatus>('/operator/sharp', settings),
+  getDns: () => get<OperatorDnsStatus>('/operator/dns'),
+  putDns: (settings: DnsSettings) => put<OperatorDnsStatus>('/operator/dns', settings),
+  getDiskWarning: () => get<OperatorDiskWarningStatus>('/operator/disk-warning'),
+  putDiskWarning: (settings: DiskWarningSettings) => put<OperatorDiskWarningStatus>('/operator/disk-warning', settings),
   getLogs: (limit = 150) => get<OperatorLogsResponse>('/operator/logs', { limit }),
   subscribeLogs: () => post<{ subscribed: boolean }>('/operator/logs/subscribe'),
   unsubscribeLogs: () => del<{ subscribed: boolean }>('/operator/logs/subscribe'),

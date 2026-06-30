@@ -160,6 +160,41 @@
   gap: 8px;
 }
 
+/* -- Drag handle --
+ * touch-action: none lets dnd-kit's TouchSensor own the gesture.
+ * -webkit-touch-callout / user-select: none stop iOS & Android from popping
+ * the native "Copy/Share" callout on press-and-hold of the handle, which
+ * would otherwise race with dnd-kit's hold-to-drag activation.
+ */
+.addonDragHandle {
+  width: 20px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: grab;
+  flex-shrink: 0;
+  padding: 0;
+  border-radius: 4px;
+  transition: color var(--lumiverse-transition-fast), background var(--lumiverse-transition-fast);
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.addonDragHandle:hover {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-subtle, rgba(0, 0, 0, 0.06));
+}
+
+.addonDragHandle:active {
+  cursor: grabbing;
+}
+
 /* -- Toggle checkbox -- */
 .addonToggle {
   width: 26px;

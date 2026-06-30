@@ -15,6 +15,11 @@ import { describeProviderError } from "../utils/provider-errors";
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 15_000;
 const ZAI_GENERAL_API_URL = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_API_URL = "https://api.z.ai/api/coding/paas/v4";
+export const MODEL_ROULETTE_PROVIDER = "model_roulette";
+
+export interface ConnectionRouletteConfig {
+  connection_ids: string[];
+}
 
 function resolveZaiApiUrl(rawUrl: string, useCodingPlanEndpoint: boolean): string {
   const trimmed = rawUrl.trim();
@@ -50,14 +55,15 @@ export interface NanoGptUsageWindow {
   remaining: number;
   percentUsed: number;
   resetAt: number | null;
+  limit: number | null;
 }
 
 export interface NanoGptSubscriptionUsage {
   active: boolean;
-  limits: {
-    weeklyInputTokens: number | null;
-    dailyImages: number | null;
-  };
+  allowOverage: boolean;
+  // Typed usage windows mirroring NanoGPT's subscription payload. Each may be
+  // null when the plan doesn't meter that dimension.
+  dailyInputTokens: NanoGptUsageWindow | null;
   weeklyInputTokens: NanoGptUsageWindow | null;
   dailyImages: NanoGptUsageWindow | null;
   period: {
@@ -65,6 +71,22 @@ export interface NanoGptSubscriptionUsage {
   };
   state: string | null;
   graceUntil: string | null;
+}
+
+/**
+ * Parse a single Nano-GPT usage window from the raw API payload, folding in its
+ * matching `limits.<key>` value. The window object and its limit live under
+ * separate keys in NanoGPT's response, so callers pass both.
+ */
+export function parseNanoGptUsageWindow(w: any, limit: any): NanoGptUsageWindow | null {
+  if (!w || typeof w !== "object") return null;
+  return {
+    used: typeof w.used === "number" ? w.used : 0,
+    remaining: typeof w.remaining === "number" ? w.remaining : 0,
+    percentUsed: typeof w.percentUsed === "number" ? w.percentUsed : 0,
+    resetAt: typeof w.resetAt === "number" ? w.resetAt : null,
+    limit: typeof limit === "number" ? limit : null,
+  };
 }
 
 export interface ConnectionModelsPreviewInput {
@@ -127,7 +149,23 @@ export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: st
     // Per Google's @google/genai SDK: `global` routes through the
     // un-prefixed host, regional routes through `{region}-aiplatform`.
     if (!region || region === "global") return "https://aiplatform.googleapis.com";
+    // Validate the region value: must be a simple alphanumeric GCP region identifier
+    // (e.g. "us-central1", "europe-west4") with no special characters that could be
+    // used to inject a different hostname or escape the intended googleapis.com domain.
+    if (!/^[a-z0-9-]{1,32}$/.test(region)) {
+      throw new Error(`Invalid vertex_region value: "${region}"`);
+    }
     return `https://${region}-aiplatform.googleapis.com`;
+  }
+  if (profile.provider === "bedrock") {
+    // An explicit api_url wins so power users can pin a GovCloud or VPC
+    // PrivateLink host; otherwise derive from region + endpoint toggle.
+    if (url) return url;
+    const region = (profile.metadata?.region || "us-east-1").trim() || "us-east-1";
+    // mantle (default, recommended) vs runtime (cross-region inference profiles).
+    return profile.metadata?.bedrock_endpoint === "runtime"
+      ? `https://bedrock-runtime.${region}.amazonaws.com/v1`
+      : `https://bedrock-mantle.${region}.api.aws/v1`;
   }
   return url;
 }
@@ -193,12 +231,45 @@ function rowToProfile(row: any): ConnectionProfile {
   };
 }
 
+export function isModelRouletteProfile(profile: Pick<ConnectionProfile, "provider"> | null | undefined): boolean {
+  return profile?.provider === MODEL_ROULETTE_PROVIDER;
+}
+
+export function getConnectionRouletteConfig(
+  profile: Pick<ConnectionProfile, "metadata"> | null | undefined
+): ConnectionRouletteConfig {
+  const raw = profile?.metadata?.connection_roulette;
+  if (!raw || typeof raw !== "object") return { connection_ids: [] };
+
+  const seen = new Set<string>();
+  const connection_ids = Array.isArray(raw.connection_ids)
+    ? raw.connection_ids
+      .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+      .map((id: string) => id.trim())
+      .filter((id: string) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+    : [];
+
+  return { connection_ids };
+}
+
 // Prepared statements for hot-path queries
 let _stmtConnById: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
 let _stmtConnDefault: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
+let _connStmtsGen = -1;
 
 function getConnStmts() {
   const db = getDb();
+  // Invalidate cached statements when the underlying Database is replaced.
+  const gen = require("../db/connection").getDbGeneration() as number;
+  if (_connStmtsGen !== gen) {
+    _stmtConnById = null;
+    _stmtConnDefault = null;
+    _connStmtsGen = gen;
+  }
   if (!_stmtConnById) _stmtConnById = db.query("SELECT * FROM connection_profiles WHERE id = ? AND user_id = ?");
   if (!_stmtConnDefault) _stmtConnDefault = db.query("SELECT * FROM connection_profiles WHERE is_default = 1 AND user_id = ? LIMIT 1");
   return { byId: _stmtConnById, byDefault: _stmtConnDefault };
@@ -222,6 +293,27 @@ export function getConnection(userId: string, id: string): ConnectionProfile | n
 export function getDefaultConnection(userId: string): ConnectionProfile | null {
   const row = getConnStmts().byDefault.get(userId) as any;
   return row ? rowToProfile(row) : null;
+}
+
+export function resolveConnection(userId: string, id?: string): ConnectionProfile | null {
+  const profile = id ? getConnection(userId, id) : getDefaultConnection(userId);
+  if (!profile) return null;
+  if (!isModelRouletteProfile(profile)) return profile;
+
+  const targetIds = getConnectionRouletteConfig(profile).connection_ids
+    .filter((targetId) => targetId !== profile.id);
+  const candidates: ConnectionProfile[] = [];
+  for (const targetId of targetIds) {
+    const candidate = getConnection(userId, targetId);
+    if (!candidate || isModelRouletteProfile(candidate)) continue;
+    candidates.push(candidate);
+  }
+
+  if (candidates.length === 0) {
+    throw new Error(`Model roulette "${profile.name}" has no available connection profiles.`);
+  }
+
+  return candidates[Math.floor(Math.random() * candidates.length)];
 }
 
 export async function createConnection(userId: string, input: CreateConnectionProfileInput): Promise<ConnectionProfile> {
@@ -344,6 +436,7 @@ export async function deleteConnection(userId: string, id: string): Promise<bool
   if (deleted) {
     // Cleanup the connection's secret
     secretsSvc.deleteSecret(userId, connectionSecretKey(id));
+    settingsSvc.deleteSetting(userId, `presetProfile:connection:${id}`);
   }
   return deleted;
 }
@@ -376,6 +469,33 @@ export async function testConnection(
       durationMs: Date.now() - startedAt,
       timedOut: false,
       error: "Connection not found",
+    };
+  }
+
+  if (isModelRouletteProfile(profile)) {
+    const targetIds = getConnectionRouletteConfig(profile).connection_ids;
+    const validTargets = targetIds
+      .map((targetId) => getConnection(userId, targetId))
+      .filter((target): target is ConnectionProfile => !!target && !isModelRouletteProfile(target));
+
+    if (validTargets.length === 0) {
+      return {
+        success: false,
+        message: `Model roulette "${profile.name}" has no available connection profiles.`,
+        provider: MODEL_ROULETTE_PROVIDER,
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+        error: "No roulette targets configured",
+      };
+    }
+
+    return {
+      success: true,
+      message: `Model roulette is ready with ${validTargets.length} connection${validTargets.length === 1 ? "" : "s"}.`,
+      provider: MODEL_ROULETTE_PROVIDER,
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      error: null,
     };
   }
 
@@ -433,6 +553,9 @@ export async function testConnection(
 export async function listConnectionModels(userId: string, id: string): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: string; error?: string }> {
   const profile = getConnection(userId, id);
   if (!profile) return { models: [], provider: "", error: "Connection not found" };
+  if (isModelRouletteProfile(profile)) {
+    return { models: [], provider: MODEL_ROULETTE_PROVIDER, error: "Model roulette uses the selected member profile models." };
+  }
 
   const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
   return listConnectionModelsPreview(userId, {
@@ -506,25 +629,12 @@ export async function fetchNanoGptSubscriptionUsage(userId: string, id: string):
     if (!res.ok) return null;
 
     const raw = await res.json() as any;
-    const weekly = raw?.weeklyInputTokens;
     return {
       active: !!raw?.active,
-      limits: {
-        weeklyInputTokens: typeof raw?.limits?.weeklyInputTokens === "number" ? raw.limits.weeklyInputTokens : null,
-        dailyImages: typeof raw?.limits?.dailyImages === "number" ? raw.limits.dailyImages : null,
-      },
-      weeklyInputTokens: weekly ? {
-        used: typeof weekly.used === "number" ? weekly.used : 0,
-        remaining: typeof weekly.remaining === "number" ? weekly.remaining : 0,
-        percentUsed: typeof weekly.percentUsed === "number" ? weekly.percentUsed : 0,
-        resetAt: typeof weekly.resetAt === "number" ? weekly.resetAt : null,
-      } : null,
-      dailyImages: raw?.dailyImages ? {
-        used: typeof raw.dailyImages.used === "number" ? raw.dailyImages.used : 0,
-        remaining: typeof raw.dailyImages.remaining === "number" ? raw.dailyImages.remaining : 0,
-        percentUsed: typeof raw.dailyImages.percentUsed === "number" ? raw.dailyImages.percentUsed : 0,
-        resetAt: typeof raw.dailyImages.resetAt === "number" ? raw.dailyImages.resetAt : null,
-      } : null,
+      allowOverage: !!raw?.allowOverage,
+      dailyInputTokens: parseNanoGptUsageWindow(raw?.dailyInputTokens, raw?.limits?.dailyInputTokens),
+      weeklyInputTokens: parseNanoGptUsageWindow(raw?.weeklyInputTokens, raw?.limits?.weeklyInputTokens),
+      dailyImages: parseNanoGptUsageWindow(raw?.dailyImages, raw?.limits?.dailyImages),
       period: {
         currentPeriodEnd: typeof raw?.period?.currentPeriodEnd === "string" ? raw.period.currentPeriodEnd : null,
       },

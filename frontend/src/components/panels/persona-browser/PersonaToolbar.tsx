@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import {
   Search,
   X,
@@ -39,9 +40,9 @@ interface PersonaToolbarProps {
   totalCount: number
 }
 
-const SORT_OPTIONS: { value: PersonaSortField; label: string }[] = [
-  { value: 'name', label: 'Name' },
-  { value: 'created', label: 'Created' },
+const SORT_OPTION_KEYS: { value: PersonaSortField; labelKey: string }[] = [
+  { value: 'name', labelKey: 'sort.name' },
+  { value: 'created', labelKey: 'sort.created' },
 ]
 
 export default function PersonaToolbar({
@@ -62,6 +63,8 @@ export default function PersonaToolbar({
   filteredCount,
   totalCount,
 }: PersonaToolbarProps) {
+  const { t: tc } = useTranslation('common')
+  const { t } = useTranslation('panels')
   const [sortOpen, setSortOpen] = useState(false)
   const [showCreatePopover, setShowCreatePopover] = useState(false)
   const [creatingFolderMode, setCreatingFolderMode] = useState(false)
@@ -119,7 +122,7 @@ export default function PersonaToolbar({
           className={styles.searchInput}
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Search personas..."
+          placeholder={t('personaToolbar.searchPersonas')}
         />
         {searchQuery && (
           <button type="button" className={styles.clearBtn} onClick={() => onSearchChange('')}>
@@ -131,7 +134,7 @@ export default function PersonaToolbar({
             type="button"
             className={styles.iconBtn}
             onClick={() => setShowCreatePopover(!showCreatePopover)}
-            title="Add"
+            title={t('actions.add', { ns: 'common' })}
           >
             <Plus size={14} />
           </button>
@@ -150,7 +153,7 @@ export default function PersonaToolbar({
                         setCreatingFolderName('')
                       }
                     }}
-                    placeholder="Folder name..."
+                    placeholder={t('personaToolbar.folderName')}
                     className={styles.createPopoverField}
                   />
                   <button
@@ -179,13 +182,13 @@ export default function PersonaToolbar({
                       setShowCreatePopover(false)
                     }}
                   >
-                    <Plus size={12} /> New Persona
+                    <Plus size={12} /> {t('personaToolbar.newPersona')}
                   </button>
                   <button
                     className={clsx(styles.createPopoverOption, styles.createPopoverFolder)}
                     onClick={() => setCreatingFolderMode(true)}
                   >
-                    <FolderPlus size={12} /> New Folder
+                    <FolderPlus size={12} /> {t('personaToolbar.newFolder')}
                   </button>
                 </>
               )}
@@ -201,7 +204,7 @@ export default function PersonaToolbar({
             type="button"
             className={clsx(styles.tabBtn, filterType === 'all' && styles.tabBtnActive)}
             onClick={() => onFilterTypeChange('all')}
-            title="All"
+            title={t('personaToolbar.filterAll')}
           >
             <Layers size={14} />
           </button>
@@ -209,7 +212,7 @@ export default function PersonaToolbar({
             type="button"
             className={clsx(styles.tabBtn, filterType === 'default' && styles.tabBtnActive)}
             onClick={() => onFilterTypeChange('default')}
-            title="Default"
+            title={t('personaToolbar.filterDefault')}
           >
             <Crown size={14} />
           </button>
@@ -217,7 +220,7 @@ export default function PersonaToolbar({
             type="button"
             className={clsx(styles.tabBtn, filterType === 'connected' && styles.tabBtnActive)}
             onClick={() => onFilterTypeChange('connected')}
-            title="Connected"
+            title={t('personaToolbar.filterConnected')}
           >
             <Link2 size={14} />
           </button>
@@ -228,13 +231,13 @@ export default function PersonaToolbar({
             type="button"
             className={styles.iconBtn}
             onClick={() => setSortOpen(!sortOpen)}
-            title={`Sort by ${sortField}`}
+            title={t('personaToolbar.sortBy', { field: t(`personaToolbar.${SORT_OPTION_KEYS.find((o) => o.value === sortField)?.labelKey ?? 'sort.name'}`) })}
           >
             <ArrowUpDown size={14} />
           </button>
           {sortOpen && (
             <div className={styles.sortDropdown}>
-              {SORT_OPTIONS.map((opt) => (
+              {SORT_OPTION_KEYS.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
@@ -244,7 +247,7 @@ export default function PersonaToolbar({
                     setSortOpen(false)
                   }}
                 >
-                  {opt.label}
+                  {t(`personaToolbar.${opt.labelKey}`)}
                 </button>
               ))}
             </div>
@@ -253,7 +256,7 @@ export default function PersonaToolbar({
             type="button"
             className={styles.iconBtn}
             onClick={onToggleSortDirection}
-            title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+            title={sortDirection === 'asc' ? t('personaToolbar.ascending') : t('personaToolbar.descending')}
           >
             {sortDirection === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
           </button>
@@ -263,7 +266,7 @@ export default function PersonaToolbar({
           type="button"
           className={styles.iconBtn}
           onClick={() => onViewModeChange(viewMode === 'grid' ? 'list' : 'grid')}
-          title={viewMode === 'grid' ? 'Switch to list' : 'Switch to grid'}
+          title={viewMode === 'grid' ? t('personaToolbar.switchToList') : t('personaToolbar.switchToGrid')}
         >
           {viewMode === 'grid' ? <List size={14} /> : <LayoutGrid size={14} />}
         </button>
@@ -272,7 +275,7 @@ export default function PersonaToolbar({
           type="button"
           className={styles.iconBtn}
           onClick={onGlobalLibraryClick}
-          title="Global add-ons library"
+          title={t('personaToolbar.globalAddonsLibrary')}
         >
           <Globe size={14} />
         </button>
@@ -281,7 +284,7 @@ export default function PersonaToolbar({
           type="button"
           className={styles.iconBtn}
           onClick={onRefresh}
-          title="Refresh"
+          title={t('actions.refresh', { ns: 'common' })}
         >
           <RefreshCw size={14} />
         </button>

@@ -12,6 +12,32 @@ import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
 import type { ExpressionsImportInfo } from '@/components/modals/ExpressionsImportModal'
 import type { AlternateFieldsSummaryInfo } from '@/components/modals/AlternateFieldsSummaryModal'
 import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
+import i18n from '@/i18n'
+
+/**
+ * If a character carries a portable LoRA hint in `extensions.lumiverse_image_gen_lora`,
+ * surface it as a non-blocking toast so the user knows the original creator
+ * expects a specific LoRA. Never auto-fetches the source URL — Lumiverse
+ * displays only.
+ */
+function maybeShowImportedLoraHint(character: Character): void {
+  const raw = (character.extensions as any)?.lumiverse_image_gen_lora
+  if (!raw || typeof raw !== 'object') return
+  if (typeof raw.lora_filename !== 'string' || !raw.lora_filename) return
+  if (typeof raw.weight !== 'number' || !Number.isFinite(raw.weight)) return
+  const sourceHint = typeof raw.source_url === 'string' && raw.source_url
+    ? i18n.t('panels.characterBrowser.toast.loraSourceHint')
+    : ''
+  toast.info(
+    i18n.t('panels.characterBrowser.toast.loraHint', {
+      name: character.name,
+      filename: raw.lora_filename,
+      weight: raw.weight,
+      sourceHint,
+    }),
+    { duration: 8000 },
+  )
+}
 
 const SEARCH_DEBOUNCE_MS = 150
 
@@ -41,6 +67,9 @@ export function useCharacterBrowser() {
   const selectedTags = useStore((s) => s.selectedTags)
   const setSelectedTags = useStore((s) => s.setSelectedTags)
   const toggleSelectedTag = useStore((s) => s.toggleSelectedTag)
+  const excludedTags = useStore((s) => s.excludedTags)
+  const cycleTagFilter = useStore((s) => s.cycleTagFilter)
+  const clearTagFilters = useStore((s) => s.clearTagFilters)
   const batchMode = useStore((s) => s.batchMode)
   const setBatchMode = useStore((s) => s.setBatchMode)
   const batchSelected = useStore((s) => s.batchSelected)
@@ -132,6 +161,8 @@ export function useCharacterBrowser() {
 
   // Debounced search
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const prevSummaryParamsRef = useRef<Record<string, any> | null>(null)
+  const summaryInitialFetchDoneRef = useRef(false)
   useEffect(() => {
     debounceRef.current = setTimeout(() => setDebouncedQuery(searchQuery), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(debounceRef.current)
@@ -169,6 +200,10 @@ export function useCharacterBrowser() {
         params.tags = selectedTags.join(',')
       }
 
+      if (excludedTags.length > 0) {
+        params.exclude_tags = excludedTags.join(',')
+      }
+
       if (filterTab === 'favorites' || filterTab === 'characters') {
         params.filter = filterTab === 'favorites' ? 'favorites' : 'non-favorites'
         if (activeFavorites.length > 0) {
@@ -178,7 +213,7 @@ export function useCharacterBrowser() {
 
       return params
     },
-    [charactersPerPage, currentPage, sortField, sortDirection, shuffleSeed, debouncedQuery, selectedTags, filterTab]
+    [charactersPerPage, currentPage, sortField, sortDirection, shuffleSeed, debouncedQuery, selectedTags, excludedTags, filterTab]
   )
 
   const loadAllCharacters = useCallback(async () => {
@@ -200,12 +235,18 @@ export function useCharacterBrowser() {
   useEffect(() => {
     if (!settingsLoaded) return
 
+    const params = buildSummaryParams()
+    const paramsChanged = JSON.stringify(params) !== JSON.stringify(prevSummaryParamsRef.current)
+    prevSummaryParamsRef.current = params
+
     let cancelled = false
     favoriteMutationSeqRef.current += 1
-    setLoading(true)
+    if (paramsChanged || !summaryInitialFetchDoneRef.current) {
+      setLoading(true)
+    }
 
     charactersApi
-      .listSummaries(buildSummaryParams())
+      .listSummaries(params)
       .then((result) => {
         if (cancelled) return
         setBrowserItems(result.data)
@@ -216,7 +257,10 @@ export function useCharacterBrowser() {
         console.error('[CharacterBrowser] Failed to load summaries:', err)
       })
       .finally(() => {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+          summaryInitialFetchDoneRef.current = true
+        }
       })
 
     return () => { cancelled = true }
@@ -236,7 +280,7 @@ export function useCharacterBrowser() {
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1)
-  }, [filterTab, selectedTags, debouncedQuery, sortField, sortDirection, shuffleSeed])
+  }, [filterTab, selectedTags, excludedTags, debouncedQuery, sortField, sortDirection, shuffleSeed])
 
   const totalPages = Math.max(1, Math.ceil(browserTotal / charactersPerPage))
   const safePage = Math.min(currentPage, totalPages)
@@ -309,6 +353,7 @@ export function useCharacterBrowser() {
             && !(result.character.extensions?.world_book_ids?.length > 0)) {
           setPendingLorebookImport(result.character)
         }
+        maybeShowImportedLoraHint(result.character)
       } catch (err: any) {
         const msg = err?.body?.message || err?.message || 'Import failed'
         setImportError(msg)
@@ -347,6 +392,7 @@ export function useCharacterBrowser() {
       if (unlinked.length > 0) {
         setPendingLorebooks(unlinked)
       }
+      for (const c of imported) maybeShowImportedLoraHint(c)
     },
     [addCharacters]
   )
@@ -385,20 +431,54 @@ export function useCharacterBrowser() {
     setPendingAltFieldsSummary([])
   }, [])
 
-  // Import URL
+  // Import one or more newline-separated URLs
   const importUrl = useCallback(
-    async (url: string) => {
-      setImportProgress({ step: 'processing', percent: 100, filename: url })
+    async (input: string) => {
+      const urls = input.split(/\r?\n/).map((url) => url.trim()).filter(Boolean)
+      if (urls.length === 0) return
+
+      setImportProgress({ step: 'processing', percent: 100, filename: urls.length === 1 ? urls[0] : `${urls.length} URLs` })
       setImportError(null)
+      const imported: Character[] = []
+      const failures: string[] = []
+      let lorebookPromptQueued = !!pendingLorebookImport
       try {
-        const result = await charactersApi.importUrl(url)
-        addCharacter(result.character)
-        setBrowserTotal((t) => t + 1)
+        for (let i = 0; i < urls.length; i++) {
+          const url = urls[i]
+          setImportProgress({
+            step: 'processing',
+            percent: 100,
+            filename: urls.length === 1 ? url : `${i + 1}/${urls.length}: ${url}`,
+          })
+          try {
+            const result = await charactersApi.importUrl(url)
+            addCharacter(result.character)
+            imported.push(result.character)
+            if (getEmbeddedCharacterBookEntryCount(result.character.extensions) > 0
+                && !(result.character.extensions?.world_book_ids?.length > 0)
+                && !lorebookPromptQueued) {
+              setPendingLorebookImport(result.character)
+              lorebookPromptQueued = true
+            }
+            maybeShowImportedLoraHint(result.character)
+          } catch (err: any) {
+            const msg = err?.body?.error || err?.body?.message || err?.message || 'Import failed'
+            failures.push(`${url}: ${msg}`)
+          }
+        }
+
+        if (imported.length > 0) {
+          setBrowserTotal((t) => t + imported.length)
+        }
         setFetchVersion((v) => v + 1)
-        toast.success(`${result.character.name} was imported`)
-        if (getEmbeddedCharacterBookEntryCount(result.character.extensions) > 0
-            && !(result.character.extensions?.world_book_ids?.length > 0)) {
-          setPendingLorebookImport(result.character)
+        if (imported.length === 1) {
+          toast.success(i18n.t('chat.toast.characterImported', { name: imported[0].name }))
+        } else if (imported.length > 1) {
+          toast.success(`Imported ${imported.length} characters`)
+        }
+
+        if (failures.length > 0) {
+          throw new Error(failures.join('\n'))
         }
       } catch (err: any) {
         const msg = err?.body?.message || err?.message || 'Import failed'
@@ -408,7 +488,7 @@ export function useCharacterBrowser() {
         setImportProgress(null)
       }
     },
-    [addCharacter]
+    [addCharacter, pendingLorebookImport]
   )
 
   // Batch delete
@@ -497,8 +577,8 @@ export function useCharacterBrowser() {
 
   const openModal = useStore((s) => s.openModal)
   const showChatCreationToast = useCallback(
-    () => toast.info('Creating chat and preparing Memory Cortex in the background…', {
-      title: 'Starting Chat',
+    () => toast.info(i18n.t('chat.toast.creatingChatCortex'), {
+      title: i18n.t('chat.toast.startingChat'),
       duration: 60_000,
       dismissible: false,
     }),
@@ -549,7 +629,7 @@ export function useCharacterBrowser() {
               } catch (err) {
                 toast.dismiss(toastId)
                 console.error('[CharacterBrowser] Failed to create chat:', err)
-                toast.error('Failed to create chat')
+                toast.error(i18n.t('chat.toast.failedCreateChat'))
               }
             },
           })
@@ -564,7 +644,7 @@ export function useCharacterBrowser() {
       } catch (err) {
         if (creationToastId) toast.dismiss(creationToastId)
         console.error('[CharacterBrowser] Failed to open chat:', err)
-        toast.error('Failed to open chat')
+        toast.error(i18n.t('chat.toast.failedOpenChat'))
       }
     },
     [navigate, openModal, showChatCreationToast]
@@ -595,7 +675,7 @@ export function useCharacterBrowser() {
               } catch (err) {
                 toast.dismiss(toastId)
                 console.error('[CharacterBrowser] Failed to create chat:', err)
-                toast.error('Failed to create chat')
+                toast.error(i18n.t('chat.toast.failedCreateChat'))
               }
             },
           })
@@ -610,7 +690,7 @@ export function useCharacterBrowser() {
       } catch (err) {
         if (creationToastId) toast.dismiss(creationToastId)
         console.error('[CharacterBrowser] Failed to start new chat:', err)
-        toast.error('Failed to start new chat')
+        toast.error(i18n.t('chat.toast.failedStartNewChat'))
       }
     },
     [navigate, openModal, showChatCreationToast]
@@ -716,6 +796,7 @@ export function useCharacterBrowser() {
     sortDirection,
     viewMode,
     selectedTags,
+    excludedTags,
     allTags,
     batchMode,
     batchSelected,
@@ -734,6 +815,8 @@ export function useCharacterBrowser() {
     setViewMode,
     setSelectedTags,
     toggleSelectedTag,
+    cycleTagFilter,
+    clearTagFilters,
     toggleFavorite: handleToggleFavorite,
     setBatchMode,
     toggleBatchSelect,

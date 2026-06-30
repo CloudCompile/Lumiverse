@@ -1,4 +1,5 @@
 import { Eye, EyeOff, Trash2, X, CheckSquare, Square } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useMessageSelect } from '@/hooks/useMessageSelect'
 import { useStore } from '@/store'
 import styles from './MessageSelectBar.module.css'
@@ -9,6 +10,8 @@ interface MessageSelectBarProps {
 }
 
 export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
+  const { t } = useTranslation('chat')
+  const { t: tc } = useTranslation('common')
   const {
     selectedCount,
     totalCount,
@@ -27,27 +30,27 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
 
   const handleDelete = () => {
     openModal('confirm', {
-      title: 'Delete Messages',
-      message: `Permanently delete ${selectedCount} message${selectedCount !== 1 ? 's' : ''}? This cannot be undone.`,
+      title: t('messageSelect.deleteTitle'),
+      message: t('messageSelect.deleteMessage', { count: selectedCount }),
       variant: 'danger',
-      confirmText: 'Delete',
+      confirmText: tc('actions.delete'),
       onConfirm: bulkDelete,
     })
   }
 
   return (
-    <div className={styles.bar}>
+    <div className={styles.bar} data-component="MessageSelectBar">
       <div className={styles.left}>
         <button
           type="button"
           className={styles.selectToggle}
           onClick={allSelected ? clearMessageSelection : selectAllMessages}
-          title={allSelected ? 'Deselect all' : 'Select all'}
+          title={allSelected ? t('messageSelect.deselectAll') : t('messageSelect.selectAll')}
         >
           {allSelected ? <CheckSquare size={14} /> : <Square size={14} />}
         </button>
         <span className={styles.count}>
-          {selectedCount} of {totalCount} selected
+          {t('messageSelect.selectedCount', { selected: selectedCount, total: totalCount })}
         </span>
       </div>
       <div className={styles.actions}>
@@ -59,7 +62,7 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
             disabled={selectedCount === 0}
           >
             <EyeOff size={13} />
-            <span className={styles.actionLabel}>Hide</span>
+            <span className={styles.actionLabel}>{t('messageActions.hide')}</span>
           </button>
         )}
         {hasHiddenSelected && (
@@ -70,7 +73,7 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
             disabled={selectedCount === 0}
           >
             <Eye size={13} />
-            <span className={styles.actionLabel}>Unhide</span>
+            <span className={styles.actionLabel}>{t('messageActions.unhide')}</span>
           </button>
         )}
         <button
@@ -80,7 +83,7 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
           disabled={selectedCount === 0}
         >
           <Trash2 size={13} />
-          <span className={styles.actionLabel}>Delete</span>
+          <span className={styles.actionLabel}>{tc('actions.delete')}</span>
         </button>
         <button
           type="button"
@@ -88,7 +91,7 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
           onClick={exitSelectMode}
         >
           <X size={13} />
-          <span className={styles.actionLabel}>Cancel</span>
+          <span className={styles.actionLabel}>{tc('actions.cancel')}</span>
         </button>
       </div>
     </div>
