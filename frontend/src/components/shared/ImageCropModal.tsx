@@ -1,4 +1,6 @@
 import { useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import { createPortal } from 'react-dom'
 import Cropper from 'react-easy-crop'
 import type { Area } from 'react-easy-crop'
 import cropImage from '@/lib/cropImage'
@@ -23,6 +25,8 @@ export default function ImageCropModal({
   aspect = 1,
   outputSize = 512,
 }: ImageCropModalProps) {
+  const { t } = useTranslation('shared', { keyPrefix: 'imageCrop' })
+  const { t: tc } = useTranslation('common')
   const [crop, setCrop] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
   const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null)
@@ -55,7 +59,7 @@ export default function ImageCropModal({
 
   if (!isOpen || !imageSrc) return null
 
-  return (
+  return createPortal(
     <div className={styles.overlay} onClick={handleCancel}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.cropContainer}>
@@ -72,7 +76,7 @@ export default function ImageCropModal({
         </div>
         <div className={styles.controls}>
           <label className={styles.zoomLabel}>
-            Zoom
+            {t('zoom')}
             <input
               type="range"
               className={styles.zoomSlider}
@@ -86,7 +90,7 @@ export default function ImageCropModal({
         </div>
         <div className={styles.actions}>
           <button type="button" className={styles.cancelBtn} onClick={handleCancel}>
-            Cancel
+            {tc('actions.cancel')}
           </button>
           <button
             type="button"
@@ -94,10 +98,11 @@ export default function ImageCropModal({
             onClick={handleConfirm}
             disabled={processing}
           >
-            {processing ? 'Cropping...' : 'Confirm'}
+            {processing ? t('cropping') : t('confirm')}
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

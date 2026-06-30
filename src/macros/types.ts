@@ -84,6 +84,13 @@ export interface MacroDefinition {
   aliases?: string[];
   /** When true, extension macros cannot overwrite this definition */
   builtIn?: boolean;
+  /** When true, the handler's return value is guaranteed to never contain
+   *  unresolved macro markers ({{...}}). Skips the post-handler recursive
+   *  expansion check for a small performance win on hot-path macros. */
+  terminal?: boolean;
+  /** Output depends on state outside MacroEnv (Date.now, Math.random,
+   *  per-call dynamicMacros). Caching the result would serve stale output. */
+  volatile?: boolean;
   handler: MacroHandler;
 }
 
@@ -102,6 +109,8 @@ export interface MacroExecContext {
   args: string[];
   rawArgs: AstNode[][];
   flags: MacroFlags;
+  /** False when the caller explicitly requested a dry / non-committing resolve. */
+  commit: boolean;
   isScoped: boolean;
   body: string;
   bodyRaw: AstNode[];
@@ -118,6 +127,8 @@ export interface MacroExecContext {
 // ============================================================================
 
 export interface MacroEnv {
+  /** False when macro evaluation should avoid durable side effects. */
+  commit: boolean;
   names: {
     user: string;
     char: string;
@@ -132,8 +143,17 @@ export interface MacroEnv {
     groupMemberCount: string;
     /** "yes" or "no" */
     isGroupChat: string;
+    /** "yes" or "no" — whether the active persona is a narrator (not a self-insert) */
+    isNarrator: string;
     /** Name of the last non-user character who spoke. Empty if none or non-group chat. */
     groupLastSpeaker: string;
+    /**
+     * Card composition mode for the current chat:
+     * - "solo" for non-group chats
+     * - "swap" when only the focused character's card is loaded
+     * - "merge" / "merge_ignore_muted" when group cards are combined into one
+     */
+    groupCardMode: string;
   };
   character: {
     name: string;
@@ -141,6 +161,9 @@ export interface MacroEnv {
     personality: string;
     scenario: string;
     persona: string;
+    personaSubjectivePronoun: string;
+    personaObjectivePronoun: string;
+    personaPossessivePronoun: string;
     mesExamples: string;
     mesExamplesRaw: string;
     systemPrompt: string;
@@ -162,6 +185,7 @@ export interface MacroEnv {
     firstIncludedMessageId: number;
     lastSwipeId: number;
     currentSwipeId: number;
+    rejectedSwipe: string;
   };
   system: {
     model: string;
@@ -172,6 +196,7 @@ export interface MacroEnv {
     isMobile: boolean;
   };
   variables: {
+    /** Transient variables scoped to the current macro environment / render only. */
     local: Map<string, string>;
     global: Map<string, string>;
     /** Chat-scoped persisted variables — saved to chat.metadata.chat_variables after generation. */
@@ -179,10 +204,18 @@ export interface MacroEnv {
   };
   /** Set to true when any chat variable macro mutates state. Used to trigger persistence. */
   _chatVarsDirty?: boolean;
+  /** Internal: fingerprint accumulator stashed by evaluate(). Surfaced back
+   *  via EvaluateResult.touchedVars / cacheable. */
+  _fingerprint?: { touched: Set<string>; cacheable: boolean };
   dynamicMacros: Record<string, string | MacroHandler | MacroDefinition>;
   /** Pre-normalized lowercase key → value map for O(1) dynamic macro lookup.
    *  Built automatically by buildEnv(); kept in sync if dynamicMacros changes. */
   _dynamicMacrosLower?: Map<string, string | MacroHandler | MacroDefinition>;
+  /** Optional abort signal. When present, the evaluator checks `aborted` between
+   *  top-level iteration passes so a user's /generate/stop can tear down a long
+   *  macro expansion (e.g. nested {{evalm}} / recursive custom macros) rather
+   *  than holding the event loop until the 5-pass loop converges. */
+  signal?: AbortSignal;
   extra: Record<string, any>;
 }
 
@@ -204,4 +237,10 @@ export interface MacroDiagnostic {
 export interface EvaluateResult {
   text: string;
   diagnostics: MacroDiagnostic[];
+  /** `<scope>:<key>` strings naming every var observed via
+   *  env.variables.*.get/has during evaluation. */
+  touchedVars: ReadonlySet<string>;
+  /** False when any volatile macro fired or an interceptor handled the
+   *  template. Consumers must not cache the result when false. */
+  cacheable: boolean;
 }

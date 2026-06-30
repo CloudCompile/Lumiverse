@@ -1,3 +1,7 @@
+---
+title: Creating Characters
+---
+
 # Creating Characters
 
 Building a character from scratch gives you full control over how the AI portrays them.

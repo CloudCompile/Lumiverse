@@ -1,4 +1,8 @@
-# Presets
+---
+title: Reasoning
+---
+
+# Reasoning
 
 Presets are the heart of Lumiverse's prompt engineering system. They control **what the AI sees** and **how it generates** — from the system prompt structure to sampling parameters like temperature.
 
@@ -23,8 +27,9 @@ Think of a preset as a recipe for how to talk to the AI. Different recipes produ
 | [Understanding Presets](understanding-presets.md) | The big picture of how presets work |
 | [Prompt Blocks](prompt-blocks.md) | Adding, ordering, and configuring blocks |
 | [Sampler Settings](sampler-settings.md) | Temperature, top-p, penalties, and more |
+| [Prompt Variables](prompt-variables.md) | Create custom user-facing settings in your presets |
 | [Preset Profiles](preset-profiles.md) | Per-character and per-chat block state snapshots |
-| [Macros Reference](macros-reference.md) | Complete list of all 117 built-in macros |
+| [Macros Reference](macros-reference.md) | Complete list of the built-in macros |
 | [Execution Order](execution-order.md) | When and how macros are evaluated — critical for ST migrants |
 | [Context Filters](context-filters.md) | Strip HTML, details, and loom tags from older messages |
 | [Sovereign Hand](sovereign-hand.md) | Co-pilot mode — direct the scene instead of playing a character |

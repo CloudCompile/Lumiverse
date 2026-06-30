@@ -13,10 +13,12 @@ app.get("/", (c) => {
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
-  // M-32: The previous check (!body.label && body.label !== "") was confusing
-  // and could pass non-string values (e.g. numbers) through.  Require label to
-  // be a string explicitly.
-  if (typeof body.label !== "string") return c.json({ error: "label is required and must be a string" }, 400);
+  // Empty labels are allowed — the UI creates a blank row and lets the user
+  // type the name inline (same pattern as persona-specific add-ons). Reject
+  // only non-string types so falsy values like null/false/0 can't sneak in.
+  if (typeof body.label !== "string") {
+    return c.json({ error: "label must be a string" }, 400);
+  }
   const addon = svc.createGlobalAddon(userId, body);
   return c.json(addon, 201);
 });

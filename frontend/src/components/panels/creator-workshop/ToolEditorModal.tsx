@@ -1,4 +1,6 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { Plus, Trash2, Wrench, Code, Settings } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
@@ -14,22 +16,18 @@ interface SchemaProperty {
   name: string
   type: string
   description: string
+  required: boolean
 }
-
-const TYPE_OPTIONS = [
-  { value: 'string', label: 'String' },
-  { value: 'number', label: 'Number' },
-  { value: 'boolean', label: 'Boolean' },
-  { value: 'integer', label: 'Integer' },
-]
 
 function parseSchemaProps(schema: Record<string, any>): SchemaProperty[] {
   const props = schema?.properties
   if (!props || typeof props !== 'object') return []
+  const required = new Set(Array.isArray(schema?.required) ? schema.required : [])
   return Object.entries(props).map(([name, def]: [string, any]) => ({
     name,
     type: def?.type || 'string',
     description: def?.description || '',
+    required: required.has(name),
   }))
 }
 
@@ -40,14 +38,58 @@ function buildSchema(properties: SchemaProperty[]): Record<string, any> {
   for (const p of properties) {
     if (!p.name.trim()) continue
     props[p.name.trim()] = { type: p.type, description: p.description }
-    required.push(p.name.trim())
+    if (p.required) required.push(p.name.trim())
   }
-  return { type: 'object', properties: props, required }
+  return { type: 'object', properties: props, ...(required.length > 0 ? { required } : {}) }
 }
 
+function buildPromptGuide(properties: SchemaProperty[], t: TFunction<'panels'>): string {
+  const activeProps = properties.filter((prop) => prop.name.trim())
+  if (activeProps.length === 0) {
+    return [
+      t('creatorWorkshop.toolEditor.promptGuideEmpty'),
+      t('creatorWorkshop.toolEditor.promptGuideFreeform'),
+    ].join('\n')
+  }
+
+  const lines = [
+    t('creatorWorkshop.toolEditor.promptGuideIntro'),
+    '',
+    t('creatorWorkshop.toolEditor.promptGuideReturn'),
+  ]
+
+  for (const prop of activeProps) {
+    const status = prop.required
+      ? t('creatorWorkshop.shared.required')
+      : t('creatorWorkshop.shared.optional')
+    const description = prop.description.trim()
+      ? `: ${prop.description.trim()}`
+      : ''
+    lines.push(t('creatorWorkshop.toolEditor.promptGuideField', {
+      name: prop.name.trim(),
+      type: prop.type,
+      status,
+      description,
+    }))
+  }
+
+  lines.push(t('creatorWorkshop.toolEditor.promptGuideFooter'))
+  return lines.join('\n')
+}
+
+const LOOM_COUNCIL_MACRO = '{{loomCouncilResult::your_variable}}'
+
 export default function ToolEditorModal() {
+  const { t } = useTranslation('panels')
   const modalProps = useStore((s) => s.modalProps)
   const closeModal = useStore((s) => s.closeModal)
+
+  const typeOptions = useMemo(() => [
+    { value: 'string', label: t('creatorWorkshop.shared.schemaType.string') },
+    { value: 'number', label: t('creatorWorkshop.shared.schemaType.number') },
+    { value: 'boolean', label: t('creatorWorkshop.shared.schemaType.boolean') },
+    { value: 'integer', label: t('creatorWorkshop.shared.schemaType.integer') },
+  ], [t])
 
   const packId = modalProps.packId as string
   const editingItem = modalProps.editingItem as LoomTool | undefined
@@ -102,12 +144,12 @@ export default function ToolEditorModal() {
   }, [handleClose])
 
   const addProperty = () => {
-    setSchemaProps([...schemaProps, { name: '', type: 'string', description: '' }])
+    setSchemaProps([...schemaProps, { name: '', type: 'string', description: '', required: true }])
   }
 
-  const updateProperty = (index: number, field: keyof SchemaProperty, value: string) => {
+  const updateProperty = (index: number, field: keyof SchemaProperty, value: string | boolean) => {
     const updated = [...schemaProps]
-    updated[index] = { ...updated[index], [field]: value }
+    updated[index] = { ...updated[index], [field]: value } as SchemaProperty
     setSchemaProps(updated)
   }
 
@@ -143,73 +185,120 @@ export default function ToolEditorModal() {
     }
   }
 
+  const generatedSchema = buildSchema(schemaProps)
+  const schemaPreview = Object.keys(generatedSchema).length > 0
+    ? JSON.stringify(generatedSchema, null, 2)
+    : '{}'
   const canSave = toolName.trim() && displayName.trim() && prompt.trim()
 
   return (
     <>
       <ModalShell isOpen onClose={handleClose} maxWidth={720} maxHeight="90vh" closeOnEscape={false} className={styles.modal}>
         <div className={styles.header}>
-          <h3 className={styles.title}>{editingItem ? 'Edit Tool' : 'Create Tool'}</h3>
+          <h3 className={styles.title}>
+            {editingItem ? t('creatorWorkshop.toolEditor.editTitle') : t('creatorWorkshop.toolEditor.createTitle')}
+          </h3>
           <CloseButton onClick={handleClose} />
         </div>
 
         <div className={styles.body}>
-          <EditorSection Icon={Wrench} title="Tool Details">
+          <div className={styles.helpCard}>
+            <div className={styles.helpTitle}>{t('creatorWorkshop.toolEditor.helpTitle')}</div>
+            <div className={styles.helpText}>{t('creatorWorkshop.toolEditor.helpText')}</div>
+            <div className={styles.helpList}>
+              <div>{t('creatorWorkshop.toolEditor.helpStep1')}</div>
+              <div>{t('creatorWorkshop.toolEditor.helpStep2')}</div>
+              <div>{t('creatorWorkshop.toolEditor.helpStep3', { macroExample: LOOM_COUNCIL_MACRO })}</div>
+            </div>
+          </div>
+
+          <EditorSection Icon={Wrench} title={t('creatorWorkshop.toolEditor.toolDetails')}>
             <div className={styles.row}>
               <div className={styles.rowHalf}>
-                <FormField label="Tool Name" required hint="Internal identifier (snake_case)">
-                  <TextInput value={toolName} onChange={setToolName} placeholder="my_tool" autoFocus />
+                <FormField label={t('creatorWorkshop.toolEditor.toolName')} required hint={t('creatorWorkshop.toolEditor.toolNameHint')}>
+                  <TextInput value={toolName} onChange={setToolName} placeholder={t('creatorWorkshop.toolEditor.toolNamePlaceholder')} autoFocus />
                 </FormField>
               </div>
               <div className={styles.rowHalf}>
-                <FormField label="Display Name" required>
-                  <TextInput value={displayName} onChange={setDisplayName} placeholder="My Tool" />
+                <FormField label={t('creatorWorkshop.toolEditor.displayName')} required hint={t('creatorWorkshop.toolEditor.displayNameHint')}>
+                  <TextInput value={displayName} onChange={setDisplayName} placeholder={t('creatorWorkshop.toolEditor.displayNamePlaceholder')} />
                 </FormField>
               </div>
             </div>
 
-            <FormField label="Description">
-              <TextInput value={description} onChange={setDescription} placeholder="What this tool does..." />
+            <FormField label={t('creatorWorkshop.toolEditor.description')} hint={t('creatorWorkshop.toolEditor.descriptionHint')}>
+              <TextInput value={description} onChange={setDescription} placeholder={t('creatorWorkshop.toolEditor.descriptionPlaceholder')} />
             </FormField>
 
-            <FormField label="Author">
-              <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
-            </FormField>
-          </EditorSection>
-
-          <EditorSection Icon={Code} title="Tool Prompt">
-            <FormField label="Prompt" required hint="Instructions the AI receives when using this tool">
-              <TextArea value={prompt} onChange={setPrompt} placeholder="You are a tool that..." rows={5} />
+            <FormField label={t('creatorWorkshop.shared.author')}>
+              <TextInput value={authorName} onChange={setAuthorName} placeholder={t('creatorWorkshop.loomEditor.authorPlaceholder')} />
             </FormField>
           </EditorSection>
 
-          <EditorSection Icon={Settings} title="Input Schema" defaultExpanded={schemaProps.length > 0}>
+          <EditorSection Icon={Code} title={t('creatorWorkshop.toolEditor.toolPrompt')}>
+            <FormField label={t('creatorWorkshop.toolEditor.prompt')} required hint={t('creatorWorkshop.toolEditor.promptHint')}>
+              <TextArea value={prompt} onChange={setPrompt} placeholder={t('creatorWorkshop.toolEditor.promptPlaceholder')} rows={6} />
+            </FormField>
+
+            <div className={styles.subtleCard}>
+              <div className={styles.subtleCardTitle}>{t('creatorWorkshop.toolEditor.promptHelperTitle')}</div>
+              <div className={styles.subtleCardText}>{t('creatorWorkshop.toolEditor.promptHelperText')}</div>
+              <pre className={styles.codeBlock}>{buildPromptGuide(schemaProps, t)}</pre>
+            </div>
+          </EditorSection>
+
+          <EditorSection Icon={Settings} title={t('creatorWorkshop.toolEditor.structuredOutput')} defaultExpanded={schemaProps.length > 0}>
+            <div className={styles.subtleCard}>
+              <div className={styles.subtleCardTitle}>{t('creatorWorkshop.toolEditor.structuredWhatTitle')}</div>
+              <div className={styles.subtleCardText}>{t('creatorWorkshop.toolEditor.structuredWhatText')}</div>
+            </div>
+
             {schemaProps.map((prop, i) => (
               <div key={i} className={styles.schemaRow}>
                 <div className={styles.schemaFields}>
                   <div className={styles.schemaFieldRow}>
-                    <TextInput value={prop.name} onChange={(v) => updateProperty(i, 'name', v)} placeholder="Property name" />
-                    <Select value={prop.type} onChange={(v) => updateProperty(i, 'type', v)} options={TYPE_OPTIONS} />
+                    <TextInput value={prop.name} onChange={(v) => updateProperty(i, 'name', v)} placeholder={t('creatorWorkshop.toolEditor.fieldNamePlaceholder')} />
+                    <Select value={prop.type} onChange={(v) => updateProperty(i, 'type', v)} options={typeOptions} />
                   </div>
-                  <TextInput value={prop.description} onChange={(v) => updateProperty(i, 'description', v)} placeholder="Description" />
+                  <TextInput value={prop.description} onChange={(v) => updateProperty(i, 'description', v)} placeholder={t('creatorWorkshop.toolEditor.fieldDescPlaceholder')} />
+                  <label className={styles.checkboxLabel}>
+                    <input
+                      type="checkbox"
+                      checked={prop.required}
+                      onChange={(e) => updateProperty(i, 'required', e.target.checked)}
+                    />
+                    {t('creatorWorkshop.toolEditor.requiredField')}
+                  </label>
                 </div>
                 <button type="button" className={styles.schemaRemoveBtn} onClick={() => removeProperty(i)}>
                   <Trash2 size={14} />
-                </button>
+                  </button>
               </div>
             ))}
             <button type="button" className={styles.addPropertyBtn} onClick={addProperty}>
-              <Plus size={14} /> Add Property
+              <Plus size={14} /> {t('creatorWorkshop.toolEditor.addField')}
             </button>
+
+            <div className={styles.previewBlock}>
+              <div className={styles.previewTitle}>{t('creatorWorkshop.toolEditor.schemaPreview')}</div>
+              <pre className={styles.codeBlock}>{schemaPreview}</pre>
+            </div>
           </EditorSection>
 
-          <EditorSection Icon={Settings} title="Result Routing" defaultExpanded={false}>
-            <FormField label="Result Variable" hint="Variable name to store the tool's output">
-              <TextInput value={resultVariable} onChange={setResultVariable} placeholder="result_var" />
+          <EditorSection Icon={Settings} title={t('creatorWorkshop.toolEditor.resultRouting')} defaultExpanded={false}>
+            <div className={styles.subtleCard}>
+              <div className={styles.subtleCardTitle}>{t('creatorWorkshop.toolEditor.resultRoutingTitle')}</div>
+              <div className={styles.subtleCardText}>
+                {t('creatorWorkshop.toolEditor.resultRoutingText', { macroExample: LOOM_COUNCIL_MACRO })}
+              </div>
+            </div>
+
+            <FormField label={t('creatorWorkshop.toolEditor.resultVariable')} hint={t('creatorWorkshop.toolEditor.resultVariableHint')}>
+              <TextInput value={resultVariable} onChange={setResultVariable} placeholder={t('creatorWorkshop.toolEditor.resultVariablePlaceholder')} />
             </FormField>
 
             <div className={styles.toggleRow}>
-              <span className={styles.toggleLabel}>Store in deliberation</span>
+              <span className={styles.toggleLabel}>{t('creatorWorkshop.toolEditor.storeInDeliberation')}</span>
               <button
                 type="button"
                 className={clsx(styles.toggle, storeInDeliberation && styles.toggleActive)}
@@ -218,13 +307,18 @@ export default function ToolEditorModal() {
                 <span className={styles.toggleKnob} />
               </button>
             </div>
+            <div className={styles.inlineHint}>{t('creatorWorkshop.toolEditor.storeInDeliberationHint')}</div>
           </EditorSection>
         </div>
 
         <div className={styles.footer}>
-          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="ghost" onClick={handleClose}>{t('creatorWorkshop.shared.cancel')}</Button>
           <Button variant="primary" onClick={handleSave} disabled={!canSave || saving}>
-            {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+            {saving
+              ? t('creatorWorkshop.shared.saving')
+              : editingItem
+                ? t('creatorWorkshop.shared.saveChanges')
+                : t('creatorWorkshop.shared.create')}
           </Button>
         </div>
       </ModalShell>
@@ -232,11 +326,11 @@ export default function ToolEditorModal() {
       {showDiscard && (
         <ConfirmationModal
           isOpen
-          title="Discard changes?"
-          message="You have unsaved changes. Are you sure you want to discard them?"
+          title={t('creatorWorkshop.shared.discardTitle')}
+          message={t('creatorWorkshop.shared.discardMessage')}
           variant="warning"
-          confirmText="Discard"
-          cancelText="Keep editing"
+          confirmText={t('creatorWorkshop.shared.discard')}
+          cancelText={t('creatorWorkshop.shared.keepEditing')}
           onConfirm={() => {
             setShowDiscard(false)
             closeModal()

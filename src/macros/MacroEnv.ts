@@ -13,6 +13,8 @@ export interface BuildEnvContext {
   chat: Chat;
   messages: Message[];
   generationType: GenerationType;
+  /** Defaults to true. False marks the evaluation as dry / non-committing. */
+  commit?: boolean;
   connection?: ConnectionProfile | null;
   userId?: string;
   dynamicMacros?: Record<string, string | MacroHandler | MacroDefinition>;
@@ -24,10 +26,27 @@ export interface BuildEnvContext {
   targetCharacterId?: string;
   /** Pre-resolved name of the target/focused character. Falls back to character.name if targetCharacterId is set. */
   targetCharacterName?: string;
+  /** Optional abort signal — threaded onto MacroEnv so the evaluator can cancel between iterations. */
+  signal?: AbortSignal;
+  /** Content of the regenerate/swipe target before the new swipe was staged. */
+  rejectedSwipe?: string;
+}
+
+export function resolvePersonaPronouns(persona: Persona | null): {
+  subjective: string;
+  objective: string;
+  possessive: string;
+} {
+  return {
+    subjective: persona?.subjective_pronoun?.trim() || "they",
+    objective: persona?.objective_pronoun?.trim() || "them",
+    possessive: persona?.possessive_pronoun?.trim() || "their",
+  };
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
   const { character, persona, chat, messages, generationType, connection } = ctx;
+  const personaPronouns = resolvePersonaPronouns(persona);
 
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastUserMsg = findLast(messages, (m) => m.is_user);
@@ -39,8 +58,18 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
   const groupLastSpeaker = isGroup
     ? (findLast(messages, (m) => !m.is_user)?.name || "")
     : "";
+  // Resolve the card composition mode. Mirrors the gate in prompt-assembly's
+  // getGroupCardMode — anything not explicitly "merge" / "merge_ignore_muted"
+  // falls back to "swap". Solo chats short-circuit to "solo".
+  const rawCardMode = chat.metadata?.group_card_mode;
+  const groupCardMode = !isGroup
+    ? "solo"
+    : (rawCardMode === "merge" || rawCardMode === "merge_ignore_muted")
+      ? rawCardMode
+      : "swap";
 
   return {
+    commit: ctx.commit !== false,
     names: {
       user: persona?.name || "User",
       char: getEffectiveCharacterName(character),
@@ -53,7 +82,9 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
         : "",
       groupMemberCount: isGroup && allGroupNames ? String(allGroupNames.length) : "0",
       isGroupChat: isGroup ? "yes" : "no",
+      isNarrator: persona?.is_narrator ? "yes" : "no",
       groupLastSpeaker,
+      groupCardMode,
     },
     character: {
       name: character.name,
@@ -61,7 +92,10 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       personality: character.personality || "",
       scenario: character.scenario || "",
       persona: buildPersonaWithAddons(persona),
-      mesExamples: character.mes_example || getDreamWeaverVoiceGuidance(character) || "",
+      personaSubjectivePronoun: personaPronouns.subjective,
+      personaObjectivePronoun: personaPronouns.objective,
+      personaPossessivePronoun: personaPronouns.possessive,
+      mesExamples: character.mes_example || "",
       mesExamplesRaw: character.mes_example || "",
       systemPrompt: character.system_prompt || "",
       postHistoryInstructions: character.post_history_instructions || "",
@@ -69,7 +103,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       creatorNotes: character.creator_notes || "",
       version: (character.extensions?.version as string) || "",
       creator: character.creator || "",
-      firstMessage: character.first_mes || "",
+      firstMessage: resolveChatGreeting(character, chat, messages),
     },
     chat: {
       id: chat.id,
@@ -82,6 +116,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       firstIncludedMessageId: messages.length > 0 ? 0 : -1,
       lastSwipeId: lastMsg?.swipes ? lastMsg.swipes.length - 1 : 0,
       currentSwipeId: lastMsg?.swipe_id ?? 0,
+      rejectedSwipe: ctx.rejectedSwipe ?? "",
     },
     system: {
       model: connection?.model || "",
@@ -92,19 +127,79 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       isMobile: false,
     },
     variables: {
-      local: new Map(Object.entries((chat.metadata?.macro_variables?.local as Record<string, string>) || {})),
+      local: new Map(),
       global: new Map(Object.entries((chat.metadata?.macro_variables?.global as Record<string, string>) || {})),
       chat: new Map(Object.entries((chat.metadata?.chat_variables as Record<string, string>) || {})),
     },
     dynamicMacros: ctx.dynamicMacros || {},
     _dynamicMacrosLower: buildDynamicLookup(ctx.dynamicMacros),
+    signal: ctx.signal,
     extra: {
       userId: ctx.userId ?? (chat as any).user_id as string | undefined,
+      characterId: character.id,
       messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
       chatCreatedAt: (chat as any).created_at as number | undefined,
       characterTags: Array.isArray((character as any).tags) ? (character as any).tags : [],
+      lastMessageTime: lastMsg && typeof lastMsg.send_date === "number"
+        ? lastMsg.send_date * 1000
+        : undefined,
     },
   };
+}
+
+export function cloneEnv(env: MacroEnv): MacroEnv {
+  return {
+    commit: env.commit !== false,
+    names: { ...env.names },
+    character: { ...env.character },
+    chat: { ...env.chat },
+    system: { ...env.system },
+    variables: {
+      local: new Map(env.variables.local),
+      global: new Map(env.variables.global),
+      chat: new Map(env.variables.chat),
+    },
+    ...(env._chatVarsDirty ? { _chatVarsDirty: true } : {}),
+    dynamicMacros: { ...env.dynamicMacros },
+    _dynamicMacrosLower: env._dynamicMacrosLower
+      ? new Map(env._dynamicMacrosLower)
+      : undefined,
+    signal: env.signal,
+    extra: { ...env.extra },
+  };
+}
+
+function resolveChatGreeting(character: Character, chat: Chat, messages: Message[]): string {
+  const metadataOverride = chat.metadata?.greeting_override;
+  if (typeof metadataOverride === "string") return metadataOverride;
+
+  if (chat.metadata?.group) {
+    const taggedGreeting = messages.find((message) =>
+      !message.is_user
+      && message.extra?.greeting === true
+      && message.extra?.greeting_character_id === character.id,
+    );
+    return taggedGreeting?.content || character.first_mes || "";
+  }
+
+  const taggedGreeting = messages.find((message) => !message.is_user && message.extra?.greeting === true);
+  if (taggedGreeting?.content) return taggedGreeting.content;
+
+  const openingMessage = messages[0];
+  if (openingMessage && !openingMessage.is_user) return openingMessage.content;
+
+  return character.first_mes || "";
+}
+
+export function mergeDynamicMacros(
+  env: MacroEnv,
+  overrides: Record<string, string>,
+): void {
+  if (!overrides) return;
+  for (const k of Object.keys(overrides)) {
+    env.dynamicMacros[k] = overrides[k];
+  }
+  env._dynamicMacrosLower = buildDynamicLookup(env.dynamicMacros);
 }
 
 /** Build a lowercase-keyed Map from dynamicMacros for O(1) lookup. */
@@ -139,19 +234,6 @@ export function resolveGroupCharacterNames(
     if (name) names.push(name);
   }
   return names.length > 0 ? names : undefined;
-}
-
-/**
- * Dream Weaver cards don't populate `mes_example` — they use voice guidance
- * instead. When the `dialogue_examples` block resolves `{{mesExamples}}`, this
- * lets DW cards fill that slot with their compiled voice guidance so preset
- * prompt orders that include dialogue examples still work.
- */
-function getDreamWeaverVoiceGuidance(character: Character): string {
-  const dw = character.extensions?.dream_weaver as
-    | { voice_guidance?: { compiled?: string } }
-    | undefined;
-  return dw?.voice_guidance?.compiled?.trim() || "";
 }
 
 function buildPersonaWithAddons(persona: Persona | null): string {

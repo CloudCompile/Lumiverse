@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import { Plus, X, Pencil, Check } from 'lucide-react'
 import { imagesApi } from '@/api/images'
 import LazyImage from '@/components/shared/LazyImage'
@@ -33,6 +35,8 @@ export default function AlternateAvatarManager({
   onAvatarSelect,
   uploadProgress,
 }: Props) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -81,10 +85,10 @@ export default function AlternateAvatarManager({
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <span className={styles.label}>Alternate Avatars</span>
-        <span className={styles.helper}>Additional profile pictures for this character, switchable per chat.</span>
+        <span className={styles.label}>{t('characterBrowser.alternateAvatars.title')}</span>
+        <span className={styles.helper}>{t('characterBrowser.alternateAvatars.helper')}</span>
         {selectable && (
-          <span className={styles.selectionHint}>Tap an avatar to use it in this chat.</span>
+          <span className={styles.selectionHint}>{t('characterBrowser.alternateAvatars.selectionHint')}</span>
         )}
       </div>
 
@@ -97,14 +101,14 @@ export default function AlternateAvatarManager({
           >
             <LazyImage
               src={imagesApi.smallUrl(primaryImageId)}
-              alt="Primary"
+              alt={t('characterBrowser.alternateAvatars.primary')}
               className={clsx(
                 styles.thumb,
                 selectable && !activeChatAvatarId && styles.thumbSelected
               )}
               fallback={<div className={styles.thumbPlaceholder} />}
             />
-            <span className={styles.avatarLabel}>Primary</span>
+            <span className={styles.avatarLabel}>{t('characterBrowser.alternateAvatars.primary')}</span>
           </div>
         )}
 
@@ -145,10 +149,10 @@ export default function AlternateAvatarManager({
                 <span className={styles.avatarLabel}>{entry.label}</span>
               )}
               <div className={styles.cardActions} onClick={(e) => e.stopPropagation()}>
-                <button type="button" className={styles.iconBtn} onClick={() => handleStartRename(entry)} title="Rename">
+                <button type="button" className={styles.iconBtn} onClick={() => handleStartRename(entry)} title={tc('actions.edit')}>
                   <Pencil size={10} />
                 </button>
-                <button type="button" className={styles.iconBtn} onClick={() => handleDelete(entry.id)} title="Remove">
+                <button type="button" className={styles.iconBtn} onClick={() => handleDelete(entry.id)} title={tc('actions.delete')}>
                   <X size={10} />
                 </button>
               </div>
@@ -163,7 +167,7 @@ export default function AlternateAvatarManager({
               <div className={styles.uploadFill} style={{ transform: `scaleY(${uploadProgress / 100})` }} />
               <span className={styles.uploadPercent}>{uploadProgress}%</span>
             </div>
-            <span className={styles.avatarLabel}>Uploading...</span>
+            <span className={styles.avatarLabel}>{t('characterBrowser.alternateAvatars.uploading')}</span>
           </div>
         )}
 

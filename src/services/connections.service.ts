@@ -10,8 +10,36 @@ import type {
 } from "../types/connection-profile";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
+import { describeProviderError } from "../utils/provider-errors";
 
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 15_000;
+const ZAI_GENERAL_API_URL = "https://api.z.ai/api/paas/v4";
+const ZAI_CODING_PLAN_API_URL = "https://api.z.ai/api/coding/paas/v4";
+export const MODEL_ROULETTE_PROVIDER = "model_roulette";
+
+export interface ConnectionRouletteConfig {
+  connection_ids: string[];
+}
+
+function resolveZaiApiUrl(rawUrl: string, useCodingPlanEndpoint: boolean): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return useCodingPlanEndpoint ? ZAI_CODING_PLAN_API_URL : ZAI_GENERAL_API_URL;
+
+  try {
+    const url = new URL(trimmed);
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    if (pathname === "/v1" || pathname === "/api/paas/v4" || pathname === "/api/coding/paas/v4") {
+      url.pathname = useCodingPlanEndpoint ? "/api/coding/paas/v4" : "/api/paas/v4";
+      url.search = "";
+      url.hash = "";
+      return url.toString();
+    }
+  } catch {
+    // Preserve custom raw URLs we can't safely normalize.
+  }
+
+  return trimmed;
+}
 
 export interface ConnectionTestResult {
   success: boolean;
@@ -22,10 +50,56 @@ export interface ConnectionTestResult {
   error: string | null;
 }
 
+export interface NanoGptUsageWindow {
+  used: number;
+  remaining: number;
+  percentUsed: number;
+  resetAt: number | null;
+  limit: number | null;
+}
+
+export interface NanoGptSubscriptionUsage {
+  active: boolean;
+  allowOverage: boolean;
+  // Typed usage windows mirroring NanoGPT's subscription payload. Each may be
+  // null when the plan doesn't meter that dimension.
+  dailyInputTokens: NanoGptUsageWindow | null;
+  weeklyInputTokens: NanoGptUsageWindow | null;
+  dailyImages: NanoGptUsageWindow | null;
+  period: {
+    currentPeriodEnd: string | null;
+  };
+  state: string | null;
+  graceUntil: string | null;
+}
+
+/**
+ * Parse a single Nano-GPT usage window from the raw API payload, folding in its
+ * matching `limits.<key>` value. The window object and its limit live under
+ * separate keys in NanoGPT's response, so callers pass both.
+ */
+export function parseNanoGptUsageWindow(w: any, limit: any): NanoGptUsageWindow | null {
+  if (!w || typeof w !== "object") return null;
+  return {
+    used: typeof w.used === "number" ? w.used : 0,
+    remaining: typeof w.remaining === "number" ? w.remaining : 0,
+    percentUsed: typeof w.percentUsed === "number" ? w.percentUsed : 0,
+    resetAt: typeof w.resetAt === "number" ? w.resetAt : null,
+    limit: typeof limit === "number" ? limit : null,
+  };
+}
+
+export interface ConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  metadata?: Record<string, any>;
+  api_key?: string;
+  output_modalities?: string;
+}
+
 function describeConnectionTestError(err: unknown): string {
-  if (err instanceof Error && err.message.trim()) return err.message;
-  if (typeof err === "string" && err.trim()) return err;
-  return "Connection test failed";
+  return describeProviderError(err, "Connection test failed");
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -62,10 +136,13 @@ export function connectionSecretKey(id: string): string {
 
 /** Resolve effective API URL, accounting for provider-specific metadata flags. */
 export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: string | null; metadata?: Record<string, any> | null }): string {
-  const url = profile.api_url || "";
+  const url = (profile.api_url || "").trim();
   if (profile.provider === "nanogpt" && profile.metadata?.use_subscription_api) {
     if (!url) return "https://nano-gpt.com/api/subscription/v1";
     return url.replace("/api/v1", "/api/subscription/v1");
+  }
+  if (profile.provider === "zai") {
+    return resolveZaiApiUrl(url, profile.metadata?.use_coding_plan_endpoint === true);
   }
   if (profile.provider === "google_vertex") {
     const region = profile.metadata?.vertex_region;
@@ -80,7 +157,32 @@ export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: st
     }
     return `https://${region}-aiplatform.googleapis.com`;
   }
+  if (profile.provider === "bedrock") {
+    // An explicit api_url wins so power users can pin a GovCloud or VPC
+    // PrivateLink host; otherwise derive from region + endpoint toggle.
+    if (url) return url;
+    const region = (profile.metadata?.region || "us-east-1").trim() || "us-east-1";
+    // mantle (default, recommended) vs runtime (cross-region inference profiles).
+    return profile.metadata?.bedrock_endpoint === "runtime"
+      ? `https://bedrock-runtime.${region}.amazonaws.com/v1`
+      : `https://bedrock-mantle.${region}.api.aws/v1`;
+  }
   return url;
+}
+
+export function resolveNanoGptSubscriptionUsageUrl(profile: { api_url?: string | null }): string {
+  const fallback = "https://nano-gpt.com/api/subscription/v1/usage";
+  const rawUrl = (profile.api_url || "").trim() || "https://nano-gpt.com/api/v1";
+
+  try {
+    const url = new URL(rawUrl);
+    url.pathname = "/api/subscription/v1/usage";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return fallback;
+  }
 }
 
 export function resolvePollinationsAppKey(userId: string): string {
@@ -129,12 +231,45 @@ function rowToProfile(row: any): ConnectionProfile {
   };
 }
 
+export function isModelRouletteProfile(profile: Pick<ConnectionProfile, "provider"> | null | undefined): boolean {
+  return profile?.provider === MODEL_ROULETTE_PROVIDER;
+}
+
+export function getConnectionRouletteConfig(
+  profile: Pick<ConnectionProfile, "metadata"> | null | undefined
+): ConnectionRouletteConfig {
+  const raw = profile?.metadata?.connection_roulette;
+  if (!raw || typeof raw !== "object") return { connection_ids: [] };
+
+  const seen = new Set<string>();
+  const connection_ids = Array.isArray(raw.connection_ids)
+    ? raw.connection_ids
+      .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+      .map((id: string) => id.trim())
+      .filter((id: string) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+    : [];
+
+  return { connection_ids };
+}
+
 // Prepared statements for hot-path queries
 let _stmtConnById: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
 let _stmtConnDefault: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
+let _connStmtsGen = -1;
 
 function getConnStmts() {
   const db = getDb();
+  // Invalidate cached statements when the underlying Database is replaced.
+  const gen = require("../db/connection").getDbGeneration() as number;
+  if (_connStmtsGen !== gen) {
+    _stmtConnById = null;
+    _stmtConnDefault = null;
+    _connStmtsGen = gen;
+  }
   if (!_stmtConnById) _stmtConnById = db.query("SELECT * FROM connection_profiles WHERE id = ? AND user_id = ?");
   if (!_stmtConnDefault) _stmtConnDefault = db.query("SELECT * FROM connection_profiles WHERE is_default = 1 AND user_id = ? LIMIT 1");
   return { byId: _stmtConnById, byDefault: _stmtConnDefault };
@@ -158,6 +293,27 @@ export function getConnection(userId: string, id: string): ConnectionProfile | n
 export function getDefaultConnection(userId: string): ConnectionProfile | null {
   const row = getConnStmts().byDefault.get(userId) as any;
   return row ? rowToProfile(row) : null;
+}
+
+export function resolveConnection(userId: string, id?: string): ConnectionProfile | null {
+  const profile = id ? getConnection(userId, id) : getDefaultConnection(userId);
+  if (!profile) return null;
+  if (!isModelRouletteProfile(profile)) return profile;
+
+  const targetIds = getConnectionRouletteConfig(profile).connection_ids
+    .filter((targetId) => targetId !== profile.id);
+  const candidates: ConnectionProfile[] = [];
+  for (const targetId of targetIds) {
+    const candidate = getConnection(userId, targetId);
+    if (!candidate || isModelRouletteProfile(candidate)) continue;
+    candidates.push(candidate);
+  }
+
+  if (candidates.length === 0) {
+    throw new Error(`Model roulette "${profile.name}" has no available connection profiles.`);
+  }
+
+  return candidates[Math.floor(Math.random() * candidates.length)];
 }
 
 export async function createConnection(userId: string, input: CreateConnectionProfileInput): Promise<ConnectionProfile> {
@@ -280,6 +436,7 @@ export async function deleteConnection(userId: string, id: string): Promise<bool
   if (deleted) {
     // Cleanup the connection's secret
     secretsSvc.deleteSecret(userId, connectionSecretKey(id));
+    settingsSvc.deleteSetting(userId, `presetProfile:connection:${id}`);
   }
   return deleted;
 }
@@ -312,6 +469,33 @@ export async function testConnection(
       durationMs: Date.now() - startedAt,
       timedOut: false,
       error: "Connection not found",
+    };
+  }
+
+  if (isModelRouletteProfile(profile)) {
+    const targetIds = getConnectionRouletteConfig(profile).connection_ids;
+    const validTargets = targetIds
+      .map((targetId) => getConnection(userId, targetId))
+      .filter((target): target is ConnectionProfile => !!target && !isModelRouletteProfile(target));
+
+    if (validTargets.length === 0) {
+      return {
+        success: false,
+        message: `Model roulette "${profile.name}" has no available connection profiles.`,
+        provider: MODEL_ROULETTE_PROVIDER,
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+        error: "No roulette targets configured",
+      };
+    }
+
+    return {
+      success: true,
+      message: `Model roulette is ready with ${validTargets.length} connection${validTargets.length === 1 ? "" : "s"}.`,
+      provider: MODEL_ROULETTE_PROVIDER,
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      error: null,
     };
   }
 
@@ -369,35 +553,96 @@ export async function testConnection(
 export async function listConnectionModels(userId: string, id: string): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: string; error?: string }> {
   const profile = getConnection(userId, id);
   if (!profile) return { models: [], provider: "", error: "Connection not found" };
-
-  const provider = getProvider(profile.provider);
-  if (!provider) return { models: [], provider: profile.provider, error: `Unknown provider: ${profile.provider}` };
-
-  const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
-  if (!apiKey && provider.capabilities.apiKeyRequired) {
-    return { models: [], provider: profile.provider, error: "No API key" };
+  if (isModelRouletteProfile(profile)) {
+    return { models: [], provider: MODEL_ROULETTE_PROVIDER, error: "Model roulette uses the selected member profile models." };
   }
 
-  try {
-    const apiUrl = resolveEffectiveApiUrl(profile);
-    const models = await provider.listModels(apiKey || "", apiUrl);
+  const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
+  return listConnectionModelsPreview(userId, {
+    connection_id: id,
+    provider: profile.provider,
+    api_url: profile.api_url,
+    metadata: profile.metadata,
+    api_key: apiKey || undefined,
+  });
+}
 
-    // For providers that expose human-readable names, build a label map
+export async function listConnectionModelsPreview(
+  userId: string,
+  input: ConnectionModelsPreviewInput
+): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: string; error?: string }> {
+  const existing = input.connection_id ? getConnection(userId, input.connection_id) : null;
+  const providerId = input.provider;
+  const metadata = input.metadata ?? existing?.metadata ?? {};
+  const apiUrl = resolveEffectiveApiUrl({
+    provider: providerId,
+    api_url: input.api_url ?? existing?.api_url ?? "",
+    metadata,
+  });
+
+  let apiKey = input.api_key;
+  if (apiKey === undefined && existing && existing.provider === providerId) {
+    apiKey = (await secretsSvc.getSecret(userId, connectionSecretKey(existing.id))) || undefined;
+  }
+
+  const provider = getProvider(providerId);
+  if (!provider) return { models: [], provider: providerId, error: `Unknown provider: ${providerId}` };
+
+  try {
     let model_labels: Record<string, string> | undefined;
-    if (profile.provider === "openrouter") {
+
+    if (providerId === "openrouter") {
       const { OpenRouterProvider } = await import("../llm/providers/openrouter");
       if (provider instanceof OpenRouterProvider) {
-        const richModels = await provider.fetchModelsWithMetadata(apiKey || "", apiUrl);
-        model_labels = {};
+        const richModels = await provider.fetchModelsWithMetadata(apiKey || "", apiUrl, {
+          outputModalities: input.output_modalities,
+        });
+        const models = richModels.map((m) => m.id).sort();
+        const model_labels: Record<string, string> = {};
         for (const m of richModels) {
           if (m.name && m.name !== m.id) model_labels[m.id] = m.name;
         }
+        return { models, model_labels, provider: providerId };
       }
     }
 
-    return { models, model_labels, provider: profile.provider };
+    const models = await provider.listModels(apiKey || "", apiUrl);
+    return { models, model_labels, provider: providerId };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: providerId, error: describeProviderError(err, "Failed to fetch models") };
+  }
+}
+
+export async function fetchNanoGptSubscriptionUsage(userId: string, id: string): Promise<NanoGptSubscriptionUsage | null> {
+  const profile = getConnection(userId, id);
+  if (!profile || profile.provider !== "nanogpt") return null;
+
+  const apiKey = await secretsSvc.getSecret(userId, connectionSecretKey(id));
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch(resolveNanoGptSubscriptionUsageUrl(profile), {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (!res.ok) return null;
+
+    const raw = await res.json() as any;
+    return {
+      active: !!raw?.active,
+      allowOverage: !!raw?.allowOverage,
+      dailyInputTokens: parseNanoGptUsageWindow(raw?.dailyInputTokens, raw?.limits?.dailyInputTokens),
+      weeklyInputTokens: parseNanoGptUsageWindow(raw?.weeklyInputTokens, raw?.limits?.weeklyInputTokens),
+      dailyImages: parseNanoGptUsageWindow(raw?.dailyImages, raw?.limits?.dailyImages),
+      period: {
+        currentPeriodEnd: typeof raw?.period?.currentPeriodEnd === "string" ? raw.period.currentPeriodEnd : null,
+      },
+      state: typeof raw?.state === "string" ? raw.state : null,
+      graceUntil: typeof raw?.graceUntil === "string" ? raw.graceUntil : null,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -417,6 +662,6 @@ export async function listConnectionRegions(userId: string, id: string): Promise
     const regions = await listVertexLocations(apiKey);
     return { regions };
   } catch (err: any) {
-    return { regions: [], error: err.message || "Failed to list regions" };
+    return { regions: [], error: describeProviderError(err, "Failed to list regions") };
   }
 }

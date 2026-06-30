@@ -1,17 +1,40 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { FormField, TextInput, Select, Button } from '@/components/shared/FormComponents'
 import { Toggle } from '@/components/shared/Toggle'
+import { useTranslation } from 'react-i18next'
 import { connectionsApi } from '@/api/connections'
+import { buildNanoGptOAuthCallbackUrl, nanoGptApi } from '@/api/nanogpt'
 import { useStore } from '@/store'
+import {
+  areReasoningSettingsEqual,
+  getReasoningBindingSummary,
+  normalizeReasoningSettingsForProvider,
+} from '@/lib/reasoning-binding'
+import {
+  buildAnthropicPromptCachingMetadata,
+  DEFAULT_ANTHROPIC_PROMPT_CACHING,
+  parseAnthropicPromptCachingSettings,
+  type AnthropicPromptCachingSettings,
+} from '@/lib/anthropic-prompt-caching'
+import {
+  buildNanoGptCachingMetadata,
+  parseNanoGptCachingSettings,
+  type NanoGptCachingSettings,
+} from '@/lib/nanogpt-prompt-caching'
 import ModelCombobox from './ModelCombobox'
+import MultiChipSelect from './MultiChipSelect'
 import OpenRouterSettings from './OpenRouterSettings'
 import type { ProviderInfo, ConnectionProfile, CreateConnectionProfileInput } from '@/types/api'
 import type { OpenRouterConnectionSettings } from '@/api/openrouter'
+import type { ReasoningSettings } from '@/types/store'
 import styles from '../ConnectionManager.module.css'
+
+const MODEL_ROULETTE_PROVIDER = 'model_roulette'
 
 interface ConnectionFormProps {
   providers: ProviderInfo[]
   profile?: ConnectionProfile
+  initialProvider?: string
   onSave: (input: CreateConnectionProfileInput) => void
   onCancel: () => void
   /** Called when OAuth auto-creates the connection during creation flow. */
@@ -21,11 +44,27 @@ interface ConnectionFormProps {
 const FALLBACK_PROVIDERS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
+  { value: 'infermatic', label: 'Infermatic' },
   { value: 'pollinations_text', label: 'Pollinations (Text)' },
   { value: 'pollinations', label: 'Pollinations (Gen)' },
   { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'nanogpt', label: 'NanoGPT' },
   { value: 'custom', label: 'Custom (OpenAI-compatible)' },
 ]
+
+function parseRouletteConnectionIds(profile?: ConnectionProfile): string[] {
+  const raw = profile?.metadata?.connection_roulette?.connection_ids
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  return raw
+    .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    .map((id) => id.trim())
+    .filter((id) => {
+      if (seen.has(id)) return false
+      seen.add(id)
+      return true
+    })
+}
 
 const VERTEX_REGIONS = [
   'us-central1', 'us-east1', 'us-east4', 'us-west1', 'us-west4',
@@ -34,47 +73,136 @@ const VERTEX_REGIONS = [
   'northamerica-northeast1', 'australia-southeast1', 'global',
 ]
 
-export default function ConnectionForm({ providers, profile, onSave, onCancel, onOAuthCreated }: ConnectionFormProps) {
+const BEDROCK_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-2',
+  'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-north-1',
+  'ap-south-1', 'ap-southeast-1', 'ap-southeast-2',
+  'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
+  'ca-central-1', 'sa-east-1',
+]
+
+const BEDROCK_ENDPOINTS = [
+  { value: 'mantle', label: 'Mantle (recommended)' },
+  { value: 'runtime', label: 'Runtime (cross-region profiles)' },
+]
+
+export default function ConnectionForm({ providers, profile, initialProvider, onSave, onCancel, onOAuthCreated }: ConnectionFormProps) {
+  const { t } = useTranslation('panels')
+  const anthropicCacheTtlOptions = [
+    { value: '5m', label: t('connectionForm.fiveMinutes') },
+    { value: '1h', label: t('connectionForm.oneHour') },
+  ]
+  const nanogptCacheTtlOptions = [
+    { value: '5m', label: t('connectionForm.fiveMinutes') },
+    { value: '1h', label: t('connectionForm.oneHour') },
+  ]
   const [name, setName] = useState(profile?.name || '')
-  const [provider, setProvider] = useState(profile?.provider || 'openai')
+  const [provider, setProvider] = useState(profile?.provider || initialProvider || 'openai')
   const [apiKey, setApiKey] = useState('')
   const [apiUrl, setApiUrl] = useState(profile?.api_url || '')
   const [model, setModel] = useState(profile?.model || '')
   const [isDefault, setIsDefault] = useState(profile?.is_default || false)
   const [useResponsesApi, setUseResponsesApi] = useState(profile?.metadata?.use_responses_api || false)
   const [useSubscriptionApi, setUseSubscriptionApi] = useState(profile?.metadata?.use_subscription_api || false)
+  const [useZaiCodingPlanEndpoint, setUseZaiCodingPlanEndpoint] = useState(profile?.metadata?.use_coding_plan_endpoint || false)
+  const [anthropicPromptCachingSettings, setAnthropicPromptCachingSettings] = useState<AnthropicPromptCachingSettings>(
+    () => parseAnthropicPromptCachingSettings(profile?.metadata?.prompt_caching)
+  )
+  const [nanogptCachingSettings, setNanogptCachingSettings] = useState<NanoGptCachingSettings>(
+    () => parseNanoGptCachingSettings(profile?.metadata?.nanogpt_caching)
+  )
   const [bindReasoning, setBindReasoning] = useState(!!profile?.metadata?.reasoningBindings)
   const reasoningSettings = useStore((s) => s.reasoningSettings)
+  const promptBias = useStore((s) => s.promptBias)
+  const [boundReasoningSettings, setBoundReasoningSettings] = useState<ReasoningSettings>(
+    () => ({ ...(profile?.metadata?.reasoningBindings?.settings || reasoningSettings) })
+  )
+  const [boundPromptBias, setBoundPromptBias] = useState<string>(
+    () => {
+      const stored = profile?.metadata?.reasoningBindings?.promptBias
+      return typeof stored === 'string' ? stored : promptBias
+    }
+  )
   const [models, setModels] = useState<string[]>([])
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
   const [modelsLoading, setModelsLoading] = useState(false)
   const [byopLoading, setByopLoading] = useState(false)
   const [byopStatus, setByopStatus] = useState<string | null>(null)
+  const [nanoGptOauthLoading, setNanoGptOauthLoading] = useState(false)
+  const [nanoGptOauthStatus, setNanoGptOauthStatus] = useState<string | null>(null)
+  const [rouletteConnectionIds, setRouletteConnectionIds] = useState<string[]>(() => parseRouletteConnectionIds(profile))
 
   // Vertex AI specific state
   const [vertexRegion, setVertexRegion] = useState(profile?.metadata?.vertex_region || 'us-central1')
   const [saFileName, setSaFileName] = useState<string | null>(profile?.metadata?.sa_file_name || null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Amazon Bedrock specific state
+  const [bedrockRegion, setBedrockRegion] = useState(profile?.metadata?.region || 'us-east-1')
+  const [bedrockEndpoint, setBedrockEndpoint] = useState<'mantle' | 'runtime'>(
+    profile?.metadata?.bedrock_endpoint === 'runtime' ? 'runtime' : 'mantle'
+  )
+
   // OpenRouter specific state
   const [openrouterSettings, setOpenrouterSettings] = useState<OpenRouterConnectionSettings>(
     profile?.metadata?.openrouter || {}
   )
 
-  const providerOptions = providers.length > 0
+  const providerOptionsBase = providers.length > 0
     ? providers.map((p) => ({ value: p.id, label: p.name }))
     : FALLBACK_PROVIDERS
+  const providerOptions = providerOptionsBase
 
   const selectedProvider = providers.find((p) => p.id === provider)
   const urlPlaceholder = selectedProvider?.default_url || 'https://api.openai.com/v1'
+  const isRoulette = provider === MODEL_ROULETTE_PROVIDER
   const isVertexAI = provider === 'google_vertex'
   const isPollinations = provider === 'pollinations'
+  const isBedrock = provider === 'bedrock'
+  const allProfiles = useStore((s) => s.profiles)
+  const rouletteOptions = allProfiles
+    .filter((p) => p.id !== profile?.id && p.provider !== MODEL_ROULETTE_PROVIDER)
+    .map((p) => ({
+      value: p.id,
+      label: `${p.name} (${p.provider}${p.model ? ` / ${p.model}` : ''})`,
+    }))
+  const rouletteOptionIds = new Set(rouletteOptions.map((o) => o.value))
+  const validRouletteConnectionIds = rouletteConnectionIds.filter((id) => rouletteOptionIds.has(id))
 
   const fetchModels = useCallback(async () => {
-    if (!profile?.id) return
+    if (isRoulette) {
+      setModels([])
+      setModelLabels({})
+      return
+    }
     setModelsLoading(true)
     try {
-      const result = await connectionsApi.models(profile.id)
+      const metadata: Record<string, any> = { ...profile?.metadata }
+      if (provider === 'nanogpt') {
+        metadata.use_subscription_api = useSubscriptionApi
+      } else {
+        delete metadata.use_subscription_api
+      }
+      if (provider === 'zai') {
+        metadata.use_coding_plan_endpoint = useZaiCodingPlanEndpoint
+      } else {
+        delete metadata.use_coding_plan_endpoint
+      }
+      if (isVertexAI) {
+        metadata.vertex_region = vertexRegion
+      }
+      if (isBedrock) {
+        metadata.region = bedrockRegion
+        metadata.bedrock_endpoint = bedrockEndpoint
+      }
+
+      const result = await connectionsApi.previewModels({
+        connection_id: profile?.id,
+        provider,
+        api_url: (isVertexAI || isBedrock) ? undefined : (apiUrl.trim() || undefined),
+        metadata,
+        api_key: apiKey.trim() || undefined,
+      })
       setModels(result.models)
       setModelLabels(result.model_labels || {})
     } catch {
@@ -83,7 +211,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } finally {
       setModelsLoading(false)
     }
-  }, [profile?.id])
+  }, [apiKey, apiUrl, isRoulette, isVertexAI, isBedrock, profile?.id, profile?.metadata, provider, useSubscriptionApi, useZaiCodingPlanEndpoint, vertexRegion, bedrockRegion, bedrockEndpoint])
 
   useEffect(() => {
     if (profile?.id) fetchModels()
@@ -153,15 +281,15 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
         try {
           await connectionsApi.update(activeConnectionId, { api_key: returnedApiKey })
           if (!cancelled) {
-            setByopStatus('Signed in with Pollinations. API key saved automatically.')
+            setByopStatus(t('connectionForm.pollinationsSaved'))
           }
         } catch {
           if (!cancelled) {
-            setByopStatus('Pollinations sign-in succeeded, but auto-save failed. Click Save to persist manually.')
+            setByopStatus(t('connectionForm.pollinationsAutoSaveFailed'))
           }
         }
       } else if (!cancelled) {
-        setByopStatus('Signed in with Pollinations. API key captured. Click Create to save this connection.')
+        setByopStatus(t('connectionForm.pollinationsCaptured'))
       }
 
       clearRedirectArtifacts()
@@ -171,14 +299,32 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     return () => {
       cancelled = true
     }
-  }, [isPollinations, profile?.id])
+  }, [isPollinations, profile?.id, t])
 
   const showResponsesApiToggle = provider === 'openai'
   const showSubscriptionApiToggle = provider === 'nanogpt'
+  const showZaiCodingPlanToggle = provider === 'zai'
+  const showAnthropicPromptCachingToggle = provider === 'anthropic'
+  const showNanoGptCachingToggle = provider === 'nanogpt'
   const isOpenRouter = provider === 'openrouter'
+  const isNanoGpt = provider === 'nanogpt'
   // Vertex AI derives its host from `metadata.vertex_region`, so the API URL
   // field has no purpose and we don't display it.
-  const hideApiUrl = isOpenRouter || provider === 'nanogpt' || isVertexAI
+  const hideApiUrl = isRoulette || isOpenRouter || provider === 'nanogpt' || isVertexAI || isBedrock
+  const normalizedBoundReasoningSettings = normalizeReasoningSettingsForProvider(boundReasoningSettings, provider, model)
+  const normalizedCurrentReasoningSettings = normalizeReasoningSettingsForProvider(reasoningSettings, provider, model)
+  const bindingMatchesCurrent = areReasoningSettingsEqual(normalizedBoundReasoningSettings, normalizedCurrentReasoningSettings)
+    && boundPromptBias === promptBias
+
+  useEffect(() => {
+    setBindReasoning(!!profile?.metadata?.reasoningBindings)
+    setBoundReasoningSettings({ ...(profile?.metadata?.reasoningBindings?.settings || reasoningSettings) })
+    const storedPromptBias = profile?.metadata?.reasoningBindings?.promptBias
+    setBoundPromptBias(typeof storedPromptBias === 'string' ? storedPromptBias : promptBias)
+    setAnthropicPromptCachingSettings(parseAnthropicPromptCachingSettings(profile?.metadata?.prompt_caching))
+    setNanogptCachingSettings(parseNanoGptCachingSettings(profile?.metadata?.nanogpt_caching))
+    setRouletteConnectionIds(parseRouletteConnectionIds(profile))
+  }, [profile?.id])
 
   const handlePollinationsSignIn = useCallback(async () => {
     setByopStatus(null)
@@ -197,11 +343,68 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
 
       window.location.href = result.auth_url
     } catch (err: any) {
-      const msg = String(err?.message || 'Failed to start Pollinations sign-in')
+      const msg = String(err?.message || t('connectionForm.pollinationsStartFailed'))
       setByopStatus(msg)
       setByopLoading(false)
     }
-  }, [model, profile?.id])
+  }, [model, profile?.id, t])
+
+  const handleNanoGptSignIn = useCallback(async () => {
+    if (!profile?.id && !name.trim()) return
+    setNanoGptOauthStatus(null)
+    setNanoGptOauthLoading(true)
+    try {
+      const callbackUrl = buildNanoGptOAuthCallbackUrl()
+      const { auth_url, session_token } = await nanoGptApi.initiateAuth(callbackUrl, profile?.id
+        ? { connectionId: profile.id }
+        : { connectionName: name.trim() }
+      )
+
+      const popup = window.open(auth_url, 'nanogpt_auth', 'width=600,height=700,scrollbars=yes')
+
+      let handled = false
+      const cleanup = () => {
+        if (handled) return
+        handled = true
+        window.removeEventListener('message', onMessage)
+        clearInterval(checkClosed)
+        setNanoGptOauthLoading(false)
+      }
+
+      const onMessage = async (event: MessageEvent) => {
+        if (event.data?.type !== 'nanogpt_oauth_code' || !event.data.code || event.data.state !== session_token) return
+        window.removeEventListener('message', onMessage)
+        clearInterval(checkClosed)
+
+        try {
+          const result = await nanoGptApi.completeAuth(session_token, event.data.code)
+          if (result.created && result.profile) {
+            onOAuthCreated?.(result.profile)
+          } else {
+            setApiKey('')
+            setNanoGptOauthStatus(t('connectionForm.nanoGptSaved'))
+          }
+        } catch (err: any) {
+          setNanoGptOauthStatus(String(err?.message || t('connectionForm.nanoGptExchangeFailed')))
+        }
+        handled = true
+        setNanoGptOauthLoading(false)
+      }
+      window.addEventListener('message', onMessage)
+
+      const checkClosed = setInterval(() => {
+        if (!popup || popup.closed) {
+          clearInterval(checkClosed)
+          setTimeout(cleanup, 1500)
+        }
+      }, 500)
+
+      setTimeout(cleanup, 5 * 60 * 1000)
+    } catch (err: any) {
+      setNanoGptOauthStatus(String(err?.message || t('connectionForm.nanoGptStartFailed')))
+      setNanoGptOauthLoading(false)
+    }
+  }, [name, onOAuthCreated, profile?.id, t])
 
   // Handle service account JSON file upload
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -214,24 +417,53 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
         // Validate it's valid JSON with required fields
         const parsed = JSON.parse(text)
         if (!parsed.private_key || !parsed.client_email || !parsed.project_id) {
-          alert('Invalid service account JSON: missing required fields (private_key, client_email, project_id)')
+          alert(t('connectionForm.invalidServiceAccountMissingFields'))
           return
         }
         // Store the raw JSON as the "API key"
         setApiKey(text)
         setSaFileName(file.name)
       } catch {
-        alert('Invalid JSON file. Please upload a valid Google service account key file.')
+        alert(t('connectionForm.invalidJsonFile'))
       }
     }
     reader.readAsText(file)
     // Reset file input so the same file can be re-selected
     e.target.value = ''
-  }, [])
+  }, [t])
 
   const handleSubmit = useCallback(() => {
     if (!name.trim()) return
     const metadata: Record<string, any> = { ...profile?.metadata }
+    if (isRoulette) {
+      metadata.connection_roulette = {
+        connection_ids: validRouletteConnectionIds,
+      }
+
+      delete metadata.use_responses_api
+      delete metadata.use_subscription_api
+      delete metadata.use_coding_plan_endpoint
+      delete metadata.prompt_caching
+      delete metadata.nanogpt_caching
+      delete metadata.reasoningBindings
+      delete metadata.vertex_region
+      delete metadata.sa_file_name
+      delete metadata.region
+      delete metadata.bedrock_endpoint
+      delete metadata.openrouter
+
+      onSave({
+        name: name.trim(),
+        provider,
+        api_key: '',
+        api_url: '',
+        model: '',
+        is_default: isDefault,
+        metadata,
+      })
+      return
+    }
+    delete metadata.connection_roulette
     if (showResponsesApiToggle) {
       metadata.use_responses_api = useResponsesApi
     } else {
@@ -242,14 +474,39 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
     } else {
       delete metadata.use_subscription_api
     }
+    if (showZaiCodingPlanToggle) {
+      metadata.use_coding_plan_endpoint = useZaiCodingPlanEndpoint
+    } else {
+      delete metadata.use_coding_plan_endpoint
+    }
+    if (showAnthropicPromptCachingToggle) {
+      metadata.prompt_caching = buildAnthropicPromptCachingMetadata(anthropicPromptCachingSettings)
+    } else {
+      delete metadata.prompt_caching
+    }
+    if (showNanoGptCachingToggle) {
+      metadata.nanogpt_caching = buildNanoGptCachingMetadata(nanogptCachingSettings)
+    } else {
+      delete metadata.nanogpt_caching
+    }
     if (bindReasoning) {
-      metadata.reasoningBindings = { settings: { ...reasoningSettings } }
+      metadata.reasoningBindings = {
+        settings: normalizedBoundReasoningSettings,
+        promptBias: boundPromptBias,
+      }
     } else {
       delete metadata.reasoningBindings
     }
     if (isVertexAI) {
       metadata.vertex_region = vertexRegion
       if (saFileName) metadata.sa_file_name = saFileName
+    }
+    if (isBedrock) {
+      metadata.region = bedrockRegion
+      metadata.bedrock_endpoint = bedrockEndpoint
+    } else {
+      delete metadata.region
+      delete metadata.bedrock_endpoint
     }
     if (isOpenRouter) {
       // Only persist non-empty settings
@@ -266,9 +523,9 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       delete metadata.openrouter
     }
 
-    // For Vertex AI the backend ignores `api_url` entirely and builds the
-    // host from `metadata.vertex_region`, so we don't persist a value here.
-    const resolvedApiUrl = isVertexAI ? undefined : (apiUrl.trim() || undefined)
+    // For Vertex AI and Bedrock the backend ignores `api_url` entirely and
+    // builds the host from metadata (region / endpoint), so we don't persist one.
+    const resolvedApiUrl = (isVertexAI || isBedrock) ? undefined : (apiUrl.trim() || undefined)
 
     onSave({
       name: name.trim(),
@@ -279,25 +536,52 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       is_default: isDefault,
       metadata,
     })
-  }, [name, provider, apiKey, apiUrl, model, isDefault, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, bindReasoning, reasoningSettings, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isOpenRouter, openrouterSettings])
+  }, [name, provider, apiKey, apiUrl, model, isDefault, isRoulette, validRouletteConnectionIds, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, useZaiCodingPlanEndpoint, showZaiCodingPlanToggle, showAnthropicPromptCachingToggle, anthropicPromptCachingSettings, showNanoGptCachingToggle, nanogptCachingSettings, bindReasoning, boundReasoningSettings, boundPromptBias, profile?.id, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isBedrock, bedrockRegion, bedrockEndpoint, isOpenRouter, openrouterSettings])
+
+  const canSubmit = name.trim().length > 0 && (!isRoulette || validRouletteConnectionIds.length > 0)
 
   return (
     <div className={styles.form}>
-      <FormField label="Name" required>
-        <TextInput value={name} onChange={setName} placeholder="Connection name" autoFocus={!profile} />
+      <FormField label={t('connectionForm.name')} required>
+        <TextInput value={name} onChange={setName} placeholder={t('connectionForm.connectionName')} autoFocus={!profile} />
       </FormField>
-      <FormField label="Provider">
-        <Select value={provider} onChange={setProvider} options={providerOptions} />
-      </FormField>
+      {!isRoulette && (
+        <FormField label={t('connectionForm.provider')}>
+          <Select value={provider} onChange={setProvider} options={providerOptions} />
+        </FormField>
+      )}
 
-      {isVertexAI ? (
+      {isRoulette && (
+        <>
+          <FormField label={t('connectionForm.rouletteConnections')} hint={t('connectionForm.rouletteConnectionsHint')}>
+            <MultiChipSelect
+              options={rouletteOptions}
+              selected={rouletteConnectionIds}
+              onChange={setRouletteConnectionIds}
+              placeholder={t('connectionForm.rouletteConnectionsPlaceholder')}
+              showValues={false}
+            />
+          </FormField>
+          <FormField label="">
+            <Toggle.Checkbox checked={isDefault} onChange={setIsDefault} label={t('connectionForm.setAsDefault')} />
+          </FormField>
+          <div className={styles.formActions}>
+            <Button variant="ghost" size="sm" onClick={onCancel}>{t('connectionForm.cancel')}</Button>
+            <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
+              {profile ? t('connectionForm.save') : t('connectionForm.create')}
+            </Button>
+          </div>
+        </>
+      )}
+
+      {!isRoulette && (isVertexAI ? (
         <>
           <FormField
-            label="Service Account JSON"
+            label={t('connectionForm.serviceAccountJson')}
             hint={
               profile?.has_api_key
-                ? `Credentials loaded${saFileName ? ` (${saFileName})` : ''}. Upload a new file to replace.`
-                : 'Upload your Google Cloud service account key JSON file'
+                ? t('connectionForm.credentialsLoaded', { file: saFileName ? ` (${saFileName})` : '' })
+                : t('connectionForm.uploadServiceAccount')
             }
           >
             <div className={styles.fileUploadRow}>
@@ -306,11 +590,11 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
                 size="sm"
                 onClick={() => fileInputRef.current?.click()}
               >
-                {apiKey ? 'File loaded' : 'Choose file'}
+                {apiKey ? t('connectionForm.fileLoaded') : t('connectionForm.chooseFile')}
               </Button>
               {(saFileName || apiKey) && (
                 <span className={styles.fileUploadName}>
-                  {saFileName || 'service-account.json'}
+                  {saFileName || t('connectionForm.serviceAccountFilename')}
                 </span>
               )}
               <input
@@ -322,7 +606,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
               />
             </div>
           </FormField>
-          <FormField label="Region" hint="Google Cloud region for Vertex AI">
+          <FormField label={t('connectionForm.region')} hint={t('connectionForm.vertexRegionHint')}>
             <Select
               value={vertexRegion}
               onChange={setVertexRegion}
@@ -333,7 +617,7 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
       ) : (
         <>
           {isPollinations && (
-            <FormField label="Pollinations BYOP" hint="Use Sign in with Pollinations to fetch a BYOP key automatically, or paste a key manually below.">
+            <FormField label={t('connectionForm.pollinationsByop')} hint={t('connectionForm.pollinationsByopHint')}>
               <div className={styles.byopRow}>
                 <Button
                   variant="secondary"
@@ -341,24 +625,57 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
                   onClick={handlePollinationsSignIn}
                   disabled={byopLoading}
                 >
-                  {byopLoading ? 'Redirecting...' : 'Sign in with Pollinations'}
+                  {byopLoading ? t('connectionForm.redirecting') : t('connectionForm.signInWithPollinations')}
                 </Button>
                 {byopStatus && <span className={styles.byopStatus}>{byopStatus}</span>}
               </div>
             </FormField>
           )}
-          <FormField label="API Key" hint={profile?.has_api_key ? 'Key is set. Enter a new value to replace it.' : undefined}>
-            <TextInput value={apiKey} onChange={setApiKey} placeholder={profile?.has_api_key ? '••••••••' : 'Enter API key'} type="password" />
+          {isNanoGpt && (
+            <FormField label={t('connectionForm.nanoGptOAuth')} hint={t('connectionForm.nanoGptOAuthHint')}>
+              <div className={styles.byopRow}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleNanoGptSignIn}
+                  disabled={nanoGptOauthLoading || (!profile?.id && !name.trim())}
+                >
+                  {nanoGptOauthLoading ? t('connectionForm.redirecting') : t('connectionForm.signInWithNanoGpt')}
+                </Button>
+                {nanoGptOauthStatus && <span className={styles.byopStatus}>{nanoGptOauthStatus}</span>}
+              </div>
+            </FormField>
+          )}
+          <FormField label={t('connectionForm.apiKey')} hint={profile?.has_api_key ? t('connectionForm.keyAlreadySet') : isBedrock ? t('connectionForm.bedrockApiKeyHint') : undefined}>
+            <TextInput value={apiKey} onChange={setApiKey} placeholder={profile?.has_api_key ? '••••••••' : t('connectionForm.enterApiKey')} type="password" />
           </FormField>
         </>
-      )}
+      ))}
 
-      {!hideApiUrl && (
-        <FormField label="API URL" hint={isVertexAI ? 'Leave empty to use default Vertex AI endpoint with selected region' : 'Leave empty for default provider URL'}>
+      {!isRoulette && !hideApiUrl && (
+        <FormField label={t('connectionForm.apiUrl')} hint={isVertexAI ? t('connectionForm.vertexApiUrlHint') : t('connectionForm.defaultApiUrlHint')}>
           <TextInput value={apiUrl} onChange={setApiUrl} placeholder={urlPlaceholder} />
         </FormField>
       )}
-      <FormField label="Model" hint={!profile?.id ? 'Save connection first to fetch model list' : undefined}>
+      {!isRoulette && isBedrock && (
+        <>
+          <FormField label={t('connectionForm.region')} hint={t('connectionForm.bedrockRegionHint')}>
+            <Select
+              value={bedrockRegion}
+              onChange={setBedrockRegion}
+              options={BEDROCK_REGIONS.map((r) => ({ value: r, label: r }))}
+            />
+          </FormField>
+          <FormField label={t('connectionForm.bedrockEndpoint')} hint={t('connectionForm.bedrockEndpointHint')}>
+            <Select
+              value={bedrockEndpoint}
+              onChange={(v) => setBedrockEndpoint(v as 'mantle' | 'runtime')}
+              options={BEDROCK_ENDPOINTS}
+            />
+          </FormField>
+        </>
+      )}
+      {!isRoulette && <FormField label={t('connectionForm.model')} hint={t('connectionForm.modelHint')}>
         <ModelCombobox
           value={model}
           onChange={setModel}
@@ -366,22 +683,185 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           modelLabels={modelLabels}
           loading={modelsLoading}
           onRefresh={fetchModels}
-          disabled={!profile?.id}
-          placeholder={isVertexAI ? 'gemini-2.5-flash' : 'gpt-4o'}
+          appearance="standard"
+          placeholder={isVertexAI ? 'gemini-2.5-flash' : isBedrock ? 'us.anthropic.claude-sonnet-4-6' : 'gpt-4o'}
         />
-      </FormField>
-      <FormField label="">
-        <Toggle.Checkbox checked={isDefault} onChange={setIsDefault} label="Set as default connection" />
-      </FormField>
+      </FormField>}
+      {!isRoulette && <FormField label="">
+        <Toggle.Checkbox checked={isDefault} onChange={setIsDefault} label={t('connectionForm.setAsDefault')} />
+      </FormField>}
       {showResponsesApiToggle && (
         <FormField label="">
-          <Toggle.Checkbox checked={useResponsesApi} onChange={setUseResponsesApi} label="Use Responses API" hint="Use /v1/responses instead of /v1/chat/completions" />
+          <Toggle.Checkbox
+            checked={useResponsesApi}
+            onChange={setUseResponsesApi}
+            label={t('connectionForm.useResponsesApi')}
+            hint={t('connectionForm.useResponsesApiHint')}
+          />
         </FormField>
       )}
       {showSubscriptionApiToggle && (
         <FormField label="">
-          <Toggle.Checkbox checked={useSubscriptionApi} onChange={setUseSubscriptionApi} label="Use Subscription API" hint="Use /api/subscription/v1 to only use models from your NanoGPT subscription" />
+          <Toggle.Checkbox
+            checked={useSubscriptionApi}
+            onChange={setUseSubscriptionApi}
+            label={t('connectionForm.useSubscriptionApi')}
+            hint={t('connectionForm.useSubscriptionApiHint')}
+          />
         </FormField>
+      )}
+      {showNanoGptCachingToggle && (
+        <>
+          <FormField label="">
+            <Toggle.Checkbox
+              checked={nanogptCachingSettings.enabled}
+              onChange={(checked) => setNanogptCachingSettings((current) => ({ ...current, enabled: checked }))}
+              label={t('connectionForm.enablePromptCaching')}
+              hint={t('connectionForm.enableNanoGptCachingHint')}
+            />
+          </FormField>
+          {nanogptCachingSettings.enabled && (
+            <>
+              <FormField label={t('connectionForm.promptCacheTtl')} hint={t('connectionForm.nanoGptPromptCacheTtlHint')}>
+                <Select
+                  value={nanogptCachingSettings.ttl}
+                  onChange={(ttl) => setNanogptCachingSettings((current) => ({ ...current, ttl: ttl as '5m' | '1h' }))}
+                  options={nanogptCacheTtlOptions}
+                />
+              </FormField>
+              <FormField label="">
+                <Toggle.Checkbox
+                  checked={nanogptCachingSettings.stickyProvider}
+                  onChange={(checked) => setNanogptCachingSettings((current) => ({ ...current, stickyProvider: checked }))}
+                  label={t('connectionForm.stickyProvider')}
+                  hint={t('connectionForm.stickyProviderHint')}
+                />
+              </FormField>
+              <FormField
+                label="Cache Cutoff Message Index"
+                hint="Optional. Pin the cache boundary to a specific message index (0-based). Everything up to and including this index is eligible for caching. Leave blank to let NanoGPT decide."
+              >
+                <TextInput
+                  value={
+                    typeof nanogptCachingSettings.cutAfterMessageIndex === 'number'
+                      ? String(nanogptCachingSettings.cutAfterMessageIndex)
+                      : ''
+                  }
+                  onChange={(raw) => setNanogptCachingSettings((current) => {
+                    const trimmed = raw.trim()
+                    if (trimmed === '') {
+                      const { cutAfterMessageIndex: _drop, ...rest } = current
+                      return rest
+                    }
+                    const parsed = Number(trimmed)
+                    if (!Number.isInteger(parsed) || parsed < 0) return current
+                    return { ...current, cutAfterMessageIndex: parsed }
+                  })}
+                  placeholder="e.g. 4"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                />
+              </FormField>
+              <FormField label="">
+                <Toggle.Checkbox
+                  checked={nanogptCachingSettings.explicitCacheControl === true}
+                  onChange={(checked) => setNanogptCachingSettings((current) => {
+                    if (checked) return { ...current, explicitCacheControl: true }
+                    const { explicitCacheControl: _drop, ...rest } = current
+                    return rest
+                  })}
+                  label="Explicit Cache Control"
+                  hint="Trust inline cache_control markers in the request body instead of letting NanoGPT auto-inject breakpoints. Advanced — only enable if you know your prompts already carry their own markers."
+                />
+              </FormField>
+              <FormField label="">
+                <Toggle.Checkbox
+                  checked={nanogptCachingSettings.forceCacheCapableRouting === true}
+                  onChange={(checked) => setNanogptCachingSettings((current) => {
+                    if (checked) return { ...current, forceCacheCapableRouting: true }
+                    const { forceCacheCapableRouting: _drop, ...rest } = current
+                    return rest
+                  })}
+                  label="Force Cache-Capable Routing (advanced)"
+                  hint="⚠️ Sends top-level caching:true so NanoGPT picks a cache-capable upstream regardless of model. Per NanoGPT docs this MAY bypass subscription coverage and bill the request as pay-as-you-go. Leave off unless you specifically need cache hits on a model that isn't getting them via implicit caching."
+                />
+              </FormField>
+            </>
+          )}
+        </>
+      )}
+      {showZaiCodingPlanToggle && (
+        <FormField label="">
+          <Toggle.Checkbox
+            checked={useZaiCodingPlanEndpoint}
+            onChange={setUseZaiCodingPlanEndpoint}
+            label={t('connectionForm.useCodingPlanEndpoint')}
+            hint={t('connectionForm.useCodingPlanEndpointHint')}
+          />
+        </FormField>
+      )}
+      {showAnthropicPromptCachingToggle && (
+        <>
+          <FormField label="">
+            <Toggle.Checkbox
+              checked={anthropicPromptCachingSettings.enabled}
+              onChange={(checked) => setAnthropicPromptCachingSettings((current) => ({
+                ...current,
+                enabled: checked,
+                automatic: checked ? current.automatic : DEFAULT_ANTHROPIC_PROMPT_CACHING.automatic,
+              }))}
+              label={t('connectionForm.enablePromptCaching')}
+              hint={t('connectionForm.enableAnthropicCachingHint')}
+            />
+          </FormField>
+          {anthropicPromptCachingSettings.enabled && (
+            <>
+              <FormField label={t('connectionForm.promptCacheTtl')} hint={t('connectionForm.anthropicPromptCacheTtlHint')}>
+                <Select
+                  value={anthropicPromptCachingSettings.ttl}
+                  onChange={(ttl) => setAnthropicPromptCachingSettings((current) => ({ ...current, ttl: ttl as '5m' | '1h' }))}
+                  options={anthropicCacheTtlOptions}
+                />
+              </FormField>
+              <FormField label="">
+                <Toggle.Checkbox
+                  checked={anthropicPromptCachingSettings.automatic}
+                  onChange={(checked) => setAnthropicPromptCachingSettings((current) => ({ ...current, automatic: checked }))}
+                  label={t('connectionForm.useAutomaticCaching')}
+                  hint={t('connectionForm.useAutomaticCachingHint')}
+                />
+              </FormField>
+              <FormField label={t('connectionForm.explicitCacheBreakpoints')} hint={t('connectionForm.explicitCacheBreakpointsHint')}>
+                <div className={styles.toggleStack}>
+                  <Toggle.Checkbox
+                    checked={anthropicPromptCachingSettings.breakpoints.tools}
+                    onChange={(checked) => setAnthropicPromptCachingSettings((current) => ({
+                      ...current,
+                      breakpoints: { ...current.breakpoints, tools: checked },
+                    }))}
+                    label={t('connectionForm.cacheTools')}
+                  />
+                  <Toggle.Checkbox
+                    checked={anthropicPromptCachingSettings.breakpoints.system}
+                    onChange={(checked) => setAnthropicPromptCachingSettings((current) => ({
+                      ...current,
+                      breakpoints: { ...current.breakpoints, system: checked },
+                    }))}
+                    label={t('connectionForm.cacheSystemPrompt')}
+                  />
+                  <Toggle.Checkbox
+                    checked={anthropicPromptCachingSettings.breakpoints.messages}
+                    onChange={(checked) => setAnthropicPromptCachingSettings((current) => ({
+                      ...current,
+                      breakpoints: { ...current.breakpoints, messages: checked },
+                    }))}
+                    label={t('connectionForm.cacheConversationPrefix')}
+                  />
+                </div>
+              </FormField>
+            </>
+          )}
+        </>
       )}
       {isOpenRouter && (
         <OpenRouterSettings
@@ -397,15 +877,46 @@ export default function ConnectionForm({ providers, profile, onSave, onCancel, o
           onConnectionCreated={onOAuthCreated}
         />
       )}
-      <FormField label="">
-        <Toggle.Checkbox checked={bindReasoning} onChange={setBindReasoning} label="Bind reasoning settings" hint="Save current reasoning settings and auto-apply when this connection is selected" />
-      </FormField>
-      <div className={styles.formActions}>
-        <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!name.trim()}>
-          {profile ? 'Save' : 'Create'}
+      {!isRoulette && <FormField label="">
+        <Toggle.Checkbox
+          checked={bindReasoning}
+          onChange={setBindReasoning}
+          label={t('connectionForm.bindReasoningSettings')}
+          hint={t('connectionForm.bindReasoningSettingsHint')}
+        />
+      </FormField>}
+      {!isRoulette && bindReasoning && (
+        <div className={styles.bindingCard}>
+          <div className={styles.bindingCardHeader}>
+            <div>
+              <div className={styles.bindingCardTitle}>{t('connectionForm.savedReasoningSnapshot')}</div>
+              <div className={styles.bindingCardSummary}>{getReasoningBindingSummary(normalizedBoundReasoningSettings, boundPromptBias)}</div>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setBoundReasoningSettings({ ...reasoningSettings })
+                setBoundPromptBias(promptBias)
+              }}
+              title={bindingMatchesCurrent ? t('connectionForm.snapshotAlreadyMatches') : t('connectionForm.replaceSavedSnapshot')}
+            >
+              {bindingMatchesCurrent ? t('connectionForm.captured') : t('connectionForm.captureCurrent')}
+            </Button>
+          </div>
+          {!bindingMatchesCurrent && (
+            <div className={styles.bindingCardHint}>
+              {t('connectionForm.currentValuesDiffer')}
+            </div>
+          )}
+        </div>
+      )}
+      {!isRoulette && <div className={styles.formActions}>
+        <Button variant="ghost" size="sm" onClick={onCancel}>{t('connectionForm.cancel')}</Button>
+        <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
+          {profile ? t('connectionForm.save') : t('connectionForm.create')}
         </Button>
-      </div>
+      </div>}
     </div>
   )
 }

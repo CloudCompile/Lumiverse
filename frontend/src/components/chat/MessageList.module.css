@@ -3,21 +3,39 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 16px 20px;
-  padding-bottom: var(--lcs-input-safe-zone, 100px);
+  padding: 16px 20px 0;
   overscroll-behavior-y: contain;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--lumiverse-border) 55%, transparent) transparent;
+  position: relative;
+  transition: opacity 220ms ease, transform 220ms ease;
 }
 
-.listHidden {
-  opacity: 0;
+.list[data-group-chat] {
+  padding-top: 0;
 }
 
-.listRevealed {
-  opacity: 1;
-  transition: opacity 0.2s ease-out;
+/* Scroll-time CSS suppression is handled in each component's own module CSS
+   via :global([data-scrolling]) selectors, since CSS module class names are
+   hashed and can't be targeted from this file. See BubbleMessage.module.css
+   and MessageContent.module.css for the actual rules. */
+
+.list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--lumiverse-border) 55%, transparent);
+  border-radius: 999px;
+}
+
+.list::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--lumiverse-text-muted) 65%, transparent);
 }
 
 .sentinel {
@@ -28,9 +46,30 @@
 .loadingOlder {
   text-align: center;
   padding: 12px 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-muted);
-  flex-shrink: 0;
+}
+
+.virtualSpace {
+  position: relative;
+  width: 100%;
+  overflow-anchor: none;
+}
+
+.virtualRow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  contain: layout style;
+}
+
+.virtualRow[data-style-mode='extension-relaxed'] {
+  contain: style;
+}
+
+.virtualRow:not([data-item-type='messageFooter']):not([data-item-type='bottom']) {
+  padding-bottom: 8px;
 }
 
 .errorBubble {
@@ -50,14 +89,36 @@
 
 @media (max-width: 600px) {
   .list {
-    padding: 8px;
-    padding-bottom: var(--lcs-input-safe-zone, 100px);
+    padding: 8px 8px 0;
+  }
+
+  .list[data-group-chat] {
+    padding-top: 0;
   }
 }
 
 @media (max-width: 480px) {
   .list {
-    padding: 6px;
-    padding-bottom: var(--lcs-input-safe-zone, 100px);
+    padding: 6px 6px 0;
+  }
+
+  .list[data-group-chat] {
+    padding-top: 0;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .list {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .virtualRow {
+    will-change: auto;
+  }
+
+  .list::-webkit-scrollbar {
+    width: 0;
+    height: 0;
   }
 }

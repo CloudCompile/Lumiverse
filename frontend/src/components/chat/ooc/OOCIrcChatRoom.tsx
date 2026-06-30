@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import clsx from 'clsx'
 import styles from './OOCStyles.module.css'
 
@@ -12,8 +13,16 @@ interface OOCIrcChatRoomProps {
 }
 
 /** Wrap @Handle mentions in styled spans */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 function highlightMentions(text: string): string {
-  return text.replace(
+  return escapeHtml(text).replace(
     /@(\w+)/g,
     `<span class="${styles.ircMention}">@$1</span>`,
   )
@@ -31,6 +40,7 @@ function buildTimestamps(count: number): string[] {
 }
 
 export default function OOCIrcChatRoom({ entries }: OOCIrcChatRoomProps) {
+  const { t } = useTranslation('chat')
   const [collapsed, setCollapsed] = useState(false)
   const timestamps = useMemo(() => buildTimestamps(entries.length), [entries.length])
 
@@ -43,7 +53,7 @@ export default function OOCIrcChatRoom({ entries }: OOCIrcChatRoomProps) {
         <span>#LumiaCouncil</span>
         <button
           className={clsx(styles.ircToggleBtn, collapsed && styles.ircToggleBtnCollapsed)}
-          aria-label={collapsed ? 'Expand' : 'Collapse'}
+          aria-label={collapsed ? t('ooc.expand') : t('ooc.collapse')}
         >
           &#9660;
         </button>
@@ -57,7 +67,7 @@ export default function OOCIrcChatRoom({ entries }: OOCIrcChatRoomProps) {
               dangerouslySetInnerHTML={{
                 __html:
                   `<span class="${styles.ircTimestamp}">[${timestamps[i]}]</span>` +
-                  `<span class="${styles.ircNick}">&lt;${entry.name || 'Lumia'}&gt;</span>` +
+                  `<span class="${styles.ircNick}">&lt;${escapeHtml(entry.name || t('ooc.lumiaFallback'))}&gt;</span>` +
                   `<span class="${styles.ircText}">${highlightMentions(entry.content)}</span>`,
               }}
             />

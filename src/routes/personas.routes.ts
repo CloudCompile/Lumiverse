@@ -23,6 +23,29 @@ app.post("/", async (c) => {
   return c.json(persona, 201);
 });
 
+app.post("/folders/rename", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ old_name?: string; new_name?: string }>();
+  const oldName = body.old_name?.trim() || "";
+  const newName = body.new_name?.trim() || "";
+  if (!oldName) return c.json({ error: "old_name is required" }, 400);
+  if (!newName) return c.json({ error: "new_name is required" }, 400);
+
+  const updated = svc.renamePersonaFolder(userId, oldName, newName);
+  if (updated.length === 0) return c.json({ error: "Folder not found" }, 404);
+  return c.json({ updated, count: updated.length });
+});
+
+app.post("/folders/delete", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ name?: string }>();
+  const name = body.name?.trim() || "";
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  const updated = svc.deletePersonaFolder(userId, name);
+  return c.json({ updated, count: updated.length });
+});
+
 app.get("/:id", (c) => {
   const userId = c.get("userId");
   const persona = svc.getPersona(userId, c.req.param("id"));
@@ -101,6 +124,7 @@ app.post("/:id/avatar", async (c) => {
 
   const formData = await c.req.formData();
   const file = formData.get("avatar") as File | null;
+  const originalFile = formData.get("original_avatar") as File | null;
   if (!file) return c.json({ error: "avatar file is required" }, 400);
 
   // Clean up old image if present
@@ -112,6 +136,16 @@ app.post("/:id/avatar", async (c) => {
   const image = await images.uploadImage(userId, file);
   svc.setPersonaImage(userId, persona.id, image.id);
   svc.setPersonaAvatar(userId, persona.id, image.filename);
+
+  const nextMetadata = { ...(persona.metadata ?? {}) };
+  if (originalFile) {
+    const originalImage = await images.uploadImage(userId, originalFile);
+    nextMetadata.original_image_id = originalImage.id;
+  } else {
+    delete nextMetadata.original_image_id;
+  }
+  svc.updatePersona(userId, persona.id, { metadata: nextMetadata });
+
   const updated = svc.getPersona(userId, persona.id);
   if (!updated) return c.json({ error: "Not found" }, 404);
 

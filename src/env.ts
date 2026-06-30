@@ -15,11 +15,21 @@ function getLanIPs(): string[] {
   return ips;
 }
 
+export const DEFAULT_DISK_WARNING_USAGE_THRESHOLD = 0.9;
+export const DEFAULT_DISK_WARNING_MIN_FREE_BYTES = 100 * 1024 * 1024 * 1024;
+
 export interface EnvConfig {
   port: number;
   /** @deprecated Use resolveEncryptionKey() instead. Kept for migration only. */
   encryptionKey: string;
   dataDir: string;
+  /**
+   * Default disk warning usage threshold as a 0..1 ratio. The warning fires
+   * only when this AND diskWarningMinFreeBytes are both crossed.
+   */
+  diskWarningUsageThreshold: number;
+  /** Default absolute free-space floor for low-disk warnings. */
+  diskWarningMinFreeBytes: number;
   frontendDir: string;
   ownerUsername: string;
   /** @deprecated Only used for legacy migration to owner.credentials. */
@@ -44,6 +54,30 @@ export interface EnvConfig {
   stForceNewMigration: boolean;
   /** Optional Pollinations BYOP app key (publishable pk_...) */
   pollinationsAppKey: string;
+  /**
+   * Enable SQLite memory-mapped I/O (PRAGMA mmap_size > 0). OFF by default:
+   * mmap faults are uncatchable and surface as SIGBUS/SIGSEGV on disk-full,
+   * copy-on-write overcommit (APFS/overlayfs), and file truncation. Opt in only
+   * on a known-good filesystem with disk headroom. See CLAUDE.md.
+   */
+  sqliteMmapEnabled: boolean;
+  /**
+   * Optional environment override for the vector database backend. When
+   * `provider` is set, it takes precedence over the owner's stored
+   * `vectorStoreConfig` (for headless/Docker self-hosting) and the operator UI
+   * renders the connection as read-only. Empty `provider` = use stored config.
+   */
+  vectorStore: {
+    provider: string; // "" | "lancedb" | "qdrant" | "milvus"
+    qdrantUrl: string;
+    qdrantApiKey: string;
+    milvusAddress: string;
+    milvusUsername: string;
+    milvusPassword: string;
+    milvusSsl: boolean;
+    milvusConnectTimeoutMs: number | undefined;
+    milvusRequestTimeoutMs: number | undefined;
+  };
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
@@ -52,6 +86,32 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
   const parsed = parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
+}
+
+function parseOptionalPositiveIntEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+function parseOptionalNonNegativeIntEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return parsed;
+}
+
+function parseRatioOrPercentEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  if (parsed <= 1) return parsed;
+  if (parsed <= 100) return parsed / 100;
+  return fallback;
 }
 
 function parseEphemeralOverrides(raw?: string): Record<string, number> {
@@ -70,18 +130,27 @@ function parseEphemeralOverrides(raw?: string): Record<string, number> {
 }
 
 export function loadEnv(): EnvConfig {
-  const rawPort = parseInt(process.env.PORT || "7860", 10);
-  // L-26: Validate port is a legitimate TCP port number (1–65535).
-  if (!Number.isFinite(rawPort) || rawPort < 1 || rawPort > 65535) {
-    throw new Error(`Invalid PORT value "${process.env.PORT}": must be 1–65535`);
+  // Validate PORT — out-of-range values used to be silently passed to Bun.serve,
+  // which then failed at bind time with a confusing native error.
+  const portRaw = process.env.PORT || "7860";
+  const port = parseInt(portRaw, 10);
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT "${portRaw}": must be an integer in 1..65535`);
   }
-  const port = rawPort;
 
   const encryptionKey = process.env.ENCRYPTION_KEY || "";
 
   // Resolve to absolute path at startup so file operations are immune to
   // CWD changes — critical on Termux where proot/grun wrappers can shift CWD.
   const dataDir = resolve(process.env.DATA_DIR || "./data");
+  const diskWarningUsageThreshold = parseRatioOrPercentEnv(
+    "LUMIVERSE_DISK_WARNING_USAGE_PERCENT",
+    DEFAULT_DISK_WARNING_USAGE_THRESHOLD,
+  );
+  const diskWarningMinFreeBytes = parsePositiveIntEnv(
+    "LUMIVERSE_DISK_WARNING_MIN_FREE_BYTES",
+    DEFAULT_DISK_WARNING_MIN_FREE_BYTES,
+  );
 
   const frontendDir = process.env.FRONTEND_DIR || "";
 
@@ -130,17 +199,34 @@ export function loadEnv(): EnvConfig {
   const stTargetUser = process.env.SILLYTAVERN_TARGET_USER || "default-user";
   const stMigrationTarget = Math.min(5, Math.max(1, parseInt(process.env.SILLYTAVERN_MIGRATION_TARGET || "5", 10) || 5));
   const stForceNewMigration = process.env.LUMIVERSE_FORCE_NEW_MIGRATION === "true";
-  // L-25: The Pollinations publishable app key was previously hardcoded as a
-  // fallback default, which means it would be used by all installations that
-  // did not configure POLLINATIONS_APP_KEY.  Remove the hardcoded default so
-  // the service simply runs without a key when none is set (Pollinations works
-  // without an app key in anonymous mode; a key only enables extra quotas).
-  const pollinationsAppKey = process.env.POLLINATIONS_APP_KEY || "";
+  // Publishable BYOP app key default used when no per-instance override is set.
+  const pollinationsAppKey = process.env.POLLINATIONS_APP_KEY || "pk_Y3z2ooD6zSWfLdL3";
+  // mmap is OFF by default (uncatchable SIGBUS/SIGSEGV risk). Opt in explicitly;
+  // the legacy *_DISABLED kill-switch still wins, for back-compat.
+  const sqliteMmapEnabled =
+    process.env.LUMIVERSE_SQLITE_MMAP_ENABLED === "true" &&
+    process.env.LUMIVERSE_SQLITE_MMAP_DISABLED !== "true";
+
+  // Optional vector-store backend override (headless/Docker). When provider is
+  // set it wins over the owner's stored vectorStoreConfig. Parsed once here.
+  const vectorStore = {
+    provider: (process.env.LUMIVERSE_VECTOR_STORE_PROVIDER || "").trim().toLowerCase(),
+    qdrantUrl: (process.env.LUMIVERSE_QDRANT_URL || "").trim(),
+    qdrantApiKey: process.env.LUMIVERSE_QDRANT_API_KEY || "",
+    milvusAddress: (process.env.LUMIVERSE_MILVUS_ADDRESS || "").trim(),
+    milvusUsername: process.env.LUMIVERSE_MILVUS_USERNAME || "",
+    milvusPassword: process.env.LUMIVERSE_MILVUS_PASSWORD || "",
+    milvusSsl: process.env.LUMIVERSE_MILVUS_SSL === "true",
+    milvusConnectTimeoutMs: parseOptionalPositiveIntEnv("LUMIVERSE_MILVUS_CONNECT_TIMEOUT_MS"),
+    milvusRequestTimeoutMs: parseOptionalNonNegativeIntEnv("LUMIVERSE_MILVUS_REQUEST_TIMEOUT_MS"),
+  };
 
   return {
     port,
     encryptionKey,
     dataDir,
+    diskWarningUsageThreshold,
+    diskWarningMinFreeBytes,
     frontendDir,
     ownerUsername,
     ownerPassword,
@@ -158,6 +244,8 @@ export function loadEnv(): EnvConfig {
     stMigrationTarget,
     stForceNewMigration,
     pollinationsAppKey,
+    sqliteMmapEnabled,
+    vectorStore,
   };
 }
 

@@ -3,6 +3,7 @@ import { registry } from "../MacroRegistry";
 export function registerMathMacros(): void {
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "calc",
     category: "Math",
     description: "Evaluate a math expression (+ - * / % with parentheses)",
@@ -17,6 +18,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "min",
     category: "Math",
     description: "Return the smallest of two or more numbers",
@@ -30,6 +32,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "max",
     category: "Math",
     description: "Return the largest of two or more numbers",
@@ -43,6 +46,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "clamp",
     category: "Math",
     description: "Clamp a value between min and max",
@@ -62,6 +66,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "abs",
     category: "Math",
     description: "Absolute value of a number",
@@ -72,6 +77,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "floor",
     category: "Math",
     description: "Round down to nearest integer",
@@ -82,6 +88,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "ceil",
     category: "Math",
     description: "Round up to nearest integer",
@@ -92,6 +99,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "mod",
     category: "Math",
     description: "Modulo (remainder of division)",
@@ -109,6 +117,7 @@ export function registerMathMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "round",
     category: "Math",
     description: "Round a number to N decimal places (default 0)",
@@ -140,73 +149,98 @@ function formatNum(n: number): string {
 // Supports: + - * / % () and unary minus, with numbers (including decimals)
 // ============================================================================
 
+// Cap parser recursion so deeply-nested user input (e.g. `((((((...)))))`)
+// can't blow the JS stack. 100 levels is far beyond any sane real expression
+// and well under V8's default limit.
+const MAX_CALC_DEPTH = 100;
+
 function safeCalc(expr: string): number {
   const cleaned = expr.replace(/\s+/g, "");
   if (!cleaned) return 0;
   let pos = 0;
+  let depth = 0;
+
+  function descend<T>(fn: () => T): T {
+    if (++depth > MAX_CALC_DEPTH) {
+      throw new Error("calc: expression nested too deeply");
+    }
+    try {
+      return fn();
+    } finally {
+      depth--;
+    }
+  }
 
   function parseExpr(): number {
-    let left = parseTerm();
-    while (pos < cleaned.length) {
-      const ch = cleaned[pos];
-      if (ch === "+") {
-        pos++;
-        left += parseTerm();
-      } else if (ch === "-") {
-        pos++;
-        left -= parseTerm();
-      } else {
-        break;
+    return descend(() => {
+      let left = parseTerm();
+      while (pos < cleaned.length) {
+        const ch = cleaned[pos];
+        if (ch === "+") {
+          pos++;
+          left += parseTerm();
+        } else if (ch === "-") {
+          pos++;
+          left -= parseTerm();
+        } else {
+          break;
+        }
       }
-    }
-    return left;
+      return left;
+    });
   }
 
   function parseTerm(): number {
-    let left = parseUnary();
-    while (pos < cleaned.length) {
-      const ch = cleaned[pos];
-      if (ch === "*") {
-        pos++;
-        left *= parseUnary();
-      } else if (ch === "/") {
-        pos++;
-        const r = parseUnary();
-        left = r !== 0 ? left / r : 0;
-      } else if (ch === "%") {
-        pos++;
-        const r = parseUnary();
-        left = r !== 0 ? left % r : 0;
-      } else {
-        break;
+    return descend(() => {
+      let left = parseUnary();
+      while (pos < cleaned.length) {
+        const ch = cleaned[pos];
+        if (ch === "*") {
+          pos++;
+          left *= parseUnary();
+        } else if (ch === "/") {
+          pos++;
+          const r = parseUnary();
+          left = r !== 0 ? left / r : 0;
+        } else if (ch === "%") {
+          pos++;
+          const r = parseUnary();
+          left = r !== 0 ? left % r : 0;
+        } else {
+          break;
+        }
       }
-    }
-    return left;
+      return left;
+    });
   }
 
   function parseUnary(): number {
-    if (cleaned[pos] === "-") {
-      pos++;
-      return -parseUnary();
-    }
-    if (cleaned[pos] === "+") {
-      pos++;
-      return parseUnary();
-    }
-    return parsePrimary();
+    return descend(() => {
+      if (cleaned[pos] === "-") {
+        pos++;
+        return -parseUnary();
+      }
+      if (cleaned[pos] === "+") {
+        pos++;
+        return parseUnary();
+      }
+      return parsePrimary();
+    });
   }
 
   function parsePrimary(): number {
-    if (cleaned[pos] === "(") {
-      pos++;
-      const result = parseExpr();
-      if (cleaned[pos] === ")") pos++;
-      return result;
-    }
-    const start = pos;
-    while (pos < cleaned.length && (/[0-9.]/.test(cleaned[pos]))) pos++;
-    const num = parseFloat(cleaned.substring(start, pos));
-    return isNaN(num) ? 0 : num;
+    return descend(() => {
+      if (cleaned[pos] === "(") {
+        pos++;
+        const result = parseExpr();
+        if (cleaned[pos] === ")") pos++;
+        return result;
+      }
+      const start = pos;
+      while (pos < cleaned.length && (/[0-9.]/.test(cleaned[pos]))) pos++;
+      const num = parseFloat(cleaned.substring(start, pos));
+      return isNaN(num) ? 0 : num;
+    });
   }
 
   try {

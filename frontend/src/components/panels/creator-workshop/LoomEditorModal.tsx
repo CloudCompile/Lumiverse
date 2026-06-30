@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
@@ -9,31 +10,21 @@ import type { LoomItem, LoomItemCategory, CreateLoomItemInput } from '@/types/ap
 import clsx from 'clsx'
 import styles from './LoomEditorModal.module.css'
 
-const CATEGORIES: { value: LoomItemCategory; label: string }[] = [
-  { value: 'narrative_style', label: 'Style' },
-  { value: 'loom_utility', label: 'Utility' },
-  { value: 'retrofit', label: 'Retrofit' },
-]
-
-const CATEGORY_HINTS: Record<LoomItemCategory, string> = {
-  narrative_style: 'Define a writing style, tone, or narrative voice for the AI to adopt.',
-  loom_utility: 'Create utility instructions that modify AI behavior or add capabilities.',
-  retrofit: 'Retrofit content to adjust or transform existing narratives.',
-}
-
-const CATEGORY_PLACEHOLDERS: Record<LoomItemCategory, string> = {
-  narrative_style: 'Write in a poetic, flowing style with rich metaphors...',
-  loom_utility: 'When the user mentions combat, use detailed action descriptions...',
-  retrofit: 'Adjust the tone to be more lighthearted and casual...',
-}
+const CATEGORY_VALUES: LoomItemCategory[] = ['narrative_style', 'loom_utility', 'retrofit']
 
 export default function LoomEditorModal() {
+  const { t } = useTranslation('panels')
   const modalProps = useStore((s) => s.modalProps)
   const closeModal = useStore((s) => s.closeModal)
 
   const packId = modalProps.packId as string
   const editingItem = modalProps.editingItem as LoomItem | undefined
   const onSaved = modalProps.onSaved as (() => void) | undefined
+
+  const categories = useMemo(() => CATEGORY_VALUES.map((value) => ({
+    value,
+    label: t(`creatorWorkshop.shared.category.${value === 'narrative_style' ? 'style' : value === 'loom_utility' ? 'utility' : 'retrofit'}`),
+  })), [t])
 
   const [name, setName] = useState(editingItem?.name || '')
   const [category, setCategory] = useState<LoomItemCategory>(editingItem?.category || 'narrative_style')
@@ -98,18 +89,20 @@ export default function LoomEditorModal() {
     <>
       <ModalShell isOpen onClose={handleClose} maxWidth={640} maxHeight="90vh" closeOnEscape={false} className={styles.modal}>
         <div className={styles.header}>
-          <h3 className={styles.title}>{editingItem ? 'Edit Loom Item' : 'Create Loom Item'}</h3>
+          <h3 className={styles.title}>
+            {editingItem ? t('creatorWorkshop.loomEditor.editTitle') : t('creatorWorkshop.loomEditor.createTitle')}
+          </h3>
           <CloseButton onClick={handleClose} />
         </div>
 
         <div className={styles.body}>
-          <FormField label="Name" required>
-            <TextInput value={name} onChange={setName} placeholder="Item name" autoFocus />
+          <FormField label={t('creatorWorkshop.shared.name')} required>
+            <TextInput value={name} onChange={setName} placeholder={t('creatorWorkshop.loomEditor.itemNamePlaceholder')} autoFocus />
           </FormField>
 
-          <FormField label="Category">
+          <FormField label={t('creatorWorkshop.loomEditor.category')}>
             <div className={styles.categoryTabs}>
-              {CATEGORIES.map((cat) => (
+              {categories.map((cat) => (
                 <button
                   key={cat.value}
                   type="button"
@@ -122,24 +115,28 @@ export default function LoomEditorModal() {
             </div>
           </FormField>
 
-          <FormField label="Content" required hint={CATEGORY_HINTS[category]}>
+          <FormField label={t('creatorWorkshop.loomEditor.content')} required hint={t(`creatorWorkshop.loomEditor.hint.${category}`)}>
             <TextArea
               value={content}
               onChange={setContent}
-              placeholder={CATEGORY_PLACEHOLDERS[category]}
+              placeholder={t(`creatorWorkshop.loomEditor.placeholder.${category}`)}
               rows={6}
             />
           </FormField>
 
-          <FormField label="Author">
-            <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
+          <FormField label={t('creatorWorkshop.shared.author')}>
+            <TextInput value={authorName} onChange={setAuthorName} placeholder={t('creatorWorkshop.loomEditor.authorPlaceholder')} />
           </FormField>
         </div>
 
         <div className={styles.footer}>
-          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="ghost" onClick={handleClose}>{t('creatorWorkshop.shared.cancel')}</Button>
           <Button variant="primary" onClick={handleSave} disabled={!name.trim() || saving}>
-            {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+            {saving
+              ? t('creatorWorkshop.shared.saving')
+              : editingItem
+                ? t('creatorWorkshop.shared.saveChanges')
+                : t('creatorWorkshop.shared.create')}
           </Button>
         </div>
       </ModalShell>
@@ -147,11 +144,11 @@ export default function LoomEditorModal() {
       {showDiscard && (
         <ConfirmationModal
           isOpen
-          title="Discard changes?"
-          message="You have unsaved changes. Are you sure you want to discard them?"
+          title={t('creatorWorkshop.shared.discardTitle')}
+          message={t('creatorWorkshop.shared.discardMessage')}
           variant="warning"
-          confirmText="Discard"
-          cancelText="Keep editing"
+          confirmText={t('creatorWorkshop.shared.discard')}
+          cancelText={t('creatorWorkshop.shared.keepEditing')}
           onConfirm={() => {
             setShowDiscard(false)
             closeModal()

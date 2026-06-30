@@ -209,6 +209,28 @@ export function listDocuments(
   );
 }
 
+/**
+ * Cheap existence check: do any of the given databanks hold at least one
+ * vectorized, searchable chunk? Used to short-circuit retrieval *before* the
+ * expensive query embedding — an attached-but-empty bank should cost nothing.
+ * A document is only searchable once vectorization marks it `ready` with
+ * chunks in LanceDB, so `pending`/`processing`/`error` docs (and empty files)
+ * don't count.
+ */
+export function hasSearchableChunks(userId: string, databankIds: string[]): boolean {
+  if (databankIds.length === 0) return false;
+  const placeholders = databankIds.map(() => "?").join(", ");
+  const row = getDb()
+    .query(
+      `SELECT 1 AS present FROM databank_documents
+       WHERE user_id = ? AND status = 'ready' AND total_chunks > 0
+         AND databank_id IN (${placeholders})
+       LIMIT 1`,
+    )
+    .get(userId, ...databankIds) as { present: number } | null;
+  return row !== null;
+}
+
 export function renameDocument(userId: string, id: string, newName: string): DatabankDocument | null {
   const now = Math.floor(Date.now() / 1000);
   const slug = nameToSlug(newName);
@@ -240,9 +262,13 @@ export function searchDocumentsBySlug(
   limit = 10,
 ): Array<{ slug: string; name: string; databankId: string; databankName: string }> {
   const db = getDb();
-  // M-06: Escape LIKE metacharacters (% and _) in the user-supplied slug
-  // so that a slug of "%" does not match every document in the table.
-  const escaped = partialSlug.toLowerCase().replace(/[%_\\]/g, "\\$&");
+  // Escape SQL LIKE wildcards so a search for "a_b" doesn't match "axb" and a
+  // bare "%" doesn't return every document. The query below uses ESCAPE '\\'.
+  const escaped = partialSlug
+    .toLowerCase()
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
   const slugPattern = `%${escaped}%`;
 
   let sql: string;
@@ -308,6 +334,28 @@ export async function deleteDocument(userId: string, docId: string): Promise<boo
     return true;
   }
   return false;
+}
+
+/**
+ * Replace a document's file metadata after the underlying file has been
+ * rewritten on disk (used by the edit-content flow). Caller is responsible for
+ * deleting the old file and triggering reprocessing.
+ */
+export function updateDocumentFile(
+  userId: string,
+  docId: string,
+  filePath: string,
+  mimeType: string,
+  fileSize: number,
+  contentHash: string,
+): void {
+  const now = Math.floor(Date.now() / 1000);
+  getDb().run(
+    `UPDATE databank_documents
+     SET file_path = ?, mime_type = ?, file_size = ?, content_hash = ?, error_message = NULL, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
+    [filePath, mimeType, fileSize, contentHash, now, docId, userId],
+  );
 }
 
 export function updateDocumentStatus(

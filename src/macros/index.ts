@@ -1,5 +1,5 @@
 export { evaluate } from "./MacroEvaluator";
-export { buildEnv, resolveGroupCharacterNames, type BuildEnvContext } from "./MacroEnv";
+export { buildEnv, cloneEnv, mergeDynamicMacros, resolveGroupCharacterNames, resolvePersonaPronouns, type BuildEnvContext } from "./MacroEnv";
 export { registry } from "./MacroRegistry";
 export type {
   MacroEnv,
@@ -32,6 +32,10 @@ import { registerFormattingMacros } from "./definitions/formatting";
 import { registerChatUtilsMacros } from "./definitions/chat-utils";
 import { registerRegexRefMacros } from "./definitions/regex-ref";
 import { registerDatabankMacros } from "./definitions/databank";
+import { registerPromptVarMacros } from "./definitions/prompt-vars";
+import { registerMultiplayerMacros } from "./definitions/multiplayer";
+import { registerIterationMacros } from "./definitions/iteration";
+import { registerListMacros } from "./definitions/lists";
 
 let initialized = false;
 
@@ -62,4 +66,8 @@ export function initMacros(): void {
   registerChatUtilsMacros();
   registerRegexRefMacros();
   registerDatabankMacros();
+  registerPromptVarMacros();
+  registerMultiplayerMacros();
+  registerIterationMacros();
+  registerListMacros();
 }

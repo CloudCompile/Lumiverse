@@ -10,10 +10,72 @@ import type {
 } from "../types/image-gen-connection";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
+import { describeProviderError } from "../utils/provider-errors";
 
 /** Secret key for an image gen connection's API key. */
 export function imageGenConnectionSecretKey(id: string): string {
   return `image_gen_connection_${id}_api_key`;
+}
+
+export interface ImageGenConnectionModelsPreviewInput {
+  connection_id?: string;
+  provider: string;
+  api_url?: string;
+  api_key?: string;
+}
+
+export interface NanoGptUsageWindow {
+  used: number;
+  remaining: number;
+  percentUsed: number;
+  resetAt: number | null;
+  limit: number | null;
+}
+
+export interface NanoGptSubscriptionUsage {
+  active: boolean;
+  allowOverage: boolean;
+  // Typed usage windows mirroring NanoGPT's subscription payload. Each may be
+  // null when the plan doesn't meter that dimension.
+  dailyInputTokens: NanoGptUsageWindow | null;
+  weeklyInputTokens: NanoGptUsageWindow | null;
+  dailyImages: NanoGptUsageWindow | null;
+  period: {
+    currentPeriodEnd: string | null;
+  };
+  state: string | null;
+  graceUntil: string | null;
+}
+
+/**
+ * Parse a single Nano-GPT usage window from the raw API payload, folding in its
+ * matching `limits.<key>` value. The window object and its limit live under
+ * separate keys in NanoGPT's response, so callers pass both.
+ */
+function parseNanoGptUsageWindow(w: any, limit: any): NanoGptUsageWindow | null {
+  if (!w || typeof w !== "object") return null;
+  return {
+    used: typeof w.used === "number" ? w.used : 0,
+    remaining: typeof w.remaining === "number" ? w.remaining : 0,
+    percentUsed: typeof w.percentUsed === "number" ? w.percentUsed : 0,
+    resetAt: typeof w.resetAt === "number" ? w.resetAt : null,
+    limit: typeof limit === "number" ? limit : null,
+  };
+}
+
+function resolveNanoGptSubscriptionUsageUrl(profile: { api_url?: string | null }): string {
+  const fallback = "https://nano-gpt.com/api/subscription/v1/usage";
+  const rawUrl = (profile.api_url || "").trim() || "https://nano-gpt.com/api/v1";
+
+  try {
+    const url = new URL(rawUrl);
+    url.pathname = "/api/subscription/v1/usage";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return fallback;
+  }
 }
 
 function rowToProfile(row: any): ImageGenConnectionProfile {
@@ -240,7 +302,7 @@ export async function testConnection(
       provider: profile.provider,
     };
   } catch (err: any) {
-    return { success: false, message: err.message || "Connection test failed", provider: profile.provider };
+    return { success: false, message: describeProviderError(err, "Connection test failed"), provider: profile.provider };
   }
 }
 
@@ -251,21 +313,37 @@ export async function listConnectionModels(
   const profile = getConnection(userId, id);
   if (!profile) return { models: [], provider: "", error: "Connection not found" };
 
-  const provider = getImageProvider(profile.provider);
-  if (!provider) {
-    return { models: [], provider: profile.provider, error: `Unknown provider: ${profile.provider}` };
+  const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(id));
+  return listConnectionModelsPreview(userId, {
+    connection_id: id,
+    provider: profile.provider,
+    api_url: profile.api_url,
+    api_key: apiKey || undefined,
+  });
+}
+
+export async function listConnectionModelsPreview(
+  userId: string,
+  input: ImageGenConnectionModelsPreviewInput
+): Promise<{ models: Array<{ id: string; label: string }>; provider: string; error?: string }> {
+  const existing = input.connection_id ? getConnection(userId, input.connection_id) : null;
+  const providerId = input.provider;
+
+  let apiKey = input.api_key;
+  if (apiKey === undefined && existing && existing.provider === providerId) {
+    apiKey = (await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(existing.id))) || undefined;
   }
 
-  const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(id));
-  if (!apiKey && provider.capabilities.apiKeyRequired) {
-    return { models: [], provider: profile.provider, error: "No API key" };
+  const provider = getImageProvider(providerId);
+  if (!provider) {
+    return { models: [], provider: providerId, error: `Unknown provider: ${providerId}` };
   }
 
   try {
-    const models = await provider.listModels(apiKey || "", profile.api_url || "");
-    return { models, provider: profile.provider };
+    const models = await provider.listModels(apiKey || "", input.api_url ?? existing?.api_url ?? "");
+    return { models, provider: providerId };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: providerId, error: describeProviderError(err, "Failed to fetch models") };
   }
 }
 
@@ -295,6 +373,39 @@ export async function listConnectionModelsBySubtype(
     const models = await provider.listModelsBySubtype(apiKey || "", profile.api_url || "", subtype);
     return { models, provider: profile.provider };
   } catch (err: any) {
-    return { models: [], provider: profile.provider, error: err.message || "Failed to fetch models" };
+    return { models: [], provider: profile.provider, error: describeProviderError(err, "Failed to fetch models") };
+  }
+}
+
+export async function fetchNanoGptSubscriptionUsage(userId: string, id: string): Promise<NanoGptSubscriptionUsage | null> {
+  const profile = getConnection(userId, id);
+  if (!profile || profile.provider !== "nanogpt") return null;
+
+  const apiKey = await secretsSvc.getSecret(userId, imageGenConnectionSecretKey(id));
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch(resolveNanoGptSubscriptionUsageUrl(profile), {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (!res.ok) return null;
+
+    const raw = await res.json() as any;
+    return {
+      active: !!raw?.active,
+      allowOverage: !!raw?.allowOverage,
+      dailyInputTokens: parseNanoGptUsageWindow(raw?.dailyInputTokens, raw?.limits?.dailyInputTokens),
+      weeklyInputTokens: parseNanoGptUsageWindow(raw?.weeklyInputTokens, raw?.limits?.weeklyInputTokens),
+      dailyImages: parseNanoGptUsageWindow(raw?.dailyImages, raw?.limits?.dailyImages),
+      period: {
+        currentPeriodEnd: typeof raw?.period?.currentPeriodEnd === "string" ? raw.period.currentPeriodEnd : null,
+      },
+      state: typeof raw?.state === "string" ? raw.state : null,
+      graceUntil: typeof raw?.graceUntil === "string" ? raw.graceUntil : null,
+    };
+  } catch {
+    return null;
   }
 }

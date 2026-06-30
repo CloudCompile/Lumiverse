@@ -17,7 +17,8 @@ import type { MacroExecContext } from "../types";
 
 interface MemoryChunk {
   content: string;
-  score: number;
+  // null when the hit has no vector distance (keyword-only or recency fallback).
+  score: number | null;
   metadata: any;
 }
 
@@ -33,6 +34,19 @@ interface MemoryEnvData {
   };
 }
 
+const DEFAULT_MEMORY_HEADER_TEMPLATE = `Long-term continuity notes from earlier in this conversation.
+These are retrieval results, not live chat history.
+Use them only to preserve continuity.
+Do not quote, continue, imitate, or replay their wording, actions, emotional beats, or dialogue.
+If an event appears complete, treat it as background consequence rather than repeating it.
+
+{{memories}}`;
+
+const DEFAULT_MEMORY_CHUNK_TEMPLATE = `Earlier retrieved context:
+{{content}}
+
+Use only the continuity-relevant facts/state above. Do not reuse its phrasing.`;
+
 function getMemory(ctx: MacroExecContext): MemoryEnvData {
   return (ctx.env.extra.memory ?? {
     chunks: [],
@@ -40,9 +54,9 @@ function getMemory(ctx: MacroExecContext): MemoryEnvData {
     count: 0,
     enabled: false,
     settings: {
-      chunkTemplate: "{{content}}",
+      chunkTemplate: DEFAULT_MEMORY_CHUNK_TEMPLATE,
       chunkSeparator: "\n---\n",
-      memoryHeaderTemplate: "Relevant context from earlier in this conversation:\n{{memories}}",
+      memoryHeaderTemplate: DEFAULT_MEMORY_HEADER_TEMPLATE,
     },
   }) as MemoryEnvData;
 }
@@ -57,7 +71,7 @@ function formatChunks(
   const renderedChunks = chunks.map(c => {
     let rendered = settings.chunkTemplate;
     rendered = rendered.replace(/\{\{content\}\}/g, c.content);
-    rendered = rendered.replace(/\{\{score\}\}/g, c.score.toFixed(4));
+    rendered = rendered.replace(/\{\{score\}\}/g, c.score != null ? c.score.toFixed(4) : "n/a");
     const meta = c.metadata ?? {};
     rendered = rendered.replace(/\{\{startIndex\}\}/g, String(meta.startIndex ?? "?"));
     rendered = rendered.replace(/\{\{endIndex\}\}/g, String(meta.endIndex ?? "?"));

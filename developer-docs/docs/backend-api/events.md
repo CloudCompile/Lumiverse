@@ -21,8 +21,10 @@ unsub()
 | `MESSAGE_SENT` | `{ chatId, message }` |
 | `MESSAGE_EDITED` | `{ chatId, message }` |
 | `MESSAGE_DELETED` | `{ chatId, messageId }` |
-| `MESSAGE_SWIPED` | `MessageSwipedPayloadDTO` — see below |
+| `MESSAGE_SWIPED` | `MessageSwipedPayloadDTO` — see [Swipe Events](#swipe-events) |
+| `SWIPE_EDITED` | `SwipeEditedPayloadDTO` — see [Swipe Events](#swipe-events) |
 | `CHAT_CHANGED` | `{ chatId }` |
+| `CHAT_SWITCHED` | `{ chatId: string \| null }` — `null` when the user returns to the home screen |
 | `CHARACTER_MESSAGE_RENDERED` | `{ chatId, messageId }` |
 | `USER_MESSAGE_RENDERED` | `{ chatId, messageId }` |
 
@@ -51,7 +53,14 @@ See [Generation > Stream Observation](generation.md#stream-observation) for the 
 
 ### Swipe Events
 
-`MESSAGE_SWIPED` is emitted by all four swipe operations (`addSwipe`, `updateSwipe`, `deleteSwipe`, `cycleSwipe`). The `action` discriminator and the `swipeId` field let you tell them apart and maintain swipe-keyed state without diffing the `swipes` array.
+Swipe state changes are surfaced through two events. Pick whichever matches how you want to react:
+
+- **`MESSAGE_SWIPED`** — fine-grained. Fires from the four dedicated REST swipe routes (`addSwipe`, `updateSwipe`, `deleteSwipe`, `cycleSwipe`). Payload carries an `action` discriminator so you can tell add/update/delete/navigate apart without diffing arrays.
+- **`SWIPE_EDITED`** — coarse. Fires when `spindle.chat.updateMessage` explicitly supplies one or more of `swipes` / `swipe_id` / `swipe_dates`. Use this when an extension rewrites the swipe array wholesale (e.g. regenerating alternates, merging variants) and you just need to know "the swipe state for this message changed, refetch it."
+
+Plain content-only edits via `updateMessage` (patches that only touch `content`, `metadata`, `name`, or `reasoning`) do **not** emit `SWIPE_EDITED` — they emit `MESSAGE_EDITED` only, even though the host mirrors the new content into the active swipe slot under the hood.
+
+#### `MESSAGE_SWIPED`
 
 ```ts
 spindle.on('MESSAGE_SWIPED', (payload) => {
@@ -89,6 +98,28 @@ spindle.on('MESSAGE_SWIPED', (payload) => {
 !!! note "Backwards compatibility"
     Subscribers that only read `payload.chatId` and `payload.message` keep working unchanged — the discriminator fields are purely additive.
 
+#### `SWIPE_EDITED`
+
+```ts
+spindle.on('SWIPE_EDITED', (payload) => {
+  // payload: SwipeEditedPayloadDTO — fully typed
+  const { chatId, message, previousSwipeId } = payload
+
+  if (previousSwipeId !== message.swipe_id) {
+    // The active slot moved — treat as a navigation
+  }
+  // Re-render from message.swipes / message.swipe_dates
+})
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `chatId` | `string` | |
+| `message` | `ChatMessageDTO` | The full message after the mutation. |
+| `previousSwipeId` | `number` | Active swipe index *before* the mutation. Equal to `message.swipe_id` when only `swipes` or `swipe_dates` changed (no navigation). |
+
+No `action` discriminator is provided — if you need add/update/delete/navigate semantics, diff `message.swipes` / `message.swipe_dates` against your cached state, or subscribe to `MESSAGE_SWIPED` instead.
+
 ### Entities
 
 | Event | Payload |
@@ -116,6 +147,15 @@ spindle.on('MESSAGE_SWIPED', (payload) => {
 | `IMAGE_UPLOADED` | `{ imageId }` |
 | `IMAGE_DELETED` | `{ imageId }` |
 
+### Regex Scripts
+
+!!! warning "Permission required: `regex_scripts`"
+
+| Event | Payload |
+|-------|---------|
+| `REGEX_SCRIPT_CHANGED` | `{ id, script }` — fires on create, update, duplicate, reorder, and enable/disable. `script` is a `RegexScriptDTO`. |
+| `REGEX_SCRIPT_DELETED` | `{ id }` |
+
 ### Expressions
 
 | Event | Payload |
@@ -127,12 +167,17 @@ spindle.on('MESSAGE_SWIPED', (payload) => {
 | Event | Payload |
 |-------|---------|
 | `SPINDLE_THEME_OVERRIDES` | `{ extensionId, extensionName, overrides }` — `overrides` is `{ variables: Record<string, string> }` or `null` when cleared |
+| `SPINDLE_CHAT_STYLE_MODE` | `{ extensionId, extensionName, chatId, mode }`. `chatId` is `null` with `mode: 'bounded'` when an extension's worker stops, signalling that all of its claims should be dropped. See [Chat Mutation](chat-mutation.md#per-chat-style-mode). |
 | `SPINDLE_EXTENSION_LOADED` | `{ extensionId }` |
 | `SPINDLE_EXTENSION_UNLOADED` | `{ extensionId }` |
 | `SPINDLE_EXTENSION_ERROR` | `{ extensionId, error }` |
+| `SPINDLE_RUNTIME_STATS` | `{ extensionId, identifier, name, runtimeMode, phase, pid, rssKb, startupMs? }` — emitted only when `LUMIVERSE_SPINDLE_RUNTIME_STATS` is enabled |
 
 ### Permissions
 
 | Event | Payload |
 |-------|---------|
-| `PERMISSION_CHANGED` | `{ permission, granted, allGranted }` — fired when a permission is granted or revoked at runtime. See [Permissions](../getting-started/permissions.md#reacting-to-permission-changes) for usage. |
+| `PERMISSION_CHANGED` | `{ extensionId, permission, granted, allGranted }` — local backend-worker event fired when this extension's permission is granted or revoked at runtime. It is scoped to the receiving extension handler; other extensions do not receive the event. See [Permissions](../getting-started/permissions.md#reacting-to-permission-changes) for usage. |
+
+!!! note "Scoped runtime event"
+    Use `spindle.permissions.onChanged()` or `spindle.on('PERMISSION_CHANGED', ...)` inside an extension backend. `PERMISSION_CHANGED` is delivered directly by the worker host and is not the same as subscribing to the global `SPINDLE_PERMISSION_CHANGED` WebSocket/EventBus event.

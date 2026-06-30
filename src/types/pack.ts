@@ -35,7 +35,7 @@ export interface LumiaItem {
   definition: string;
   personality: string;
   behavior: string;
-  gender_identity: 0 | 1 | 2; // 0=unspecified, 1=feminine, 2=masculine
+  gender_identity: 0 | 1 | 2 | 3; // 0=feminine, 1=masculine, 2=neutral, 3=any
   version: string;
   sort_order: number;
   created_at: number;
@@ -49,7 +49,7 @@ export interface CreateLumiaItemInput {
   definition?: string;
   personality?: string;
   behavior?: string;
-  gender_identity?: 0 | 1 | 2;
+  gender_identity?: 0 | 1 | 2 | 3;
   version?: string;
   sort_order?: number;
 }
@@ -139,7 +139,7 @@ export interface PackImportPayload {
     definition?: string;
     personality?: string;
     behavior?: string;
-    genderIdentity?: 0 | 1 | 2;
+    genderIdentity?: 0 | 1 | 2 | 3;
     version?: string;
     sortOrder?: number;
   }>;
@@ -170,7 +170,7 @@ export interface PackImportPayload {
     replaceString?: string;
     flags?: string;
     placement?: string[];
-    target?: string;
+    target?: string | string[];
     minDepth?: number | null;
     maxDepth?: number | null;
     trimStrings?: string[];
@@ -181,4 +181,40 @@ export interface PackImportPayload {
     description?: string;
     metadata?: Record<string, any>;
   }>;
+}
+
+// ---- Export Payload (LumiHub-compatible camelCase format) ----
+// Shaped to satisfy LumiHub's `lumiaPackSchema` (packName/lumiaName/loomName,
+// integer versions, gender identity 0-2) so exported packs can be uploaded and
+// shared directly. Lumiverse-only fields (sourceUrl, extras, loomTools,
+// regexScripts) ride along via LumiHub's `.passthrough()` — LumiHub drops them,
+// but the importer re-reads them for lossless Lumiverse → Lumiverse round-trips.
+export interface PackExportPayload {
+  packName: string;
+  packAuthor: string;
+  coverUrl: string | null;
+  version: number;
+  packExtras: Array<{ type: string; name: string; description: string }>;
+  lumiaItems: Array<{
+    lumiaName: string;
+    lumiaDefinition: string;
+    lumiaPersonality: string;
+    lumiaBehavior: string;
+    avatarUrl: string | null;
+    genderIdentity: 0 | 1 | 2;
+    authorName: string;
+    version: number;
+  }>;
+  loomItems: Array<{
+    loomName: string;
+    loomContent: string;
+    loomCategory: string;
+    authorName: string | null;
+    version: number;
+  }>;
+  // Lumiverse-only passthrough (ignored by LumiHub, used for round-trip fidelity)
+  sourceUrl?: string;
+  extras?: Record<string, any>;
+  loomTools?: PackImportPayload["loomTools"];
+  regexScripts?: PackImportPayload["regexScripts"];
 }

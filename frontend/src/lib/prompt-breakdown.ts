@@ -18,10 +18,27 @@ export interface BreakdownEntry {
   type: string
   tokens: number
   role?: string
+  content?: string
   blockId?: string
+  extensionId?: string
+  extensionName?: string
+  messageCount?: number
+  firstMessageIndex?: number
 }
 
+export type BreakdownGroupId =
+  | 'lumiverse'
+  | 'chatHistory'
+  | 'longTermMemory'
+  | 'worldInfo'
+  | 'sidecar'
+  | 'extensions'
+  | 'system'
+
 export interface BreakdownGroup {
+  /** Stable key for i18n and React state (language-independent). */
+  id: BreakdownGroupId | string
+  /** English fallback label; prefer `translateBreakdownGroupLabel(id, t)` in UI. */
   label: string
   color: string
   tokens: number
@@ -34,13 +51,14 @@ const TYPE_TO_GROUP: Record<string, string> = {
   long_term_memory: 'longTermMemory',
   world_info: 'worldInfo',
   sidecar: 'sidecar',
+  extension: 'extensions',
   authors_note: 'extensions',
   separator: 'system',
   utility: 'system',
   append: 'lumiverse',
 }
 
-const GROUP_LABELS: Record<string, string> = {
+export const GROUP_LABEL_FALLBACKS: Record<string, string> = {
   lumiverse: 'Lumiverse Prompts',
   chatHistory: 'Chat History',
   longTermMemory: 'Long-Term Memory',
@@ -57,7 +75,8 @@ export function groupBreakdownEntries(entries: BreakdownEntry[]): BreakdownGroup
     const groupKey = TYPE_TO_GROUP[entry.type] || 'system'
     if (!groupMap.has(groupKey)) {
       groupMap.set(groupKey, {
-        label: GROUP_LABELS[groupKey] || groupKey,
+        id: groupKey,
+        label: GROUP_LABEL_FALLBACKS[groupKey] || groupKey,
         color: GROUP_COLORS[groupKey] || GROUP_COLORS.system,
         tokens: 0,
         entries: [],

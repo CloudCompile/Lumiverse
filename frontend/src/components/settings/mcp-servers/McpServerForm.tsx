@@ -1,15 +1,10 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { FormField, TextInput, Select, Button } from '@/components/shared/FormComponents'
 import { Toggle } from '@/components/shared/Toggle'
 import type { CreateMcpServerInput } from '@/api/mcp-servers'
 import styles from '../../panels/ConnectionManager.module.css'
 import formStyles from './McpServerForm.module.css'
-
-const TRANSPORT_OPTIONS = [
-  { value: 'streamable_http', label: 'Streamable HTTP' },
-  { value: 'sse', label: 'SSE (Legacy)' },
-  { value: 'stdio', label: 'Stdio (Subprocess)' },
-]
 
 interface HeaderRow {
   key: string
@@ -23,6 +18,18 @@ interface McpServerFormProps {
 }
 
 export default function McpServerForm({ initial, onSave, onCancel }: McpServerFormProps) {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
+
+  const transportOptions = useMemo(
+    () => [
+      { value: 'streamable_http', label: t('mcp.transportStreamable') },
+      { value: 'sse', label: t('mcp.transportSse') },
+      { value: 'stdio', label: t('mcp.transportStdio') },
+    ],
+    [t],
+  )
+
   const [name, setName] = useState(initial?.name || '')
   const [transportType, setTransportType] = useState<string>(initial?.transport_type || 'streamable_http')
   const [url, setUrl] = useState(initial?.url || '')
@@ -91,42 +98,42 @@ export default function McpServerForm({ initial, onSave, onCancel }: McpServerFo
 
   return (
     <div className={styles.form}>
-      <FormField label="Name">
+      <FormField label={t('mcp.name')}>
         <TextInput
           value={name}
           onChange={setName}
-          placeholder="My MCP Server"
+          placeholder={t('mcp.namePlaceholder')}
         />
       </FormField>
 
-      <FormField label="Transport">
-        <Select value={transportType} onChange={setTransportType} options={TRANSPORT_OPTIONS} />
+      <FormField label={t('mcp.transport')}>
+        <Select value={transportType} onChange={setTransportType} options={transportOptions} />
       </FormField>
 
       {isHttp && (
         <>
-          <FormField label="URL" hint="The MCP server endpoint URL">
+          <FormField label={t('mcp.url')} hint={t('mcp.urlHint')}>
             <TextInput
               value={url}
               onChange={setUrl}
-              placeholder="https://example.com/mcp"
+              placeholder={t('mcp.urlPlaceholder')}
             />
           </FormField>
 
-          <FormField label="Headers" hint="Custom headers (API keys, auth tokens). Values are stored encrypted.">
+          <FormField label={t('mcp.headers')} hint={t('mcp.headersHint')}>
             <div className={formStyles.kvList}>
               {headers.map((row, idx) => (
                 <div key={idx} className={formStyles.kvRow}>
                   <TextInput
                     value={row.key}
                     onChange={(value) => updateHeader(idx, 'key', value)}
-                    placeholder="Header name"
+                    placeholder={t('mcp.headerName')}
                   />
                   <TextInput
                     type="password"
                     value={row.value}
                     onChange={(value) => updateHeader(idx, 'value', value)}
-                    placeholder="Value"
+                    placeholder={t('mcp.headerValue')}
                   />
                   <button
                     className={formStyles.kvRemove}
@@ -138,7 +145,7 @@ export default function McpServerForm({ initial, onSave, onCancel }: McpServerFo
                 </div>
               ))}
               <button className={formStyles.kvAdd} onClick={addHeaderRow} type="button">
-                + Add header
+                {t('mcp.addHeader')}
               </button>
             </div>
           </FormField>
@@ -147,36 +154,36 @@ export default function McpServerForm({ initial, onSave, onCancel }: McpServerFo
 
       {isStdio && (
         <>
-          <FormField label="Command" hint="The executable to run (e.g. node, python3, npx)">
+          <FormField label={t('mcp.command')} hint={t('mcp.commandHint')}>
             <TextInput
               value={command}
               onChange={setCommand}
-              placeholder="npx"
+              placeholder={t('mcp.commandPlaceholder')}
             />
           </FormField>
 
-          <FormField label="Arguments" hint="Comma-separated command arguments">
+          <FormField label={t('mcp.args')} hint={t('mcp.argsHint')}>
             <TextInput
               value={args}
               onChange={setArgs}
-              placeholder="-y, @modelcontextprotocol/server-filesystem, /path"
+              placeholder={t('mcp.argsPlaceholder')}
             />
           </FormField>
 
-          <FormField label="Environment Variables" hint="Env vars passed to the subprocess. Values are stored encrypted.">
+          <FormField label={t('mcp.env')} hint={t('mcp.envHint')}>
             <div className={formStyles.kvList}>
               {envVars.map((row, idx) => (
                 <div key={idx} className={formStyles.kvRow}>
                   <TextInput
                     value={row.key}
                     onChange={(value) => updateEnvVar(idx, 'key', value)}
-                    placeholder="Variable name"
+                    placeholder={t('mcp.varName')}
                   />
                   <TextInput
                     type="password"
                     value={row.value}
                     onChange={(value) => updateEnvVar(idx, 'value', value)}
-                    placeholder="Value"
+                    placeholder={t('mcp.headerValue')}
                   />
                   <button
                     className={formStyles.kvRemove}
@@ -188,7 +195,7 @@ export default function McpServerForm({ initial, onSave, onCancel }: McpServerFo
                 </div>
               ))}
               <button className={formStyles.kvAdd} onClick={addEnvRow} type="button">
-                + Add variable
+                {t('mcp.addVariable')}
               </button>
             </div>
           </FormField>
@@ -198,18 +205,18 @@ export default function McpServerForm({ initial, onSave, onCancel }: McpServerFo
       <Toggle.Checkbox
         checked={autoConnect}
         onChange={setAutoConnect}
-        label="Auto-connect on startup"
+        label={t('mcp.autoConnect')}
       />
 
       <Toggle.Checkbox
         checked={enabled}
         onChange={setEnabled}
-        label="Enabled"
+        label={t('mcp.enabled')}
       />
 
       <div className={styles.formActions}>
-        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-        <Button onClick={handleSubmit} disabled={!name.trim()}>Save</Button>
+        <Button variant="ghost" onClick={onCancel}>{tc('actions.cancel')}</Button>
+        <Button onClick={handleSubmit} disabled={!name.trim()}>{tc('actions.save')}</Button>
       </div>
     </div>
   )

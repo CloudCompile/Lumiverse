@@ -1,3 +1,7 @@
+---
+title: Prompt Blocks
+---
+
 # Prompt Blocks
 
 Prompt blocks are the building pieces of your preset. Each block is a section of text that gets assembled into the final prompt sent to the AI.
@@ -111,6 +115,16 @@ By default, a block is included in every generation. You can limit it to specifi
 | `quiet` | Background/silent generations |
 
 Leave the trigger list empty to include the block in all generation types.
+
+---
+
+## Prompt Variables
+
+Blocks can define **Prompt Variables**—typed inputs that allow users to customize the preset's behavior without editing the raw block text.
+
+For example, you might create a `tone` variable (text) or a `verbosity` variable (slider). When a user selects your preset, they are presented with a clean UI to fill out these variables, and the values are automatically injected into your macros.
+
+Read the [Prompt Variables guide](prompt-variables.md) for full instructions on how to define them as a creator, and how users interact with them via the Prompt Variables Modal.
 
 ---
 

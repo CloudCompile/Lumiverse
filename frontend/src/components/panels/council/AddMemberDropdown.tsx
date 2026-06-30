@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Search, X, Users, Plus } from 'lucide-react'
 import type { CouncilMember } from 'lumiverse-spindle-types'
 import type { Pack, PackWithItems, LumiaItem } from '@/types/api'
@@ -24,6 +25,7 @@ interface AvailableItem {
 }
 
 export default function AddMemberDropdown({ existingMembers, onAdd, onClose }: AddMemberDropdownProps) {
+  const { t } = useTranslation('panels')
   const packs = useStore((s) => s.packs)
   const packsWithItems = useStore((s) => s.packsWithItems)
   const setPackWithItems = useStore((s) => s.setPackWithItems)
@@ -98,7 +100,7 @@ export default function AddMemberDropdown({ existingMembers, onAdd, onClose }: A
           <input
             type="text"
             className={styles.addSearchInput}
-            placeholder="Search Lumias..."
+            placeholder={t('councilManager.addMember.searchPlaceholder')}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             autoFocus={!isMobile}
@@ -115,10 +117,10 @@ export default function AddMemberDropdown({ existingMembers, onAdd, onClose }: A
       </div>
       <div className={styles.addDropdownList}>
         {loadingPacks ? (
-          <div className={styles.addDropdownEmpty}>Loading packs...</div>
+          <div className={styles.addDropdownEmpty}>{t('councilManager.addMember.loadingPacks')}</div>
         ) : availableItems.length === 0 ? (
           <div className={styles.addDropdownEmpty}>
-            {searchTerm ? 'No matching Lumias found' : 'All Lumias are already in the council'}
+            {searchTerm ? t('councilManager.addMember.noMatch') : t('councilManager.addMember.allAdded')}
           </div>
         ) : (
           availableItems.map((item) => (

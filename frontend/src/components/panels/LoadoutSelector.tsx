@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Save, ChevronDown, MoreVertical, RefreshCw, Trash2, Link, Unlink, Pencil, Check, X } from 'lucide-react'
 import { useStore } from '@/store'
 import { loadoutsApi } from '@/api/loadouts'
+import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { toast } from '@/lib/toast'
 import type { Loadout, LoadoutBinding } from '@/api/loadouts'
 import styles from './LoadoutSelector.module.css'
 import clsx from 'clsx'
 
 export default function LoadoutSelector() {
+  const { t } = useTranslation('panels')
   const loadouts = useStore((s) => s.loadouts)
   const activeLoadoutId = useStore((s) => s.activeLoadoutId)
   const loadLoadouts = useStore((s) => s.loadLoadouts)
@@ -25,6 +28,7 @@ export default function LoadoutSelector() {
   const [saveName, setSaveName] = useState('')
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameName, setRenameName] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [chatBinding, setChatBinding] = useState<LoadoutBinding | null>(null)
   const [charBinding, setCharBinding] = useState<LoadoutBinding | null>(null)
 
@@ -66,8 +70,8 @@ export default function LoadoutSelector() {
   const handleSelect = useCallback(async (loadout: Loadout) => {
     setDropdownOpen(false)
     await applyLoadout(loadout.id)
-    toast.success(`Applied loadout: ${loadout.name}`)
-  }, [applyLoadout])
+    toast.success(t('loadoutSelector.applied', { name: loadout.name }))
+  }, [applyLoadout, t])
 
   const handleSelectCustom = useCallback(() => {
     setDropdownOpen(false)
@@ -78,27 +82,27 @@ export default function LoadoutSelector() {
     if (!saveName.trim()) return
     const loadout = await createLoadout(saveName.trim())
     if (loadout) {
-      toast.success(`Saved loadout: ${loadout.name}`)
+      toast.success(t('loadoutSelector.saved', { name: loadout.name }))
       setActiveLoadoutId(loadout.id)
     }
     setSaving(false)
     setSaveName('')
-  }, [saveName, createLoadout, setActiveLoadoutId])
+  }, [saveName, createLoadout, setActiveLoadoutId, t])
 
   const handleRecapture = useCallback(async () => {
     if (!activeLoadoutId) return
     await updateLoadout(activeLoadoutId, { recapture: true })
-    toast.success('Loadout updated with current settings')
+    toast.success(t('loadoutSelector.recaptured'))
     setMenuOpen(false)
-  }, [activeLoadoutId, updateLoadout])
+  }, [activeLoadoutId, updateLoadout, t])
 
   const handleDelete = useCallback(async () => {
     if (!activeLoadoutId) return
     const name = activeLoadout?.name
+    setConfirmDelete(false)
     await deleteLoadout(activeLoadoutId)
-    toast.success(`Deleted loadout: ${name}`)
-    setMenuOpen(false)
-  }, [activeLoadoutId, activeLoadout, deleteLoadout])
+    toast.success(t('loadoutSelector.deleted', { name }))
+  }, [activeLoadoutId, activeLoadout, deleteLoadout, t])
 
   const handleRename = useCallback(async () => {
     if (!renaming || !renameName.trim()) return
@@ -113,48 +117,48 @@ export default function LoadoutSelector() {
     try {
       const binding = await loadoutsApi.setChatBinding(activeChatId, activeLoadoutId)
       setChatBinding(binding)
-      toast.success('Loadout bound to this chat')
+      toast.success(t('loadoutSelector.boundChat'))
     } catch {
-      toast.error('Failed to bind loadout')
+      toast.error(t('loadoutSelector.bindFailed'))
     }
     setMenuOpen(false)
-  }, [activeChatId, activeLoadoutId])
+  }, [activeChatId, activeLoadoutId, t])
 
   const handleUnbindChat = useCallback(async () => {
     if (!activeChatId) return
     try {
       await loadoutsApi.deleteChatBinding(activeChatId)
       setChatBinding(null)
-      toast.success('Chat binding removed')
+      toast.success(t('loadoutSelector.unboundChat'))
     } catch {
-      toast.error('Failed to remove binding')
+      toast.error(t('loadoutSelector.unbindFailed'))
     }
     setMenuOpen(false)
-  }, [activeChatId])
+  }, [activeChatId, t])
 
   const handleBindCharacter = useCallback(async () => {
     if (!activeCharacterId || !activeLoadoutId) return
     try {
       const binding = await loadoutsApi.setCharacterBinding(activeCharacterId, activeLoadoutId)
       setCharBinding(binding)
-      toast.success('Loadout bound to this character')
+      toast.success(t('loadoutSelector.boundCharacter'))
     } catch {
-      toast.error('Failed to bind loadout')
+      toast.error(t('loadoutSelector.bindFailed'))
     }
     setMenuOpen(false)
-  }, [activeCharacterId, activeLoadoutId])
+  }, [activeCharacterId, activeLoadoutId, t])
 
   const handleUnbindCharacter = useCallback(async () => {
     if (!activeCharacterId) return
     try {
       await loadoutsApi.deleteCharacterBinding(activeCharacterId)
       setCharBinding(null)
-      toast.success('Character binding removed')
+      toast.success(t('loadoutSelector.unboundCharacter'))
     } catch {
-      toast.error('Failed to remove binding')
+      toast.error(t('loadoutSelector.unbindFailed'))
     }
     setMenuOpen(false)
-  }, [activeCharacterId])
+  }, [activeCharacterId, t])
 
   return (
     <div className={styles.container}>
@@ -167,7 +171,7 @@ export default function LoadoutSelector() {
             onClick={() => setDropdownOpen(!dropdownOpen)}
           >
             <span className={styles.selectorLabel}>
-              {activeLoadout ? activeLoadout.name : 'Custom'}
+              {activeLoadout ? activeLoadout.name : t('loadoutSelector.custom')}
             </span>
             <ChevronDown size={12} className={clsx(styles.chevron, dropdownOpen && styles.chevronOpen)} />
           </button>
@@ -179,7 +183,7 @@ export default function LoadoutSelector() {
                 className={clsx(styles.dropdownItem, !activeLoadoutId && styles.dropdownItemActive)}
                 onClick={handleSelectCustom}
               >
-                Custom
+                {t('loadoutSelector.custom')}
               </button>
               {loadouts.map((loadout) => (
                 <button
@@ -206,7 +210,7 @@ export default function LoadoutSelector() {
                 </button>
               ))}
               {loadouts.length === 0 && (
-                <div className={styles.dropdownEmpty}>No saved loadouts</div>
+                <div className={styles.dropdownEmpty}>{t('loadoutSelector.noSaved')}</div>
               )}
             </div>
           )}
@@ -220,7 +224,7 @@ export default function LoadoutSelector() {
               value={saveName}
               onChange={(e) => setSaveName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') { setSaving(false); setSaveName('') } }}
-              placeholder="Loadout name..."
+              placeholder={t('loadoutSelector.namePlaceholder')}
               autoFocus
             />
             <button type="button" className={styles.saveConfirm} onClick={handleSave} disabled={!saveName.trim()}>
@@ -235,7 +239,7 @@ export default function LoadoutSelector() {
             type="button"
             className={styles.saveBtn}
             onClick={() => setSaving(true)}
-            title="Save current settings as loadout"
+            title={t('loadoutSelector.saveTitle')}
           >
             <Save size={12} />
           </button>
@@ -260,41 +264,53 @@ export default function LoadoutSelector() {
                   setMenuOpen(false)
                   setDropdownOpen(true)
                 }}>
-                  <Pencil size={11} /> Rename
+                  <Pencil size={11} /> {t('loadoutSelector.rename')}
                 </button>
                 <button type="button" className={styles.menuItem} onClick={handleRecapture}>
-                  <RefreshCw size={11} /> Re-capture
+                  <RefreshCw size={11} /> {t('loadoutSelector.recapture')}
                 </button>
                 {activeChatId && (
                   chatBinding?.loadout_id === activeLoadoutId ? (
                     <button type="button" className={styles.menuItem} onClick={handleUnbindChat}>
-                      <Unlink size={11} /> Unbind Chat
+                      <Unlink size={11} /> {t('loadoutSelector.unbindChat')}
                     </button>
                   ) : (
                     <button type="button" className={styles.menuItem} onClick={handleBindChat}>
-                      <Link size={11} /> Bind to Chat
+                      <Link size={11} /> {t('loadoutSelector.bindChat')}
                     </button>
                   )
                 )}
                 {activeCharacterId && (
                   charBinding?.loadout_id === activeLoadoutId ? (
                     <button type="button" className={styles.menuItem} onClick={handleUnbindCharacter}>
-                      <Unlink size={11} /> Unbind Character
+                      <Unlink size={11} /> {t('loadoutSelector.unbindCharacter')}
                     </button>
                   ) : (
                     <button type="button" className={styles.menuItem} onClick={handleBindCharacter}>
-                      <Link size={11} /> Bind to Character
+                      <Link size={11} /> {t('loadoutSelector.bindCharacter')}
                     </button>
                   )
                 )}
-                <button type="button" className={clsx(styles.menuItem, styles.menuItemDanger)} onClick={handleDelete}>
-                  <Trash2 size={11} /> Delete
+                <button type="button" className={clsx(styles.menuItem, styles.menuItemDanger)} onClick={() => { setMenuOpen(false); setConfirmDelete(true) }}>
+                  <Trash2 size={11} /> {t('loadoutSelector.delete')}
                 </button>
               </div>
             )}
           </div>
         )}
       </div>
+
+      {confirmDelete && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('loadoutSelector.deleteConfirmTitle')}
+          message={t('loadoutSelector.deleteConfirmMessage', { name: activeLoadout?.name })}
+          variant="danger"
+          confirmText={t('loadoutSelector.delete')}
+          onConfirm={() => { void handleDelete() }}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
     </div>
   )
 }

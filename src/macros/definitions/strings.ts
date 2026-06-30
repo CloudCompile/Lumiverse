@@ -1,8 +1,13 @@
 import { registry } from "../MacroRegistry";
+import {
+  regexReplaceSandboxed,
+  RegexTimeoutError,
+} from "../../utils/regex-sandbox";
 
 export function registerStringMacros(): void {
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "len",
     category: "String",
     description: "Length of a string (character count)",
@@ -17,6 +22,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "upper",
     category: "String",
     description: "Convert text to uppercase",
@@ -31,6 +37,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "lower",
     category: "String",
     description: "Convert text to lowercase",
@@ -45,6 +52,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "capitalize",
     category: "String",
     description: "Capitalize the first letter of each sentence",
@@ -60,6 +68,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "replace",
     category: "String",
     description: "Replace occurrences of a substring. Scoped: {{replace::find::with}}text{{/replace}}",
@@ -80,6 +89,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "substr",
     category: "String",
     description: "Extract a substring by start and optional end index",
@@ -100,6 +110,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "split",
     category: "String",
     description: "Split text by delimiter and return the Nth item (0-based)",
@@ -121,6 +132,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "join",
     category: "String",
     description: "Join multiple values with a separator",
@@ -132,13 +144,24 @@ export function registerStringMacros(): void {
     isList: true,
     handler: (ctx) => {
       const sep = ctx.args[0] ?? ", ";
-      const items = ctx.args.slice(1).filter((a) => a !== "");
+      // Trim each item before filtering blanks. When a join is written across
+      // multiple indented lines for readability, every `::`-separated item
+      // picks up the surrounding newlines/indentation as literal text (and a
+      // nested macro that resolves to "" leaves just its indentation behind).
+      // Items are list values, so that structural whitespace is noise and
+      // would otherwise accumulate into joined output. The separator (arg 0)
+      // is intentionally left intact — its whitespace is meaningful.
+      const items = ctx.args
+        .slice(1)
+        .map((a) => a.trim())
+        .filter((a) => a !== "");
       return items.join(sep);
     },
   });
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "repeat",
     category: "String",
     description: "Repeat text N times. Scoped: {{repeat::3}}text{{/repeat}}",
@@ -156,6 +179,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "wrap",
     category: "String",
     description: "Wrap text with prefix and suffix. Only wraps if text is non-empty.",
@@ -176,6 +200,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "regex",
     category: "String",
     description: "Regex replacement. {{regex::pattern::replacement::text}} or scoped.",
@@ -186,15 +211,21 @@ export function registerStringMacros(): void {
       { name: "text", optional: true, description: "Source text (or use scoped body)" },
       { name: "flags", optional: true, description: "Regex flags (default: g)" },
     ],
-    handler: (ctx) => {
+    handler: async (ctx) => {
       const pattern = ctx.args[0] ?? "";
       const replacement = ctx.args[1] ?? "";
       const text = ctx.isScoped ? ctx.body : (ctx.args[2] ?? "");
       const flags = (ctx.isScoped ? ctx.args[2] : ctx.args[3]) ?? "g";
       if (!pattern) return text;
       try {
-        return text.replace(new RegExp(pattern, flags), replacement);
-      } catch {
+        // Run user-supplied regex in the sandbox so a pathological pattern
+        // can't freeze the prompt-assembly thread.
+        return await regexReplaceSandboxed(pattern, flags, text, replacement);
+      } catch (err) {
+        if (err instanceof RegexTimeoutError) {
+          ctx.warn(`Regex pattern exceeded time budget: ${pattern}`);
+          return text;
+        }
         ctx.warn(`Invalid regex pattern: ${pattern}`);
         return text;
       }
@@ -203,6 +234,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "tokenCount",
     category: "String",
     description: "Approximate token count of text (~4 chars per token)",
@@ -217,6 +249,7 @@ export function registerStringMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "truncate",
     category: "String",
     description: "Truncate text to approximately N tokens (word-boundary aware)",

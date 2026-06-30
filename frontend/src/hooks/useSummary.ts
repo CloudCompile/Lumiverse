@@ -5,9 +5,11 @@ import {
   saveSummary,
   clearSummary,
   getSummary,
-  getLastSummarizedInfo,
-  shouldAutoSummarize,
 } from '@/lib/summary/service'
+import { generateApi } from '@/api/generate'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/ws/events'
+import type { SummarizationProgressPayload } from '@/types/ws-events'
 
 export function useSummary() {
   const activeChatId = useStore((s) => s.activeChatId)
@@ -17,18 +19,16 @@ export function useSummary() {
   const activePersonaId = useStore((s) => s.activePersonaId)
   const profiles = useStore((s) => s.profiles)
   const activeProfileId = useStore((s) => s.activeProfileId)
-  const messages = useStore((s) => s.messages)
   const summarization = useStore((s) => s.summarization)
   const setSummarization = useStore((s) => s.setSummarization)
   const isSummarizing = useStore((s) => s.isSummarizing)
   const setIsSummarizing = useStore((s) => s.setIsSummarizing)
+  const lastSummaryMutation = useStore((s) => s.lastSummaryMutation)
 
   const [summaryText, setSummaryText] = useState('')
   const [originalText, setOriginalText] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const autoCheckRef = useRef(false)
 
   // Derived values
   const hasChat = !!activeChatId
@@ -70,12 +70,20 @@ export function useSummary() {
     loadSummary()
   }, [loadSummary])
 
+  useEffect(() => {
+    if (!activeChatId) return
+    if (!lastSummaryMutation || lastSummaryMutation.chatId !== activeChatId) return
+    setSummaryText(lastSummaryMutation.summaryText)
+    setOriginalText(lastSummaryMutation.summaryText)
+  }, [activeChatId, lastSummaryMutation])
+
   // Generate summary
   const generate = useCallback(async (isManual = true) => {
     if (!activeChatId || isSummarizing) return null
     setIsSummarizing(true)
     setIsLoading(true)
     setError(null)
+    useStore.getState().setActiveSummaryOperation('generating')
 
     try {
       const messageContext = isManual
@@ -90,6 +98,7 @@ export function useSummary() {
         characterName,
         systemPromptOverride: summarization.systemPromptOverride,
         userPromptOverride: summarization.userPromptOverride,
+        requestTimeoutMs: summarization.requestTimeoutMs,
       })
 
       if (result) {
@@ -104,6 +113,7 @@ export function useSummary() {
     } finally {
       setIsLoading(false)
       setIsSummarizing(false)
+      useStore.getState().setActiveSummaryOperation(null)
     }
   }, [activeChatId, isSummarizing, summarization, resolveConnectionId, userName, characterName, setIsSummarizing])
 
@@ -130,27 +140,85 @@ export function useSummary() {
     }
   }, [activeChatId])
 
-  // Auto-summarization check on message count changes
-  useEffect(() => {
-    if (summarization.mode !== 'auto' || !activeChatId || isSummarizing) return
-    if (autoCheckRef.current) return // Prevent double-trigger
+  // Rebuild summary from scratch (processes all messages in batches)
+  const rebuild = useCallback(async () => {
+    if (!activeChatId || isSummarizing) return null
 
-    const check = async () => {
-      const info = await getLastSummarizedInfo(activeChatId)
-      const lastCount = info?.messageCount ?? 0
+    const batchSize = summarization.manualMessageContext
+    const connectionId = resolveConnectionId()
 
-      if (shouldAutoSummarize(messages.length, lastCount, summarization.autoInterval)) {
-        autoCheckRef.current = true
-        try {
-          await generate(false)
-        } finally {
-          autoCheckRef.current = false
-        }
+    // Register in-progress state
+    setIsSummarizing(true)
+    setIsLoading(true)
+    setError(null)
+    useStore.getState().setActiveSummaryOperation('rebuilding')
+    useStore.getState().setRebuildProgress({ batchNumber: 0, totalBatches: 0 })
+
+    // Set up WS listener for progress events
+    const progressListener = (payload: SummarizationProgressPayload) => {
+      if (payload.chatId === activeChatId) {
+        useStore.getState().setRebuildProgress({
+          batchNumber: payload.batchNumber,
+          totalBatches: payload.totalBatches,
+        })
       }
     }
 
-    check()
-  }, [messages.length, summarization.mode, summarization.autoInterval, activeChatId, isSummarizing, generate])
+    const completionListener = (payload: { chatId: string; generationId: string; summaryText?: string }) => {
+      if (payload.chatId === activeChatId) {
+        unsubProgress()
+        unsubComplete()
+        unsubFail()
+        useStore.getState().setRebuildProgress(null)
+        useStore.getState().setActiveSummaryOperation(null)
+        setIsSummarizing(false)
+        setIsLoading(false)
+        loadSummary()
+      }
+    }
+
+    const failureListener = (payload: { chatId: string; generationId: string; error: string }) => {
+      if (payload.chatId === activeChatId) {
+        unsubProgress()
+        unsubComplete()
+        unsubFail()
+        setError(payload.error || 'Summary rebuild failed')
+        useStore.getState().setRebuildProgress(null)
+        useStore.getState().setActiveSummaryOperation(null)
+        setIsSummarizing(false)
+        setIsLoading(false)
+      }
+    }
+
+    const unsubProgress = wsClient.on(EventType.SUMMARIZATION_PROGRESS, progressListener)
+    const unsubComplete = wsClient.on(EventType.SUMMARIZATION_COMPLETED, completionListener)
+    const unsubFail = wsClient.on(EventType.SUMMARIZATION_FAILED, failureListener)
+
+    try {
+      const result = await generateApi.rebuildSummary(activeChatId, batchSize, userName, {
+        connection_id: connectionId,
+        system_prompt_override: summarization.systemPromptOverride,
+        user_prompt_override: summarization.userPromptOverride,
+      })
+      // Store total batches for immediate progress display
+      useStore.getState().setRebuildProgress({
+        batchNumber: 0,
+        totalBatches: result.totalBatches,
+      })
+    } catch (err: any) {
+      // API call failed (e.g. validation error) — clean up listeners
+      unsubProgress()
+      unsubComplete()
+      unsubFail()
+      setError(err.message || 'Summary rebuild failed')
+      useStore.getState().setRebuildProgress(null)
+      useStore.getState().setActiveSummaryOperation(null)
+      setIsSummarizing(false)
+      setIsLoading(false)
+    }
+
+    return null
+  }, [activeChatId, isSummarizing, summarization, resolveConnectionId, userName, setIsSummarizing, loadSummary])
 
   return {
     // State
@@ -167,11 +235,15 @@ export function useSummary() {
     // Connection
     profiles,
     activeProfileId,
+    // Rebuild
+    rebuildProgress: useStore((s) => s.rebuildProgress),
     // Actions
     setSummaryText,
     generate,
     save,
     clear,
+    rebuild,
     loadSummary,
+    activeChatId,
   }
 }

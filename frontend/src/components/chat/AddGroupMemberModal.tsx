@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
 import { Search, UserPlus } from 'lucide-react'
@@ -7,7 +8,7 @@ import { useStore } from '@/store'
 import { chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import type { CharacterSummary } from '@/types/api'
-import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
 import { Spinner } from '@/components/shared/Spinner'
 import Pagination from '@/components/shared/Pagination'
@@ -16,12 +17,26 @@ import styles from './AddGroupMemberModal.module.css'
 const CHARS_PER_PAGE = 50
 
 export default function AddGroupMemberModal() {
+  const { t } = useTranslation('chat')
+  const { t: tc } = useTranslation('common')
   const closeModal = useStore((s) => s.closeModal)
   const modalProps = useStore((s) => s.modalProps)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
   const setGroupCharacterIds = useStore((s) => s.setGroupCharacterIds)
 
   const chatId = modalProps.chatId as string
+  const seededCharacterIds = useMemo(
+    () => Array.isArray(modalProps.existingCharacterIds)
+      ? modalProps.existingCharacterIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+      : [],
+    [modalProps.existingCharacterIds]
+  )
+  const memberIds = useMemo(
+    () => (seededCharacterIds.length > 0
+      ? Array.from(new Set([...seededCharacterIds, ...groupCharacterIds]))
+      : groupCharacterIds),
+    [seededCharacterIds, groupCharacterIds]
+  )
   const [search, setSearch] = useState('')
   const [addingId, setAddingId] = useState<string | null>(null)
   const [page, setPage] = useState(1)
@@ -56,13 +71,13 @@ export default function AddGroupMemberModal() {
 
   // Filter out current group members, then apply search
   const available = useMemo(() => {
-    const nonMembers = allSummaries.filter((c) => !groupCharacterIds.includes(c.id))
+    const nonMembers = allSummaries.filter((c) => !memberIds.includes(c.id))
     if (!search.trim()) return nonMembers
     const q = search.toLowerCase()
     return nonMembers.filter(
       (c) => c.name.toLowerCase().includes(q) || c.tags?.some((t) => t.toLowerCase().includes(q))
     )
-  }, [allSummaries, groupCharacterIds, search])
+  }, [allSummaries, memberIds, search])
 
   useEffect(() => { setPage(1) }, [search])
 
@@ -80,16 +95,16 @@ export default function AddGroupMemberModal() {
       setAddingId(charId)
       try {
         await chatsApi.addMember(chatId, charId)
-        setGroupCharacterIds([...groupCharacterIds, charId])
-        toast.success(`${char?.name || 'Character'} added to group`)
+        setGroupCharacterIds([...memberIds, charId])
+        toast.success(t('addGroupMember.addedToGroup', { name: char?.name || t('characterFallback') }))
       } catch (err: any) {
         console.error('[AddGroupMember] Failed:', err)
-        toast.error(err?.body?.error || 'Failed to add member')
+        toast.error(err?.body?.error || t('addGroupMember.failedAddMember'))
       } finally {
         setAddingId(null)
       }
     },
-    [chatId, allSummaries, groupCharacterIds, setGroupCharacterIds, addingId]
+    [chatId, allSummaries, memberIds, setGroupCharacterIds, addingId]
   )
 
   useEffect(() => {
@@ -113,7 +128,7 @@ export default function AddGroupMemberModal() {
     [closeModal]
   )
 
-  const nonMemberCount = allSummaries.filter((c) => !groupCharacterIds.includes(c.id)).length
+  const nonMemberCount = allSummaries.filter((c) => !memberIds.includes(c.id)).length
 
   return createPortal(
     <AnimatePresence>
@@ -137,9 +152,9 @@ export default function AddGroupMemberModal() {
 
           <div className={styles.header}>
             <UserPlus size={18} className={styles.headerIcon} />
-            <h3 className={styles.title}>Add Group Member</h3>
+            <h3 className={styles.title}>{t('addGroupMember.title')}</h3>
             <span className={styles.countBadge}>
-              {loading ? '...' : `${nonMemberCount} available`}
+              {loading ? '...' : t('addGroupMember.available', { count: nonMemberCount })}
             </span>
           </div>
 
@@ -148,10 +163,12 @@ export default function AddGroupMemberModal() {
               <Search size={14} className={styles.searchIcon} />
               <input
                 type="text"
+                name="group-member-search"
+                aria-label={t('addGroupMember.searchAria')}
                 className={styles.searchInput}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search characters..."
+                placeholder={t('addGroupMember.searchPlaceholder')}
                 autoFocus
               />
             </div>
@@ -164,9 +181,7 @@ export default function AddGroupMemberModal() {
               <div className={styles.charGrid}>
                 {pageChars.map((char) => {
                   const isAdding = addingId === char.id
-                  const avatarUrl = char.image_id
-                    ? getCharacterAvatarThumbUrlById(char.id, char.image_id)
-                    : null
+                  const avatarUrl = char.image_id ? getCharacterAvatarThumbUrl(char) : null
                   return (
                     <button
                       key={char.id}
@@ -201,8 +216,8 @@ export default function AddGroupMemberModal() {
                 {available.length === 0 && (
                   <div className={styles.emptyState}>
                     {nonMemberCount === 0
-                      ? 'All your characters are already in this group.'
-                      : 'No characters found.'}
+                      ? t('addGroupMember.allInGroup')
+                      : t('addGroupMember.noneFound')}
                   </div>
                 )}
               </div>
@@ -220,7 +235,7 @@ export default function AddGroupMemberModal() {
 
           <div className={styles.footer}>
             <button type="button" className={styles.footerBtn} onClick={closeModal}>
-              Done
+              {tc('actions.done')}
             </button>
           </div>
         </motion.div>

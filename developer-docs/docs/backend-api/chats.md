@@ -73,6 +73,18 @@ Both fields are optional. Only provided fields are updated.
 
 `getActive()` reads the `activeChatId` setting that the frontend persists whenever the user opens or closes a chat. This lets extensions discover the current chat without subscribing to events.
 
+You can also react to chat switches in real time by subscribing to the `CHAT_SWITCHED` event:
+
+```ts
+spindle.on('CHAT_SWITCHED', (payload) => {
+  if (payload.chatId) {
+    spindle.log.info(`User switched to chat ${payload.chatId}`)
+  } else {
+    spindle.log.info('User returned to the home screen')
+  }
+})
+```
+
 ```ts
 // React to the active chat
 const active = await spindle.chats.getActive()
@@ -135,13 +147,14 @@ const memories = await spindle.chats.getMemories('chat-id', { topK: 8 })
 | `settingsSource` | `string` | `"global"` or `"per_chat"` — where the memory settings came from. |
 | `chunksAvailable` | `number` | Total vectorized chunks in the store for this chat. |
 | `chunksPending` | `number` | Chunks awaiting vectorization. If > 0, results may be incomplete. |
+| `retrievalMode` | `string?` | How chunks were retrieved: `"vector"` (real vector/hybrid search) or `"recency"` (fallback, e.g. the query embedding failed). Absent until the cache is populated. |
 
 ### ChatMemoryChunkDTO
 
 | Field | Type | Description |
 |---|---|---|
 | `content` | `string` | The chunk text (concatenated messages from a conversation segment). |
-| `score` | `number` | Similarity score (lower = more similar in cosine distance). |
+| `score` | `number \| null` | Vector distance (lower = more similar). `null` for keyword-only or recency-fallback hits, which have no vector distance — do not treat a missing score as a perfect (zero-distance) match. |
 | `metadata` | `Record<string, unknown>` | Chunk metadata (may include `startIndex`, `endIndex`, etc.). |
 
 !!! note "Prerequisites"
@@ -150,6 +163,9 @@ const memories = await spindle.chats.getMemories('chat-id', { topK: 8 })
 !!! tip "Memories vs Chat Mutation"
     - **`getMemories()`** — retrieves semantically relevant *past* conversation segments via vector search. Read-only, no side effects.
     - **`spindle.chat.getMessages()`** ([Chat Mutation](chat-mutation.md)) — returns the full raw message list for a chat.
+
+!!! tip "Need more than retrieval?"
+    `getMemories()` is the lightweight entry point under the `chats` permission. The richer surface — listing vectorized chunks, warming a chat, invalidating the cache, plus the full Memory Cortex (entities, relations, vaults, consolidations, salience) — lives under [`spindle.memories`](memories.md) and the dedicated `memories` permission. The same retrieval call is mirrored there as `spindle.memories.chatMemory.get()`.
 
 ---
 

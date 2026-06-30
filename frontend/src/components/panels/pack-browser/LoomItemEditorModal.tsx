@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { X } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { Button } from '@/components/shared/FormComponents'
@@ -13,13 +14,21 @@ interface Props {
   onClose: () => void
 }
 
-const CATEGORIES: { value: LoomItemCategory; label: string }[] = [
-  { value: 'narrative_style', label: 'Narrative Style' },
-  { value: 'loom_utility', label: 'Loom Utility' },
-  { value: 'retrofit', label: 'Retrofit' },
-]
+const CATEGORY_VALUES: LoomItemCategory[] = ['narrative_style', 'loom_utility', 'retrofit']
+
+const CATEGORY_LABEL_KEYS: Record<LoomItemCategory, string> = {
+  narrative_style: 'packBrowser.loomItemEditor.categoryNarrativeStyle',
+  loom_utility: 'packBrowser.loomItemEditor.categoryLoomUtility',
+  retrofit: 'packBrowser.loomItemEditor.categoryRetrofit',
+}
 
 export default function LoomItemEditorModal({ packId, initialData, onSave, onClose }: Props) {
+  const { t } = useTranslation('panels')
+  const categories = useMemo(() => CATEGORY_VALUES.map((value) => ({
+    value,
+    label: t(CATEGORY_LABEL_KEYS[value]),
+  })), [t])
+
   const [name, setName] = useState(initialData?.name || '')
   const [category, setCategory] = useState<LoomItemCategory>(initialData?.category || 'narrative_style')
   const [content, setContent] = useState(initialData?.content || '')
@@ -47,64 +56,70 @@ export default function LoomItemEditorModal({ packId, initialData, onSave, onClo
   return (
     <ModalShell isOpen onClose={onClose} maxWidth={480} maxHeight="90vh" zIndex={10001} className={styles.modal}>
       <div className={styles.modalHeader}>
-        <h2 className={styles.modalTitle}>{isEditing ? 'Edit Loom Item' : 'New Loom Item'}</h2>
+        <h2 className={styles.modalTitle}>
+          {isEditing ? t('creatorWorkshop.loomEditor.editTitle') : t('creatorWorkshop.loomEditor.createTitle')}
+        </h2>
         <Button size="icon" variant="ghost" onClick={onClose} icon={<X size={16} />} />
       </div>
       <div className={styles.modalBody}>
         <div className={styles.fieldGroup}>
-          <label className={styles.fieldLabel}>Name *</label>
+          <label className={styles.fieldLabel}>{t('creatorWorkshop.shared.name')} *</label>
           <input
             type="text"
             className={styles.fieldInput}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Item name"
+            placeholder={t('creatorWorkshop.loomEditor.itemNamePlaceholder')}
             autoFocus
           />
         </div>
         <div className={styles.fieldGroup}>
-          <label className={styles.fieldLabel}>Category</label>
+          <label className={styles.fieldLabel}>{t('creatorWorkshop.loomEditor.category')}</label>
           <select
             className={styles.fieldSelect}
             value={category}
             onChange={(e) => setCategory(e.target.value as LoomItemCategory)}
           >
-            {CATEGORIES.map((c) => (
+            {categories.map((c) => (
               <option key={c.value} value={c.value}>{c.label}</option>
             ))}
           </select>
         </div>
         <div className={styles.fieldGroup}>
-          <label className={styles.fieldLabel}>Author</label>
+          <label className={styles.fieldLabel}>{t('creatorWorkshop.shared.author')}</label>
           <input
             type="text"
             className={styles.fieldInput}
             value={authorName}
             onChange={(e) => setAuthorName(e.target.value)}
-            placeholder="Author name"
+            placeholder={t('creatorWorkshop.loomEditor.authorPlaceholder')}
           />
         </div>
         <div className={styles.fieldGroup}>
-          <label className={styles.fieldLabel}>Content</label>
+          <label className={styles.fieldLabel}>{t('creatorWorkshop.loomEditor.content')}</label>
           <textarea
             className={styles.fieldTextarea}
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            placeholder="Loom item content / prompt..."
+            placeholder={t('packBrowser.loomItemEditor.contentPlaceholder')}
             rows={6}
           />
-          <div className={styles.charCount}>{content.length} chars</div>
+          <div className={styles.charCount}>{t('packBrowser.charCount', { count: content.length })}</div>
         </div>
       </div>
       <div className={styles.modalFooter}>
-        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="ghost" onClick={onClose}>{t('creatorWorkshop.shared.cancel')}</Button>
         <Button
           variant="primary"
           disabled={!name.trim() || saving}
           loading={saving}
           onClick={handleSave}
         >
-          {saving ? 'Saving...' : isEditing ? 'Save' : 'Create'}
+          {saving
+            ? t('creatorWorkshop.shared.saving')
+            : isEditing
+              ? t('creatorWorkshop.shared.saveChanges')
+              : t('creatorWorkshop.shared.create')}
         </Button>
       </div>
     </ModalShell>

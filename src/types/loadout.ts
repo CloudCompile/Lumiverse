@@ -1,13 +1,15 @@
 export interface LoadoutSnapshot {
   // Lumia
   selectedDefinition: any | null;
+  selectedChimeraDefinitions: any[];
   selectedBehaviors: any[];
   selectedPersonalities: any[];
   chimeraMode: boolean;
   lumiaQuirks: string;
   lumiaQuirksEnabled: boolean;
-  // Council
-  councilSettings: any;
+  /** @deprecated Council is owned by the council-profile system; no longer
+   *  captured or applied. Retained only so older stored snapshots still type. */
+  councilSettings?: any;
   // Loom
   selectedLoomStyles: any[];
   selectedLoomUtils: any[];

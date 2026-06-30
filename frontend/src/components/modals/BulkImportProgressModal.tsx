@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { CheckCircle2, XCircle, SkipForward } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
@@ -30,6 +31,8 @@ export default function BulkImportProgressModal({
   onComplete,
   onClose,
 }: BulkImportProgressModalProps) {
+  const { t } = useTranslation('modals')
+  const { t: tc } = useTranslation('common')
   const [processed, setProcessed] = useState(0)
   const [results, setResults] = useState<BulkImportResultItem[]>([])
   const [currentFile, setCurrentFile] = useState('')
@@ -39,7 +42,6 @@ export default function BulkImportProgressModal({
   const cancelledRef = useRef(false)
   const resultsEndRef = useRef<HTMLDivElement>(null)
 
-  // Reset on new open
   useEffect(() => {
     if (isOpen && files.length > 0) {
       setProcessed(0)
@@ -51,7 +53,6 @@ export default function BulkImportProgressModal({
     }
   }, [isOpen, files])
 
-  // Auto-scroll results list
   useEffect(() => {
     resultsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [results.length])
@@ -67,7 +68,7 @@ export default function BulkImportProgressModal({
       setCurrentFile(
         chunk.length === 1
           ? chunk[0].name
-          : `${chunk[0].name} ... (${chunk.length} files)`
+          : t('bulkImport.chunkFiles', { first: chunk[0].name, count: chunk.length }),
       )
 
       try {
@@ -75,10 +76,10 @@ export default function BulkImportProgressModal({
         allResults.push(...response.results)
         setResults([...allResults])
         setProcessed(Math.min(i + chunk.length, files.length))
-      } catch {
-        // If the bulk endpoint itself fails, record errors for this chunk
+      } catch (err: any) {
+        const errorMessage = err?.body?.error || err?.body?.message || err?.message || t('bulkImport.requestFailed')
         for (const file of chunk) {
-          allResults.push({ filename: file.name, success: false, error: 'Request failed' })
+          allResults.push({ filename: file.name, success: false, error: errorMessage })
         }
         setResults([...allResults])
         setProcessed(Math.min(i + chunk.length, files.length))
@@ -88,7 +89,6 @@ export default function BulkImportProgressModal({
     setDone(true)
     setCurrentFile('')
 
-    // Collect results for parent
     const imported = allResults
       .filter((r) => r.success && !r.skipped && r.character)
       .map((r) => r.character!)
@@ -103,7 +103,7 @@ export default function BulkImportProgressModal({
       }))
 
     onComplete(imported, lorebookChars)
-  }, [files, skipDuplicates, onComplete])
+  }, [files, skipDuplicates, onComplete, t])
 
   const handleCancel = useCallback(() => {
     if (done) {
@@ -119,11 +119,23 @@ export default function BulkImportProgressModal({
   const skippedCount = results.filter((r) => r.skipped).length
   const errorCount = results.filter((r) => !r.success).length
 
+  // Detail line for a successful import: combine the embedded lorebook entry
+  // count and the portable LoRA reference, whichever are present.
+  const successDetail = (r: BulkImportResultItem): string =>
+    [
+      r.lorebook ? t('bulkImport.wiEntries', { count: r.lorebook.entryCount }) : null,
+      r.lumiverse_lora
+        ? t('bulkImport.loraReference', { name: r.lumiverse_lora.lora_filename, weight: r.lumiverse_lora.weight })
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' · ')
+
   return (
     <ModalShell isOpen={isOpen} onClose={onClose} maxWidth={520} closeOnBackdrop={done} closeOnEscape={done}>
       <div className={styles.header}>
         <span className={styles.title}>
-          {done ? 'Import Complete' : started ? 'Importing Characters...' : 'Bulk Import'}
+          {done ? t('bulkImport.complete') : started ? t('bulkImport.importing') : t('bulkImport.title')}
         </span>
         {done && (
           <CloseButton onClick={onClose} />
@@ -136,14 +148,20 @@ export default function BulkImportProgressModal({
             <Toggle.Checkbox
               checked={skipDuplicates}
               onChange={setSkipDuplicates}
-              label="Skip characters that already exist (by name)"
+              label={t('bulkImport.skipDuplicates')}
             />
           </div>
         )}
 
         <div className={styles.progressSection}>
           <div className={styles.progressLabel}>
-            <span>{started ? (done ? 'Done' : 'Processing...') : `${total} files selected`}</span>
+            <span>
+              {started
+                ? done
+                  ? t('bulkImport.done')
+                  : t('bulkImport.processing')
+                : t('bulkImport.filesSelected', { count: total })}
+            </span>
             <span className={styles.progressCount}>
               {processed}/{total}
             </span>
@@ -177,12 +195,10 @@ export default function BulkImportProgressModal({
                   </span>
                   <span className={styles.resultDetail}>
                     {r.skipped
-                      ? 'duplicate'
+                      ? t('bulkImport.duplicate')
                       : r.success
-                        ? r.lorebook
-                          ? `${r.lorebook.entryCount} WI entries`
-                          : ''
-                        : r.error || 'failed'}
+                        ? successDetail(r)
+                        : r.error || t('bulkImport.failed')}
                   </span>
                 </div>
               ))}
@@ -196,7 +212,7 @@ export default function BulkImportProgressModal({
                     className={styles.summaryDot}
                     style={{ background: 'var(--lumiverse-success, #22c55e)' }}
                   />
-                  {successCount} imported
+                  {t('bulkImport.imported', { count: successCount })}
                 </span>
                 {skippedCount > 0 && (
                   <span className={styles.summaryItem}>
@@ -204,7 +220,7 @@ export default function BulkImportProgressModal({
                       className={styles.summaryDot}
                       style={{ background: 'var(--lumiverse-warning, #f59e0b)' }}
                     />
-                    {skippedCount} skipped
+                    {t('bulkImport.skipped', { count: skippedCount })}
                   </span>
                 )}
                 {errorCount > 0 && (
@@ -213,7 +229,7 @@ export default function BulkImportProgressModal({
                       className={styles.summaryDot}
                       style={{ background: 'var(--lumiverse-danger, #ef4444)' }}
                     />
-                    {errorCount} failed
+                    {t('bulkImport.failedCount', { count: errorCount })}
                   </span>
                 )}
               </div>
@@ -226,19 +242,19 @@ export default function BulkImportProgressModal({
         {!started ? (
           <>
             <Button variant="ghost" onClick={onClose}>
-              Cancel
+              {tc('actions.cancel')}
             </Button>
             <Button variant="primary" onClick={startImport}>
-              Start Import
+              {t('bulkImport.startImport')}
             </Button>
           </>
         ) : done ? (
           <Button variant="primary" onClick={onClose}>
-            Close
+            {tc('actions.close')}
           </Button>
         ) : (
           <Button variant="ghost" onClick={handleCancel}>
-            Cancel
+            {tc('actions.cancel')}
           </Button>
         )}
       </div>

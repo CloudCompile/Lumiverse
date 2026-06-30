@@ -1,34 +1,36 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { GitBranch, MessageCircle, Info, Scissors } from 'lucide-react'
 import clsx from 'clsx'
+import { useTranslation } from 'react-i18next'
 import { chatsApi } from '@/api/chats'
 import { useStore } from '@/store'
 import type { ChatTreeNode } from '@/types/api'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
+import { formatRelativeTime } from '@/lib/formatRelativeTime'
 import styles from './BranchTreePanel.module.css'
-
-function relativeTime(unixSeconds: number): string {
-  const diff = Math.floor(Date.now() / 1000) - unixSeconds
-  if (diff < 60) return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`
-  return new Date(unixSeconds * 1000).toLocaleDateString()
-}
 
 function treeSize(node: ChatTreeNode): number {
   return 1 + node.children.reduce((acc, c) => acc + treeSize(c), 0)
 }
 
+// Pixels added per real branch level — mirrors .children's margin-left + padding-left.
+const INDENT_STEP = 29
+// Keep the deepest node card at least this wide. maxIndent is derived from the
+// panel's measured width (users can resize the drawer) so cards stay readable.
+const MIN_CARD_WIDTH = 190
+
 interface NodeProps {
   node: ChatTreeNode
   currentChatId: string
+  indent: number
+  maxIndent: number
 }
 
-function Node({ node, currentChatId }: NodeProps) {
+function Node({ node, currentChatId, indent, maxIndent }: NodeProps) {
   const navigate = useNavigate()
   const closeDrawer = useStore((s) => s.closeDrawer)
+  const { t } = useTranslation('panels')
   const isCurrent = node.id === currentChatId
 
   function handleClick() {
@@ -38,6 +40,12 @@ function Node({ node, currentChatId }: NodeProps) {
     }
   }
 
+  // Indentation steps in only at a real branch point (2+ children) and only while
+  // the measured width budget allows it. Linear fork chains (a single child) and
+  // any depth past the budget render flush, so they never staircase off-screen.
+  const stepsIn = node.children.length > 1 && indent < maxIndent
+  const childIndent = stepsIn ? indent + 1 : indent
+
   return (
     <div className={styles.treeItem}>
       <button
@@ -45,7 +53,7 @@ function Node({ node, currentChatId }: NodeProps) {
         className={clsx(styles.node, isCurrent && styles.nodeCurrent)}
         onClick={handleClick}
         disabled={isCurrent}
-        title={isCurrent ? 'Current chat' : `Open "${node.name}"`}
+        title={isCurrent ? t('branchTree.currentChat') : t('branchTree.openChatTitle', { name: node.name })}
       >
         <div className={styles.nodeIcon}>
           {isCurrent
@@ -55,12 +63,12 @@ function Node({ node, currentChatId }: NodeProps) {
         </div>
         <div className={styles.nodeBody}>
           <span className={styles.nodeName}>
-            {node.name || 'Untitled Chat'}
+            {node.name || t('branchTree.untitledChat')}
           </span>
           <span className={styles.nodeMeta}>
-            {node.message_count} {node.message_count === 1 ? 'message' : 'messages'}
+            {t('branchTree.messageCount', { count: node.message_count })}
             {' · '}
-            {relativeTime(node.updated_at)}
+            {formatRelativeTime(node.updated_at)}
           </span>
           {node.branch_message_preview && (
             <span className={styles.branchPreview} title={node.branch_message_preview}>
@@ -73,17 +81,19 @@ function Node({ node, currentChatId }: NodeProps) {
           )}
         </div>
         {isCurrent && (
-          <span className={styles.nodeCurrentBadge}>here</span>
+          <span className={styles.nodeCurrentBadge}>{t('branchTree.here')}</span>
         )}
       </button>
 
       {node.children.length > 0 && (
-        <div className={styles.children}>
+        <div className={clsx(styles.children, !stepsIn && styles.childrenFlush)}>
           {node.children.map((child) => (
             <Node
               key={child.id}
               node={child}
               currentChatId={currentChatId}
+              indent={childIndent}
+              maxIndent={maxIndent}
             />
           ))}
         </div>
@@ -93,10 +103,13 @@ function Node({ node, currentChatId }: NodeProps) {
 }
 
 export default function BranchTreePanel() {
+  const { t } = useTranslation('panels')
   const activeChatId = useStore((s) => s.activeChatId)
   const [tree, setTree] = useState<ChatTreeNode | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const [maxIndent, setMaxIndent] = useState(6)
 
   useEffect(() => {
     if (!activeChatId) return
@@ -108,12 +121,30 @@ export default function BranchTreePanel() {
       .finally(() => setLoading(false))
   }, [activeChatId])
 
+  // Derive how many indent levels fit from the panel's real width (resizable),
+  // keeping the deepest card at least MIN_CARD_WIDTH. Re-runs when the tree mounts
+  // (so rootRef is attached) and whenever the drawer is resized.
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+    const update = () => {
+      const width = el.clientWidth
+      if (width <= 0) return
+      const fits = Math.floor((width - MIN_CARD_WIDTH) / INDENT_STEP)
+      setMaxIndent(Math.max(1, Math.min(12, fits)))
+    }
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    update()
+    return () => ro.disconnect()
+  }, [tree])
+
   if (!activeChatId) {
     return (
       <div className={styles.center}>
         <GitBranch size={32} strokeWidth={1.5} />
-        <p className={styles.centerTitle}>No chat open</p>
-        <p className={styles.centerHint}>Open a chat to see its branch history.</p>
+        <p className={styles.centerTitle}>{t('branchTree.noChatOpen')}</p>
+        <p className={styles.centerHint}>{t('branchTree.openChatHint')}</p>
       </div>
     )
   }
@@ -121,7 +152,7 @@ export default function BranchTreePanel() {
   if (loading) {
     return (
       <div className={styles.center}>
-        <p className={styles.centerHint}>Loading…</p>
+        <p className={styles.centerHint}>{t('branchTree.loading')}</p>
       </div>
     )
   }
@@ -130,7 +161,7 @@ export default function BranchTreePanel() {
     return (
       <div className={styles.center}>
         <GitBranch size={32} strokeWidth={1.5} />
-        <p className={styles.centerTitle}>Couldn't load tree</p>
+        <p className={styles.centerTitle}>{t('branchTree.loadError')}</p>
       </div>
     )
   }
@@ -143,11 +174,11 @@ export default function BranchTreePanel() {
       <div className={styles.panel}>
         <div className={styles.center}>
           <GitBranch size={32} strokeWidth={1.5} />
-          <p className={styles.centerTitle}>No branches yet</p>
+          <p className={styles.centerTitle}>{t('branchTree.noBranches')}</p>
           <p className={styles.centerHint}>
-            Fork this chat at any message using the{' '}
+            {t('branchTree.noBranchesHintPrefix')}{' '}
             <GitBranch size={11} strokeWidth={2} style={{ display: 'inline', verticalAlign: 'middle' }} />{' '}
-            icon to create branches you can explore independently.
+            {t('branchTree.noBranchesHintSuffix')}
           </p>
         </div>
       </div>
@@ -157,15 +188,16 @@ export default function BranchTreePanel() {
   return (
     <PanelFadeIn>
       <div className={styles.panel}>
-        <div className={styles.root}>
-          <Node node={tree} currentChatId={activeChatId} />
+        <div className={styles.root} ref={rootRef}>
+          <Node node={tree} currentChatId={activeChatId} indent={0} maxIndent={maxIndent} />
         </div>
 
         <div className={styles.hint}>
           <Info size={13} strokeWidth={1.5} />
           <span>
-            Click any node to jump to that branch.
-            Fork at a message using the <GitBranch size={11} strokeWidth={2} style={{ display: 'inline', verticalAlign: 'middle' }} /> icon in the message actions.
+            {t('branchTree.footerHintPrefix')}{' '}
+            <GitBranch size={11} strokeWidth={2} style={{ display: 'inline', verticalAlign: 'middle' }} />{' '}
+            {t('branchTree.footerHintSuffix')}
           </span>
         </div>
       </div>

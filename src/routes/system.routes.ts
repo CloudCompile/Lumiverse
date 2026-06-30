@@ -1,8 +1,8 @@
 import { Hono } from "hono";
-import { cpus, totalmem, freemem, platform, arch, release } from "os";
-import { exec } from "child_process";
+import { cpus, totalmem, freemem, platform, arch, release, hostname } from "os";
 import { join } from "path";
 import { requireOwner } from "../auth/middleware";
+import { getGitMetadata } from "../utils/git-metadata";
 
 const app = new Hono();
 
@@ -21,26 +21,9 @@ async function getBackendVersion(): Promise<string> {
   }
 }
 
-// H-24: replaced execSync (blocks event loop) with promise-wrapped exec
-function execAsync(cmd: string, cwd: string): Promise<string> {
-  return new Promise((resolve) => {
-    exec(cmd, { cwd, encoding: "utf-8", timeout: 5000 }, (err, stdout) => {
-      resolve(err ? "unknown" : stdout.trim());
-    });
-  });
-}
-
-async function getGitInfo(): Promise<{ branch: string; commit: string }> {
-  const projectRoot = join(import.meta.dir, "../..");
-  try {
-    const [branch, commit] = await Promise.all([
-      execAsync("git rev-parse --abbrev-ref HEAD", projectRoot),
-      execAsync("git rev-parse --short HEAD", projectRoot),
-    ]);
-    return { branch, commit };
-  } catch {
-    return { branch: "unknown", commit: "unknown" };
-  }
+function getGitInfo(): { branch: string; commit: string } {
+  const { branch, commit } = getGitMetadata();
+  return { branch, commit };
 }
 
 function getDiskUsage(): { total: number; used: number } | null {

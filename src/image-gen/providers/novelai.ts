@@ -1,8 +1,10 @@
 import { decodeMulti } from "@msgpack/msgpack";
-import sharp from "sharp";
+import sharp from "../../utils/sharp-config";
 import type { ImageProvider } from "../provider";
 import type { ImageProviderCapabilities } from "../param-schema";
 import type { ImageGenRequest, ImageGenResponse } from "../types";
+import { ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
+import { cancelStreamAndCloseConnection, fetchWithPreflightAbort, readWithAbort } from "../../llm/stream-utils";
 import { applyRawOverride } from "../types";
 
 const DIRECTOR_REF_CANVASES: Array<[number, number]> = [
@@ -209,21 +211,18 @@ export class NovelAIImageProvider implements ImageProvider {
     const outerBody = { input: request.prompt, model, action: "generate", parameters: naiParams };
     const finalBody = applyRawOverride(outerBody, params.rawRequestOverride);
 
-    const res = await fetch("https://image.novelai.net/ai/generate-image-stream", {
+    const res = await fetchWithPreflightAbort("https://image.novelai.net/ai/generate-image-stream", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(finalBody),
-      signal: request.signal,
-    });
+    }, request.signal);
 
-    if (!res.ok) {
-      throw new Error(`NovelAI API error ${res.status}: ${await res.text().catch(() => "Unknown error")}`);
-    }
+    if (!res.ok) await throwProviderResponseError(this.displayName, "image generate", res);
 
-    const imageDataUrl = await extractImageFromResponse(res);
+    const imageDataUrl = await extractImageFromResponse(res, request.signal);
     return { imageDataUrl, model, provider: this.name };
   }
 
@@ -232,9 +231,11 @@ export class NovelAIImageProvider implements ImageProvider {
       const res = await fetch("https://api.novelai.net/user/information", {
         headers: { Authorization: `Bearer ${apiKey}` },
       });
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({ provider: this.displayName, operation: "authentication", detail: err instanceof Error ? err.message : "network request failed", retryable: true });
     }
   }
 
@@ -249,19 +250,36 @@ function isNovelAIV4Model(model: string): boolean {
   return model.startsWith("nai-diffusion-4");
 }
 
-async function extractImageFromResponse(res: Response): Promise<string> {
+// Sanity ceiling on the streamed image payload so a misbehaving upstream can't
+// grow the buffer without bound. NovelAI images are a few MB; 64 MB is generous.
+const NOVELAI_MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+
+async function extractImageFromResponse(res: Response, signal?: AbortSignal): Promise<string> {
   let fullBuffer: Uint8Array;
   const reader = res.body?.getReader();
   if (reader) {
     const chunks: Uint8Array[] = [];
     let totalBytes = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value?.length) {
-        chunks.push(value);
-        totalBytes += value.length;
+    // Drive the reader through readWithAbort (user-space cancel) rather than
+    // handing the signal to Bun's fetch — cancelling a streaming body mid-read
+    // via the fetch signal can crash Bun's HTTPThread. cancel() is awaited so
+    // the socket is torn down before the Response is dropped.
+    let doneNaturally = false;
+    try {
+      while (true) {
+        const { done, value } = await readWithAbort(reader, signal);
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+        if (done) { doneNaturally = true; break; }
+        if (value?.length) {
+          totalBytes += value.length;
+          if (totalBytes > NOVELAI_MAX_IMAGE_BYTES) {
+            throw new Error(`NovelAI image stream exceeded ${NOVELAI_MAX_IMAGE_BYTES} bytes`);
+          }
+          chunks.push(value);
+        }
       }
+    } finally {
+      if (!doneNaturally) await cancelStreamAndCloseConnection(reader, res);
     }
     fullBuffer = new Uint8Array(totalBytes);
     let offset = 0;

@@ -1,9 +1,11 @@
 import { useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import { messagesApi } from '@/api/chats'
 import { toast } from '@/lib/toast'
 
 export function useMessageSelect(chatId: string) {
+  const { t } = useTranslation('chat', { keyPrefix: 'toast' })
   const messageSelectMode = useStore((s) => s.messageSelectMode)
   const selectedMessageIds = useStore((s) => s.selectedMessageIds)
   const messages = useStore((s) => s.messages)
@@ -12,7 +14,6 @@ export function useMessageSelect(chatId: string) {
   const selectAllMessages = useStore((s) => s.selectAllMessages)
   const clearMessageSelection = useStore((s) => s.clearMessageSelection)
   const selectMessageRange = useStore((s) => s.selectMessageRange)
-  const updateMessage = useStore((s) => s.updateMessage)
   const removeMessage = useStore((s) => s.removeMessage)
 
   const selectedCount = selectedMessageIds.length
@@ -46,16 +47,15 @@ export function useMessageSelect(chatId: string) {
     if (selectedMessageIds.length === 0) return
     try {
       const result = await messagesApi.bulkHide(chatId, selectedMessageIds, hidden)
-      for (const msg of result.messages) {
-        updateMessage(msg.id, msg)
-      }
-      toast.success(`${result.updated} message${result.updated !== 1 ? 's' : ''} ${hidden ? 'hidden' : 'unhidden'}`)
+      toast.success(hidden
+        ? t('messagesHidden', { count: result.updated })
+        : t('messagesUnhidden', { count: result.updated }))
       setMessageSelectMode(false)
     } catch (err) {
       console.error('[useMessageSelect] Bulk hide failed:', err)
-      toast.error('Failed to update messages')
+      toast.error(t('failedUpdateMessages'))
     }
-  }, [chatId, selectedMessageIds, updateMessage, setMessageSelectMode])
+  }, [chatId, selectedMessageIds, setMessageSelectMode, t])
 
   const bulkDelete = useCallback(async () => {
     if (selectedMessageIds.length === 0) return
@@ -64,13 +64,13 @@ export function useMessageSelect(chatId: string) {
       for (const id of selectedMessageIds) {
         removeMessage(id)
       }
-      toast.success(`${result.deleted} message${result.deleted !== 1 ? 's' : ''} deleted`)
+      toast.success(t('messagesDeleted', { count: result.deleted }))
       setMessageSelectMode(false)
     } catch (err) {
       console.error('[useMessageSelect] Bulk delete failed:', err)
-      toast.error('Failed to delete messages')
+      toast.error(t('failedDeleteMessages'))
     }
-  }, [chatId, selectedMessageIds, removeMessage, setMessageSelectMode])
+  }, [chatId, selectedMessageIds, removeMessage, setMessageSelectMode, t])
 
   return {
     messageSelectMode,

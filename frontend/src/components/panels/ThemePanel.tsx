@@ -1,11 +1,13 @@
 import { useCallback } from 'react'
-import { Download, Upload, Code2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { Bookmark, Download, Upload, Code2 } from 'lucide-react'
 import { useStore } from '@/store'
-import { DEFAULT_THEME } from '@/theme/presets'
+import { DEFAULT_THEME, normalizeTheme } from '@/theme/presets'
 import { resolveMode } from '@/hooks/useThemeApplicator'
 import type { ThemeConfig, ThemeMode, BaseColors } from '@/types/theme'
 import ModeSelector from './theme-panel/ModeSelector'
 import PresetGrid from './theme-panel/PresetGrid'
+import SavedThemes from './theme-panel/SavedThemes'
 import ExtensionThemes from './theme-panel/ExtensionThemes'
 import AccentPicker from './theme-panel/AccentPicker'
 import BaseColorPicker from './theme-panel/BaseColorPicker'
@@ -13,12 +15,17 @@ import DepthControls from './theme-panel/DepthControls'
 import styles from './ThemePanel.module.css'
 
 export default function ThemePanel() {
+  const { t } = useTranslation('panels')
   const theme = useStore((s) => s.theme) as ThemeConfig | null
   const setTheme = useStore((s) => s.setTheme)
-  const hasExtensionOverrides = useStore((s) => Object.keys(s.extensionThemeOverrides).length > 0)
+  const hasExtensionOverrides = useStore((s) =>
+    Object.keys(s.extensionThemeOverrides).some((id) => !s.mutedExtensionThemes[id])
+  )
 
   const openModal = useStore((s) => s.openModal)
-  const current = theme ?? DEFAULT_THEME
+  // Normalize so a malformed persisted theme (e.g. missing accent) can't throw
+  // when the panel reads current.accent.* — falls back to DEFAULT_THEME.
+  const current = normalizeTheme(theme) ?? DEFAULT_THEME
 
   // Always read the latest theme from the store to avoid stale closures
   // (e.g. useCharacterTheme may async-update accent/baseColors after render)
@@ -104,6 +111,17 @@ export default function ThemePanel() {
     URL.revokeObjectURL(url)
   }, [current])
 
+  const addSavedTheme = useStore((s) => s.addSavedTheme)
+
+  const handleSaveTheme = useCallback(() => {
+    const latest = getLatest()
+    addSavedTheme({
+      kind: 'config',
+      name: latest.name || 'My Theme',
+      theme: latest,
+    })
+  }, [getLatest, addSavedTheme])
+
   const handleImportTheme = useCallback(() => {
     const input = document.createElement('input')
     input.type = 'file'
@@ -119,29 +137,35 @@ export default function ThemePanel() {
           typeof parsed.mode === 'string' &&
           typeof parsed.accent === 'object' && parsed.accent !== null
         ) {
-          setTheme({ ...parsed, id: 'custom' } as ThemeConfig)
+          const importedTheme = { ...parsed, id: 'custom' } as ThemeConfig
+          const baseName = file.name.replace(/\.json$/i, '').replace(/^lumiverse-theme-/i, '')
+          const name = parsed.name || baseName || t('themePanel.importedTheme')
+          addSavedTheme({ kind: 'config', name, theme: { ...importedTheme, name } })
+          setTheme(importedTheme)
         }
       } catch { /* ignore invalid files */ }
     }
     input.click()
-  }, [setTheme])
+  }, [setTheme, addSavedTheme, t])
 
   return (
     <div className={styles.panel}>
       <section className={styles.section}>
-        <h4 className={styles.sectionLabel}>Mode</h4>
+        <h4 className={styles.sectionLabel}>{t('themePanel.mode')}</h4>
         <ModeSelector value={current.mode} onChange={handleModeChange} />
       </section>
 
       <section className={styles.section}>
-        <h4 className={styles.sectionLabel}>Presets</h4>
+        <h4 className={styles.sectionLabel}>{t('themePanel.presets')}</h4>
         <PresetGrid activeId={hasExtensionOverrides ? '' : current.id} onSelect={handlePresetSelect} />
       </section>
+
+      <SavedThemes />
 
       <ExtensionThemes />
 
       <section className={styles.section}>
-        <h4 className={styles.sectionLabel}>Accent Color</h4>
+        <h4 className={styles.sectionLabel}>{t('themePanel.accentColor')}</h4>
         <AccentPicker
           hue={current.accent.h}
           saturation={current.accent.s}
@@ -151,7 +175,7 @@ export default function ThemePanel() {
       </section>
 
       <section className={styles.section}>
-        <h4 className={styles.sectionLabel}>Base Colors</h4>
+        <h4 className={styles.sectionLabel}>{t('themePanel.baseColors')}</h4>
         <BaseColorPicker
           baseColors={current.baseColorsByMode?.[resolvedMode] ?? current.baseColors ?? {}}
           onChange={handleBaseColorsChange}
@@ -159,7 +183,7 @@ export default function ThemePanel() {
       </section>
 
       <section className={styles.section}>
-        <h4 className={styles.sectionLabel}>Controls</h4>
+        <h4 className={styles.sectionLabel}>{t('themePanel.controls')}</h4>
         <DepthControls
           radiusScale={current.radiusScale}
           enableGlass={current.enableGlass}
@@ -173,29 +197,32 @@ export default function ThemePanel() {
       </section>
 
       <section className={styles.section}>
-        <h4 className={styles.sectionLabel}>Advanced</h4>
+        <h4 className={styles.sectionLabel}>{t('themePanel.advanced')}</h4>
         <button
           type="button"
           className={styles.actionBtn}
           onClick={() => openModal('customCSS')}
         >
-          <Code2 size={12} /> Custom CSS Editor
+          <Code2 size={12} /> {t('themePanel.customCssEditor')}
         </button>
       </section>
 
       <div className={styles.themeActions}>
         <button type="button" className={styles.actionBtn} onClick={handleExportTheme}>
-          <Download size={12} /> Export Theme
+          <Download size={12} /> {t('themePanel.exportTheme')}
         </button>
         <button type="button" className={styles.actionBtn} onClick={handleImportTheme}>
-          <Upload size={12} /> Import Theme
+          <Upload size={12} /> {t('themePanel.importTheme')}
+        </button>
+        <button type="button" className={styles.actionBtn} onClick={handleSaveTheme}>
+          <Bookmark size={12} /> Save to My Themes
         </button>
         <button
           type="button"
           className={styles.resetBtn}
           onClick={() => setTheme(null)}
         >
-          Reset to Default
+          {t('themePanel.resetToDefault')}
         </button>
       </div>
     </div>

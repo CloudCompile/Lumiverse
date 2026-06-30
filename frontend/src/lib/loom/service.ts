@@ -1,6 +1,7 @@
-import type { Preset, CreatePresetInput, UpdatePresetInput } from '@/types/api'
+import type { Preset, CreatePresetInput, UpdatePresetInput, ProviderInfo } from '@/types/api'
 import type {
   PromptBlock,
+  PromptVariableValue,
   LoomPreset,
   LoomRegistryEntry,
   LoomConnectionProfile,
@@ -20,6 +21,8 @@ import {
   PROVIDER_PARAMS,
   DEFAULT_PROVIDER_PARAMS,
   CATEGORY_MARKER,
+  WIKI_CATEGORY_PATTERN,
+  WIKI_SUBCATEGORY_PATTERN,
   ST_IDENTIFIER_TO_MARKER,
   MARKER_TO_ST_IDENTIFIER,
 } from './constants'
@@ -41,6 +44,7 @@ export function createBlock(overrides: Partial<PromptBlock> = {}): PromptBlock {
     isLocked: false,
     color: null,
     injectionTrigger: [],
+    group: null,
     categoryMode: null,
     ...overrides,
   }
@@ -70,6 +74,13 @@ function migratePreset(preset: LoomPreset): LoomPreset {
   preset.advancedSettings = { ...DEFAULT_ADVANCED_SETTINGS, ...(preset.advancedSettings || {}) }
   if (!preset.modelProfiles) preset.modelProfiles = {}
   if (!preset.lastProfileKey) preset.lastProfileKey = null
+  preset.coverUrl = typeof preset.coverUrl === 'string' && preset.coverUrl.trim()
+    ? preset.coverUrl.trim()
+    : null
+  preset.presetVersion = typeof preset.presetVersion === 'string' && preset.presetVersion.trim()
+    ? preset.presetVersion.trim()
+    : null
+  preset.lumihubMeta = isRecord(preset.lumihubMeta) ? preset.lumihubMeta : null
   if (Array.isArray(preset.blocks)) {
     for (const block of preset.blocks) {
       if (!Array.isArray(block.injectionTrigger)) {
@@ -78,26 +89,152 @@ function migratePreset(preset: LoomPreset): LoomPreset {
       block.categoryMode = block.marker === 'category'
         ? coerceCategoryMode(block.categoryMode)
         : null
+      if (block.sealedSource === 'lumihub') {
+        block.sealed = true
+      }
+      if (block.sealed !== true) {
+        delete block.sealed
+        delete block.sealedKey
+        delete block.sealedSource
+        delete block.sealedOriginPresetId
+        delete block.sealedOriginVersion
+        delete block.sealedSha256
+      } else if (typeof block.sealedKey !== 'string') {
+        block.sealedKey = block.id
+      }
     }
   }
   preset.blocks = normalizeCategoryBlockState(preset.blocks || [])
   return preset
 }
 
+function isRecord(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Version key is surfaced separately as `presetVersion`; the rest of the bag round-trips verbatim. */
+const LUMIHUB_VERSION_META_KEY = '_lumiverse_preset_version'
+
+/**
+ * Pull the LumiHub provenance bag (install source, hub id, slug, creator) out of a stored
+ * preset's metadata so it survives the marshal/unmarshal round-trip. `marshalUpdate` rewrites
+ * the metadata column wholesale, so without this these fields would be wiped on the first edit,
+ * breaking manifest sync and re-install update tracking. The version key is excluded — it is
+ * surfaced as `presetVersion` and re-applied authoritatively on marshal.
+ */
+function extractLumihubMeta(meta: Record<string, any>): Record<string, unknown> | null {
+  const bag: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(meta)) {
+    if (key.startsWith('_lumiverse_') && key !== LUMIHUB_VERSION_META_KEY) {
+      bag[key] = value
+    }
+  }
+  return Object.keys(bag).length > 0 ? bag : null
+}
+
+function hasLegacyPromptOrderShape(promptOrder: unknown): boolean {
+  if (Array.isArray(promptOrder)) {
+    return promptOrder.some((entry) => isRecord(entry) && Array.isArray(entry.order))
+  }
+  if (isRecord(promptOrder)) {
+    return Object.values(promptOrder).some((entry) => isRecord(entry) && Array.isArray(entry.order))
+  }
+  return false
+}
+
+export function looksLikeLegacyPresetData(data: unknown): data is STPresetData {
+  return isRecord(data)
+    && (Array.isArray(data.prompts) || hasLegacyPromptOrderShape(data.prompt_order))
+}
+
+export function looksLikeBackendLoomPresetData(data: unknown): data is Preset {
+  return isRecord(data)
+    && Array.isArray(data.prompt_order)
+    && isRecord(data.parameters)
+    && isRecord(data.prompts)
+    && isRecord(data.metadata)
+}
+
+export function looksLikeLoomPresetData(data: unknown): data is LoomPreset {
+  return isRecord(data) && Array.isArray(data.blocks)
+}
+
+export function detectImportedPresetKind(data: unknown): 'loom' | 'legacy' | null {
+  if (looksLikeWrappedLumiHubPresetData(data) || looksLikeLoomPresetData(data) || looksLikeBackendLoomPresetData(data)) {
+    return 'loom'
+  }
+
+  if (looksLikeLegacyPresetData(data)) {
+    return 'legacy'
+  }
+
+  return null
+}
+
+export function coerceImportedLoomPreset(data: unknown, fallbackName: string): LoomPreset {
+  if (looksLikeWrappedLumiHubPresetData(data)) {
+    return migratePreset({
+      ...data.preset,
+      name: data.preset.name || fallbackName,
+      coverUrl: typeof data.cover_url === 'string' ? data.cover_url : null,
+    } as LoomPreset)
+  }
+
+  if (looksLikeLoomPresetData(data)) {
+    return migratePreset({
+      ...data,
+      name: data.name || fallbackName,
+    })
+  }
+
+  if (looksLikeBackendLoomPresetData(data)) {
+    return unmarshalPreset(data)
+  }
+
+  if (looksLikeLegacyPresetData(data)) {
+    return importFromSTPreset(data, fallbackName)
+  }
+
+  throw new Error('Unrecognized preset JSON format')
+}
+
+function looksLikeWrappedLumiHubPresetData(data: unknown): data is { preset: LoomPreset; cover_url?: unknown } {
+  return isRecord(data)
+    && data.type === 'lumiverse_preset'
+    && isRecord(data.preset)
+    && Array.isArray(data.preset.blocks)
+}
+
 function coerceCategoryMode(mode: unknown): PromptBlock['categoryMode'] {
   return mode === 'radio' || mode === 'checkbox' ? mode : null
+}
+
+function normalizeCategoryGroups(blocks: PromptBlock[]): PromptBlock[] {
+  let currentCategoryId: string | null = null
+  return blocks.map((block) => {
+    if (block.marker === 'category') {
+      currentCategoryId = block.id
+      return { ...block, group: null }
+    }
+
+    if (block.group !== undefined) {
+      return { ...block, group: block.group || null }
+    }
+
+    return { ...block, group: currentCategoryId }
+  })
 }
 
 export function normalizeCategoryBlockState(
   blocks: PromptBlock[],
   preferredBlockIdByCategory?: Map<string, string>,
 ): PromptBlock[] {
-  const normalizedBlocks = blocks.map((block) => ({
+  const normalizedBlocks = normalizeCategoryGroups(blocks.map((block) => ({
     ...block,
     categoryMode: block.marker === 'category'
       ? coerceCategoryMode(block.categoryMode)
       : null,
-  }))
+  })))
 
   for (const group of computeGroups(normalizedBlocks)) {
     if (!group.categoryBlock || group.categoryBlock.categoryMode !== 'radio') continue
@@ -173,8 +310,13 @@ export function marshalPreset(loom: LoomPreset): CreatePresetInput {
       modelProfiles: loom.modelProfiles,
       schemaVersion: loom.schemaVersion,
       description: loom.description,
+      coverUrl: loom.coverUrl ?? null,
       isDefault: loom.isDefault,
       lastProfileKey: loom.lastProfileKey,
+      promptVariables: pruneOrphanPromptVariables(loom.promptVariables, blocks),
+      // Preserve LumiHub provenance + version so an edit doesn't strip them from the metadata column.
+      ...(loom.lumihubMeta ?? {}),
+      ...(loom.presetVersion ? { _lumiverse_preset_version: loom.presetVersion } : {}),
     },
   }
 }
@@ -188,6 +330,9 @@ export function unmarshalPreset(preset: Preset): LoomPreset {
     id: preset.id,
     name: preset.name,
     description: meta.description || '',
+    coverUrl: typeof meta.coverUrl === 'string' ? meta.coverUrl : (typeof meta.cover_url === 'string' ? meta.cover_url : null),
+    presetVersion: typeof meta._lumiverse_preset_version === 'string' ? meta._lumiverse_preset_version : null,
+    lumihubMeta: extractLumihubMeta(meta),
     schemaVersion: meta.schemaVersion || 1,
     createdAt: preset.created_at,
     updatedAt: preset.updated_at,
@@ -201,6 +346,9 @@ export function unmarshalPreset(preset: Preset): LoomPreset {
     advancedSettings: prompts.advancedSettings || { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: meta.modelProfiles || {},
     lastProfileKey: meta.lastProfileKey || null,
+    promptVariables: meta.promptVariables && typeof meta.promptVariables === 'object'
+      ? meta.promptVariables
+      : {},
   }
 
   return migratePreset(loom)
@@ -225,10 +373,91 @@ export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
       modelProfiles: loom.modelProfiles,
       schemaVersion: loom.schemaVersion,
       description: loom.description,
+      coverUrl: loom.coverUrl ?? null,
       isDefault: loom.isDefault,
       lastProfileKey: loom.lastProfileKey,
+      promptVariables: pruneOrphanPromptVariables(loom.promptVariables, blocks),
+      // Preserve LumiHub provenance + version so an edit doesn't strip them from the metadata column.
+      ...(loom.lumihubMeta ?? {}),
+      ...(loom.presetVersion ? { _lumiverse_preset_version: loom.presetVersion } : {}),
     },
   }
+}
+
+export function sanitizeLumiHubSealedBlocksForExport<T extends LoomPreset>(loom: T): T {
+  const manifestKeys = getLumiHubSealedManifestKeys(loom)
+  if (!manifestKeys.size && !loom.blocks.some((block) => isLumiHubSealedBlock(block))) return loom
+
+  return {
+    ...loom,
+    blocks: loom.blocks.map((block) => {
+      const key = getLumiHubSealedExportKey(block, manifestKeys)
+      if (!key) return block
+      return {
+        ...block,
+        content: sealedPresetBlockPlaceholder(key),
+        sealed: true,
+        sealedKey: key,
+      }
+    }),
+  }
+}
+
+function getLumiHubSealedExportKey(block: PromptBlock, manifestKeys: Set<string>): string | null {
+  const sealedKey = typeof block.sealedKey === 'string' && block.sealedKey.trim() ? block.sealedKey.trim() : null
+  if (sealedKey && (block.sealedSource === 'lumihub' || manifestKeys.has(sealedKey))) return sealedKey
+
+  const placeholderKey = extractExactSealedPlaceholder(block.content || '')
+  if (placeholderKey && manifestKeys.has(placeholderKey)) return placeholderKey
+
+  return null
+}
+
+function isLumiHubSealedBlock(block: PromptBlock): boolean {
+  return block.sealedSource === 'lumihub'
+}
+
+function getLumiHubSealedManifestKeys(loom: LoomPreset): Set<string> {
+  const sealedPreset = isRecord(loom.lumihubMeta?._lumiverse_sealed_preset)
+    ? loom.lumihubMeta._lumiverse_sealed_preset
+    : null
+  const blocks = Array.isArray(sealedPreset?.blocks) ? sealedPreset.blocks : []
+  const keys = new Set<string>()
+  for (const block of blocks) {
+    if (isRecord(block) && typeof block.key === 'string' && block.key.trim()) {
+      keys.add(block.key.trim())
+    }
+  }
+  return keys
+}
+
+function sealedPresetBlockPlaceholder(key: string): string {
+  return `{{presetBlock::${key}}}`
+}
+
+function extractExactSealedPlaceholder(content: string): string | null {
+  const match = content.trim().match(/^\{\{(?:presetBlock|pblock)::([^}]+)\}\}$/)
+  return match?.[1]?.trim() || null
+}
+
+function pruneOrphanPromptVariables(
+  values: LoomPreset['promptVariables'] | undefined,
+  blocks: PromptBlock[],
+): LoomPreset['promptVariables'] {
+  if (!values || typeof values !== 'object') return {}
+  const out: LoomPreset['promptVariables'] = {}
+  const blockById = new Map(blocks.map((b) => [b.id, b]))
+  for (const [blockId, bucket] of Object.entries(values)) {
+    const block = blockById.get(blockId)
+    if (!block || !block.variables?.length) continue
+    const validNames = new Set(block.variables.map((v) => v.name))
+    const kept: Record<string, PromptVariableValue> = {}
+    for (const [name, value] of Object.entries(bucket || {})) {
+      if (validNames.has(name)) kept[name] = value
+    }
+    if (Object.keys(kept).length) out[blockId] = kept
+  }
+  return out
 }
 
 // ============================================================================
@@ -269,6 +498,12 @@ export function computeGroups(blocks: PromptBlock[] | undefined): CategoryGroup[
       }
       currentGroup = { categoryBlock: block, children: [] }
     } else {
+      if (block.group !== undefined && block.group !== (currentGroup.categoryBlock?.id ?? null)) {
+        if (currentGroup.categoryBlock || currentGroup.children.length > 0) {
+          result.push(currentGroup)
+        }
+        currentGroup = { categoryBlock: null, children: [] }
+      }
       currentGroup.children.push(block)
     }
   }
@@ -285,6 +520,38 @@ export function computeGroups(blocks: PromptBlock[] | undefined): CategoryGroup[
 export function detectSupportedParams(provider: string | null): Set<string> {
   if (!provider) return DEFAULT_PROVIDER_PARAMS
   return PROVIDER_PARAMS[provider] || DEFAULT_PROVIDER_PARAMS
+}
+
+const PROVIDER_PARAM_KEY_TO_SAMPLER_KEY: Record<string, string> = {
+  max_tokens: 'maxTokens',
+  temperature: 'temperature',
+  top_p: 'topP',
+  min_p: 'minP',
+  top_k: 'topK',
+  frequency_penalty: 'frequencyPenalty',
+  presence_penalty: 'presencePenalty',
+  repetition_penalty: 'repetitionPenalty',
+}
+
+export function detectSupportedParamsFromProviders(
+  provider: string | null,
+  providers: ProviderInfo[] | null | undefined,
+): Set<string> {
+  if (!provider) return DEFAULT_PROVIDER_PARAMS
+
+  const providerInfo = providers?.find((entry) => entry.id === provider)
+  const capabilityKeys = providerInfo?.capabilities?.parameters
+
+  if (capabilityKeys && typeof capabilityKeys === 'object') {
+    const supported = new Set<string>(['contextSize'])
+    for (const apiKey of Object.keys(capabilityKeys)) {
+      const samplerKey = PROVIDER_PARAM_KEY_TO_SAMPLER_KEY[apiKey]
+      if (samplerKey) supported.add(samplerKey)
+    }
+    return supported
+  }
+
+  return detectSupportedParams(provider)
 }
 
 // ============================================================================
@@ -403,6 +670,9 @@ interface STPresetData {
   name?: string
   prompts?: STPrompt[]
   prompt_order?: Record<string, { order?: Array<{ identifier: string; enabled?: boolean }> }>
+  extensions?: {
+    regex_scripts?: unknown[]
+  }
   // Root-level behavior prompts (ST stores these outside the prompts array)
   continue_nudge_prompt?: string
   impersonation_prompt?: string
@@ -427,7 +697,21 @@ function convertSTPromptToBlock(p: STPrompt, enabled: boolean): PromptBlock {
     return block
   }
 
-  const isCategory = p.name?.startsWith(CATEGORY_MARKER)
+  // NemoPresetExt wiki subcategories (<Name>) flatten to category blocks —
+  // Lumiverse has only one level of category nesting.
+  const rawName = p.name || 'Untitled'
+  const wikiCategoryMatch = rawName.match(WIKI_CATEGORY_PATTERN)
+  const wikiSubCategoryMatch = !wikiCategoryMatch ? rawName.match(WIKI_SUBCATEGORY_PATTERN) : null
+  const isLegacyCategory = rawName.startsWith(CATEGORY_MARKER)
+  // Only treat wiki-style tags as categories when the prompt is acting like a
+  // heading. Ordinary prompts can legitimately use angle brackets or ===title===
+  // names, and those must round-trip as normal blocks.
+  const isWikiHeading = (!p.content || !p.content.trim()) && (!!wikiCategoryMatch || !!wikiSubCategoryMatch)
+  const isCategory = isLegacyCategory || isWikiHeading
+
+  let displayName = rawName
+  if (wikiCategoryMatch) displayName = wikiCategoryMatch[1].trim()
+  else if (wikiSubCategoryMatch) displayName = wikiSubCategoryMatch[1].trim()
 
   let position: PromptBlock['position'] = 'pre_history'
   let depth = 0
@@ -437,7 +721,7 @@ function convertSTPromptToBlock(p: STPrompt, enabled: boolean): PromptBlock {
   }
 
   return createBlock({
-    name: p.name || 'Untitled',
+    name: displayName,
     content: p.content || '',
     role: (p.role as PromptBlock['role']) || 'system',
     enabled,
@@ -532,6 +816,9 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
     id: generateUUID(),
     name,
     description: `Imported from legacy preset "${stPresetData.name || name}"`,
+    coverUrl: null,
+    presetVersion: null,
+    lumihubMeta: null,
     schemaVersion: 1,
     createdAt: now,
     updatedAt: now,
@@ -559,6 +846,7 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
     advancedSettings: { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: {},
     lastProfileKey: null,
+    promptVariables: {},
   }
 }
 
@@ -569,10 +857,11 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
  * and flattens behavior/sampler settings to ST root-level fields.
  */
 export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
+  const exportLoom = sanitizeLumiHubSealedBlocksForExport(loom)
   const prompts: Array<Record<string, any>> = []
   const orderEntries: Array<{ identifier: string; enabled: boolean }> = []
 
-  for (const block of loom.blocks) {
+  for (const block of exportLoom.blocks) {
     // Determine ST identifier — well-known markers use their ST name,
     // everything else (custom blocks, categories) uses the block's own UUID
     const markerMapping = block.marker && block.marker !== 'category'
@@ -624,10 +913,10 @@ export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
   }
 
   // Build root-level sampler values
-  const samplers = loom.samplerOverrides ?? DEFAULT_SAMPLER_OVERRIDES
-  const behavior = loom.promptBehavior ?? DEFAULT_PROMPT_BEHAVIOR
-  const completion = loom.completionSettings ?? DEFAULT_COMPLETION_SETTINGS
-  const advanced = loom.advancedSettings ?? DEFAULT_ADVANCED_SETTINGS
+  const samplers = exportLoom.samplerOverrides ?? DEFAULT_SAMPLER_OVERRIDES
+  const behavior = exportLoom.promptBehavior ?? DEFAULT_PROMPT_BEHAVIOR
+  const completion = exportLoom.completionSettings ?? DEFAULT_COMPLETION_SETTINGS
+  const advanced = exportLoom.advancedSettings ?? DEFAULT_ADVANCED_SETTINGS
 
   return {
     // Sampler params at root level (ST convention: these come first)
@@ -662,7 +951,7 @@ export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
     stream_openai: true,
 
     // Prompt blocks + ordering
-    name: loom.name,
+    name: exportLoom.name,
     prompts,
     prompt_order: [{ character_id: 100001, order: orderEntries }],
 
@@ -696,6 +985,9 @@ export function createNewLoomPreset(name: string, description = ''): LoomPreset 
     id: generateUUID(),
     name,
     description,
+    coverUrl: null,
+    presetVersion: null,
+    lumihubMeta: null,
     schemaVersion: 1,
     createdAt: now,
     updatedAt: now,
@@ -712,5 +1004,6 @@ export function createNewLoomPreset(name: string, description = ''): LoomPreset 
     advancedSettings: { ...DEFAULT_ADVANCED_SETTINGS },
     modelProfiles: {},
     lastProfileKey: null,
+    promptVariables: {},
   }
 }

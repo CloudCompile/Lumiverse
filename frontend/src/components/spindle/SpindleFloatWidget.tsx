@@ -1,9 +1,11 @@
 import { useRef, useCallback, useEffect, useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { FloatWidgetState } from '@/store/slices/spindle-placement'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/components/shared/ContextMenu'
 import { useLongPress } from '@/hooks/useLongPress'
+import { scheduleSpindleDomTask } from '@/lib/spindle/browser-scheduler'
 import styles from './SpindleFloatWidget.module.css'
 
 interface Props {
@@ -11,12 +13,14 @@ interface Props {
 }
 
 export default function SpindleFloatWidget({ widget }: Props) {
+  const { t } = useTranslation('shared', { keyPrefix: 'spindle' })
   const updateFloatWidget = useStore((s) => s.updateFloatWidget)
   const setPlacementHidden = useStore((s) => s.setPlacementHidden)
   const isMobile = useIsMobile()
 
   const dragging = useRef(false)
   const offset = useRef({ x: 0, y: 0 })
+  const contentHostRef = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState({ x: widget.x, y: widget.y })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
 
@@ -27,6 +31,18 @@ export default function SpindleFloatWidget({ widget }: Props) {
   useEffect(() => {
     setPos({ x: widget.x, y: widget.y })
   }, [widget.x, widget.y])
+
+  useEffect(() => {
+    const host = contentHostRef.current
+    if (!host) return
+
+    return scheduleSpindleDomTask(() => {
+      if (!host.isConnected) return
+      if (!host.contains(widget.root)) {
+        host.replaceChildren(widget.root)
+      }
+    }, { phase: 'paint' })
+  }, [widget.root])
 
   const clampPos = useCallback(
     (x: number, y: number) => {
@@ -56,22 +72,24 @@ export default function SpindleFloatWidget({ widget }: Props) {
     [widget.snapToEdge, size.width, size.height]
   )
 
+  const isFullscreen = widget.fullscreen ?? false
+
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return
+    if (isFullscreen || e.button !== 0) return
     dragging.current = true
     offset.current = { x: e.clientX - pos.x, y: e.clientY - pos.y }
     ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
     e.preventDefault()
-  }, [pos])
+  }, [pos, isFullscreen])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragging.current) return
+    if (!dragging.current || isFullscreen) return
     const raw = { x: e.clientX - offset.current.x, y: e.clientY - offset.current.y }
     setPos(clampPos(raw.x, raw.y))
-  }, [clampPos])
+  }, [clampPos, isFullscreen])
 
   const handlePointerUp = useCallback(() => {
-    if (!dragging.current) return
+    if (!dragging.current || isFullscreen) return
     dragging.current = false
     let snapped = { x: 0, y: 0 }
     setPos((prev) => {
@@ -88,56 +106,78 @@ export default function SpindleFloatWidget({ widget }: Props) {
         })
       )
     })
-  }, [snapToEdge, updateFloatWidget, widget.id])
+  }, [snapToEdge, updateFloatWidget, widget.id, isFullscreen])
 
   const longPress = useLongPress({
     onLongPress: (pos) => setContextMenu(pos),
   })
 
+  // The extension owns its content area. If an inner element handled the
+  // contextmenu event (either by opening a Spindle context menu via the store,
+  // or by calling preventDefault), don't also raise the outer widget-chrome
+  // menu — otherwise the less-specific chrome menu wins ownership over the
+  // extension's own menu on the same right-click.
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    if (e.defaultPrevented) return
+    if (useStore.getState().pendingContextMenu) return
+    longPress.onContextMenu(e)
+  }, [longPress])
+
   const menuItems: ContextMenuEntry[] = useMemo(() => [
     {
       key: 'hide',
-      label: 'Hide Widget',
+      label: t('hideWidget'),
       onClick: () => { setPlacementHidden(widget.id, true); setContextMenu(null) },
     },
     {
       key: 'reset',
-      label: 'Reset Position',
+      label: t('resetPosition'),
       onClick: () => {
+        const pad = 12
+        const resetWidth = widget.defaultWidth
+        const resetHeight = widget.defaultHeight
         const reset = {
-          x: window.innerWidth - size.width - 16,
-          y: window.innerHeight - size.height - 16,
+          x: Math.max(pad, Math.min(widget.defaultX, window.innerWidth - resetWidth - pad)),
+          y: Math.max(pad, Math.min(widget.defaultY, window.innerHeight - resetHeight - pad)),
+          width: resetWidth,
+          height: resetHeight,
         }
-        setPos(reset)
+        setPos({ x: reset.x, y: reset.y })
         updateFloatWidget(widget.id, reset)
         setContextMenu(null)
       },
     },
-  ], [setPlacementHidden, updateFloatWidget, widget.id, size.width, size.height])
+  ], [
+    t,
+    setPlacementHidden,
+    updateFloatWidget,
+    widget.defaultHeight,
+    widget.defaultWidth,
+    widget.defaultX,
+    widget.defaultY,
+    widget.id,
+  ])
 
   if (!widget.visible) return null
+
+  const widgetStyle = isFullscreen
+    ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+    : { left: pos.x, top: pos.y, width: size.width, height: size.height }
 
   return (
     <>
       <div
-        className={`${styles.widget}${widget.chromeless ? ` ${styles.chromeless}` : ''}`}
-        style={{
-          left: pos.x,
-          top: pos.y,
-          width: size.width,
-          height: size.height,
-        }}
+        className={`${styles.widget}${widget.chromeless ? ` ${styles.chromeless}` : ''}${isFullscreen ? ` ${styles.fullscreen}` : ''}`}
+        style={widgetStyle}
         title={widget.tooltip}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         {...longPress}
+        onTouchStart={(e) => { if (!widget.root.contains(e.target as Node)) longPress.onTouchStart(e) }}
+        onContextMenu={handleContextMenu}
       >
-        <div className={styles.content} ref={(el) => {
-          if (el && !el.contains(widget.root)) {
-            el.replaceChildren(widget.root)
-          }
-        }} />
+        <div className={styles.content} ref={contentHostRef} />
       </div>
 
       <ContextMenu

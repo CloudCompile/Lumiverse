@@ -43,7 +43,15 @@
 }
 
 :global(html[data-ios-pwa]) .top {
-  top: env(safe-area-inset-top, 0px);
+  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
+}
+
+@media (display-mode: window-controls-overlay) {
+  .left,
+  .right,
+  .top {
+    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
+  }
 }
 
 .bottom {
@@ -87,7 +95,7 @@
 
 .title {
   flex: 1;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-text);
   white-space: nowrap;
@@ -191,13 +199,13 @@
     border-radius: 0 0 12px 12px;
     border: 1px solid var(--lumiverse-border);
     border-top: none;
-    max-height: 60vh;
+    max-height: calc(60vh / var(--lumiverse-ui-scale, 1));
   }
 
   :global(html[data-ios-pwa]) .left,
   :global(html[data-ios-pwa]) .right,
   :global(html[data-ios-pwa]) .top {
-    top: env(safe-area-inset-top, 0px) !important;
+    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) !important;
   }
 
   .collapsed.left,
@@ -216,5 +224,13 @@
   .right > .header > .title {
     writing-mode: horizontal-tb;
     text-orientation: initial;
+  }
+}
+
+@media (max-width: 600px) and (display-mode: window-controls-overlay) {
+  .left,
+  .right,
+  .top {
+    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) !important;
   }
 }
