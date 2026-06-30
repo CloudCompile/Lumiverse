@@ -9,15 +9,7 @@ import { startAllExtensions } from "./spindle/lifecycle";
 import { initIdentity } from "./crypto/init";
 import { initVapidKeys } from "./crypto/vapid";
 import { eventBus } from "./ws/bus";
-
-export function isTermuxLikeEnvironment(): boolean {
-  return Boolean(process.env.TERMUX_VERSION)
-    || process.env.LUMIVERSE_IS_TERMUX === "true"
-    || process.env.LUMIVERSE_IS_PROOT === "true"
-    || process.env.PREFIX?.startsWith("/data/data/com.termux/") === true
-    || process.env.HOME?.startsWith("/data/data/com.termux/files/home") === true
-    || env.dataDir.startsWith("/data/data/com.termux/");
-}
+import { isTermuxLikeEnvironment } from "./utils/termux";
 
 // Validate data directory is accessible and writable before any file operations.
 // This catches permission issues early (common on Termux/Android) instead of
@@ -32,6 +24,7 @@ if (isTermuxLikeEnvironment()) {
   process.env.TMP = tempDir;
   process.env.TEMP = tempDir;
   console.log(`[startup] Temp directory: ${tempDir}`);
+  console.log("[startup] Termux LanceDB mode: cross-process write locking enabled");
 }
 
 try {
@@ -63,10 +56,16 @@ const { clearAllPoolEntries } = await import("./services/generation-pool.service
 clearAllPoolEntries();
 
 // Dynamic import: auth modules call getDb() at module level, so must load after initDatabase()
-const { seedOwner, backfillUserIds, getFirstUserId } = await import("./auth/seed");
+const { seedOwner, backfillUserIds, backfillDefaultPresets, getFirstUserId } = await import("./auth/seed");
 const { operatorService } = await import("./services/operator.service");
 await seedOwner();
 backfillUserIds();
+const presetBackfill = backfillDefaultPresets();
+if (presetBackfill.seeded > 0 || presetBackfill.upgradedLegacy > 0 || presetBackfill.activated > 0) {
+  console.log(
+    `[Auth] Default preset backfill: seeded ${presetBackfill.seeded}, upgraded ${presetBackfill.upgradedLegacy}, activated ${presetBackfill.activated}`,
+  );
+}
 
 console.log(
   `[startup] Runner IPC: ${operatorService.ipcAvailable ? "connected" : `unavailable (${operatorService.ipcReason})`}`
@@ -105,11 +104,24 @@ seedTokenizers();
 const { initSharpSettings } = await import("./services/sharp-settings.service");
 initSharpSettings();
 
+// Load DNS settings so safe-fetch can pick up the DoH fallback toggle
+// before the first outbound request that needs validation.
+const { initDnsSettings } = await import("./services/dns-settings.service");
+initDnsSettings();
+
+// Load owner-scoped disk warning thresholds before the monitor starts so
+// operator changes apply live without a server restart.
+const { initDiskWarningSettings } = await import("./services/disk-warning-settings.service");
+initDiskWarningSettings();
+
 // Start background vectorization maintenance only after the database is ready.
 const { startVectorizationQueueMaintenance } = await import("./services/vectorization-queue.service");
 startVectorizationQueueMaintenance();
 
-// Pre-warm tokenizers for configured connection models (fire-and-forget)
+const { startDiskMonitor } = await import("./services/disk-monitor.service");
+startDiskMonitor();
+
+// Pre-warm tokenizers for active/default connection models (fire-and-forget)
 import("./services/tokenizer.service").then(({ prewarm }) => prewarm()).catch(() => {});
 
 // LanceDB startup maintenance: compact fragments, migrate old HNSW_PQ → IVF_PQ (fire-and-forget)
@@ -143,12 +155,28 @@ const server = Bun.serve({
   hostname: "::",
   fetch: app.fetch,
   websocket,
-  maxRequestBodySize: 1000 * 1024 * 1024, // 1000 MB — matches MAX_CHARX_SIZE in character-card.service.ts
+  // Sized for the user-data import endpoint (full-account archives). Other
+  // upload routes self-cap at the service layer (character imports stay at
+  // MAX_CHARX_SIZE ≈ 1000 MB, image/avatar uploads at a few MB, etc.), so
+  // raising the global ceiling here only widens the door for routes we
+  // explicitly opt-in for via the bodyLimit exclusion list above.
+  maxRequestBodySize: 5 * 1024 * 1024 * 1024, // 5 GB — matches MAX_COMPRESSED_BYTES in user-data import.
   idleTimeout: 255,
 });
 
 // Give the EventBus access to the server for native topic-based publish().
 eventBus.setServer(server);
+
+// Initialize multiplayer rooms: registers the chat/generation fan-out listener
+// (re-broadcasts to room topics), the prompt-assembly persona provider, and
+// re-arms any freeform deadline timers dropped by the restart.
+const { initMultiplayer } = await import("./services/multiplayer.service");
+initMultiplayer();
+
+// Register the Identity Server attestation validator so remote peers can join
+// directly with a server-minted token (no-op until MPIDENTITY_URL is set).
+const { registerIdentityServerAttestation } = await import("./multiplayer/attestation");
+registerIdentityServerAttestation();
 
 console.log(`Lumiverse Backend listening on ${server.hostname}:${server.port}`);
 
@@ -234,11 +262,12 @@ async function gracefulShutdown(signal: string) {
   const { stopTicketSweep } = await import("./ws/tickets");
   const { stopOAuthStateSweep } = await import("./spindle/oauth-state");
   const { stopPkceSweep } = await import("./routes/lumihub.routes");
-  const { stopQueryCacheCleanup, stopWorldBookVectorizationSweep } = await import("./services/vectorization-queue.service");
+  const { stopChatChunkVectorizationWorker, stopQueryCacheCleanup, stopWorldBookVectorizationSweep } = await import("./services/vectorization-queue.service");
   const { stopVersionCheckCleanup } = await import("./services/embeddings.service");
   stopTicketSweep();
   stopOAuthStateSweep();
   stopPkceSweep();
+  stopChatChunkVectorizationWorker();
   stopQueryCacheCleanup();
   stopWorldBookVectorizationSweep();
   stopVersionCheckCleanup();
@@ -269,6 +298,8 @@ async function gracefulShutdown(signal: string) {
   // 7.5 Stop DB stats monitor
   stopDatabaseMonitor();
   stopAutomaticDatabaseMaintenance();
+  const { stopDiskMonitor } = await import("./services/disk-monitor.service");
+  stopDiskMonitor();
 
   // 8. Close database (triggers WAL checkpoint)
   const { closeDatabase } = await import("./db/connection");

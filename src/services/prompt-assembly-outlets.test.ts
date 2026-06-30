@@ -17,7 +17,9 @@ function makeMinimalEnv(): MacroEnv {
       groupOthers: "",
       groupMemberCount: "0",
       isGroupChat: "no",
+      isNarrator: "no",
       groupLastSpeaker: "",
+      groupCardMode: "solo",
     },
     character: {
       name: "Bob",
@@ -49,6 +51,7 @@ function makeMinimalEnv(): MacroEnv {
       firstIncludedMessageId: 0,
       lastSwipeId: 0,
       currentSwipeId: 0,
+      rejectedSwipe: "",
     },
     system: {
       model: "test",

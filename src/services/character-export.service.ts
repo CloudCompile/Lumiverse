@@ -1,7 +1,7 @@
 import sharp from "../utils/sharp-config";
 import { extname } from "path";
 import { zipSync } from "fflate";
-import { getCharacter } from "./characters.service";
+import { LANDING_PERSPECTIVE_LAYERS_KEY, getCharacter, normalizeLandingPerspectiveLayers } from "./characters.service";
 import { getExpressionConfig, getExpressionGroups } from "./expressions.service";
 import { listGallery } from "./character-gallery.service";
 import { getImage, getImageFilePath } from "./images.service";
@@ -176,6 +176,14 @@ async function readImageBytes(userId: string, imageId: string): Promise<ImageByt
   };
 }
 
+function getExportAvatarImageIds(character: Character): string[] {
+  const ids = [
+    typeof character.extensions?.original_image_id === "string" ? character.extensions.original_image_id : null,
+    character.image_id,
+  ];
+  return ids.filter((id, index): id is string => Boolean(id) && ids.indexOf(id) === index);
+}
+
 // ── CCSv3 JSON builder ──────────────────────────────────────────────────────
 
 /** Extension keys that are Lumiverse-internal and should not leak into CCSv3 exports. */
@@ -186,6 +194,8 @@ const INTERNAL_EXTENSION_KEYS = new Set([
   "alternate_avatars",
   "world_book_id",
   "world_book_ids",
+  "avatar_crop_image_id",
+  "original_image_id",
   "_lumiverse_source_filename",
   "risu_asset_map",
 ]);
@@ -303,10 +313,11 @@ export async function exportAsPng(userId: string, characterId: string): Promise<
   // Get avatar image
   let avatarBuffer: Buffer | null = null;
 
-  if (character.image_id) {
-    const filepath = await getImageFilePath(userId, character.image_id);
+  for (const imageId of getExportAvatarImageIds(character)) {
+    const filepath = await getImageFilePath(userId, imageId);
     if (filepath) {
       avatarBuffer = Buffer.from(await Bun.file(filepath).arrayBuffer());
+      break;
     }
   }
 
@@ -356,6 +367,7 @@ export interface LumiverseModulesExport {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  landing_perspective_layers?: Array<{ id: string; label?: string; path: string; intensity: number }>;
   world_books?: Record<string, any>[];
   regex_scripts?: import("./character-card.service").BundledRegexScript[];
 }
@@ -378,11 +390,12 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
   // Primary avatar — CHARX spec: assets/{category}/{type}/{filename}.
   // Strip any stale card tEXt chunks so the archive's avatar can't shadow
   // card.json for readers that peek at PNG text chunks.
-  if (character.image_id) {
-    const img = await readImageBytes(userId, character.image_id);
+  for (const imageId of getExportAvatarImageIds(character)) {
+    const img = await readImageBytes(userId, imageId);
     if (img) {
       const cleaned = stripCardTextChunks(img.bytes);
       entries[`assets/icon/image/main${img.ext}`] = new Uint8Array(cleaned);
+      break;
     }
   }
 
@@ -483,6 +496,26 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
     modules.alternate_avatars = altAvatars;
   }
 
+  // Landing perspective layers (ordered back → front)
+  const landingLayers = normalizeLandingPerspectiveLayers(character.extensions?.[LANDING_PERSPECTIVE_LAYERS_KEY]);
+  const exportedLandingLayers: Array<{ id: string; label?: string; path: string; intensity: number }> = [];
+  for (const layer of landingLayers) {
+    const img = await readImageBytes(userId, layer.image_id);
+    if (!img) continue;
+    const safeName = sanitizeArchiveName(layer.label || layer.id || "layer");
+    const archivePath = `assets/other/image/landing_layer_${safeName}_${layer.id}${img.ext}`;
+    entries[archivePath] = img.bytes;
+    exportedLandingLayers.push({
+      id: layer.id,
+      ...(layer.label ? { label: layer.label } : {}),
+      path: archivePath,
+      intensity: layer.intensity,
+    });
+  }
+  if (exportedLandingLayers.length > 0) {
+    modules.landing_perspective_layers = exportedLandingLayers;
+  }
+
   // World books (individual Lumiverse-format exports for lossless round-trips)
   const charWorldBookIds = getCharacterWorldBookIds(character.extensions);
   if (charWorldBookIds.length > 0) {
@@ -522,7 +555,7 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
 
   // Only include lumiverse_modules.json if there's content
   const hasModules =
-    modules.expressions || modules.expression_groups || modules.alternate_fields || modules.alternate_avatars || modules.world_books?.length || modules.regex_scripts;
+    modules.expressions || modules.expression_groups || modules.alternate_fields || modules.alternate_avatars || modules.landing_perspective_layers || modules.world_books?.length || modules.regex_scripts;
   if (hasModules) {
     entries["lumiverse_modules.json"] = new TextEncoder().encode(
       JSON.stringify(modules, null, 2)

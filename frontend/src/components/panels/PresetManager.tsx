@@ -12,17 +12,19 @@ import {
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import NumericInput from '@/components/shared/NumericInput'
 import { Toggle } from '@/components/shared/Toggle'
+import { useTranslation } from 'react-i18next'
 import type { ReasoningSettings, ReasoningEffort, ThinkingDisplay } from '@/types/store'
 import styles from './PresetManager.module.css'
 import clsx from 'clsx'
 
-const REASONING_PRESETS: { label: string; prefix: string; suffix: string }[] = [
-  { label: 'DeepSeek', prefix: '<think>\n', suffix: '\n</think>' },
-  { label: 'Claude', prefix: '<thinking>\n', suffix: '\n</thinking>' },
-  { label: 'o1', prefix: '<reasoning>\n', suffix: '\n</reasoning>' },
+const REASONING_PRESETS: { id: 'deepseek' | 'claude' | 'o1'; prefix: string; suffix: string }[] = [
+  { id: 'deepseek', prefix: '<think>\n', suffix: '\n</think>' },
+  { id: 'claude', prefix: '<thinking>\n', suffix: '\n</thinking>' },
+  { id: 'o1', prefix: '<reasoning>\n', suffix: '\n</reasoning>' },
 ]
 
 export default function PresetManager() {
+  const { t } = useTranslation('panels')
   const reasoningSettings = useStore((s) => s.reasoningSettings)
   const promptBias = useStore((s) => s.promptBias)
   const setSetting = useStore((s) => s.setSetting)
@@ -37,6 +39,7 @@ export default function PresetManager() {
   const activeProvider = activeProfile?.provider
   const activeModel = activeProfile?.model
   const activeBinding = activeProfile?.metadata?.reasoningBindings?.settings
+  const activeBindingPromptBias = activeProfile?.metadata?.reasoningBindings?.promptBias
   const normalizedActiveBinding = activeBinding
     ? normalizeReasoningSettingsForProvider(activeBinding, activeProvider, activeModel)
     : null
@@ -47,6 +50,7 @@ export default function PresetManager() {
   const isAnthropic = activeProvider === 'anthropic'
   const activeBindingMatchesPanel = normalizedActiveBinding
     ? areReasoningSettingsEqual(normalizedActiveBinding, reasoningSettings)
+      && (typeof activeBindingPromptBias !== 'string' || activeBindingPromptBias === promptBias)
     : false
 
   const updateReasoning = useCallback(
@@ -71,16 +75,16 @@ export default function PresetManager() {
   return (
     <div className={styles.panel}>
       {/* ── Reasoning / CoT ── */}
-      <CollapsibleSection title="Reasoning / CoT" icon={<Brain size={14} />} defaultExpanded>
+      <CollapsibleSection title={t('presetManager.reasoningTitle')} icon={<Brain size={14} />} defaultExpanded>
         {normalizedActiveBinding && (
           <div className={styles.bindingBanner}>
-            <div className={styles.bindingBannerTitle}>Saved on {activeProfile?.name}</div>
+            <div className={styles.bindingBannerTitle}>{t('presetManager.savedOn', { name: activeProfile?.name })}</div>
             <div className={styles.bindingBannerText}>
-              {getReasoningBindingSummary(normalizedActiveBinding)}
+              {getReasoningBindingSummary(normalizedActiveBinding, activeBindingPromptBias)}
             </div>
             {!activeBindingMatchesPanel && (
               <div className={styles.bindingBannerHint}>
-                The panel has been changed locally. Edit the connection and use Capture Current to update the saved snapshot.
+                {t('presetManager.bindingChangedHint')}
               </div>
             )}
           </div>
@@ -89,12 +93,15 @@ export default function PresetManager() {
         <div className={styles.presetRow}>
           {REASONING_PRESETS.map((p) => (
             <button
-              key={p.label}
+              key={p.id}
               type="button"
-              className={clsx(styles.presetBtn, activePreset?.label === p.label && styles.presetBtnActive)}
+              className={clsx(
+                styles.presetBtn,
+                activePreset?.prefix === p.prefix && activePreset?.suffix === p.suffix && styles.presetBtnActive,
+              )}
               onClick={() => updateReasoning({ prefix: p.prefix, suffix: p.suffix })}
             >
-              {p.label}
+              {t(`presetManager.reasoningPresets.${p.id}`)}
             </button>
           ))}
         </div>
@@ -102,8 +109,10 @@ export default function PresetManager() {
         {/* Prefix / Suffix */}
         <div className={styles.tagRow}>
           <div className={styles.fieldGroup}>
-            <span className={styles.label}>Prefix</span>
+            <span className={styles.label}>{t('presetManager.prefix')}</span>
             <input
+              name="reasoning-prefix"
+              aria-label={t('presetManager.reasoningPrefix')}
               className={styles.input}
               value={reasoningSettings.prefix}
               onChange={(e) => updateReasoning({ prefix: e.target.value })}
@@ -111,8 +120,10 @@ export default function PresetManager() {
             />
           </div>
           <div className={styles.fieldGroup}>
-            <span className={styles.label}>Suffix</span>
+            <span className={styles.label}>{t('presetManager.suffix')}</span>
             <input
+              name="reasoning-suffix"
+              aria-label={t('presetManager.reasoningSuffix')}
               className={styles.input}
               value={reasoningSettings.suffix}
               onChange={(e) => updateReasoning({ suffix: e.target.value })}
@@ -124,8 +135,8 @@ export default function PresetManager() {
         {/* Auto-parse thoughts toggle */}
         <div className={styles.toggleRow}>
           <div>
-            <div className={styles.toggleLabel}>Auto-parse thoughts</div>
-            <div className={styles.toggleDesc}>Strip thinking tags from displayed output</div>
+            <div className={styles.toggleLabel}>{t('presetManager.autoParseThoughts')}</div>
+            <div className={styles.toggleDesc}>{t('presetManager.autoParseThoughtsHint')}</div>
           </div>
           <Toggle.Switch
             checked={reasoningSettings.autoParse}
@@ -136,8 +147,8 @@ export default function PresetManager() {
         {/* API Reasoning toggle */}
         <div className={styles.toggleRow}>
           <div>
-            <div className={styles.toggleLabel}>API Reasoning</div>
-            <div className={styles.toggleDesc}>Request native reasoning from the provider, if available</div>
+            <div className={styles.toggleLabel}>{t('presetManager.apiReasoning')}</div>
+            <div className={styles.toggleDesc}>{t('presetManager.apiReasoningHint')}</div>
           </div>
           <Toggle.Switch
             checked={reasoningSettings.apiReasoning}
@@ -148,11 +159,13 @@ export default function PresetManager() {
         {/* Reasoning effort */}
         <div className={clsx(styles.fieldGroup, (isToggleOnly || isApiReasoningDisabled) && styles.fieldGroupDisabled)}>
           <span className={styles.label}>
-            Reasoning Effort
-            {isToggleOnly && <span className={styles.toggleOnlyHint}> (toggle-only for {activeProvider})</span>}
-            {!isToggleOnly && isApiReasoningDisabled && <span className={styles.toggleOnlyHint}> (disabled while API reasoning is off)</span>}
+            {t('presetManager.reasoningEffort')}
+            {isToggleOnly && <span className={styles.toggleOnlyHint}> {t('presetManager.toggleOnlyFor', { provider: activeProvider })}</span>}
+            {!isToggleOnly && isApiReasoningDisabled && <span className={styles.toggleOnlyHint}> {t('presetManager.disabledWhileApiOff')}</span>}
           </span>
           <select
+            name="reasoning-effort"
+            aria-label={t('presetManager.reasoningEffort')}
             className={clsx(styles.select, (isToggleOnly || isApiReasoningDisabled) && styles.selectDisabled)}
             value={reasoningSettings.reasoningEffort}
             onChange={(e) => updateReasoning({ reasoningEffort: e.target.value as ReasoningEffort })}
@@ -160,7 +173,7 @@ export default function PresetManager() {
           >
             {!currentEffortValid && (
               <option value={reasoningSettings.reasoningEffort}>
-                {reasoningSettings.reasoningEffort} (unsupported by {activeProvider ?? 'provider'})
+                {t('presetManager.unsupportedEffort', { effort: reasoningSettings.reasoningEffort, provider: activeProvider ?? t('presetManager.provider') })}
               </option>
             )}
             {effortOptions.map((opt) => (
@@ -172,28 +185,30 @@ export default function PresetManager() {
         {/* Anthropic-only: thinking.display field on the Messages API */}
         {isAnthropic && (
           <div className={clsx(styles.fieldGroup, isApiReasoningDisabled && styles.fieldGroupDisabled)}>
-            <span className={styles.label}>Thinking Display</span>
+            <span className={styles.label}>{t('presetManager.thinkingDisplay')}</span>
             <select
+              name="thinking-display"
+              aria-label={t('presetManager.thinkingDisplay')}
               className={clsx(styles.select, isApiReasoningDisabled && styles.selectDisabled)}
               value={reasoningSettings.thinkingDisplay ?? 'auto'}
               onChange={(e) => updateReasoning({ thinkingDisplay: e.target.value as ThinkingDisplay })}
               disabled={isApiReasoningDisabled}
             >
-              <option value="auto">Auto (model default)</option>
-              <option value="summarized">Summarized</option>
-              <option value="omitted">Omitted</option>
+              <option value="auto">{t('presetManager.thinkingDisplayAuto')}</option>
+              <option value="summarized">{t('presetManager.thinkingDisplaySummarized')}</option>
+              <option value="omitted">{t('presetManager.thinkingDisplayOmitted')}</option>
             </select>
             <span className={styles.toggleDesc}>
               {isApiReasoningDisabled
-                ? 'Only sent when API reasoning is enabled.'
-                : 'Opus 4.7 and Mythos Preview default to Omitted. Pick Summarized to receive summary text.'}
+                ? t('presetManager.thinkingDisplayDisabledHint')
+                : t('presetManager.thinkingDisplayHint')}
             </span>
           </div>
         )}
 
         {/* Keep N reasoning blocks in history */}
         <div className={styles.fieldGroup}>
-          <span className={styles.label}>Keep in history</span>
+          <span className={styles.label}>{t('presetManager.keepInHistory')}</span>
           <div className={styles.historyRow}>
             <NumericInput
               className={styles.input}
@@ -202,27 +217,32 @@ export default function PresetManager() {
               integer
               onChange={(value) => updateReasoning({ keepInHistory: value ?? reasoningSettings.keepInHistory })}
             />
-            <span className={styles.historyHint}>
-              {reasoningSettings.keepInHistory === -1
-                ? 'Keep all reasoning in prompt'
-                : reasoningSettings.keepInHistory === 0
-                  ? 'Strip all reasoning from prompt'
-                  : `Keep last ${reasoningSettings.keepInHistory} block${reasoningSettings.keepInHistory === 1 ? '' : 's'}`}
-            </span>
+            <div className={styles.historyMeta}>
+              <span className={styles.historyHint}>
+                {reasoningSettings.keepInHistory === -1
+                  ? t('presetManager.keepAllReasoning')
+                  : reasoningSettings.keepInHistory === 0
+                    ? t('presetManager.stripAllReasoning')
+                    : t('presetManager.keepLastBlocks', { count: reasoningSettings.keepInHistory })}
+              </span>
+              <span className={styles.historySubHint}>{t('presetManager.keepInHistoryHint')}</span>
+            </div>
           </div>
         </div>
       </CollapsibleSection>
 
       {/* ── Prompt Behavior ── */}
-      <CollapsibleSection title="Prompt Behavior" icon={<IconBolt size={14} />} defaultExpanded>
+      <CollapsibleSection title={t('presetManager.promptBehaviorTitle')} icon={<IconBolt size={14} />} defaultExpanded>
         {/* Start Reply With */}
         <div className={styles.fieldGroup}>
-          <span className={styles.label}>Start Reply With</span>
+          <span className={styles.label}>{t('presetManager.startReplyWith')}</span>
           <textarea
+            name="prompt-bias"
+            aria-label={t('presetManager.startReplyWith')}
             className={styles.textarea}
             value={promptBias}
             onChange={(e) => setSetting('promptBias', e.target.value)}
-            placeholder="Partial assistant message to prepend..."
+            placeholder={t('presetManager.startReplyPlaceholder')}
             rows={2}
           />
           <div className={styles.quickBtnRow}>
@@ -240,7 +260,7 @@ export default function PresetManager() {
               className={clsx(styles.quickBtn, styles.clearBtn)}
               onClick={() => setSetting('promptBias', '')}
             >
-              Clear
+              {t('presetManager.clear')}
             </button>
           </div>
         </div>

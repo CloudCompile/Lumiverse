@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ShieldAlert } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
@@ -11,6 +12,7 @@ function formatPermissionName(perm: string): string {
 }
 
 export default function PermissionRequestModal() {
+  const { t } = useTranslation('modals')
   const request = useStore((s) => s.pendingPermissionRequest)
   const resolvePermissionRequest = useStore((s) => s.resolvePermissionRequest)
   const [granting, setGranting] = useState(false)
@@ -44,11 +46,14 @@ export default function PermissionRequestModal() {
                     <ShieldAlert size={24} />
                   </div>
 
-                  <h3 className={styles.title}>Permission Request</h3>
+                  <h3 className={styles.title}>{t('permissionRequest.title')}</h3>
 
                   <p className={styles.description}>
                     <span className={styles.extensionName}>{request.extensionName}</span>
-                    {' '}is requesting the following permission{request.permissions.length > 1 ? 's' : ''}:
+                    {' '}
+                    {request.permissions.length > 1
+                      ? t('permissionRequest.requestingMany')
+                      : t('permissionRequest.requestingOne')}
                   </p>
 
                   <div className={styles.permissionList}>
@@ -73,7 +78,7 @@ export default function PermissionRequestModal() {
                     onClick={handleDeny}
                     disabled={granting}
                   >
-                    Deny
+                    {t('permissionRequest.deny')}
                   </button>
                   <button
                     type="button"
@@ -81,7 +86,7 @@ export default function PermissionRequestModal() {
                     onClick={handleGrant}
                     disabled={granting}
                   >
-                    {granting ? 'Granting...' : 'Grant'}
+                    {granting ? t('permissionRequest.granting') : t('permissionRequest.grant')}
                   </button>
                 </div>
               </>

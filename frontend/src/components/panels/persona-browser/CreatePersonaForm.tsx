@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import { User, Check, X, Upload } from 'lucide-react'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
 import ImageCropModal from '@/components/shared/ImageCropModal'
@@ -9,7 +11,10 @@ interface CreatePersonaFormProps {
   onCancel: () => void
 }
 
-export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaFormProps) {
+export default function CreatePersonaForm({
+  onCreate, onCancel }: CreatePersonaFormProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'personaManager.createForm' })
+  const { t: tc } = useTranslation('common')
   const [name, setName] = useState('')
   const [avatarFile, setAvatarFile] = useState<File | null>(null)
   const [originalFile, setOriginalFile] = useState<File | null>(null)
@@ -58,10 +63,10 @@ export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaF
       <div
         className={styles.avatarArea}
         onClick={() => fileRef.current?.click()}
-        title="Upload avatar"
+        title={t('uploadAvatar')}
       >
         {avatarPreview ? (
-          <img src={avatarPreview} alt="Preview" className={styles.avatarPreview} />
+          <img src={avatarPreview} alt={t('previewAlt')} className={styles.avatarPreview} />
         ) : (
           <div className={styles.avatarPlaceholder}>
             <Upload size={16} />
@@ -81,7 +86,7 @@ export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaF
         value={name}
         onChange={(e) => setName(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="Persona name..."
+        placeholder={t('namePlaceholder')}
         autoFocus
       />
       <div className={styles.actions}>
@@ -90,7 +95,7 @@ export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaF
           className={styles.confirmBtn}
           onClick={handleSubmit}
           disabled={!name.trim() || creating}
-          title="Create"
+          title={t('create')}
         >
           <Check size={14} />
         </button>
@@ -98,7 +103,7 @@ export default function CreatePersonaForm({ onCreate, onCancel }: CreatePersonaF
           type="button"
           className={styles.cancelBtn}
           onClick={onCancel}
-          title="Cancel"
+          title={tc('actions.cancel')}
         >
           <X size={14} />
         </button>

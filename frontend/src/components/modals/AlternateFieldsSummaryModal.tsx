@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom'
+import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'motion/react'
 import { X } from 'lucide-react'
 import styles from './LorebookImportModal.module.css'
@@ -15,13 +16,15 @@ interface Props {
   onClose: () => void
 }
 
-const FIELD_LABELS: Record<string, string> = {
-  description: 'Description',
-  personality: 'Personality',
-  scenario: 'Scenario',
+const FIELD_KEYS: Record<string, 'fieldDescription' | 'fieldPersonality' | 'fieldScenario'> = {
+  description: 'fieldDescription',
+  personality: 'fieldPersonality',
+  scenario: 'fieldScenario',
 }
 
 export default function AlternateFieldsSummaryModal({ isOpen, items, onClose }: Props) {
+  const { t } = useTranslation('modals', { keyPrefix: 'alternateFieldsSummary' })
+
   return createPortal(
     <AnimatePresence>
       {isOpen && items.length > 0 && (
@@ -41,7 +44,7 @@ export default function AlternateFieldsSummaryModal({ isOpen, items, onClose }: 
           >
             <div className={styles.header}>
               <div className={styles.headerLeft}>
-                <span className={styles.title}>Lumiverse Features Imported</span>
+                <span className={styles.title}>{t('title')}</span>
               </div>
               <button type="button" className={styles.closeBtn} onClick={onClose}>
                 <X size={16} />
@@ -50,8 +53,7 @@ export default function AlternateFieldsSummaryModal({ isOpen, items, onClose }: 
 
             <div className={styles.body}>
               <p style={{ fontSize: 12, color: 'var(--lumiverse-text-dim)', margin: '0 0 8px' }}>
-                The following Lumiverse-specific features were imported with your characters.
-                You can manage them in the character editor.
+                {t('intro')}
               </p>
               <div className={styles.lorebookList}>
                 {items.map((item, i) => (
@@ -61,9 +63,13 @@ export default function AlternateFieldsSummaryModal({ isOpen, items, onClose }: 
                       <span className={styles.lorebookMeta}>
                         {Object.entries(item.fieldCounts)
                           .filter(([, count]) => count > 0)
-                          .map(([field, count]) => `${FIELD_LABELS[field] || field}: ${count} variants`)
+                          .map(([field, count]) => {
+                            const labelKey = FIELD_KEYS[field]
+                            const label = labelKey ? t(labelKey) : field
+                            return t('variants', { label, count })
+                          })
                           .join(', ')}
-                        {item.hasAlternateAvatars && ', Alternate avatars'}
+                        {item.hasAlternateAvatars && `, ${t('alternateAvatars')}`}
                       </span>
                     </div>
                   </div>
@@ -73,7 +79,7 @@ export default function AlternateFieldsSummaryModal({ isOpen, items, onClose }: 
 
             <div className={styles.footer}>
               <button type="button" className={styles.importBtn} onClick={onClose}>
-                Got it
+                {t('gotIt')}
               </button>
             </div>
           </motion.div>

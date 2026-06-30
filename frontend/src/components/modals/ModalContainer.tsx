@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import SettingsModal from './SettingsModal'
@@ -11,6 +12,7 @@ import DryRunModal from './DryRunModal'
 import PromptItemizerModal from './PromptItemizerModal'
 import GroupChatCreatorModal from './GroupChatCreatorModal'
 import AddGroupMemberModal from '@/components/chat/AddGroupMemberModal'
+import MemberVoiceModal from './MemberVoiceModal'
 import ManageChatsModal from './ManageChatsModal'
 import ChatPickerModal from './ChatPickerModal'
 import MemoryCortexDiagnosticsModal from './MemoryCortexDiagnosticsModal'
@@ -24,15 +26,22 @@ import GlobalAddonsLibraryModal from './GlobalAddonsLibraryModal'
 import ChatSettingsModal from './GroupSettingsModal'
 import CustomCSSModal from './CustomCSSModal'
 import ConfigureDrawerTabsModal from './ConfigureDrawerTabsModal'
-import { DreamWeaverStudio } from '@/components/dream-weaver/DreamWeaverStudio'
+import ImagePromptPreviewModal from './ImagePromptPreviewModal'
+import ImageCaptionModal from './ImageCaptionModal'
+import QwenCustomVoiceModal from './QwenCustomVoiceModal'
+import { WeaverStudio } from '@/components/weaver/WeaverStudio'
 
 export default function ModalContainer() {
+  const { t } = useTranslation('modals')
   const settingsModalOpen = useStore((s) => s.settingsModalOpen)
   const closeSettings = useStore((s) => s.closeSettings)
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail
-      useStore.getState().openSettings(detail?.view || 'extensions')
+      useStore.getState().openSettings(
+        detail?.view || 'extensions',
+        detail?.extensionId ? { extensionId: detail.extensionId } : undefined,
+      )
     }
     window.addEventListener('spindle:open-settings', handler)
     return () => window.removeEventListener('spindle:open-settings', handler)
@@ -49,8 +58,8 @@ export default function ModalContainer() {
       {activeModal === 'confirm' && (
         <ConfirmationModal
           isOpen={true}
-          title={modalProps.title || 'Confirm'}
-          message={modalProps.message || 'Are you sure?'}
+          title={modalProps.title || t('confirm.defaultTitle')}
+          message={modalProps.message || t('confirm.defaultMessage')}
           variant={modalProps.variant || 'safe'}
           confirmText={modalProps.confirmText}
           onConfirm={() => {
@@ -87,6 +96,7 @@ export default function ModalContainer() {
       {activeModal === 'promptItemizer' && <PromptItemizerModal />}
       {activeModal === 'groupChatCreator' && <GroupChatCreatorModal />}
       {activeModal === 'addGroupMember' && modalProps.chatId && <AddGroupMemberModal />}
+      {activeModal === 'memberVoice' && modalProps.chatId && modalProps.characterId && <MemberVoiceModal />}
       {activeModal === 'manageChats' && <ManageChatsModal />}
       {activeModal === 'chatPicker' && modalProps.characterId && modalProps.characterName && (
         <ChatPickerModal
@@ -133,9 +143,10 @@ export default function ModalContainer() {
       )}
 
       {activeModal === 'customCSS' && <CustomCSSModal />}
-      {activeModal === 'dreamWeaverStudio' && modalProps.sessionId && (
-        <DreamWeaverStudio sessionId={modalProps.sessionId} />
-      )}
+      {activeModal === 'imagePromptPreview' && <ImagePromptPreviewModal />}
+      {activeModal === 'imageCaptioner' && <ImageCaptionModal />}
+      {activeModal === 'qwenCustomVoice' && modalProps.connectionId && <QwenCustomVoiceModal />}
+      {activeModal === 'weaver' && <WeaverStudio />}
 
       <PermissionRequestModal />
       <CommandPalette />

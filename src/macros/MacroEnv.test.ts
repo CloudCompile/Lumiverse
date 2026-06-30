@@ -3,6 +3,7 @@ import { buildEnv } from "./MacroEnv";
 import type { Character } from "../types/character";
 import type { Chat } from "../types/chat";
 import type { Message } from "../types/message";
+import type { Persona } from "../types/persona";
 
 const baseCharacter: Character = {
   id: "char-1",
@@ -29,6 +30,25 @@ const baseChat: Chat = {
   id: "chat-1",
   character_id: "char-1",
   name: "Test Chat",
+  metadata: {},
+  created_at: 0,
+  updated_at: 0,
+};
+
+const basePersona: Persona = {
+  id: "persona-1",
+  name: "Alice",
+  title: "",
+  description: "",
+  subjective_pronoun: "",
+  objective_pronoun: "",
+  possessive_pronoun: "",
+  folder: "",
+  avatar_path: null,
+  image_id: null,
+  is_default: true,
+  is_narrator: false,
+  attached_world_book_id: null,
   metadata: {},
   created_at: 0,
   updated_at: 0,
@@ -100,5 +120,185 @@ describe("buildEnv firstMessage", () => {
     });
 
     expect(env.character.firstMessage).toBe("Group greeting");
+  });
+});
+
+describe("buildEnv persona pronouns", () => {
+  test("defaults blank persona pronouns to neutral values", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: basePersona,
+      chat: baseChat,
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.character.personaSubjectivePronoun).toBe("they");
+    expect(env.character.personaObjectivePronoun).toBe("them");
+    expect(env.character.personaPossessivePronoun).toBe("their");
+  });
+
+  test("uses configured persona pronouns when present", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: {
+        ...basePersona,
+        subjective_pronoun: " she ",
+        objective_pronoun: " her ",
+        possessive_pronoun: " her ",
+      },
+      chat: baseChat,
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.character.personaSubjectivePronoun).toBe("she");
+    expect(env.character.personaObjectivePronoun).toBe("her");
+    expect(env.character.personaPossessivePronoun).toBe("her");
+  });
+});
+
+describe("buildEnv rejected swipe", () => {
+  test("defaults rejectedSwipe to empty", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: baseChat,
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.chat.rejectedSwipe).toBe("");
+  });
+
+  test("threads rejectedSwipe into chat macro state", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: baseChat,
+      messages: [],
+      generationType: "regenerate",
+      connection: null,
+      rejectedSwipe: "Yes I am!",
+    });
+
+    expect(env.chat.rejectedSwipe).toBe("Yes I am!");
+  });
+});
+
+describe("buildEnv variables", () => {
+  test("does not rehydrate transient local macro variables from chat metadata", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: {
+        ...baseChat,
+        metadata: {
+          macro_variables: {
+            local: { stale: "from-disabled-block" },
+            global: { theme: "noir" },
+          },
+          chat_variables: { mood: "calm" },
+        },
+      },
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.variables.local.has("stale")).toBe(false);
+    expect(env.variables.global.get("theme")).toBe("noir");
+    expect(env.variables.chat.get("mood")).toBe("calm");
+  });
+});
+
+describe("buildEnv lastMessageTime", () => {
+  test("is undefined when there are no messages", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: baseChat,
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.extra.lastMessageTime).toBeUndefined();
+  });
+
+  test("is derived from the last message's send_date in milliseconds", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: baseChat,
+      messages: [
+        makeMessage({ content: "Hello", send_date: 1_700_000_000 }),
+        makeMessage({ id: "msg-2", content: "World", index_in_chat: 1, send_date: 1_700_000_060 }),
+      ],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.extra.lastMessageTime).toBe(1_700_000_060_000);
+  });
+});
+
+describe("buildEnv groupCardMode", () => {
+  test("returns 'solo' for non-group chats regardless of metadata", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: { ...baseChat, metadata: { group_card_mode: "merge" } },
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+    expect(env.names.groupCardMode).toBe("solo");
+    expect(env.names.isGroupChat).toBe("no");
+  });
+
+  test("returns the raw mode for group chats with merge / merge_ignore_muted", () => {
+    for (const mode of ["merge", "merge_ignore_muted"]) {
+      const env = buildEnv({
+        character: baseCharacter,
+        persona: null,
+        chat: {
+          ...baseChat,
+          metadata: {
+            group: true,
+            character_ids: ["char-1", "char-2"],
+            group_card_mode: mode,
+          },
+        },
+        messages: [],
+        generationType: "normal",
+        connection: null,
+      });
+      expect(env.names.groupCardMode).toBe(mode);
+    }
+  });
+
+  test("defaults to 'swap' for group chats with an unset or unrecognized mode", () => {
+    for (const raw of [undefined, null, "", "garbage", 42]) {
+      const env = buildEnv({
+        character: baseCharacter,
+        persona: null,
+        chat: {
+          ...baseChat,
+          metadata: {
+            group: true,
+            character_ids: ["char-1", "char-2"],
+            ...(raw !== undefined ? { group_card_mode: raw } : {}),
+          },
+        },
+        messages: [],
+        generationType: "normal",
+        connection: null,
+      });
+      expect(env.names.groupCardMode).toBe("swap");
+    }
   });
 });

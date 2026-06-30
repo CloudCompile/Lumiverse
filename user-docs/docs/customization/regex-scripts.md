@@ -1,3 +1,7 @@
+---
+title: Regex Scripts
+---
+
 # Regex Scripts
 
 Regex scripts are text transformation rules that automatically find and replace patterns in your messages. They can clean up formatting, enforce style rules, or transform content at various stages of the pipeline.
@@ -48,8 +52,11 @@ This converts `*italic text*` into `<em>italic text</em>`.
 | **AI Output** | The AI's response |
 | **World Info** | World book entry content |
 | **Reasoning** | Reasoning/thinking blocks |
+| **Memory** | Content as it's written to long-term memory |
 
 You can select multiple placements for the same script.
+
+**Memory** placement is independent of target: it strips text as it's saved to long-term memory (vector search and the memory cortex), before storage and embedding, while the displayed message keeps the full text. Use it to keep tracker or HUD blocks out of recalled memory. Macros aren't available at ingestion, so memory scripts must use literal patterns.
 
 ---
 
@@ -88,7 +95,7 @@ You can select multiple placements for the same script.
 | **Min/Max Depth** | Only apply to messages within a depth range |
 | **Trim Strings** | Additional strings to strip from matches |
 | **Run on Edit** | Re-run when you edit a message |
-| **Substitute Macros** | Replace macros in the replacement string (`none`, `raw`, `escaped`) |
+| **Substitute Macros** | Replace macros in the **find** and **replace** strings. Modes: `none` (no substitution), `raw` (substitute before matching, capture groups see the raw output), `escaped` (substitute and regex-escape the result so special characters in macro output don't break the pattern), `after` (substitute *after* the match runs — useful when you want capture groups to feed into a macro in the replacement string) |
 | **Folder** | Organizational grouping |
 
 ---

@@ -1,4 +1,6 @@
 import { useState, useMemo, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import { Pencil, Trash2, ChevronDown, ChevronRight, Users2, X } from 'lucide-react'
 import { IconSettingsCog } from '@tabler/icons-react'
 import type { CouncilMember, CouncilToolDefinition } from 'lumiverse-spindle-types'
@@ -11,6 +13,10 @@ import LazyImage from '@/components/shared/LazyImage'
 import ToolSelector from './ToolSelector'
 import styles from '../CouncilManager.module.css'
 
+type CouncilMemberWithHistory = CouncilMember & {
+  toolHistoryRetention?: Record<string, number>
+}
+
 interface CouncilMemberItemProps {
   member: CouncilMember
   availableTools: CouncilToolDefinition[]
@@ -18,9 +24,13 @@ interface CouncilMemberItemProps {
   onDelete: () => void
 }
 
-export default function CouncilMemberItem({ member, availableTools, onUpdate, onDelete }: CouncilMemberItemProps) {
+export default function CouncilMemberItem({
+ member, availableTools, onUpdate, onDelete }: CouncilMemberItemProps) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
   const [expanded, setExpanded] = useState(false)
   const [showToolPicker, setShowToolPicker] = useState(false)
+  const memberWithHistory = member as CouncilMemberWithHistory
   const packsWithItems = useStore((s) => s.packsWithItems)
   const setPackWithItems = useStore((s) => s.setPackWithItems)
 
@@ -47,6 +57,14 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
     .map((name) => toolMap.get(name))
     .filter(Boolean) as CouncilToolDefinition[]
 
+  const updateToolHistoryRetention = (toolName: string, retain: number) => {
+    const current = memberWithHistory.toolHistoryRetention ?? {}
+    const next = { ...current }
+    if (retain <= 0) delete next[toolName]
+    else next[toolName] = retain
+    onUpdate(member.id, { toolHistoryRetention: next } as Partial<CouncilMember>)
+  }
+
   return (
     <div className={styles.memberCard}>
       {/* Collapsed header row */}
@@ -62,10 +80,10 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
         <div className={styles.memberInfo}>
           <div className={styles.memberName}>{member.itemName}</div>
           <div className={styles.memberStats}>
-            <span className={styles.statBadge} title="Tools assigned">
+            <span className={styles.statBadge} title={t('councilManager.member.toolsAssigned')}>
               <IconSettingsCog size={10} /> {member.tools.length}
             </span>
-            <span className={styles.statBadge} title="Chance">
+            <span className={styles.statBadge} title={t('councilManager.member.chance')}>
               {member.chance}%
             </span>
           </div>
@@ -75,7 +93,7 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
             type="button"
             className={styles.actionBtnDanger}
             onClick={(e) => { e.stopPropagation(); onDelete() }}
-            title="Remove"
+            title={tc('actions.delete')}
           >
             <Trash2 size={13} />
           </button>
@@ -90,19 +108,19 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
         <div className={styles.memberBody}>
           {/* Role */}
           <div className={styles.inlineField}>
-            <span className={styles.inlineLabel}>Role:</span>
+            <span className={styles.inlineLabel}>{t('councilManager.member.role')}</span>
             <span className={styles.inlineValue}>
               {member.role ? (
                 <TextInput
                   value={member.role}
                   onChange={(val) => onUpdate(member.id, { role: val })}
-                  placeholder="e.g. Plot Enforcer"
+                  placeholder={t('councilManager.member.rolePlaceholder')}
                 />
               ) : (
                 <TextInput
                   value=""
                   onChange={(val) => onUpdate(member.id, { role: val })}
-                  placeholder="No role set"
+                  placeholder={t('councilManager.member.noRoleSet')}
                 />
               )}
             </span>
@@ -110,7 +128,7 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
 
           {/* Chance */}
           <div className={styles.inlineField}>
-            <span className={styles.inlineLabel}>% Chance:</span>
+            <span className={styles.inlineLabel}>{t('councilManager.member.chanceLabel')}</span>
             <div className={styles.chanceRow}>
               <NumberStepper
                 value={member.chance}
@@ -119,7 +137,7 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
                 max={100}
                 step={5}
               />
-              <span className={styles.chanceHint}>Likelihood of contributing each generation</span>
+              <span className={styles.chanceHint}>{t('councilManager.member.chanceHint')}</span>
             </div>
           </div>
 
@@ -130,35 +148,54 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
           <div className={styles.toolsSection}>
             <div className={styles.toolsSectionHeader}>
               <span className={styles.inlineLabel}>
-                <IconSettingsCog size={12} /> Tools:
+                <IconSettingsCog size={12} /> {t('councilManager.member.tools')}
               </span>
               <button
                 type="button"
                 className={styles.assignToolsBtn}
                 onClick={() => setShowToolPicker(!showToolPicker)}
               >
-                {showToolPicker ? 'Done' : 'Assign Tools'}
+                {showToolPicker ? t('councilManager.member.done') : t('councilManager.member.assignTools')}
               </button>
             </div>
 
             {/* Tool pills */}
             {assignedTools.length > 0 ? (
-              <div className={styles.toolPills}>
-                {assignedTools.map((tool) => (
-                  <span key={tool.name} className={tool.category === 'extension' ? styles.toolPillExtension : styles.toolPill}>
-                    {tool.displayName}
-                    <button
-                      type="button"
-                      className={styles.toolPillRemove}
-                      onClick={() => onUpdate(member.id, { tools: member.tools.filter((t) => t !== tool.name) })}
-                    >
-                      <X size={10} />
-                    </button>
-                  </span>
-                ))}
-              </div>
+              <>
+                <div className={styles.toolPills}>
+                  {assignedTools.map((tool) => (
+                    <span key={tool.name} className={tool.category === 'extension' ? styles.toolPillExtension : styles.toolPill}>
+                      {tool.displayName}
+                      <button
+                        type="button"
+                        className={styles.toolPillRemove}
+                        onClick={() => onUpdate(member.id, { tools: member.tools.filter((t) => t !== tool.name) })}
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className={styles.toolHistoryControls}>
+                  {assignedTools.map((tool) => (
+                    <div key={tool.name} className={styles.toolHistoryRow}>
+                      <div className={styles.toolHistoryInfo}>
+                        <span className={styles.toolHistoryName}>{tool.displayName}</span>
+                        <span className={styles.toolHistoryHint}>{t('councilManager.member.toolHistoryHint')}</span>
+                      </div>
+                      <NumberStepper
+                        value={memberWithHistory.toolHistoryRetention?.[tool.name] ?? 0}
+                        onChange={(val) => updateToolHistoryRetention(tool.name, val)}
+                        min={0}
+                        max={10}
+                        step={1}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </>
             ) : (
-              <div className={styles.noTools}>No tools assigned</div>
+              <div className={styles.noTools}>{t('councilManager.member.noTools')}</div>
             )}
 
             {/* Tool picker */}
@@ -174,9 +211,7 @@ export default function CouncilMemberItem({ member, availableTools, onUpdate, on
           </div>
 
           {/* Helper text */}
-          <div className={styles.memberHelperText}>
-            Each member's inherent traits are auto-attached when added. Use the role field to define their expertise, which enhances tool contributions.
-          </div>
+          <div className={styles.memberHelperText}>{t('councilManager.member.helperText')}</div>
         </div>
       )}
     </div>

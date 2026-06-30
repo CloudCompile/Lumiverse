@@ -2,6 +2,7 @@ export interface WorldBook {
   id: string;
   name: string;
   description: string;
+  folder: string;
   metadata: Record<string, any>;
   created_at: number;
   updated_at: number;
@@ -104,6 +105,14 @@ export interface WorldBookDiagnostics {
     threshold_rejected: number;
     hits_after_rerank_cutoff: number;
     rerank_rejected: number;
+    timings_ms: {
+      query_build: number;
+      query_embed: number;
+      search: number;
+      ranking: number;
+      merge: number;
+      total: number;
+    };
   };
   keyword_hits: Array<{
     entry_id: string;
@@ -222,6 +231,7 @@ export interface WorldBookDiagnostics {
 export interface CreateWorldBookInput {
   name: string;
   description?: string;
+  folder?: string;
   metadata?: Record<string, any>;
 }
 
@@ -298,11 +308,19 @@ export interface WorldBookEntryBulkAddKeywordInput {
   target?: "primary" | "secondary";
 }
 
+export interface WorldBookEntryBulkSetPositionInput {
+  action: "set_position";
+  entry_ids: string[];
+  position: number;
+  depth?: number;
+}
+
 export type WorldBookEntryBulkActionInput =
   | WorldBookEntryBulkDeleteInput
   | WorldBookEntryBulkMoveInput
   | WorldBookEntryBulkRenumberInput
-  | WorldBookEntryBulkAddKeywordInput;
+  | WorldBookEntryBulkAddKeywordInput
+  | WorldBookEntryBulkSetPositionInput;
 
 export interface WorldBookEntryBulkActionResult {
   action: WorldBookEntryBulkActionInput["action"];
@@ -320,4 +338,5 @@ export interface WorldInfoCache {
   depth: Array<{ content: string; depth: number; role: "system" | "user" | "assistant"; entryLabel: string }>; // position 4
   emBefore: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;       // position 5
   emAfter: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;        // position 6
+  atMarker: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;       // position 7
 }

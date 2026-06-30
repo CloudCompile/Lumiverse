@@ -11,6 +11,13 @@
   color: var(--lumiverse-text-muted);
 }
 
+.createActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .createBtn {
   display: flex;
   align-items: center;
@@ -107,6 +114,12 @@
 .bindingCardHint {
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-muted);
+}
+
+.toggleStack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .list {

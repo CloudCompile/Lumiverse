@@ -127,10 +127,19 @@ When multiple interceptors inject parameters, they are merged in priority order 
 ```ts
 interface LlmMessageDTO {
   role: "system" | "user" | "assistant"
-  content: string
+  content: string | LlmMessagePartDTO[]
   name?: string
 }
+
+type LlmMessagePartDTO =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mime_type: string }
+  | { type: "audio"; data: string; mime_type: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }
 ```
+
+`content` accepts a plain string or an array of typed parts. Tool calls and tool results are first-class parts — see [Generation › Tool calling](generation.md#tool-calling).
 
 ## Context Object
 

@@ -1,10 +1,14 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, useDeferredValue, type ReactNode, Fragment } from 'react'
+import { useTranslation } from 'react-i18next'
+import i18n from '@/i18n'
+
 import {
   DndContext,
   closestCenter,
   MouseSensor,
   TouchSensor,
   KeyboardSensor,
+  useDroppable,
   useSensor,
   useSensors,
 } from '@dnd-kit/core'
@@ -15,7 +19,7 @@ import {
   verticalListSortingStrategy,
   useSortable,
 } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
+import { useScaledSortableStyle } from '@/lib/dndUiScale'
 import {
   GripVertical,
   ChevronDown,
@@ -39,6 +43,7 @@ import {
   FileText,
   Zap,
   Settings2,
+  Braces,
   RotateCcw,
   Wifi,
   Code2,
@@ -52,28 +57,27 @@ import {
   Camera,
   Link,
   Unlink,
+  Shield,
 } from 'lucide-react'
 import clsx from 'clsx'
 import ExpandedTextEditor, { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { ModalShell } from '@/components/shared/ModalShell'
+import { RangeSlider } from '@/components/shared/RangeSlider'
 import { resolveMacros as resolveMacrosApi } from '@/api/macros'
 import { useLoomBuilder } from '@/hooks/useLoomBuilder'
 import { usePresetProfiles } from '@/hooks/usePresetProfiles'
 import { computeGroups, createBlock, createMarkerBlock } from '@/lib/loom/service'
 import {
-  MARKER_NAMES,
   PROMPT_TEMPLATES,
-  ADDABLE_MARKERS,
-  INJECTION_TRIGGER_TYPES,
   PROVIDER_DISPLAY_NAMES,
-  CONTINUE_POSTFIX_OPTIONS,
-  NAMES_BEHAVIOR_OPTIONS,
+  INJECTION_TRIGGER_TYPES,
   DEFAULT_SAMPLER_OVERRIDES,
   DEFAULT_PROMPT_BEHAVIOR,
   DEFAULT_COMPLETION_SETTINGS,
   DEFAULT_ADVANCED_SETTINGS,
 } from '@/lib/loom/constants'
-import type { PromptBlock, PromptVariableDef, LoomConnectionProfile, SamplerParam, MacroGroup, CategoryGroup } from '@/lib/loom/types'
+import type { PromptBlock, PromptVariableDef, PromptVariableValues, LoomConnectionProfile, SamplerParam, MacroGroup, CategoryGroup, LoomPreset } from '@/lib/loom/types'
+import { useLoomOptionLabels } from '@/lib/i18n/loomOptionLabels'
 import { PromptVariablesModal } from '@/components/shared/PromptVariablesModal'
 import { VariablesEditor } from './PromptVariablesEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -84,7 +88,12 @@ import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import { Toggle } from '@/components/shared/Toggle'
 import { Button } from '@/components/shared/FormComponents'
 import { toast } from '@/lib/toast'
+import { markLoomRuntimeProfileContext } from '@/lib/loom/runtimeProfile'
 import s from './LoomBuilder.module.css'
+
+function useLb() {
+  return useTranslation('panels', { keyPrefix: 'loomBuilder' })
+}
 
 // ============================================================================
 // HELPERS
@@ -93,7 +102,7 @@ import s from './LoomBuilder.module.css'
 function formatProfileLabel(connectionProfile: LoomConnectionProfile | null) {
   const sourceName = PROVIDER_DISPLAY_NAMES[connectionProfile?.source || '']
     || connectionProfile?.source
-    || 'Unknown'
+    || i18n.t('unknownProvider', { ns: 'panels', keyPrefix: 'loomBuilder' })
   const modelName = connectionProfile?.model?.split('/').pop() || null
   return { sourceName, modelName }
 }
@@ -114,6 +123,94 @@ const ROLE_DISPLAY_LABELS: Record<string, string> = {
   assistant_append: 'asst+',
 }
 
+const ROOT_DROP_PREFIX = 'root-drop:'
+
+function parseRootDropId(id: unknown) {
+  if (typeof id !== 'string' || !id.startsWith(ROOT_DROP_PREFIX)) return null
+  const index = Number(id.slice(ROOT_DROP_PREFIX.length).split(':', 1)[0])
+  return Number.isFinite(index) ? index : null
+}
+
+function rootDropId(index: number, appendCategoryId?: string) {
+  return `${ROOT_DROP_PREFIX}${index}${appendCategoryId ? `:category:${appendCategoryId}` : ''}`
+}
+
+function hasExplicitGroup(block: PromptBlock) {
+  return block.group !== undefined
+}
+
+function blockGroup(block: PromptBlock) {
+  return block.group ?? null
+}
+
+function sanitizeSealedBlockKey(value: string) {
+  return value.trim().replace(/[^A-Za-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function filterSealedBlockKeyInput(value: string) {
+  return value.replace(/[^A-Za-z0-9._:-]+/g, '-')
+}
+
+function suggestedSealedBlockKey(block: PromptBlock, name: string) {
+  const fromTitle = (name || block.name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+  return fromTitle || sanitizeSealedBlockKey(block.id).toLowerCase() || block.id.toLowerCase()
+}
+
+function inferGroupAtIndex(blocks: PromptBlock[], index: number) {
+  const target = blocks[index]
+  if (!target || target.marker === 'category') return null
+  if (hasExplicitGroup(target)) return blockGroup(target)
+
+  for (let i = index - 1; i >= 0; i--) {
+    if (blocks[i].marker === 'category') return blocks[i].id
+  }
+  return null
+}
+
+function getCategoryEndIndex(blocks: PromptBlock[], categoryId: string) {
+  const categoryIndex = blocks.findIndex((block) => block.id === categoryId)
+  if (categoryIndex === -1) return -1
+
+  let endIndex = categoryIndex + 1
+  while (endIndex < blocks.length) {
+    const block = blocks[endIndex]
+    if (block.marker === 'category') break
+    if (hasExplicitGroup(block) && blockGroup(block) !== categoryId) break
+    endIndex += 1
+  }
+  return endIndex
+}
+
+function parseRootDropCategoryId(id: unknown) {
+  if (typeof id !== 'string' || !id.startsWith(ROOT_DROP_PREFIX)) return null
+  const marker = ':category:'
+  const markerIndex = id.indexOf(marker)
+  return markerIndex === -1 ? null : id.slice(markerIndex + marker.length) || null
+}
+
+function RootDropSlot({ id, active, appendArmed }: { id: string; active: boolean; appendArmed?: boolean }) {
+  const { t } = useLb()
+  const { setNodeRef, isOver } = useDroppable({ id, disabled: !active })
+  return (
+    <div className={s.rootDropSlotWrap}>
+      <div
+        ref={setNodeRef}
+        className={clsx(
+          s.rootDropSlot,
+          active && s.rootDropSlotActive,
+          isOver && s.rootDropSlotOver,
+          appendArmed && s.rootDropSlotAppendArmed,
+        )}
+        aria-label={appendArmed
+          ? t('block.dropAtCategoryEnd', { defaultValue: 'Drop at bottom of category' })
+          : t('block.dropAtRoot', { defaultValue: 'Drop at root level' })}
+      />
+    </div>
+  )
+}
+
 // ============================================================================
 // SORTABLE CATEGORY ITEM
 // ============================================================================
@@ -132,8 +229,9 @@ interface SortableCategoryItemProps {
 function SortableCategoryItem({
   block, isCollapsed, onToggleCollapse, onEdit, onDelete, onToggle, childCount, dragDisabled = false,
 }: SortableCategoryItemProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
-  const style = { transform: CSS.Transform.toString(transform), transition }
+  const { t } = useLb()
+  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
+  const { setNodeRef, style } = useScaledSortableStyle({ setNodeRef: setSortableRef, transform, transition, isDragging })
   const isDisabled = !block.enabled
   const displayName = block.name.replace(/^\u2501\s*/, '')
 
@@ -147,11 +245,11 @@ function SortableCategoryItem({
         {...attributes}
         {...listeners}
         className={clsx(s.dragHandle, dragDisabled && s.dragHandleDisabled)}
-        title={dragDisabled ? 'Reordering disabled while searching' : 'Drag to reorder (moves all items in this category)'}
+        title={dragDisabled ? t('category.dragDisabledSearch') : t('category.dragReorderCategory')}
       >
         <GripVertical size={14} />
       </span>
-      <Button size="icon-sm" variant="ghost" onClick={onToggleCollapse} title={isCollapsed ? 'Expand category' : 'Collapse category'}>
+      <Button size="icon-sm" variant="ghost" onClick={onToggleCollapse} title={isCollapsed ? t('category.expand') : t('category.collapse')}>
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </Button>
       <div className={s.categoryMeta} onClick={onToggleCollapse}>
@@ -162,18 +260,18 @@ function SortableCategoryItem({
           <span className={s.categoryCount}>({childCount})</span>
           {block.categoryMode && (
             <span className={s.groupBadge}>
-              {block.categoryMode === 'radio' ? 'pick one' : 'multi'}
+              {block.categoryMode === 'radio' ? t('category.pickOne') : t('category.multi')}
             </span>
           )}
         </span>
       </div>
-      <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable category' : 'Enable category'}>
+      <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? t('category.disable') : t('category.enable')}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
       </Button>
-      <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title="Rename">
+      <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title={t('category.rename')}>
         <Edit2 size={14} />
       </Button>
-      <Button size="icon-sm" variant="danger-ghost" onClick={() => onDelete(block.id)} title="Delete category">
+      <Button size="icon-sm" variant="danger-ghost" onClick={() => onDelete(block.id)} title={t('category.deleteCategory')}>
         <Trash2 size={14} />
       </Button>
     </div>
@@ -194,8 +292,10 @@ interface SortableBlockItemProps {
 }
 
 function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDisabled = false }: SortableBlockItemProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
-  const style = { transform: CSS.Transform.toString(transform), transition }
+  const { t } = useLb()
+  const { t: tc } = useTranslation('common')
+  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
+  const { setNodeRef, style } = useScaledSortableStyle({ setNodeRef: setSortableRef, transform, transition, isDragging })
   const isMarker = block.marker && block.marker !== 'category'
   const isDisabled = !block.enabled
   const preview = block.content ? block.content.substring(0, 50) + (block.content.length > 50 ? '...' : '') : ''
@@ -210,7 +310,7 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
         {...attributes}
         {...listeners}
         className={clsx(s.dragHandle, dragDisabled && s.dragHandleDisabled)}
-        title={dragDisabled ? 'Reordering disabled while searching' : 'Drag to reorder'}
+        title={dragDisabled ? t('block.dragDisabledSearch') : t('block.dragReorder')}
       >
         <GripVertical size={14} />
       </span>
@@ -219,6 +319,7 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
           <span className={s.blockName}>
             {isMarker && <Hash size={12} className={s.blockNameIcon} />}
             {block.isLocked && <Lock size={10} className={clsx(s.blockNameIcon, s.blockNameIconMuted)} />}
+            {block.sealed === true && <Shield size={10} className={clsx(s.blockNameIcon, s.blockNameIconSealed)} />}
             <span className={s.blockNameText}>{block.name}</span>
           </span>
           <span className={s.blockMetaRow}>
@@ -226,7 +327,7 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
               <span className={clsx(s.badge, ROLE_BADGES[block.role] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[block.role] || block.role}</span>
             )}
             {isMarker && (
-              <span className={clsx(s.badge, s.badgeMarker)}>marker</span>
+              <span className={clsx(s.badge, s.badgeMarker)}>{t('block.marker')}</span>
             )}
             {block.injectionTrigger?.length > 0 && (
               <span className={s.triggerBadgeList}>
@@ -240,14 +341,14 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
         </div>
         {preview && !isMarker && <span className={s.blockPreview}>{preview}</span>}
       </div>
-      <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? 'Disable' : 'Enable'}>
+      <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? t('block.disable') : t('block.enable')}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
       </Button>
-      <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title="Edit">
+      <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title={tc('actions.edit')}>
         <Edit2 size={14} />
       </Button>
       {!block.isLocked && (
-        <Button size="icon-sm" variant="danger-ghost" onClick={() => onDelete(block.id)} title="Delete">
+        <Button size="icon-sm" variant="danger-ghost" onClick={() => onDelete(block.id)} title={tc('actions.delete')}>
           <Trash2 size={14} />
         </Button>
       )}
@@ -261,6 +362,8 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
 
 interface BlockEditorProps {
   block: PromptBlock
+  blocks: PromptBlock[]
+  promptVariables: PromptVariableValues
   onSave: (updates: Partial<PromptBlock>) => void
   onBack: () => void
   availableMacros: MacroGroup[]
@@ -268,13 +371,20 @@ interface BlockEditorProps {
   compact: boolean
 }
 
-function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, compact }: BlockEditorProps) {
+function BlockEditor({ block, blocks, promptVariables, onSave, onBack, availableMacros, refreshMacros, compact }: BlockEditorProps) {
+  const { t } = useLb()
+  const { t: tc } = useTranslation('common')
+  const { injectionTriggerTypes, injectionTriggerLabel } = useLoomOptionLabels()
+  const isInstalledLumiHubSealed = block.sealedSource === 'lumihub'
   const [name, setName] = useState(block.name)
   const [role, setRole] = useState<PromptBlock['role']>(block.role || 'system')
   const [content, setContent] = useState(block.content || '')
   const [position, setPosition] = useState<PromptBlock['position']>(block.position || 'pre_history')
   const [depth, setDepth] = useState(block.depth || 0)
   const [isLocked, setIsLocked] = useState(block.isLocked || false)
+  const [sealControlsOpen, setSealControlsOpen] = useState(block.sealed === true)
+  const [sealed, setSealed] = useState(block.sealed === true)
+  const [sealedKey, setSealedKey] = useState(typeof block.sealedKey === 'string' ? block.sealedKey : '')
   const [injectionTrigger, setInjectionTrigger] = useState<string[]>(block.injectionTrigger || [])
   const [categoryMode, setCategoryMode] = useState<PromptBlock['categoryMode']>(block.categoryMode ?? null)
   const [variables, setVariables] = useState<PromptVariableDef[]>(
@@ -301,19 +411,34 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
     if (previewTimerRef.current) clearTimeout(previewTimerRef.current)
     previewTimerRef.current = setTimeout(() => {
       setPreviewLoading(true)
-      resolveMacrosApi({ template: content, ...(activeChatId ? { chat_id: activeChatId } : {}) })
+      // Trim the preview to match the dry run: the assembly strips
+      // leading/trailing whitespace from each resolved block, except append
+      // roles, where it preserves whitespace for inter-append spacing.
+      const isAppend = role === 'user_append' || role === 'assistant_append'
+      const previewBlocks = blocks.map((b) =>
+        b.id === block.id
+          ? { ...b, content, role, position, depth, variables, enabled: true }
+          : b,
+      )
+      resolveMacrosApi({
+        template: content,
+        trim: !isAppend,
+        prompt_blocks: previewBlocks,
+        prompt_variables: promptVariables,
+        ...(activeChatId ? { chat_id: activeChatId } : {}),
+      })
         .then((res) => {
           setPreviewText(res.text)
           setPreviewDiagnostics(res.diagnostics)
         })
         .catch(() => {
-          setPreviewText('[Preview unavailable]')
+          setPreviewText(t('blockEditor.previewUnavailable'))
           setPreviewDiagnostics([])
         })
         .finally(() => setPreviewLoading(false))
     }, 500)
     return () => { if (previewTimerRef.current) clearTimeout(previewTimerRef.current) }
-  }, [content, showPreview, activeChatId])
+  }, [content, showPreview, activeChatId, role, blocks, block.id, position, depth, variables, promptVariables])
 
   const handlePositionChange = (newPosition: string) => {
     const pos = newPosition as PromptBlock['position']
@@ -326,11 +451,19 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
   const handleSave = () => {
     const isAppend = role === 'user_append' || role === 'assistant_append'
     const cleanedVariables = variables.filter((v) => v && v.name?.trim().length > 0)
+    const cleanSealedKey = sanitizeSealedBlockKey(sealedKey || block.sealedKey || block.id)
+    const shouldSeal = isInstalledLumiHubSealed || (sealed && !!cleanSealedKey)
     onSave({
       name, role, content,
       position: isAppend ? 'pre_history' : position,
       depth: (position === 'in_history' || isAppend) ? depth : 0,
       isLocked, injectionTrigger,
+      sealed: shouldSeal ? true : undefined,
+      sealedKey: shouldSeal ? cleanSealedKey : undefined,
+      sealedSource: isInstalledLumiHubSealed ? block.sealedSource : undefined,
+      sealedOriginPresetId: isInstalledLumiHubSealed ? block.sealedOriginPresetId : undefined,
+      sealedOriginVersion: isInstalledLumiHubSealed ? block.sealedOriginVersion : undefined,
+      sealedSha256: isInstalledLumiHubSealed ? block.sealedSha256 : undefined,
       categoryMode: block.marker === 'category' ? categoryMode : null,
       variables: cleanedVariables.length ? cleanedVariables : undefined,
     })
@@ -369,68 +502,68 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
     <div className={clsx(s.layout, compact && s.layoutCompact)}>
       {compact && (
         <div className={s.toolbar} style={{ justifyContent: 'space-between' }}>
-          <Button size="icon-sm" variant="ghost" onClick={onBack} title="Back to list"><ArrowLeft size={18} /></Button>
-          <span style={{ fontSize: 'calc(13px * var(--lumiverse-font-scale, 1))', fontWeight: 600 }}>Edit Block</span>
-          <button className={clsx(s.btn, s.btnPrimary, s.btnSmall)} onClick={handleSave} type="button"><Check size={12} /> Save</button>
+          <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+          <span style={{ fontSize: 'calc(13px * var(--lumiverse-font-scale, 1))', fontWeight: 600 }}>{t('blockEditor.title')}</span>
+          <button className={clsx(s.btn, s.btnPrimary, s.btnSmall)} onClick={handleSave} type="button"><Check size={12} /> {t('blockEditor.save')}</button>
         </div>
       )}
       {!compact && (
         <div className={s.header}>
-          <Button size="icon-sm" variant="ghost" onClick={onBack} title="Back to list"><ArrowLeft size={18} /></Button>
-          <h3 className={s.title}>Edit Block</h3>
+          <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+          <h3 className={s.title}>{t('blockEditor.title')}</h3>
           <div style={{ flex: 1 }} />
-          <button className={clsx(s.btn, s.btnPrimary)} onClick={handleSave} type="button"><Check size={14} /> Save</button>
+          <button className={clsx(s.btn, s.btnPrimary)} onClick={handleSave} type="button"><Check size={14} /> {t('blockEditor.save')}</button>
         </div>
       )}
       <div className={s.scrollArea}>
         <div className={s.form}>
           <div className={s.formGroup}>
-            <label className={s.label}>Name</label>
-            <input className={s.input} value={name} onChange={e => setName(e.target.value)} placeholder="Block name" />
+            <label className={s.label}>{t('blockEditor.name')}</label>
+            <input className={s.input} value={name} onChange={e => setName(e.target.value)} placeholder={t('blockEditor.namePlaceholder')} />
           </div>
 
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <div className={s.formGroup} style={{ flex: 1, minWidth: '120px' }}>
-              <label className={s.label}>Role</label>
+              <label className={s.label}>{t('blockEditor.role')}</label>
               <select className={s.select} value={role} onChange={e => setRole(e.target.value as PromptBlock['role'])}>
-                {position !== 'post_history' && <option value="system">System</option>}
-                <option value="user">User</option>
-                <option value="assistant">Assistant</option>
-                <option value="user_append">User Append</option>
-                <option value="assistant_append">Assistant Append</option>
+                {position !== 'post_history' && <option value="system">{t('blockEditor.roles.system')}</option>}
+                <option value="user">{t('blockEditor.roles.user')}</option>
+                <option value="assistant">{t('blockEditor.roles.assistant')}</option>
+                <option value="user_append">{t('blockEditor.roles.user_append')}</option>
+                <option value="assistant_append">{t('blockEditor.roles.assistant_append')}</option>
               </select>
             </div>
             {role !== 'user_append' && role !== 'assistant_append' && (
               <div className={s.formGroup} style={{ flex: 1, minWidth: '140px' }}>
-                <label className={s.label}>Position</label>
+                <label className={s.label}>{t('blockEditor.position')}</label>
                 <select className={s.select} value={position} onChange={e => handlePositionChange(e.target.value)}>
-                  <option value="pre_history">Before Chat History</option>
-                  <option value="post_history">After Chat History</option>
-                  <option value="in_history">Within Chat History</option>
+                  <option value="pre_history">{t('blockEditor.positions.pre_history')}</option>
+                  <option value="post_history">{t('blockEditor.positions.post_history')}</option>
+                  <option value="in_history">{t('blockEditor.positions.in_history')}</option>
                 </select>
               </div>
             )}
             {(position === 'in_history' || role === 'user_append' || role === 'assistant_append') && (
               <div className={s.formGroup} style={{ width: '100px' }}>
-                <label className={s.label}>Depth</label>
+                <label className={s.label}>{t('blockEditor.depth')}</label>
                 <NumberStepper value={depth} min={0} onChange={(v) => setDepth(v ?? 0)} />
               </div>
             )}
             {(role === 'user_append' || role === 'assistant_append') && (
               <div className={s.postHistoryNote} style={{ width: '100%' }}>
-                0 = last {role === 'user_append' ? 'user' : 'assistant'} message, 1 = second-to-last, etc.
+                {role === 'user_append' ? t('blockEditor.depthHintUser') : t('blockEditor.depthHintAssistant')}
               </div>
             )}
           </div>
 
           <div className={s.formGroup}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <label className={s.label}>Content</label>
+              <label className={s.label}>{t('blockEditor.content')}</label>
               <div style={{ display: 'flex', gap: '4px' }}>
                 <button className={clsx(s.btn, s.btnSmall)} onClick={() => { if (!showMacros) refreshMacros?.(); setShowMacros(!showMacros) }} type="button">
-                  <Hash size={12} /> {showMacros ? 'Hide Macros' : 'Insert Macro'}
+                  <Hash size={12} /> {showMacros ? t('blockEditor.hideMacros') : t('blockEditor.insertMacro')}
                 </button>
-                <button className={clsx(s.btn, s.btnSmall)} onClick={() => setShowExpandedEditor(true)} title="Expand editor" type="button">
+                <button className={clsx(s.btn, s.btnSmall)} onClick={() => setShowExpandedEditor(true)} title={t('blockEditor.expandEditor')} type="button">
                   <Maximize2 size={12} />
                 </button>
               </div>
@@ -440,7 +573,7 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
                 <div className={s.macroSearch}>
                   <div className={s.macroSearchInner}>
                     <Search size={12} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-                    <input className={s.macroSearchInput} placeholder="Search macros..." value={macroSearch} onChange={e => setMacroSearch(e.target.value)} />
+                    <input className={s.macroSearchInput} placeholder={t('blockEditor.searchMacros')} value={macroSearch} onChange={e => setMacroSearch(e.target.value)} />
                   </div>
                 </div>
                 {filteredMacros.map(group => (
@@ -456,12 +589,12 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
                 ))}
               </div>
             )}
-            <textarea ref={textareaRef} className={s.textarea} value={content} onChange={e => setContent(e.target.value)} placeholder="Enter prompt content... Use {{macros}} for dynamic content." />
+            <textarea ref={textareaRef} className={s.textarea} value={content} onChange={e => setContent(e.target.value)} placeholder={t('blockEditor.contentPlaceholder')} />
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
               <button className={clsx(s.btn, s.btnSmall, showPreview && s.btnPrimary)} onClick={() => setShowPreview(!showPreview)} type="button">
-                <Eye size={12} /> {showPreview ? 'Hide Preview' : 'Preview'}
+                <Eye size={12} /> {showPreview ? t('blockEditor.hidePreview') : t('blockEditor.preview')}
               </button>
-              {showPreview && previewLoading && <span style={{ fontSize: 'calc(10px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)' }}>Resolving...</span>}
+              {showPreview && previewLoading && <span style={{ fontSize: 'calc(10px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)' }}>{t('blockEditor.resolving')}</span>}
             </div>
             {showPreview && (
               <div className={s.previewPanel}>
@@ -474,37 +607,84 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
                     ))}
                   </div>
                 )}
-                <pre className={s.previewContent}>{previewLoading ? 'Resolving...' : (previewText === '' && content ? '(Empty Output)' : previewText || 'No content to preview')}</pre>
+                <pre className={s.previewContent}>{previewLoading ? t('blockEditor.resolving') : (previewText === '' && content ? t('blockEditor.emptyOutput') : previewText || t('blockEditor.noPreview'))}</pre>
               </div>
             )}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Toggle.Checkbox checked={isLocked} onChange={setIsLocked} label={<><Lock size={14} /> Lock block (prevent accidental edits)</>} />
+            <Toggle.Checkbox checked={isLocked} onChange={setIsLocked} label={<><Lock size={14} /> {t('blockEditor.lockBlock')}</>} />
           </div>
+
+          {!block.marker && (
+            <div className={clsx(s.sealedBlockPanel, sealed && s.sealedBlockPanelActive)}>
+              <button
+                className={s.sealedBlockReveal}
+                type="button"
+                onClick={() => {
+                  const nextOpen = !sealControlsOpen
+                  setSealControlsOpen(nextOpen)
+                  if (nextOpen && !sealedKey.trim()) setSealedKey(suggestedSealedBlockKey(block, name))
+                }}
+                aria-expanded={sealControlsOpen}
+              >
+                <span className={s.sealedBlockRevealCopy}>
+                  <Shield size={14} />
+                  <span>{t('blockEditor.sealedBlockTitle')}</span>
+                </span>
+                <ChevronDown size={14} className={clsx(s.sealedBlockChevron, sealControlsOpen && s.sealedBlockChevronOpen)} />
+              </button>
+              {sealControlsOpen && (
+                <div className={s.sealedBlockBody}>
+                  <p className={s.sealedBlockText}>{t(isInstalledLumiHubSealed ? 'blockEditor.sealedBlockInstalledHint' : 'blockEditor.sealedBlockHint')}</p>
+                  <div className={s.formGroup}>
+                    <label className={s.label}>{t('blockEditor.sealedBlockKey')}</label>
+                    <input
+                      className={s.input}
+                      value={sealedKey}
+                      onChange={e => setSealedKey(filterSealedBlockKeyInput(e.target.value))}
+                      placeholder={t('blockEditor.sealedBlockKeyPlaceholder')}
+                      spellCheck={false}
+                      disabled={isInstalledLumiHubSealed}
+                    />
+                    <span className={s.settingsHint}>{t('blockEditor.sealedBlockKeyHint')}</span>
+                  </div>
+                  <label className={clsx(s.sealedBlockArmRow, !sealedKey.trim() && s.sealedBlockArmRowDisabled)}>
+                    <input
+                      type="checkbox"
+                      checked={(isInstalledLumiHubSealed || sealed) && !!sealedKey.trim()}
+                      disabled={isInstalledLumiHubSealed || !sealedKey.trim()}
+                      onChange={e => setSealed(e.target.checked)}
+                    />
+                    <span>{t(isInstalledLumiHubSealed ? 'blockEditor.sealedBlockInstalledEnable' : 'blockEditor.sealedBlockEnable')}</span>
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
 
           {block.marker === 'category' && (
             <div className={s.formGroup}>
-              <label className={s.label}>Category Mode</label>
+              <label className={s.label}>{t('blockEditor.categoryMode')}</label>
               <select
                 className={s.select}
                 value={categoryMode || ''}
                 onChange={e => setCategoryMode((e.target.value || null) as PromptBlock['categoryMode'])}
               >
-                <option value="">Normal toggles</option>
-                <option value="checkbox">Multi-select</option>
-                <option value="radio">Pick one</option>
+                <option value="">{t('blockEditor.categoryModeNormal')}</option>
+                <option value="checkbox">{t('blockEditor.categoryModeMulti')}</option>
+                <option value="radio">{t('blockEditor.categoryModeRadio')}</option>
               </select>
               <span className={s.settingsHint}>
-                Applies to the blocks inside this category. Ungrouped blocks and categories left on normal toggles behave exactly as they do now.
+                {t('blockEditor.categoryModeHint')}
               </span>
             </div>
           )}
 
           <div className={s.formGroup}>
-            <label className={s.label}>Injection Triggers</label>
+            <label className={s.label}>{t('blockEditor.injectionTriggers')}</label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-              {INJECTION_TRIGGER_TYPES.map(trigger => (
+              {injectionTriggerTypes.map(trigger => (
                 <label key={trigger.value} className={clsx(s.triggerLabel, injectionTrigger.includes(trigger.value) ? s.triggerLabelActive : s.triggerLabelInactive)}>
                   <input type="checkbox" className={s.triggerCheckbox} checked={injectionTrigger.includes(trigger.value)} onChange={() => toggleTrigger(trigger.value)} />
                   {trigger.label}
@@ -513,8 +693,8 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
             </div>
             <span className={s.settingsHint}>
               {injectionTrigger.length === 0
-                ? 'No triggers selected \u2014 block fires on all generation types'
-                : `Block only fires on: ${injectionTrigger.join(', ')}`}
+                ? t('blockEditor.triggersNone')
+                : t('blockEditor.triggersActive', { list: injectionTrigger.map(injectionTriggerLabel).join(', ') })}
             </span>
           </div>
 
@@ -526,8 +706,8 @@ function BlockEditor({ block, onSave, onBack, availableMacros, refreshMacros, co
           value={content}
           onChange={setContent}
           onClose={() => setShowExpandedEditor(false)}
-          title={name || 'Edit Block'}
-          placeholder="Enter prompt content... Use {{macros}} for dynamic content."
+          title={name || t('blockEditor.title')}
+          placeholder={t('blockEditor.contentPlaceholder')}
           macros={availableMacros}
           onRefreshMacros={refreshMacros}
         />
@@ -555,6 +735,8 @@ interface PresetSelectorProps {
 }
 
 function PresetSelector({ registry, activePresetId, activePresetName, onSelect, onCreate, onRename, onDuplicate, onDelete, onImport, onExport, onExportLegacy }: PresetSelectorProps) {
+  const { t } = useLb()
+  const { t: tc } = useTranslation('common')
   const [showMenu, setShowMenu] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [showRename, setShowRename] = useState(false)
@@ -579,32 +761,32 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
       <select className={s.select} style={{ flex: 1, minWidth: 0 }} value={activePresetId || ''} onChange={e => onSelect(e.target.value || null)}>
-        <option value="">-- Select Preset --</option>
+        <option value="">{t('preset.selectPlaceholder')}</option>
         {registryEntries.map(([id, entry]) => (
-          <option key={id} value={id}>{entry.name} ({entry.blockCount} blocks)</option>
+          <option key={id} value={id}>{t('preset.blocksCount', { name: entry.name, count: entry.blockCount })}</option>
         ))}
       </select>
 
       <div style={{ position: 'relative' }}>
-        <Button size="icon-sm" variant="ghost" onClick={() => setShowMenu(!showMenu)} title="More options">
+        <Button size="icon-sm" variant="ghost" onClick={() => setShowMenu(!showMenu)} title={t('preset.moreOptions')}>
           <MoreVertical size={16} />
         </Button>
         {showMenu && (
           <div className={s.dropdownMenu} style={{ top: '100%', right: 0, minWidth: '160px' }}>
-            <MenuButton icon={<Plus size={14} />} label="New Preset" onClick={() => { setShowCreate(true); setShowMenu(false) }} />
+            <MenuButton icon={<Plus size={14} />} label={t('preset.newPreset')} onClick={() => { setShowCreate(true); setShowMenu(false) }} />
             {activePresetId && (
               <>
-                <MenuButton icon={<Edit2 size={14} />} label="Rename" onClick={() => { setRenameName(activePresetName || ''); setShowRename(true); setShowMenu(false) }} />
-                <MenuButton icon={<Copy size={14} />} label="Duplicate" onClick={() => { onDuplicate(); setShowMenu(false) }} />
-                <MenuButton icon={<Download size={14} />} label="Export Loom JSON" onClick={() => { onExport(); setShowMenu(false) }} />
-                <MenuButton icon={<Download size={14} />} label="Export Legacy Preset" onClick={() => { onExportLegacy(); setShowMenu(false) }} />
+                <MenuButton icon={<Edit2 size={14} />} label={t('preset.rename')} onClick={() => { setRenameName(activePresetName || ''); setShowRename(true); setShowMenu(false) }} />
+                <MenuButton icon={<Copy size={14} />} label={t('preset.duplicate')} onClick={() => { onDuplicate(); setShowMenu(false) }} />
+                <MenuButton icon={<Download size={14} />} label={t('preset.exportLoomJson')} onClick={() => { onExport(); setShowMenu(false) }} />
+                <MenuButton icon={<Download size={14} />} label={t('preset.exportLegacy')} onClick={() => { onExportLegacy(); setShowMenu(false) }} />
                 <hr className={s.menuDivider} />
-                <MenuButton icon={<Trash2 size={14} />} label="Delete" danger onClick={() => { onDelete(); setShowMenu(false) }} />
+                <MenuButton icon={<Trash2 size={14} />} label={tc('actions.delete')} danger onClick={() => { onDelete(); setShowMenu(false) }} />
               </>
             )}
             <hr className={s.menuDivider} />
-            <MenuButton icon={<Upload size={14} />} label="Import Legacy Preset" onClick={() => { onImport('st'); setShowMenu(false) }} />
-            <MenuButton icon={<Upload size={14} />} label="Import Loom JSON" onClick={() => { onImport('json'); setShowMenu(false) }} />
+            <MenuButton icon={<Upload size={14} />} label={t('preset.importLegacy')} onClick={() => { onImport('st'); setShowMenu(false) }} />
+            <MenuButton icon={<Upload size={14} />} label={t('preset.importLoomJson')} onClick={() => { onImport('json'); setShowMenu(false) }} />
           </div>
         )}
       </div>
@@ -612,13 +794,13 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
       <ModalShell isOpen={showCreate} onClose={() => setShowCreate(false)} maxWidth="clamp(320px, 90vw, min(420px, var(--lumiverse-content-max-width, 420px)))" className={s.presetNameModal}>
         <div className={s.presetNameHeader}>
           <Plus size={16} />
-          <h3 className={s.presetNameTitle}>New Loom Preset</h3>
+          <h3 className={s.presetNameTitle}>{t('preset.newTitle')}</h3>
         </div>
         <div className={s.presetNameBody}>
-          <input className={s.presetNameInput} placeholder="Preset name" value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCreate()} autoFocus />
+          <input className={s.presetNameInput} placeholder={t('preset.namePlaceholder')} value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleCreate()} autoFocus />
           <div className={s.presetNameActions}>
-            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnCancel)} onClick={() => setShowCreate(false)}>Cancel</button>
-            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnSubmit)} onClick={handleCreate} disabled={!newName.trim()}>Create</button>
+            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnCancel)} onClick={() => setShowCreate(false)}>{tc('actions.cancel')}</button>
+            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnSubmit)} onClick={handleCreate} disabled={!newName.trim()}>{t('preset.create')}</button>
           </div>
         </div>
       </ModalShell>
@@ -626,17 +808,42 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
       <ModalShell isOpen={showRename} onClose={() => setShowRename(false)} maxWidth="clamp(320px, 90vw, min(420px, var(--lumiverse-content-max-width, 420px)))" className={s.presetNameModal}>
         <div className={s.presetNameHeader}>
           <Edit2 size={16} />
-          <h3 className={s.presetNameTitle}>Rename Preset</h3>
+          <h3 className={s.presetNameTitle}>{t('preset.renameTitle')}</h3>
         </div>
         <div className={s.presetNameBody}>
-          <input className={s.presetNameInput} placeholder="Preset name" value={renameName} onChange={e => setRenameName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleRename()} autoFocus />
+          <input className={s.presetNameInput} placeholder={t('preset.namePlaceholder')} value={renameName} onChange={e => setRenameName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleRename()} autoFocus />
           <div className={s.presetNameActions}>
-            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnCancel)} onClick={() => setShowRename(false)}>Cancel</button>
-            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnSubmit)} onClick={handleRename} disabled={!renameName.trim()}>Rename</button>
+            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnCancel)} onClick={() => setShowRename(false)}>{tc('actions.cancel')}</button>
+            <button type="button" className={clsx(s.presetNameBtn, s.presetNameBtnSubmit)} onClick={handleRename} disabled={!renameName.trim()}>{t('preset.renameAction')}</button>
           </div>
         </div>
       </ModalShell>
     </div>
+  )
+}
+
+function PresetCoverHeader({ preset }: { preset: LoomPreset }) {
+  const { t } = useLb()
+  const coverUrl = preset.coverUrl?.trim()
+  if (!coverUrl) return null
+
+  const description = preset.description?.trim()
+
+  return (
+    <section className={s.presetCoverHeader} aria-label={t('preset.coverAria', { name: preset.name })}>
+      <img className={s.presetCoverImage} src={coverUrl} alt="" aria-hidden="true" />
+      <div className={s.presetCoverContent}>
+        <div className={s.presetCoverBadgeRow}>
+          <span className={s.presetCoverBadge}>{t('preset.lumihubBadge')}</span>
+          {preset.presetVersion && (
+            <span className={s.presetCoverBadge}>{t('preset.version', { version: preset.presetVersion })}</span>
+          )}
+          <span className={s.presetCoverBadge}>{t('preset.blocks', { count: preset.blocks.length })}</span>
+        </div>
+        <h2 className={s.presetCoverTitle}>{preset.name}</h2>
+        {description && <p className={s.presetCoverDescription}>{description}</p>}
+      </div>
+    </section>
   )
 }
 
@@ -670,15 +877,10 @@ function isSamplerParamSet(param: SamplerParam, value: number | null | undefined
 }
 
 function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
+  const { t } = useLb()
   const isSet = isSamplerParamSet(param, value)
   const hasIncludeToggle = !!param.includeToggle
   const isIncluded = hasIncludeToggle ? isSet : true
-  const trackRef = useRef<HTMLDivElement>(null)
-  const dragging = useRef(false)
-  const dragValueRef = useRef<number | null>(null)
-
-  const [localValue, setLocalValue] = useState<number | null>(null)
-  const currentValue = localValue !== null ? localValue : (isSet ? value! : param.defaultHint)
 
   const [localInput, setLocalInput] = useState(isSet ? String(value) : '')
   const inputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -690,45 +892,11 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
 
   useEffect(() => () => { if (inputTimerRef.current) clearTimeout(inputTimerRef.current) }, [])
 
-  const snap = useCallback((raw: number) => {
-    const clamped = Math.min(param.max, Math.max(param.min, raw))
-    const stepped = Math.round((clamped - param.min) / param.step) * param.step + param.min
+  const formatForInput = useCallback((val: number) => {
+    if (param.type === 'int') return String(Math.round(val))
     const decimals = (String(param.step).split('.')[1] || '').length
-    return param.type === 'int' ? Math.round(stepped) : parseFloat(stepped.toFixed(decimals))
-  }, [param.min, param.max, param.step, param.type])
-
-  const posToValue = useCallback((clientX: number) => {
-    const rect = trackRef.current?.getBoundingClientRect()
-    if (!rect || rect.width === 0) return currentValue
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
-    return snap(param.min + ratio * (param.max - param.min))
-  }, [param.min, param.max, currentValue, snap])
-
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
-    dragging.current = true
-    trackRef.current?.setPointerCapture(e.pointerId)
-    const val = posToValue(e.clientX)
-    dragValueRef.current = val
-    setLocalValue(val)
-  }, [posToValue])
-
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragging.current) return
-    const val = posToValue(e.clientX)
-    dragValueRef.current = val
-    setLocalValue(val)
-  }, [posToValue])
-
-  const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    if (!dragging.current) return
-    dragging.current = false
-    trackRef.current?.releasePointerCapture(e.pointerId)
-    const final = dragValueRef.current
-    dragValueRef.current = null
-    setLocalValue(null)
-    if (final !== null) onChange(param.key, final)
-  }, [param.key, onChange])
+    return val.toFixed(decimals)
+  }, [param.type, param.step])
 
   const commitInput = useCallback((raw: string) => {
     inputEditingRef.current = false
@@ -761,7 +929,23 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
     onChange(param.key, nextValue)
   }, [hasIncludeToggle, onChange, param.defaultHint, param.key, value])
 
-  const pct = ((currentValue - param.min) / (param.max - param.min)) * 100
+  // RangeSlider commit → propagate to parent. onDragValue mirrors the live
+  // drag value into the number input so the field tracks the thumb in real
+  // time; on cancel without commit (null), the useEffect above will resync
+  // localInput from the unchanged value prop.
+  const handleSliderCommit = useCallback((val: number) => {
+    onChange(param.key, val)
+  }, [onChange, param.key])
+
+  const handleSliderDragValue = useCallback((val: number | null) => {
+    if (val === null) {
+      setLocalInput(isSet ? String(value) : '')
+    } else {
+      setLocalInput(formatForInput(val))
+    }
+  }, [formatForInput, isSet, value])
+
+  const sliderValue = isSet ? value! : param.defaultHint
 
   return (
     <div className={s.sliderRow}>
@@ -790,19 +974,20 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
         />
       </div>
       <div
-        ref={trackRef}
-        className={s.sliderTrackArea}
-        onPointerDown={isIncluded ? handlePointerDown : undefined}
-        onPointerMove={isIncluded ? handlePointerMove : undefined}
-        onPointerUp={isIncluded ? handlePointerUp : undefined}
         onDoubleClick={() => onChange(param.key, null)}
-        title="Double-click to reset"
+        title={t('sampler.doubleClickReset')}
         style={{ opacity: !isIncluded ? 0.2 : isSet ? 1 : 0.4 }}
       >
-        <div className={s.sliderTrack}>
-          <div className={s.sliderFill} style={{ width: `${pct}%` }} />
-          <div className={s.sliderThumb} style={{ left: `${pct}%` }} />
-        </div>
+        <RangeSlider
+          min={param.min}
+          max={param.max}
+          step={param.step}
+          integer={param.type === 'int'}
+          value={sliderValue}
+          disabled={!isIncluded}
+          onCommit={handleSliderCommit}
+          onDragValue={handleSliderDragValue}
+        />
       </div>
     </div>
   )
@@ -823,6 +1008,7 @@ interface GenerationSettingsProps {
 }
 
 function GenerationSettings({ samplerOverrides, customBody, connectionProfile, samplerParams, onSaveSamplers, onSaveCustomBody, onRefreshProfile }: GenerationSettingsProps) {
+  const { t } = useLb()
   const [isExpanded, setIsExpanded] = useState(false)
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [localJson, setLocalJson] = useState(customBody?.rawJson || '{}')
@@ -872,7 +1058,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
         onClick={() => { setIsExpanded(!isExpanded); if (!isExpanded) onRefreshProfile() }}
       >
         <Settings2 size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-        <span className={s.accordionTitle}>Samplers</span>
+        <span className={s.accordionTitle}>{t('settings.samplers')}</span>
         {activeCount > 0 && <span className={s.accordionBadge}>{activeCount}</span>}
         {body.enabled && <Code2 size={10} style={{ color: 'var(--lumiverse-primary)', flexShrink: 0 }} />}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
@@ -880,9 +1066,9 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
       {isExpanded && (
         <div className={clsx(s.accordionBody, s.accordionBodyGen)}>
           <div className={s.samplerHeader}>
-            <span className={s.samplerLabel}>Samplers</span>
-            <button className={s.resetBtn} onClick={handleResetSamplers} title="Reset all sampler overrides to defaults" type="button">
-              <RotateCcw size={8} /> Reset
+            <span className={s.samplerLabel}>{t('settings.samplers')}</span>
+            <button className={s.resetBtn} onClick={handleResetSamplers} title={t('settings.resetAll')} type="button">
+              <RotateCcw size={8} /> {t('settings.reset')}
             </button>
           </div>
           {visibleParams.map(param => (
@@ -890,7 +1076,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
           ))}
           {visibleParams.length === 0 && (
             <div style={{ fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)', padding: '8px 0', textAlign: 'center' }}>
-              No sampler overrides available for this provider.
+              {t('settings.noSamplers')}
             </div>
           )}
           <hr className={s.menuDivider} style={{ margin: '8px 0 4px' }} />
@@ -898,14 +1084,14 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
             <Toggle.Checkbox
               checked={overrides.streaming !== false}
               onChange={(v) => onSaveSamplers({ ...overrides, enabled: true, streaming: v })}
-              label="Stream response"
-              hint="Disable to receive the full response at once instead of token-by-token"
+              label={t('settings.streamResponse')}
+              hint={t('settings.streamHint')}
             />
           </div>
           <hr className={s.menuDivider} style={{ margin: '4px 0 4px' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 0 4px' }}>
-            <span className={s.samplerLabel}>Custom Body</span>
-            <Toggle.Checkbox checked={!!body.enabled} onChange={handleToggleCustomBody} label="Enabled" />
+            <span className={s.samplerLabel}>{t('settings.customBody')}</span>
+            <Toggle.Checkbox checked={!!body.enabled} onChange={handleToggleCustomBody} label={t('settings.enabled')} />
           </div>
           <div style={body.enabled ? {} : { opacity: 0.35, pointerEvents: 'none' as const }}>
             <textarea
@@ -916,7 +1102,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
               spellCheck={false}
             />
             {jsonError && <div className={s.jsonError}><AlertTriangle size={10} /> {jsonError}</div>}
-            <div className={s.settingsHint} style={{ marginTop: '3px' }}>Keys are spread onto the request body.</div>
+            <div className={s.settingsHint} style={{ marginTop: '3px' }}>{t('settings.customBodyHint')}</div>
           </div>
         </div>
       )}
@@ -929,6 +1115,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
 // ============================================================================
 
 function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: any; onSave: (updates: Record<string, any>) => void }) {
+  const { t } = useLb()
   const [isExpanded, setIsExpanded] = useState(false)
   const behavior = promptBehavior || {}
   const defaults = DEFAULT_PROMPT_BEHAVIOR
@@ -941,7 +1128,7 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
   const handleChange = (key: string, value: string) => onSave({ [key]: value })
   const handleRestore = (key: string) => onSave({ [key]: defaults[key as keyof typeof defaults] })
 
-  const Field = ({ fieldKey, label, hint, multiline }: { fieldKey: string; label: string; hint?: string; multiline?: boolean }) => {
+  const renderField = ({ fieldKey, label, hint, multiline }: { fieldKey: string; label: string; hint?: string; multiline?: boolean }) => {
     const value = behavior[fieldKey] ?? defaults[fieldKey as keyof typeof defaults]
     const isDefault = value === defaults[fieldKey as keyof typeof defaults]
     return (
@@ -949,8 +1136,8 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span className={clsx(s.settingsFieldLabel, isDefault ? s.settingsFieldLabelDefault : s.settingsFieldLabelModified)}>{label}</span>
           {!isDefault && (
-            <button className={s.resetBtn} onClick={() => handleRestore(fieldKey)} title="Restore default" type="button">
-              <RotateCcw size={7} /> Default
+            <button className={s.resetBtn} onClick={() => handleRestore(fieldKey)} title={t('settings.restoreDefault')} type="button">
+              <RotateCcw size={7} /> {t('sampler.default')}
             </button>
           )}
         </div>
@@ -958,7 +1145,7 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
           className={s.settingsTextarea}
           value={value}
           onChange={next => handleChange(fieldKey, next)}
-          title={`${label} — Prompt Behavior`}
+          title={t('settings.promptBehaviorTitle', { label })}
           rows={multiline ? 4 : 2}
           spellCheck={false}
         />
@@ -971,19 +1158,19 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
     <div className={s.accordionSection}>
       <div className={clsx(s.accordionHeader, activeCount > 0 && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <MessageSquare size={12} style={{ color: activeCount > 0 ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-        <span className={s.accordionTitle}>Prompt Behavior</span>
+        <span className={s.accordionTitle}>{t('settings.promptBehavior')}</span>
         {activeCount > 0 && <span className={s.accordionBadge}>{activeCount}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
         <div className={s.accordionBody}>
-          <Field fieldKey="continueNudge" label="Continue Nudge" hint="Injected when continuing a response" multiline />
-          <Field fieldKey="emptySendNudge" label="Empty Send Nudge" hint="Injected when nudging for a fresh reply from an assistant-ending chat" multiline />
-          <Field fieldKey="impersonationPrompt" label="Impersonation Prompt" hint="Injected when impersonating the user" multiline />
-          <Field fieldKey="groupNudge" label="Group Nudge" hint="Injected in group chats" multiline />
-          <Field fieldKey="newChatPrompt" label="New Chat Separator" hint="Inserted at conversation start" />
-          <Field fieldKey="newGroupChatPrompt" label="New Group Chat Separator" hint="Inserted at group conversation start" />
-          <Field fieldKey="sendIfEmpty" label="Send If Empty" hint="Sent as a user message when the final assistant content is blank" />
+          {renderField({ fieldKey: 'continueNudge', label: t('settings.continueNudge'), hint: t('settings.continueNudgeHint'), multiline: true })}
+          {renderField({ fieldKey: 'emptySendNudge', label: t('settings.emptySendNudge'), hint: t('settings.emptySendNudgeHint'), multiline: true })}
+          {renderField({ fieldKey: 'impersonationPrompt', label: t('settings.impersonationPrompt'), hint: t('settings.impersonationPromptHint'), multiline: true })}
+          {renderField({ fieldKey: 'groupNudge', label: t('settings.groupNudge'), hint: t('settings.groupNudgeHint'), multiline: true })}
+          {renderField({ fieldKey: 'newChatPrompt', label: t('settings.newChatPrompt'), hint: t('settings.newChatPromptHint') })}
+          {renderField({ fieldKey: 'newGroupChatPrompt', label: t('settings.newGroupChatPrompt'), hint: t('settings.newGroupChatPromptHint') })}
+          {renderField({ fieldKey: 'sendIfEmpty', label: t('settings.sendIfEmpty'), hint: t('settings.sendIfEmptyHint') })}
         </div>
       )}
     </div>
@@ -995,6 +1182,8 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
 // ============================================================================
 
 function CompletionSettingsPanel({ completionSettings, onSave }: { completionSettings: any; onSave: (updates: Record<string, any>) => void }) {
+  const { t } = useLb()
+  const { continuePostfixOptions } = useLoomOptionLabels()
   const [isExpanded, setIsExpanded] = useState(false)
   const settings = completionSettings || {}
   const defaults = DEFAULT_COMPLETION_SETTINGS
@@ -1011,41 +1200,41 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
     <div className={s.accordionSection}>
       <div className={clsx(s.accordionHeader, activeCount > 0 && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <Bot size={12} style={{ color: activeCount > 0 ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-        <span className={s.accordionTitle}>Completion</span>
+        <span className={s.accordionTitle}>{t('settings.completion')}</span>
         {activeCount > 0 && <span className={s.accordionBadge}>{activeCount}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
         <div className={s.accordionBody}>
           <div className={s.settingsField}>
-            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Assistant Prefill</span>
-            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantPrefill ?? defaults.assistantPrefill} onChange={e => handleChange('assistantPrefill', e.target.value)} placeholder="Claude only — prepended to response" spellCheck={false} />
-            <span className={s.settingsHint}>Claude only — prepended to assistant response</span>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.assistantPrefill')}</span>
+            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantPrefill ?? defaults.assistantPrefill} onChange={e => handleChange('assistantPrefill', e.target.value)} placeholder={t('settings.assistantPrefillPlaceholder')} spellCheck={false} />
+            <span className={s.settingsHint}>{t('settings.assistantPrefillHint')}</span>
           </div>
           <div className={s.settingsField}>
-            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Impersonation Prefill</span>
-            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantImpersonation ?? defaults.assistantImpersonation} onChange={e => handleChange('assistantImpersonation', e.target.value)} placeholder="Claude only — prefill when impersonating" spellCheck={false} />
-            <span className={s.settingsHint}>Claude only — prefill when impersonating</span>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.impersonationPrefill')}</span>
+            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantImpersonation ?? defaults.assistantImpersonation} onChange={e => handleChange('assistantImpersonation', e.target.value)} placeholder={t('settings.impersonationPrefillPlaceholder')} spellCheck={false} />
+            <span className={s.settingsHint}>{t('settings.impersonationPrefillHint')}</span>
           </div>
           <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-            <Toggle.Checkbox checked={!!(settings.continuePrefill ?? defaults.continuePrefill)} onChange={v => handleChange('continuePrefill', v)} label="Continue Prefill" />
-            <Toggle.Checkbox checked={!!(settings.squashSystemMessages ?? defaults.squashSystemMessages)} onChange={v => handleChange('squashSystemMessages', v)} label="Squash System Messages" />
+            <Toggle.Checkbox checked={!!(settings.continuePrefill ?? defaults.continuePrefill)} onChange={v => handleChange('continuePrefill', v)} label={t('settings.continuePrefill')} />
+            <Toggle.Checkbox checked={!!(settings.squashSystemMessages ?? defaults.squashSystemMessages)} onChange={v => handleChange('squashSystemMessages', v)} label={t('settings.squashSystem')} />
           </div>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
-              <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Continue Postfix</span>
+              <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.continuePostfix')}</span>
               <select className={s.settingsInput} style={{ cursor: 'pointer' }} value={settings.continuePostfix ?? defaults.continuePostfix} onChange={e => handleChange('continuePostfix', e.target.value)}>
-                {CONTINUE_POSTFIX_OPTIONS.map(opt => <option key={opt.label} value={opt.value}>{opt.label}</option>)}
+                {continuePostfixOptions.map(opt => <option key={opt.value || 'none'} value={opt.value}>{opt.label}</option>)}
               </select>
             </div>
           </div>
           <hr className={s.menuDivider} />
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-            <Toggle.Checkbox checked={!!(settings.useSystemPrompt ?? defaults.useSystemPrompt)} onChange={v => handleChange('useSystemPrompt', v)} label="Use System Prompt" />
-            <Toggle.Checkbox checked={!!(settings.enableWebSearch ?? defaults.enableWebSearch)} onChange={v => handleChange('enableWebSearch', v)} label="Enable Web Search" />
-            <Toggle.Checkbox checked={!!(settings.sendInlineMedia ?? defaults.sendInlineMedia)} onChange={v => handleChange('sendInlineMedia', v)} label="Send Inline Media" />
-            <Toggle.Checkbox checked={!!(settings.enableFunctionCalling ?? defaults.enableFunctionCalling)} onChange={v => handleChange('enableFunctionCalling', v)} label="Enable Function Calling" />
-            <Toggle.Checkbox checked={!!(settings.includeUsage ?? defaults.includeUsage)} onChange={v => handleChange('includeUsage', v)} label="Include Usage" />
+            <Toggle.Checkbox checked={!!(settings.useSystemPrompt ?? defaults.useSystemPrompt)} onChange={v => handleChange('useSystemPrompt', v)} label={t('settings.useSystemPrompt')} />
+            <Toggle.Checkbox checked={!!(settings.enableWebSearch ?? defaults.enableWebSearch)} onChange={v => handleChange('enableWebSearch', v)} label={t('settings.enableWebSearch')} />
+            <Toggle.Checkbox checked={!!(settings.sendInlineMedia ?? defaults.sendInlineMedia)} onChange={v => handleChange('sendInlineMedia', v)} label={t('settings.sendInlineMedia')} />
+            <Toggle.Checkbox checked={!!(settings.enableFunctionCalling ?? defaults.enableFunctionCalling)} onChange={v => handleChange('enableFunctionCalling', v)} label={t('settings.enableFunctionCalling')} />
+            <Toggle.Checkbox checked={!!(settings.includeUsage ?? defaults.includeUsage)} onChange={v => handleChange('includeUsage', v)} label={t('settings.includeUsage')} />
           </div>
         </div>
       )}
@@ -1068,6 +1257,8 @@ function AdvancedSettingsPanel({
   onSave: (updates: Record<string, any>) => void
   onSaveCompletion: (updates: Record<string, any>) => void
 }) {
+  const { t } = useLb()
+  const { namesBehaviorOptions } = useLoomOptionLabels()
   const [isExpanded, setIsExpanded] = useState(false)
   const [stopInput, setStopInput] = useState('')
   const settings = advancedSettings || {}
@@ -1102,33 +1293,33 @@ function AdvancedSettingsPanel({
     <div className={s.accordionSection}>
       <div className={clsx(s.accordionHeader, isActive && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <Wrench size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
-        <span className={s.accordionTitle}>Advanced</span>
+        <span className={s.accordionTitle}>{t('settings.advanced')}</span>
         {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0) + (namesBehavior !== completionDefaults.namesBehavior ? 1 : 0)}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
         <div className={s.accordionBody}>
           <div className={s.settingsField} style={{ flex: '1 1 140px' }}>
-            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Names in Messages</span>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.namesInMessages')}</span>
             <select className={s.settingsInput} style={{ cursor: 'pointer' }} value={namesBehavior} onChange={e => onSaveCompletion({ namesBehavior: parseInt(e.target.value) })}>
-              {NAMES_BEHAVIOR_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+              {namesBehaviorOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
             </select>
-            <span className={s.settingsHint}>Controls how speaker names are represented when formatting messages, including collapsed mode.</span>
+            <span className={s.settingsHint}>{t('settings.namesHint')}</span>
           </div>
           <div className={s.settingsField}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Seed</span>
-              <button className={s.resetBtn} onClick={() => onSave({ seed: -1 })} title="Set to random (-1)" type="button">
-                <Dice1 size={7} /> Random
+              <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.seed')}</span>
+              <button className={s.resetBtn} onClick={() => onSave({ seed: -1 })} title={t('settings.seedRandom')} type="button">
+                <Dice1 size={7} /> {t('settings.random')}
               </button>
             </div>
-            <NumberStepper value={seed} min={-1} onChange={(v) => handleSeedChange(String(v ?? -1))} placeholder="-1 (random)" />
-            <span className={s.settingsHint}>-1 = random seed</span>
+            <NumberStepper value={seed} min={-1} onChange={(v) => handleSeedChange(String(v ?? -1))} placeholder={t('settings.seedPlaceholder')} />
+            <span className={s.settingsHint}>{t('settings.seedHint')}</span>
           </div>
           <div className={s.settingsField}>
-            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>Custom Stop Strings</span>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.customStopStrings')}</span>
             <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-              <input className={s.settingsInput} style={{ flex: 1 }} value={stopInput} onChange={e => setStopInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddStopString() } }} placeholder="Type and press Enter" />
+              <input className={s.settingsInput} style={{ flex: 1 }} value={stopInput} onChange={e => setStopInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddStopString() } }} placeholder={t('settings.stopPlaceholder')} />
               <button className={s.btn} style={{ padding: '4px 8px', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))' }} onClick={handleAddStopString} type="button">
                 <Plus size={10} />
               </button>
@@ -1143,10 +1334,10 @@ function AdvancedSettingsPanel({
                 ))}
               </div>
             )}
-            <span className={s.settingsHint}>Appended to the request stop sequences</span>
+            <span className={s.settingsHint}>{t('settings.stopHint')}</span>
           </div>
           <div className={s.settingsField}>
-            <Toggle.Checkbox checked={collapseMessages} onChange={v => onSave({ collapseMessages: v })} label="Collapse into single user message" hint="Merges all prompt blocks and chat history into one user message. Use with &quot;Names in Messages: In Content&quot; for turn separation." />
+            <Toggle.Checkbox checked={collapseMessages} onChange={v => onSave({ collapseMessages: v })} label={t('settings.collapseMessages')} hint={t('settings.collapseHint')} />
           </div>
         </div>
       )}
@@ -1159,6 +1350,7 @@ function AdvancedSettingsPanel({
 // ============================================================================
 
 function ContextMeter() {
+  const { t } = useLb()
   const breakdownCache = __contextMeterStore((s) => s.breakdownCache)
   const activeChatId = __contextMeterStore((s) => s.activeChatId)
   const messages = __contextMeterStore((s) => s.messages)
@@ -1178,7 +1370,7 @@ function ContextMeter() {
   if (!latestBreakdown) {
     return (
       <div className={s.contextMeter}>
-        <span>Context: N/A</span>
+        <span>{t('context.na')}</span>
       </div>
     )
   }
@@ -1194,7 +1386,7 @@ function ContextMeter() {
       className={s.contextMeter}
       style={{ cursor: 'pointer' }}
       onClick={() => openModal('promptItemizer', { messageId })}
-      title="Click to view full prompt breakdown"
+      title={t('context.breakdownTitle')}
     >
       <div className={s.contextBar}>
         {groups.map((g) => {
@@ -1202,7 +1394,7 @@ function ContextMeter() {
           if (segPct < 1) return null
           return (
             <div
-              key={g.label}
+              key={g.id}
               className={s.contextBarSegment}
               style={{ width: `${segPct}%`, background: g.color }}
             />
@@ -1210,7 +1402,7 @@ function ContextMeter() {
         })}
       </div>
       <span className={s.contextLabel}>
-        {total.toLocaleString()}{max > 0 ? ` / ${max.toLocaleString()} (${pct}%)` : ' tokens'}
+        {total.toLocaleString()}{max > 0 ? ` / ${max.toLocaleString()} (${pct}%)` : t('tokens')}
       </span>
     </div>
   )
@@ -1224,7 +1416,11 @@ interface LoomBuilderProps {
   compact?: boolean
 }
 
-export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
+export default function LoomBuilder({
+ compact = true }: LoomBuilderProps) {
+  const { t: lb } = useLb()
+  const { t: tc } = useTranslation('common')
+  const { addableMarkers, markerLabel, markerSectionLabel } = useLoomOptionLabels()
   const {
     registry,
     activePresetId,
@@ -1259,6 +1455,17 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
 
   const presetProfiles = usePresetProfiles(activePresetId, activePreset?.blocks)
   const addToast = __contextMeterStore((s) => s.addToast)
+  const activePresetRef = useRef(activePreset)
+  const suppressNextProfileApplyRef = useRef<string | null>(null)
+
+  const getProfileContextKey = useCallback(() => (
+    `${activePresetRef.current?.id ?? 'none'}:${presetProfiles.activeChatId ?? 'none'}:${presetProfiles.activeCharacterId ?? 'none'}:${presetProfiles.activeProfileId ?? 'none'}`
+  ), [presetProfiles.activeChatId, presetProfiles.activeCharacterId, presetProfiles.activeProfileId])
+
+  const captureDefaults = useCallback(() => {
+    suppressNextProfileApplyRef.current = getProfileContextKey()
+    void presetProfiles.captureDefaults()
+  }, [getProfileContextKey, presetProfiles])
 
   const reapplyDefaults = useCallback(() => {
     const binding = presetProfiles.defaults
@@ -1271,9 +1478,9 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     const changed = updatedBlocks.some((b, i) => b.enabled !== activePreset.blocks[i].enabled)
     if (changed) {
       saveBlocks(updatedBlocks)
-      addToast({ type: 'success', message: 'Default profile reapplied' })
+      addToast({ type: 'success', message: lb('profiles.reapplied') })
     } else {
-      addToast({ type: 'info', message: 'Block states already match defaults' })
+      addToast({ type: 'info', message: lb('profiles.alreadyDefault') })
     }
   }, [presetProfiles.defaults, activePreset, saveBlocks, addToast])
 
@@ -1287,18 +1494,14 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
   // activePreset is read through a ref so user-driven block toggles (which
   // mutate activePreset) don't re-fire this effect and fight the toggle by
   // re-applying the binding.
-  const activePresetRef = useRef(activePreset)
   const lastProfileContextRef = useRef<string | null>(null)
   activePresetRef.current = activePreset
 
   useEffect(() => {
     if (!presetProfiles.isResolved) return
 
-    const contextKey = `${presetProfiles.activeChatId ?? 'none'}:${presetProfiles.activeCharacterId ?? 'none'}:${presetProfiles.activeSource}`
+    const contextKey = `${activePresetRef.current?.id ?? 'none'}:${presetProfiles.activeChatId ?? 'none'}:${presetProfiles.activeCharacterId ?? 'none'}:${presetProfiles.activeProfileId ?? 'none'}`
     const contextChanged = lastProfileContextRef.current !== contextKey
-    if (contextChanged) {
-      lastProfileContextRef.current = contextKey
-    }
 
     if (
       presetProfiles.resolvedPresetId
@@ -1312,6 +1515,16 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     const binding = presetProfiles.activeBinding
     const currentBlocks = activePresetRef.current?.blocks
     if (!binding || !currentBlocks?.length) return
+
+    if (!contextChanged) return
+    if (suppressNextProfileApplyRef.current === contextKey) {
+      suppressNextProfileApplyRef.current = null
+      lastProfileContextRef.current = contextKey
+      markLoomRuntimeProfileContext(activePresetRef.current?.id, presetProfiles.activeChatId, presetProfiles.activeCharacterId, presetProfiles.activeProfileId)
+      return
+    }
+    lastProfileContextRef.current = contextKey
+    markLoomRuntimeProfileContext(activePresetRef.current?.id, presetProfiles.activeChatId, presetProfiles.activeCharacterId, presetProfiles.activeProfileId)
 
     const updatedBlocks = currentBlocks.map(b =>
       b.id in binding.block_states ? { ...b, enabled: binding.block_states[b.id] } : b
@@ -1329,6 +1542,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     presetProfiles.activeSource,
     presetProfiles.activeChatId,
     presetProfiles.activeCharacterId,
+    presetProfiles.activeProfileId,
     activePreset?.id,
     saveBlocks,
   ])
@@ -1338,16 +1552,21 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
   const [promptMenuOpen, setPromptMenuOpen] = useState(false)
   const [markerMenuOpen, setMarkerMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [confirmDeletePreset, setConfirmDeletePreset] = useState(false)
   const [showLegacyExportConfirm, setShowLegacyExportConfirm] = useState(false)
   const [showPromptVariablesModal, setShowPromptVariablesModal] = useState(false)
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
   const [isSearchOpen, setIsSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [activeDragId, setActiveDragId] = useState<string | null>(null)
+  const [hoveredAppendRootDropId, setHoveredAppendRootDropId] = useState<string | null>(null)
+  const [armedAppendRootDropId, setArmedAppendRootDropId] = useState<string | null>(null)
 
-  const hasConfigurableVariables = useMemo(() => {
-    return (activePreset?.blocks ?? []).some(
-      (b) => b.enabled && Array.isArray(b.variables) && b.variables.length > 0,
-    )
+  const configurableVariableCount = useMemo(() => {
+    return (activePreset?.blocks ?? []).reduce((count, b) => {
+      if (!b.enabled || !Array.isArray(b.variables)) return count
+      return count + b.variables.filter((v) => v && v.name).length
+    }, 0)
   }, [activePreset?.blocks])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importTypeRef = useRef<string>('json')
@@ -1435,6 +1654,22 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     return () => cancelAnimationFrame(frame)
   }, [isSearchVisible])
 
+  useEffect(() => {
+    if (!hoveredAppendRootDropId) {
+      setArmedAppendRootDropId(null)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setArmedAppendRootDropId(hoveredAppendRootDropId)
+    }, 3000)
+
+    return () => {
+      window.clearTimeout(timer)
+      setArmedAppendRootDropId(null)
+    }
+  }, [hoveredAppendRootDropId])
+
   const visibleBlockIds = useMemo(() => {
     const ids: string[] = []
     for (const group of displayedGroups) {
@@ -1449,6 +1684,32 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     }
     return ids
   }, [displayedGroups, collapsedCategories, isSearchActive])
+
+  const activeDraggedBlock = useMemo(() => {
+    if (!activeDragId) return null
+    return activePreset?.blocks.find((block) => block.id === activeDragId) ?? null
+  }, [activeDragId, activePreset?.blocks])
+
+  const rootDropIndexAfterGroup = useCallback((group: CategoryGroup) => {
+    const blocks = activePreset?.blocks ?? []
+    if (group.categoryBlock) {
+      const categoryIndex = blocks.findIndex((block) => block.id === group.categoryBlock!.id)
+      if (categoryIndex === -1) return blocks.length
+      let endIndex = categoryIndex + 1
+      while (endIndex < blocks.length) {
+        const block = blocks[endIndex]
+        if (block.marker === 'category') break
+        if (hasExplicitGroup(block) && blockGroup(block) !== group.categoryBlock.id) break
+        endIndex += 1
+      }
+      return endIndex
+    }
+
+    const childIndexes = group.children
+      .map((child) => blocks.findIndex((block) => block.id === child.id))
+      .filter((index) => index >= 0)
+    return childIndexes.length > 0 ? Math.max(...childIndexes) + 1 : blocks.length
+  }, [activePreset?.blocks])
 
   const toggleCollapse = useCallback((categoryId: string) => {
     setCollapsedCategories(prev => {
@@ -1485,31 +1746,84 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
 
   const handleDragEnd = useCallback((event: any) => {
     const { active, over } = event
+    setActiveDragId(null)
+    setHoveredAppendRootDropId(null)
+    setArmedAppendRootDropId(null)
     if (!over || active.id === over.id || !activePreset) return
 
     const blocks = activePreset.blocks
     const draggedBlock = blocks.find(b => b.id === active.id)
     if (!draggedBlock) return
+    const rootDropIndex = parseRootDropId(over.id)
+    const armedAppendCategoryId = armedAppendRootDropId === over.id ? parseRootDropCategoryId(over.id) : null
 
     if (draggedBlock.marker === 'category') {
       const catIdx = blocks.findIndex(b => b.id === active.id)
       let endIdx = blocks.length
       for (let i = catIdx + 1; i < blocks.length; i++) {
         if (blocks[i].marker === 'category') { endIdx = i; break }
+        if (hasExplicitGroup(blocks[i]) && blockGroup(blocks[i]) !== draggedBlock.id) { endIdx = i; break }
       }
       const group = blocks.slice(catIdx, endIdx)
       const remaining = [...blocks.slice(0, catIdx), ...blocks.slice(endIdx)]
-      const overIdx = remaining.findIndex(b => b.id === over.id)
+      const overIdx = rootDropIndex == null
+        ? remaining.findIndex(b => b.id === over.id)
+        : Math.max(0, Math.min(remaining.length, rootDropIndex > catIdx ? rootDropIndex - group.length : rootDropIndex))
       if (overIdx === -1) return
       remaining.splice(overIdx, 0, ...group)
       saveBlocks(remaining)
     } else {
       const oldIndex = blocks.findIndex(b => b.id === active.id)
+      if (oldIndex === -1) return
+
+      if (armedAppendCategoryId) {
+        const endIndex = getCategoryEndIndex(blocks, armedAppendCategoryId)
+        if (endIndex === -1) return
+        const nextBlocks = [...blocks]
+        const [moved] = nextBlocks.splice(oldIndex, 1)
+        const insertAt = Math.max(0, Math.min(nextBlocks.length, endIndex > oldIndex ? endIndex - 1 : endIndex))
+        nextBlocks.splice(insertAt, 0, { ...moved, group: armedAppendCategoryId })
+        saveBlocks(nextBlocks)
+        return
+      }
+
+      if (rootDropIndex != null) {
+        const nextBlocks = [...blocks]
+        const [moved] = nextBlocks.splice(oldIndex, 1)
+        const insertAt = Math.max(0, Math.min(nextBlocks.length, rootDropIndex > oldIndex ? rootDropIndex - 1 : rootDropIndex))
+        nextBlocks.splice(insertAt, 0, { ...moved, group: null })
+        saveBlocks(nextBlocks)
+        return
+      }
+
       const newIndex = blocks.findIndex(b => b.id === over.id)
-      if (oldIndex === -1 || newIndex === -1) return
-      saveBlocks(arrayMove(blocks, oldIndex, newIndex))
+      if (newIndex === -1) return
+      if (blocks[newIndex].marker === 'category') {
+        const nextBlocks = [...blocks]
+        const [moved] = nextBlocks.splice(oldIndex, 1)
+        const insertAt = newIndex > oldIndex ? newIndex : newIndex + 1
+        nextBlocks.splice(insertAt, 0, { ...moved, group: blocks[newIndex].id })
+        saveBlocks(nextBlocks)
+        return
+      }
+
+      const movedGroup = inferGroupAtIndex(blocks, newIndex)
+      const reordered = arrayMove(blocks, oldIndex, newIndex)
+      saveBlocks(reordered.map(block => block.id === draggedBlock.id ? { ...block, group: movedGroup } : block))
     }
-  }, [activePreset, saveBlocks])
+  }, [activePreset, armedAppendRootDropId, saveBlocks])
+
+  const handleDragOver = useCallback((event: any) => {
+    const activeBlock = activePreset?.blocks.find((block) => block.id === event.active?.id)
+    const appendCategoryId = parseRootDropCategoryId(event.over?.id)
+    setHoveredAppendRootDropId(appendCategoryId && activeBlock?.marker !== 'category' ? event.over.id : null)
+  }, [activePreset?.blocks])
+
+  const handleDragCancel = useCallback(() => {
+    setActiveDragId(null)
+    setHoveredAppendRootDropId(null)
+    setArmedAppendRootDropId(null)
+  }, [])
 
   const handleEdit = useCallback((block: PromptBlock) => {
     setEditingBlock(block)
@@ -1528,7 +1842,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
   }, [addBlock])
 
   const handleAddCategory = useCallback(() => {
-    addBlock(createMarkerBlock('category', 'New Category'))
+    addBlock(createMarkerBlock('category', lb('actions.newCategory')))
   }, [addBlock])
 
   const handleAddMarker = useCallback((type: string) => {
@@ -1554,11 +1868,12 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
 
   const handleDuplicatePreset = useCallback(async () => {
     if (!activePreset || !activePresetId) return
-    await duplicatePreset(activePresetId, `${activePreset.name} (Copy)`)
+    await duplicatePreset(activePresetId, `${activePreset.name}${lb('preset.copySuffix')}`)
   }, [activePreset, activePresetId, duplicatePreset])
 
   const handleDeletePreset = useCallback(async () => {
     if (!activePresetId) return
+    setConfirmDeletePreset(false)
     await deletePreset(activePresetId)
   }, [activePresetId, deletePreset])
 
@@ -1574,7 +1889,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       a.click()
       URL.revokeObjectURL(url)
     } catch (err: any) {
-      toast.error(err.body?.error || err.message || 'Failed to export preset')
+      toast.error(err.body?.error || err.message || lb('toast.exportFailed'))
     }
   }, [exportInternal])
 
@@ -1618,6 +1933,8 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
     return (
       <BlockEditor
         block={editingBlock}
+        blocks={activePreset?.blocks ?? []}
+        promptVariables={activePreset?.promptVariables ?? {}}
         onSave={handleEditSave}
         onBack={() => { setView('list'); setEditingBlock(null) }}
         availableMacros={availableMacros}
@@ -1641,7 +1958,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
             onCreate={createPreset}
             onRename={handleRenamePreset}
             onDuplicate={handleDuplicatePreset}
-            onDelete={handleDeletePreset}
+            onDelete={() => setConfirmDeletePreset(true)}
             onImport={handleImport}
             onExport={handleExport}
             onExportLegacy={() => setShowLegacyExportConfirm(true)}
@@ -1651,10 +1968,10 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
             className={clsx(s.btn, s.searchToggle, isSearchVisible && s.searchToggleActive)}
             onClick={toggleSearch}
             disabled={!activePreset}
-            title={isSearchVisible ? 'Close prompt search' : 'Search prompts'}
+            title={isSearchVisible ? lb('search.closeTitle') : lb('search.openTitle')}
           >
             <Search size={14} />
-            {isSearchVisible ? 'Close Search' : 'Search'}
+            {isSearchVisible ? lb('search.close') : lb('search.search')}
           </button>
           {activePreset && isSearchVisible && (
             <div className={s.searchBarRow}>
@@ -1667,7 +1984,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
                   onKeyDown={handleSearchKeyDown}
-                  placeholder="Search prompt titles and content..."
+                  placeholder={lb('search.placeholder')}
                   inputMode="search"
                   enterKeyHint="search"
                   autoCapitalize="none"
@@ -1675,19 +1992,21 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                   spellCheck={false}
                 />
                 {trimmedSearchQuery.length > 0 && (
-                  <button type="button" className={s.searchClear} onClick={clearSearch} title="Clear search">
+                  <button type="button" className={s.searchClear} onClick={clearSearch} title={lb('search.clearTitle')}>
                     <X size={14} />
                   </button>
                 )}
               </div>
               <div className={s.searchMeta}>
                 {isSearchActive
-                  ? `${searchMatchCount} match${searchMatchCount === 1 ? '' : 'es'}`
-                  : 'Search prompt titles and content'}
+                  ? lb('search.matches', { count: searchMatchCount })
+                  : lb('search.hint')}
               </div>
             </div>
           )}
-       </div>
+        </div>
+
+      {activePreset && <PresetCoverHeader preset={activePreset} />}
 
       {/* Connection profile */}
       {activePreset && connectionProfile && (() => {
@@ -1709,32 +2028,32 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       {/* Preset Profile Bindings */}
       {activePreset && (
         <div className={s.profileBar}>
-          <span className={s.profileLabel}>Profiles</span>
+          <span className={s.profileLabel}>{lb('profiles.label')}</span>
           <div className={s.profileBtnGroup}>
             {/* Capture / clear defaults */}
             {!presetProfiles.hasDefaults ? (
               <button
                 className={s.profileBtn}
-                onClick={presetProfiles.captureDefaults}
+                onClick={captureDefaults}
                 disabled={presetProfiles.isLoading}
-                title="Capture the current preset and block states as this preset's defaults"
+                title={lb('profiles.captureTitle')}
                 type="button"
               >
-                <Camera size={10} /> Capture Defaults
+                <Camera size={10} /> {lb('profiles.capture')}
               </button>
             ) : (
               <button
                 className={clsx(s.profileBtn, s.profileBtnActive)}
                 onClick={reapplyDefaults}
                 disabled={presetProfiles.isLoading}
-                title="Reapply this preset's default block states"
+                title={lb('profiles.reapplyTitle')}
                 type="button"
               >
-                <RotateCcw size={10} /> Defaults
+                <RotateCcw size={10} /> {lb('profiles.default')}
                 <span
                   className={s.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); presetProfiles.clearDefaults() }}
-                  title="Clear default block states"
+                  title={lb('profiles.clearDefaultsTitle')}
                   role="button"
                   tabIndex={0}
                 >
@@ -1750,27 +2069,27 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                 onClick={presetProfiles.bindToCharacter}
                 disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset || !presetProfiles.activeCharacterId}
                 title={
-                  !presetProfiles.activeCharacterId ? 'No active character — open a chat first'
-                    : !presetProfiles.hasDefaults ? 'Capture defaults first'
-                      : 'Bind the current preset and block states to this character'
+                  !presetProfiles.activeCharacterId ? lb('profiles.noCharacter')
+                    : !presetProfiles.hasDefaults ? lb('profiles.captureFirst')
+                      : lb('profiles.bindCharacter')
                 }
                 type="button"
               >
-                <Link size={10} /> Character
+                <Link size={10} /> {lb('profiles.character')}
               </button>
             ) : (
               <button
                 className={clsx(s.profileBtn, s.profileBtnActive)}
                 onClick={presetProfiles.bindToCharacter}
                 disabled={presetProfiles.isLoading || !presetProfiles.activeCharacterId}
-                title="Rebind the current preset and block states to this character"
+                title={lb('profiles.rebindCharacter')}
                 type="button"
               >
-                <RotateCcw size={10} /> Character
+                <RotateCcw size={10} /> {lb('profiles.character')}
                 <span
                   className={s.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); presetProfiles.unbindCharacter() }}
-                  title="Remove character binding"
+                  title={lb('profiles.removeCharacter')}
                   role="button"
                   tabIndex={0}
                 >
@@ -1786,27 +2105,63 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                 onClick={presetProfiles.bindToChat}
                 disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset || !presetProfiles.activeChatId}
                 title={
-                  !presetProfiles.activeChatId ? 'No active chat — open a chat first'
-                    : !presetProfiles.hasDefaults ? 'Capture defaults first'
-                      : 'Bind the current preset and block states to this chat'
+                  !presetProfiles.activeChatId ? lb('profiles.noChat')
+                    : !presetProfiles.hasDefaults ? lb('profiles.captureFirst')
+                      : lb('profiles.bindChat')
                 }
                 type="button"
               >
-                <Link size={10} /> Chat
+                <Link size={10} /> {lb('profiles.chat')}
               </button>
             ) : (
               <button
                 className={clsx(s.profileBtn, s.profileBtnActive)}
                 onClick={presetProfiles.bindToChat}
                 disabled={presetProfiles.isLoading || !presetProfiles.activeChatId}
-                title="Rebind the current preset and block states to this chat"
+                title={lb('profiles.rebindChat')}
                 type="button"
               >
-                <RotateCcw size={10} /> Chat
+                <RotateCcw size={10} /> {lb('profiles.chat')}
                 <span
                   className={s.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); presetProfiles.unbindChat() }}
-                  title="Remove chat binding"
+                  title={lb('profiles.removeChat')}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <X size={8} />
+                </span>
+              </button>
+            )}
+
+            {/* Bind / unbind connection profile */}
+            {!presetProfiles.hasConnectionBinding ? (
+              <button
+                className={s.profileBtn}
+                onClick={presetProfiles.bindToConnection}
+                disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset || !presetProfiles.activeProfileId}
+                title={
+                  !presetProfiles.activeProfileId ? lb('profiles.noConnection')
+                    : !presetProfiles.hasDefaults ? lb('profiles.captureFirst')
+                      : lb('profiles.bindConnection')
+                }
+                type="button"
+              >
+                <Link size={10} /> {lb('profiles.conn')}
+              </button>
+            ) : (
+              <button
+                className={clsx(s.profileBtn, s.profileBtnActive)}
+                onClick={presetProfiles.bindToConnection}
+                disabled={presetProfiles.isLoading || !presetProfiles.activeProfileId}
+                title={lb('profiles.rebindConnection')}
+                type="button"
+              >
+                <RotateCcw size={10} /> {lb('profiles.conn')}
+                <span
+                  className={s.profileBtnDismiss}
+                  onClick={(e) => { e.stopPropagation(); presetProfiles.unbindConnection() }}
+                  title={lb('profiles.removeConnection')}
                   role="button"
                   tabIndex={0}
                 >
@@ -1819,8 +2174,9 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
           {/* Active source indicator */}
           {presetProfiles.activeSource !== 'none' && (
             <span className={s.profileSourceBadge}>
-              {presetProfiles.activeSource === 'chat' ? 'CHAT' :
-               presetProfiles.activeSource === 'character' ? 'CHAR' : 'DEFAULT'}
+              {presetProfiles.activeSource === 'chat' ? lb('profiles.sourceChat') :
+               presetProfiles.activeSource === 'character' ? lb('profiles.sourceCharacter') :
+               presetProfiles.activeSource === 'connection' ? lb('profiles.sourceConnection') : lb('profiles.sourceDefault')}
             </span>
           )}
         </div>
@@ -1845,15 +2201,16 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         {activePreset && <AdvancedSettingsPanel advancedSettings={activePreset.advancedSettings} completionSettings={activePreset.completionSettings} onSave={saveAdvancedSettings} onSaveCompletion={saveCompletionSettings} />}
         {activePreset && <ContextMeter />}
 
-        {activePreset && hasConfigurableVariables && (
-          <div style={{ padding: '0 12px 8px' }}>
+        {activePreset && configurableVariableCount > 0 && (
+          <div className={s.variablesAction}>
             <button
               type="button"
-              className={clsx(s.btn)}
-              style={{ width: '100%', justifyContent: 'center' }}
+              className={clsx(s.btn, s.variablesBtn)}
               onClick={() => setShowPromptVariablesModal(true)}
             >
-              <Settings2 size={14} /> Configure Prompt Variables
+              <Braces size={14} />
+              <span>{lb('actions.configureVariables')}</span>
+              <span className={s.accordionBadge}>{configurableVariableCount}</span>
             </button>
           </div>
         )}
@@ -1861,30 +2218,38 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         {/* Block list or empty state */}
         <div className={s.blockList}>
           {isLoading ? (
-            <div className={s.emptyState}>Loading...</div>
+            <div className={s.emptyState}>{lb('empty.loading')}</div>
           ) : !activePreset ? (
             <div className={s.emptyState}>
               <Layers size={40} style={{ opacity: 0.3 }} />
-              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))', fontWeight: 500 }}>No Preset Selected</div>
-              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>Create a new preset or select an existing one to start building.</div>
+              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))', fontWeight: 500 }}>{lb('empty.noPresetTitle')}</div>
+              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>{lb('empty.noPresetHint')}</div>
             </div>
           ) : activePreset.blocks.length === 0 ? (
             <div className={s.emptyState}>
-              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))' }}>No blocks yet</div>
-              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>Add a prompt block or marker to get started.</div>
+              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))' }}>{lb('empty.noBlocksTitle')}</div>
+              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>{lb('empty.noBlocksHint')}</div>
             </div>
           ) : isSearchActive && searchMatchCount === 0 ? (
             <div className={s.emptyState}>
               <Search size={32} style={{ opacity: 0.3 }} />
-              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))', fontWeight: 500 }}>No matching prompts</div>
-              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>Search matches prompt titles and content within this preset.</div>
-              <button type="button" className={s.btn} onClick={clearSearch}>Clear Search</button>
+              <div style={{ fontSize: 'calc(14px * var(--lumiverse-font-scale, 1))', fontWeight: 500 }}>{lb('empty.noSearchTitle')}</div>
+              <div style={{ fontSize: 'calc(12px * var(--lumiverse-font-scale, 1))' }}>{lb('empty.noSearchHint')}</div>
+              <button type="button" className={s.btn} onClick={clearSearch}>{lb('empty.clearSearch')}</button>
             </div>
           ) : (
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={(event) => setActiveDragId(String(event.active.id))}
+              onDragOver={handleDragOver}
+              onDragEnd={handleDragEnd}
+              onDragCancel={handleDragCancel}
+            >
               <SortableContext items={visibleBlockIds} strategy={verticalListSortingStrategy}>
+                <RootDropSlot id={rootDropId(0)} active={!!activeDragId && !isSearchActive} />
                 {displayedGroups.map(group => (
-                  <Fragment key={group.categoryBlock?.id || 'ungrouped'}>
+                  <Fragment key={group.categoryBlock?.id || group.children[0]?.id || 'ungrouped'}>
                     {group.categoryBlock && (
                       <SortableCategoryItem
                         block={group.categoryBlock}
@@ -1910,6 +2275,11 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                         />
                       ))
                     }
+                    <RootDropSlot
+                      id={rootDropId(rootDropIndexAfterGroup(group), group.categoryBlock?.id)}
+                      active={!!activeDragId && !isSearchActive}
+                      appendArmed={!!activeDraggedBlock && activeDraggedBlock.marker !== 'category' && armedAppendRootDropId === rootDropId(rootDropIndexAfterGroup(group), group.categoryBlock?.id)}
+                    />
                   </Fragment>
                 ))}
               </SortableContext>
@@ -1923,7 +2293,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
         <div className={s.actionBar}>
           <div style={{ position: 'relative' }}>
             <button className={clsx(s.btn, s.btnPrimary)} onClick={() => { setPromptMenuOpen(!promptMenuOpen); setMarkerMenuOpen(false) }} type="button">
-              <Plus size={14} /> Add Prompt <ChevronDown size={12} />
+              <Plus size={14} /> {lb('actions.addPrompt')} <ChevronDown size={12} />
             </button>
             {promptMenuOpen && (
               <div className={s.dropdownMenu} style={{ bottom: '100%', left: 0, marginBottom: '4px' }}>
@@ -1953,21 +2323,21 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
           </div>
 
           <button className={s.btn} onClick={handleAddCategory} type="button">
-            <ChevronRight size={14} /> Add Category
+            <ChevronRight size={14} /> {lb('actions.addCategory')}
           </button>
 
           <div style={{ position: 'relative' }}>
             <button className={s.btn} onClick={() => { setMarkerMenuOpen(!markerMenuOpen); setPromptMenuOpen(false) }} type="button">
-              <Hash size={14} /> Add Marker <ChevronDown size={12} />
+              <Hash size={14} /> {lb('actions.addMarker')} <ChevronDown size={12} />
             </button>
             {markerMenuOpen && (
               <div className={s.dropdownMenu} style={{ bottom: '100%', left: 0, marginBottom: '4px', minWidth: '200px' }}>
-                {ADDABLE_MARKERS.map((item, i) => {
+                {addableMarkers.map((item, i) => {
                   if (typeof item === 'object' && 'section' in item) {
                     return (
                       <div key={item.section}>
                         {i > 0 && <hr className={s.menuDivider} />}
-                        <div className={s.sectionLabel}>{item.section}</div>
+                        <div className={s.sectionLabel}>{markerSectionLabel(item.section)}</div>
                       </div>
                     )
                   }
@@ -1975,7 +2345,7 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
                     <MenuButton
                       key={item as string}
                       icon={<Hash size={14} />}
-                      label={MARKER_NAMES[item as string] || (item as string)}
+                      label={markerLabel(item as string)}
                       onClick={() => handleAddMarker(item as string)}
                     />
                   )
@@ -1992,10 +2362,10 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       {/* Confirm legacy export */}
         <ConfirmationModal
           isOpen={showLegacyExportConfirm}
-          title="Export Legacy Preset"
-          message="Lumiverse-specific macros (e.g. {{lumiaDef}}, {{loomStyle}}, {{lumiaOOC}}) will not resolve in SillyTavern. Only standard macros like {{char}}, {{user}}, and {{persona}} are portable. Blocks using Lumiverse macros will be exported as-is with their raw macro text."
+          title={lb('confirm.legacyExportTitle')}
+          message={lb('confirm.legacyExportMessage')}
           variant="warning"
-          confirmText="Export Anyway"
+          confirmText={lb('confirm.exportAnyway')}
           onConfirm={handleExportLegacy}
           onCancel={() => setShowLegacyExportConfirm(false)}
         />
@@ -2003,12 +2373,23 @@ export default function LoomBuilder({ compact = true }: LoomBuilderProps) {
       {/* Confirm delete dialog */}
         <ConfirmationModal
           isOpen={!!confirmDelete}
-          title="Delete Block"
-          message="Are you sure you want to delete this block? This action cannot be undone."
+          title={lb('confirm.deleteBlockTitle')}
+          message={lb('confirm.deleteBlockMessage')}
           variant="danger"
-          confirmText="Delete"
+          confirmText={tc('actions.delete')}
           onConfirm={confirmDeleteBlock}
           onCancel={() => setConfirmDelete(null)}
+        />
+
+      {/* Confirm preset delete dialog */}
+        <ConfirmationModal
+          isOpen={confirmDeletePreset}
+          title={lb('confirm.deletePresetTitle')}
+          message={lb('confirm.deletePresetMessage', { name: activePreset?.name })}
+          variant="danger"
+          confirmText={tc('actions.delete')}
+          onConfirm={() => { void handleDeletePreset() }}
+          onCancel={() => setConfirmDeletePreset(false)}
         />
 
         {activePreset && (

@@ -20,10 +20,14 @@
   background: var(--lumiverse-bg-deep);
   border: 1px solid var(--lumiverse-border);
   border-radius: 16px;
-  box-shadow: var(--lumiverse-shadow-xl);
+  box-shadow: var(--lumiverse-shadow-md, 0 8px 24px rgba(0, 0, 0, 0.4));
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+:global([data-glass]) .modal {
+  box-shadow: var(--lumiverse-shadow-xl);
 }
 
 .header {
@@ -40,6 +44,7 @@
   font-size: calc(16px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-text);
+  flex-shrink: 0;
 }
 
 .body {
@@ -388,10 +393,21 @@
 }
 
 .extensionMount {
-  min-height: 140px;
-  border: 1px dashed var(--lumiverse-border);
-  border-radius: 10px;
-  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.extensionMount > [data-spindle-extension-root] {
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--lumiverse-fill-subtle);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.extensionMount > [data-spindle-extension-root]:empty {
+  display: none;
 }
 
 .extensionMountHost {
@@ -407,6 +423,35 @@
   font-weight: 600;
   color: var(--lumiverse-text);
   margin-bottom: 4px;
+  /* Leave breathing room when scrolled to via the settings search. */
+  scroll-margin-top: 14px;
+  border-radius: 6px;
+}
+
+/* Brief highlight pulse applied when the settings search jumps to a section. */
+.sectionFlash {
+  animation: sectionFlash 1.4s ease-out;
+}
+
+@keyframes sectionFlash {
+  0% {
+    background: var(--lumiverse-primary-020);
+    box-shadow: 0 0 0 6px var(--lumiverse-primary-020);
+  }
+  60% {
+    background: var(--lumiverse-primary-015, var(--lumiverse-primary-020));
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sectionFlash {
+    animation: none;
+  }
 }
 
 .danger {
@@ -912,11 +957,37 @@
   border-color: var(--lumiverse-primary-020);
 }
 
+.cardDragging {
+  opacity: 0.65;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+  z-index: 2;
+}
+
 .cardRow {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
+}
+
+.dragHandle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--lumiverse-text-dim);
+  cursor: grab;
+  padding: 2px;
+  flex-shrink: 0;
+  touch-action: none;
+  user-select: none;
+}
+
+.dragHandle:hover {
+  color: var(--lumiverse-text);
+}
+
+.dragHandle:active {
+  cursor: grabbing;
 }
 
 .cardTitleWrap {
@@ -1087,13 +1158,13 @@
 @media (max-width: 600px) {
   .overlay {
     align-items: stretch;
-    padding-top: env(safe-area-inset-top, 0px);
+    padding-top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .modal {
     width: calc(100vw / var(--lumiverse-ui-scale, 1));
-    height: calc(var(--app-scaled-viewport-height, calc(100dvh / var(--lumiverse-ui-scale, 1))) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    height: calc(var(--app-scaled-viewport-height, calc(100dvh / var(--lumiverse-ui-scale, 1))) - var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) - env(safe-area-inset-bottom, 0px));
     border-radius: 0;
   }
 
@@ -1143,5 +1214,18 @@
 
   .poolNumbers {
     text-align: left;
+  }
+
+  /* Tighten the header so the settings search has room next to the title. */
+  .header {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+}
+
+@media (max-width: 380px) {
+  /* On very narrow screens, drop the title to keep the search field usable. */
+  .title {
+    display: none;
   }
 }

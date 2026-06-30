@@ -1,8 +1,10 @@
 import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect, type CSSProperties, type KeyboardEvent } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
-import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UserRound, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText, Braces, Globe, Plus } from 'lucide-react'
+import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Compass, MessageSquareQuote, Wrench, UsersRound, UserPlus, Settings2, Home, MoreHorizontal, FolderOpen, Paperclip, X, StickyNote, Crown, ScrollText, MessageSquare, BrainCircuit, Drama, Layers, FileText, Braces, Globe, Plus, Mic, Link2, LoaderCircle } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { useStore } from '@/store'
+import { sendRoomAction } from '@/ws/relayClient'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { charactersApi } from '@/api/characters'
 import { generateApi } from '@/api/generate'
@@ -11,30 +13,165 @@ import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
 import { globalAddonsApi } from '@/api/global-addons'
 import { imagesApi } from '@/api/images'
-import { getPersonaAvatarThumbUrlById, getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
+import { getPersonaAvatarThumbUrlById, getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import { uuidv7 } from '@/lib/uuid'
 import { toast } from '@/lib/toast'
+import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 import { resolveAutoPersonaBinding } from '@/store/slices/personas'
 import { useDeviceFrameRadius } from '@/hooks/useDeviceFrameRadius'
 import useIsMobile from '@/hooks/useIsMobile'
 import type { MessageAttachment, PersonaAddon, GlobalAddon, AttachedGlobalAddon } from '@/types/api'
 import AuthorsNotePanel from './AuthorsNotePanel'
+import ProviderIcon from '@/components/shared/ProviderIcon'
 import { databankApi } from '@/api/databank'
 import { resolveMacros } from '@/api/macros'
 import type { AutocompleteResult } from '@/api/databank'
 import styles from './InputArea.module.css'
 import clsx from 'clsx'
 import InputBarExtensionActions from './InputBarExtensionActions'
+import { didMobileQueueHoldReachThreshold, getMobileQueueHoldPreviewState } from './mobileQueueHold'
+import { getMobileQueueHintKey, type MobileQueueHoldState } from './mobileQueueHint'
 import { unlockNotificationAudio } from '@/lib/notificationAudio'
 import { unlockTTSAudio } from '@/lib/ttsAudio'
+import { orderGroupResponseIds, readGroupResponseOrder } from '@/lib/groupResponseOrder'
+import { createSTTEngine, getSupportedSTTAudioFormat, isWebSpeechAvailable, type STTAudioFrame, type STTEngine } from '@/lib/sttEngine'
 
 interface InputAreaProps {
   chatId: string
+  onNavigateHome?: () => void
 }
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform)
-const queueModLabel = isMac ? 'Cmd' : 'Ctrl'
 const TEXTAREA_MAX_HEIGHT = 180
+const STT_VISUALIZER_BARS = 18
+const MOBILE_QUEUE_HOLD_PROMPT_MS = 180
+const MOBILE_QUEUE_HOLD_MS = 900
+const LIVE_GENERATION_HEAD_STATUSES = new Set(['assembling', 'council', 'waiting', 'reasoning', 'streaming'])
+const STT_IDLE_BARS = Array.from({ length: STT_VISUALIZER_BARS }, (_, index) => {
+  const centerBias = 1 - Math.abs(index - ((STT_VISUALIZER_BARS - 1) / 2)) / (STT_VISUALIZER_BARS / 2)
+  return 0.12 + centerBias * 0.22
+})
+
+type STTCommandState = {
+  thoughtDepth: number
+}
+
+const STT_COMMAND_ALIASES: Record<string, string[]> = {
+  'quote': ['quote start', 'quote end', 'open quote', 'close quote'],
+  'single quote': ['single quote', 'apostrophe'],
+  'em dash': ['em dash'],
+  'asterisk': ['asterisk'],
+  'thought start': ['thought start', 'begin thought'],
+  'thought end': ['thought end', 'end thought'],
+}
+
+function normalizeSTTCommandWord(word: string): string {
+  if (word === 'quotes') return 'quote'
+  if (word === 'starts') return 'start'
+  if (word === 'ends') return 'end'
+  if (word === 'thoughts') return 'thought'
+  if (word === 'begins') return 'begin'
+  if (word === 'dashes') return 'dash'
+  if (word === 'apostrophes') return 'apostrophe'
+  if (word === 'asterisks') return 'asterisk'
+  return word
+}
+
+function sttCommandEditDistance(a: string, b: string): number {
+  if (a === b) return 0
+  if (Math.abs(a.length - b.length) > 1) return 2
+
+  let edits = 0
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1
+      j += 1
+      continue
+    }
+    edits += 1
+    if (edits > 1) return edits
+    if (a.length > b.length) i += 1
+    else if (b.length > a.length) j += 1
+    else {
+      i += 1
+      j += 1
+    }
+  }
+
+  return edits + (i < a.length || j < b.length ? 1 : 0)
+}
+
+function normalizeSTTCommandCandidate(candidate: string): string | null {
+  const normalized = candidate
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!normalized) return null
+
+  const candidateWords = normalized.split(' ').map(normalizeSTTCommandWord)
+  for (const [canonical, aliases] of Object.entries(STT_COMMAND_ALIASES)) {
+    for (const alias of aliases) {
+      const aliasWords = alias.split(' ')
+      if (candidateWords.length !== aliasWords.length) continue
+      const isSimilar = candidateWords.every((word, index) => {
+        const aliasWord = aliasWords[index]
+        return word === aliasWord || (word.length >= 4 && aliasWord.length >= 4 && sttCommandEditDistance(word, aliasWord) <= 1)
+      })
+      if (isSimilar) return canonical
+    }
+  }
+
+  return null
+}
+
+function normalizeSTTTranscript(raw: string, state: STTCommandState): string {
+  if (!raw.trim()) return ''
+
+  const commandPattern = /\b(?:quotes?\s+(?:starts?|ends?)|open\s+quotes?|close\s+quotes?|single\s+quotes?|apostrophes?|thoughts?\s+(?:starts?|ends?)|begins?\s+thoughts?|ends?\s+thoughts?|asterisks?|em\s+dashes?)\b(?:\s*[,.;:!?]+)?/gi
+
+  return raw
+    .replace(commandPattern, (match) => {
+      const command = normalizeSTTCommandCandidate(match)
+      if (!command) return match
+
+      if (command === 'quote') return '"'
+      if (command === 'single quote') return "'"
+      if (command === 'em dash') return '—'
+      if (command === 'asterisk') return '*'
+      if (command === 'thought start') {
+        const marker = state.thoughtDepth >= 1 ? '**' : '*'
+        state.thoughtDepth += 1
+        return marker
+      }
+      if (command === 'thought end') {
+        const marker = state.thoughtDepth > 1 ? '**' : '*'
+        state.thoughtDepth = Math.max(0, state.thoughtDepth - 1)
+        return marker
+      }
+
+      return match
+    })
+    .replace(/(^|[\s([{"'])(\*{1,2})\s*[.,;:!?]+\s*/g, '$1$2')
+    .replace(/(\*{1,2})\s+[.,;:!?]+(?=\s|$)/g, '$1')
+    .replace(/([.!?])\s+([.!?])(?=\s|$|\*)/g, '$1')
+    .replace(/([.!?])(\*{1,2})\.(?=\s|$)/g, '$1$2')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/\s+([”’])/g, '$1')
+    .replace(/([“‘])\s+/g, '$1')
+    .replace(/\s*—\s*/g, ' — ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function stripSTTSendCommand(raw: string): { text: string; shouldSend: boolean } {
+  const match = raw.match(/^(.*?)(?:[\s,.;:!?-]*)send\s+message\s*$/i)
+  if (!match) return { text: raw.trim(), shouldSend: false }
+  return { text: (match[1] || '').trim(), shouldSend: true }
+}
 
 // Slugify a character name into a stable @mention token. Matches the
 // databank `#` convention (lowercase, hyphen-separated, diacritics stripped).
@@ -47,15 +184,18 @@ function slugifyName(name: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-export default function InputArea({ chatId }: InputAreaProps) {
+export default function InputArea({ chatId, onNavigateHome }: InputAreaProps) {
+  const { t } = useTranslation('chat')
+  const { t: te } = useTranslation('errors')
+  const queueModLabel = isMac ? t('input.modCmd') : t('input.modCtrl')
   const navigate = useNavigate()
   const [text, setText] = useState('')
   const [lastImpersonateInput, setLastImpersonateInput] = useState<string>('')
   const [dryRunning, setDryRunning] = useState(false)
   const [resolvingMacros, setResolvingMacros] = useState(false)
   const [authorsNoteOpen, setAuthorsNoteOpen] = useState(false)
-  const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank' | 'groupMember'>(null)
-  const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank' | 'groupMember'>(null)
+  const [openPopover, setOpenPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank' | 'groupMember' | 'connections'>(null)
+  const [renderPopover, setRenderPopover] = useState<null | 'guides' | 'quick' | 'persona' | 'tools' | 'extras' | 'altFields' | 'addons' | 'databank' | 'groupMember' | 'connections'>(null)
   const [popoverClosing, setPopoverClosing] = useState(false)
   const [sendPersonaId, setSendPersonaId] = useState<string | null>(null)
   const [personaList, setPersonaList] = useState<Array<{ id: string; name: string; title: string; avatar_path: string | null; image_id: string | null }>>([])
@@ -63,6 +203,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const [impersonationPresetId, setImpersonationPresetId] = useState<string | null>(null)
   const [pendingAttachments, setPendingAttachments] = useState<(MessageAttachment & { previewUrl?: string })[]>([])
   const [uploading, setUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const dragCounterRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const mirrorRef = useRef<HTMLDivElement>(null)
@@ -80,23 +222,44 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const databankDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [atQuery, setAtQuery] = useState<string | null>(null)
   const [atStartIndex, setAtStartIndex] = useState(0)
-  const [atResults, setAtResults] = useState<Array<{ id: string; name: string; slug: string; muted: boolean; image_id: string | null }>>([])
+  const [atResults, setAtResults] = useState<Array<{ id: string; name: string; slug: string; muted: boolean; image_id: string | null; extensions?: Record<string, any> }>>([])
   const [atActiveIdx, setAtActiveIdx] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
   const pendingSelectionRef = useRef<{ start: number; end: number; direction?: 'forward' | 'backward' | 'none' } | null>(null)
+  const pendingSTTActionRef = useRef<'queue' | 'send' | null>(null)
   const sendingRef = useRef(false)
   const generationNonceRef = useRef(0)
-  const queueLockRef = useRef(false)
-  const touchTimerRef = useRef<number>(0)
+  const touchHoldPromptTimerRef = useRef<number>(0)
+  const touchQueueArmTimerRef = useRef<number>(0)
+  const touchHoldStartedAtRef = useRef(0)
+  const ignoreFollowupClickUntilRef = useRef(0)
+  const ignoreFollowupClickCountRef = useRef(0)
+  const mobileQueueHoldStateRef = useRef<MobileQueueHoldState>('idle')
   const isStreaming = useStore((s) => s.isStreaming)
   const editingMessageId = useStore((s) => s.editingMessageId)
   const isMobile = useIsMobile()
   const hideForMobileEdit = isMobile && !!editingMessageId
+  const supportsTouchQueueHold = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+  const activeChatId = useStore((s) => s.activeChatId)
   const activeGenerationId = useStore((s) => s.activeGenerationId)
+  const liveChatGenerationId = useStore((s) =>
+    s.chatHeads.find((head) =>
+      head.chatId === chatId &&
+      !head.generationId.startsWith('mp-room:') &&
+      LIVE_GENERATION_HEAD_STATUSES.has(head.status)
+    )?.generationId ?? null
+  )
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const enterToSend = useStore((s) => s.chatSheldEnterToSend)
   const saveDraftInput = useStore((s) => s.saveDraftInput)
   const activeProfileId = useStore((s) => s.activeProfileId)
+  const profiles = useStore((s) => s.profiles)
+  const setActiveProfile = useStore((s) => s.setActiveProfile)
+  const activeProfile = profiles.find((p) => p.id === activeProfileId) || null
+  const voiceSettings = useStore((s) => s.voiceSettings)
+  // Temporary chats are persona-less: messages send as plain "User" and no
+  // persona_id is attached to message extras or generation requests.
+  const isTemporaryChat = useStore((s) => s.activeChatMetadata?.temporary === true)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
   const regenFeedback = useStore((s) => s.regenFeedback)
@@ -112,12 +275,18 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const startStreaming = useStore((s) => s.startStreaming)
   const stopStreaming = useStore((s) => s.stopStreaming)
   const setStreamingError = useStore((s) => s.setStreamingError)
+  const mpRoomId = useStore((s) => s.mpRoomId)
+  const mpIsHost = useStore((s) => s.mpIsHost)
+  // A non-host room peer can't stop the host's generation (it isn't theirs) —
+  // used to suppress the stop control so they can't trigger a no-op/stuck state.
+  const isRoomPeer = !!mpRoomId && !mpIsHost
   const openModal = useStore((s) => s.openModal)
   const setSetting = useStore((s) => s.setSetting)
 
   const isGroupChat = useStore((s) => s.isGroupChat)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
   const mutedCharacterIds = useStore((s) => s.mutedCharacterIds)
+  const activeChatMetadata = useStore((s) => s.activeChatMetadata)
   const characters = useStore((s) => s.characters)
   const setMentionQueue = useStore((s) => s.setMentionQueue)
   const expressionDisplay = useStore((s) => s.expressionDisplay)
@@ -126,6 +295,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const setImpersonateDraftContent = useStore((s) => s.setImpersonateDraftContent)
   const streamingContent = useStore((s) => s.streamingContent)
   const streamingGenerationType = useStore((s) => s.streamingGenerationType)
+  const localGenerationInChat = isStreaming && activeChatId === chatId
+  const isGeneratingInChat = !!liveChatGenerationId || localGenerationInChat
+  const generationIdForChat = liveChatGenerationId || (localGenerationInChat ? activeGenerationId : null)
+  const groupResponseOrder = useMemo(
+    () => readGroupResponseOrder(activeChatMetadata),
+    [activeChatMetadata],
+  )
 
   // Track whether the active character has expressions configured
   const [hasExpressions, setHasExpressions] = useState(false)
@@ -136,29 +312,177 @@ export default function InputArea({ chatId }: InputAreaProps) {
       .catch(() => setHasExpressions(false))
   }, [activeCharacterId])
 
-  // Track alternate fields for the active character
+  // Track alternate fields for the active character or group members.
   type AltFieldVariant = { id: string; label: string; content: string }
+  const ALT_FIELD_NAMES = ['description', 'personality', 'scenario'] as const
   const [altFieldsData, setAltFieldsData] = useState<Record<string, AltFieldVariant[]>>({})
+  const [groupAltFieldsData, setGroupAltFieldsData] = useState<Record<string, Record<string, AltFieldVariant[]>>>({})
+  const [altFieldsLoaded, setAltFieldsLoaded] = useState(false)
+  const [groupAltFieldsLoadedIds, setGroupAltFieldsLoadedIds] = useState<string[]>([])
   const [altFieldSelections, setAltFieldSelections] = useState<Record<string, string>>({})
-  const hasAltFields = Object.values(altFieldsData).some((arr) => arr.length > 0)
+  const [groupAltFieldSelections, setGroupAltFieldSelections] = useState<Record<string, Record<string, string>>>({})
+  const [groupScenarioMode, setGroupScenarioMode] = useState<'individual' | 'member' | 'custom'>('individual')
+  const hasSingleAltFields = Object.values(altFieldsData).some((arr) => arr.length > 0)
+  const groupMembersWithAltFields = useMemo(() => {
+    if (!isGroupChat) return []
+    return groupCharacterIds
+      .map((id) => {
+        const char = characters.find((c) => c.id === id)
+        const altFields = groupAltFieldsData[id]
+        const hasAlternates = altFields && Object.values(altFields).some((arr) => Array.isArray(arr) && arr.length > 0)
+        return char && hasAlternates ? { char, altFields } : null
+      })
+      .filter(Boolean) as Array<{ char: typeof characters[number]; altFields: Record<string, AltFieldVariant[]> }>
+  }, [isGroupChat, groupCharacterIds, characters, groupAltFieldsData])
+  const hasAltFields = isGroupChat ? groupMembersWithAltFields.length > 0 : hasSingleAltFields
+  const activeAltSelectionCount = isGroupChat
+    ? Object.values(groupAltFieldSelections).reduce((total, selections) => total + Object.keys(selections || {}).length, 0)
+    : Object.keys(altFieldSelections).length
+  const groupCharacterKey = useMemo(() => groupCharacterIds.join('\0'), [groupCharacterIds])
+  const groupAltFieldsKey = useMemo(() => {
+    if (!isGroupChat) return ''
+    return groupCharacterIds.map((id) => {
+      const altFields = characters.find((c) => c.id === id)?.extensions?.alternate_fields
+      return `${id}:${altFields ? JSON.stringify(altFields) : ''}`
+    }).join('\0')
+  }, [characters, groupCharacterIds, isGroupChat])
 
   useEffect(() => {
+    if (isGroupChat) {
+      setAltFieldsData({})
+      setAltFieldsLoaded(false)
+      if (groupCharacterIds.length === 0) { setGroupAltFieldsData({}); setGroupAltFieldsLoadedIds([]); return }
+      let cancelled = false
+      const characterSnapshot = useStore.getState().characters
+      Promise.all(groupCharacterIds.map(async (id) => {
+        const cached = characterSnapshot.find((c) => c.id === id)
+        if (cached?.extensions?.alternate_fields) {
+          return { id, loaded: true, altFields: cached.extensions.alternate_fields as Record<string, AltFieldVariant[]> }
+        }
+        if (cached) {
+          return { id, loaded: true, altFields: undefined }
+        }
+        const fetched = await charactersApi.get(id).catch(() => null)
+        if (fetched) useStore.getState().updateCharacter(fetched.id, fetched)
+        return {
+          id,
+          loaded: !!fetched,
+          altFields: fetched?.extensions?.alternate_fields as Record<string, AltFieldVariant[]> | undefined,
+        }
+      }))
+        .then((items) => {
+          if (cancelled) return
+          const next: Record<string, Record<string, AltFieldVariant[]>> = {}
+          for (const item of items) {
+            if (item.altFields && typeof item.altFields === 'object') next[item.id] = item.altFields
+          }
+          setGroupAltFieldsData(next)
+          setGroupAltFieldsLoadedIds(items.filter((item) => item.loaded).map((item) => item.id))
+        })
+        .catch(() => { if (!cancelled) { setGroupAltFieldsData({}); setGroupAltFieldsLoadedIds([]) } })
+      return () => { cancelled = true }
+    }
+
+    setGroupAltFieldsData({})
+    setGroupAltFieldsLoadedIds([])
+    setAltFieldsLoaded(false)
     if (!activeCharacterId) { setAltFieldsData({}); return }
     charactersApi.get(activeCharacterId)
       .then((c) => {
         const af = c.extensions?.alternate_fields as Record<string, AltFieldVariant[]> | undefined
         setAltFieldsData(af && typeof af === 'object' ? af : {})
+        setAltFieldsLoaded(true)
       })
-      .catch(() => setAltFieldsData({}))
-  }, [activeCharacterId])
+      .catch(() => { setAltFieldsData({}); setAltFieldsLoaded(false) })
+  }, [activeCharacterId, isGroupChat, groupCharacterKey, groupAltFieldsKey])
+
+  const pruneAltSelections = useCallback((
+    selections: Record<string, string>,
+    altFields: Record<string, AltFieldVariant[]> | undefined,
+  ) => {
+    let changed = false
+    const next: Record<string, string> = {}
+
+    for (const [field, variantId] of Object.entries(selections)) {
+      const variants = altFields?.[field]
+      if (Array.isArray(variants) && variants.some((variant) => variant.id === variantId)) {
+        next[field] = variantId
+      } else {
+        changed = true
+      }
+    }
+
+    return changed ? next : selections
+  }, [])
+
+  useEffect(() => {
+    if (!chatId) return
+
+    if (isGroupChat) {
+      if (groupAltFieldsLoadedIds.length === 0 || Object.keys(groupAltFieldSelections).length === 0) return
+      const loadedIds = new Set(groupAltFieldsLoadedIds)
+      let changed = false
+      const next: Record<string, Record<string, string>> = {}
+
+      for (const [characterId, selections] of Object.entries(groupAltFieldSelections)) {
+        if (!loadedIds.has(characterId)) {
+          next[characterId] = selections
+          continue
+        }
+
+        const pruned = pruneAltSelections(selections, groupAltFieldsData[characterId])
+        if (pruned !== selections) changed = true
+        if (Object.keys(pruned).length > 0) next[characterId] = pruned
+      }
+
+      if (!changed) return
+      setGroupAltFieldSelections(next)
+      chatsApi.patchMetadata(chatId, {
+        group_alternate_field_selections: Object.keys(next).length > 0 ? next : null,
+      }).catch((err) => console.error('[AltFields] Failed to clear stale group selections:', err))
+      return
+    }
+
+    if (!altFieldsLoaded || Object.keys(altFieldSelections).length === 0) return
+    const next = pruneAltSelections(altFieldSelections, altFieldsData)
+    if (next === altFieldSelections) return
+    setAltFieldSelections(next)
+    chatsApi.patchMetadata(chatId, {
+      alternate_field_selections: Object.keys(next).length > 0 ? next : null,
+    }).catch((err) => console.error('[AltFields] Failed to clear stale selections:', err))
+  }, [
+    altFieldSelections,
+    altFieldsData,
+    altFieldsLoaded,
+    chatId,
+    groupAltFieldSelections,
+    groupAltFieldsData,
+    groupAltFieldsLoadedIds,
+    isGroupChat,
+    pruneAltSelections,
+  ])
 
   // Load per-chat alternate field selections
   useEffect(() => {
-    if (!chatId || !hasAltFields) { setAltFieldSelections({}); return }
+    if (!chatId) {
+      setAltFieldSelections({})
+      setGroupAltFieldSelections({})
+      setGroupScenarioMode('individual')
+      return
+    }
     chatsApi.get(chatId, { messages: false })
-      .then((chat) => setAltFieldSelections((chat.metadata?.alternate_field_selections as Record<string, string>) || {}))
-      .catch(() => setAltFieldSelections({}))
-  }, [chatId, hasAltFields])
+      .then((chat) => {
+        setAltFieldSelections((chat.metadata?.alternate_field_selections as Record<string, string>) || {})
+        setGroupAltFieldSelections((chat.metadata?.group_alternate_field_selections as Record<string, Record<string, string>>) || {})
+        const mode = chat.metadata?.group_scenario_override?.mode
+        setGroupScenarioMode(mode === 'member' || mode === 'custom' ? mode : 'individual')
+      })
+      .catch(() => {
+        setAltFieldSelections({})
+        setGroupAltFieldSelections({})
+        setGroupScenarioMode('individual')
+      })
+  }, [chatId])
 
   useEffect(() => {
     if (!chatId) { setImpersonationPresetId(null); return }
@@ -187,6 +511,23 @@ export default function InputArea({ chatId }: InputAreaProps) {
       console.error('[AltFields] Failed to save:', err)
     }
   }, [chatId, altFieldSelections])
+
+  const handleGroupAltFieldSelect = useCallback(async (characterId: string, field: string, variantId: string | null) => {
+    const memberSelections = { ...(groupAltFieldSelections[characterId] || {}) }
+    if (variantId) memberSelections[field] = variantId
+    else delete memberSelections[field]
+
+    const newSelections = { ...groupAltFieldSelections }
+    if (Object.keys(memberSelections).length > 0) newSelections[characterId] = memberSelections
+    else delete newSelections[characterId]
+    setGroupAltFieldSelections(newSelections)
+
+    try {
+      await chatsApi.setGroupMemberAlternateFields(chatId, characterId, memberSelections)
+    } catch (err) {
+      console.error('[AltFields] Failed to save group member selection:', err)
+    }
+  }, [chatId, groupAltFieldSelections])
 
   // Track persona add-ons for the active persona
   const [personaAddons, setPersonaAddons] = useState<PersonaAddon[]>([])
@@ -219,16 +560,19 @@ export default function InputArea({ chatId }: InputAreaProps) {
   }), [activeCharacterId, activeCharacter?.tags, personas, characterPersonaBindings, personaTagBindings])
 
   const currentChatAddonOverrides = activePersonaId ? (chatAddonStatesByPersona[activePersonaId] ?? {}) : {}
-  const effectivePersonaAddonStates = useMemo(() => {
+  const basePersonaAddonStates = useMemo(() => {
     const states: Record<string, boolean> = {}
     for (const addon of personaAddons) states[addon.id] = addon.enabled
     for (const addon of attachedGlobalAddons) states[addon.id] = addon.enabled
     if (activePersonaId && resolvedPersonaBinding.personaId === activePersonaId && resolvedPersonaBinding.addonStates) {
       Object.assign(states, resolvedPersonaBinding.addonStates)
     }
-    Object.assign(states, currentChatAddonOverrides)
     return states
-  }, [activePersonaId, personaAddons, attachedGlobalAddons, resolvedPersonaBinding, currentChatAddonOverrides])
+  }, [activePersonaId, personaAddons, attachedGlobalAddons, resolvedPersonaBinding])
+  const effectivePersonaAddonStates = useMemo(
+    () => ({ ...basePersonaAddonStates, ...currentChatAddonOverrides }),
+    [basePersonaAddonStates, currentChatAddonOverrides],
+  )
   const effectivePersonaAddons = useMemo(
     () => personaAddons.map((addon) => ({ ...addon, enabled: effectivePersonaAddonStates[addon.id] ?? addon.enabled })),
     [personaAddons, effectivePersonaAddonStates],
@@ -237,7 +581,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
     () => attachedGlobalAddons.map((addon) => ({ ...addon, enabled: effectivePersonaAddonStates[addon.id] ?? addon.enabled })),
     [attachedGlobalAddons, effectivePersonaAddonStates],
   )
-  const chatAddonOverrideCount = Object.keys(currentChatAddonOverrides).length
+  const chatAddonOverrideCount = Object.entries(currentChatAddonOverrides)
+    .filter(([id, enabled]) => id in basePersonaAddonStates && enabled !== basePersonaAddonStates[id])
+    .length
   const activeGenerationAddonStates = activePersonaId && Object.keys(effectivePersonaAddonStates).length > 0
     ? effectivePersonaAddonStates
     : undefined
@@ -287,6 +633,15 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
   }, [storePersonas, activePersonaId])
 
+  // Mirror per-chat add-on states into the shared chat metadata so other
+  // surfaces (notably the Persona editor's "rebind add-ons" snapshot) read the
+  // live selections rather than the copy captured when the chat first opened.
+  const syncChatAddonMetadata = useCallback((states: Record<string, Record<string, boolean>>) => {
+    const store = useStore.getState()
+    if (store.activeChatId !== chatId) return
+    store.setActiveChatMetadata({ ...(store.activeChatMetadata ?? {}), persona_addon_states: states })
+  }, [chatId])
+
   const persistChatAddonOverride = useCallback(async (addonId: string, enabled: boolean) => {
     if (!activePersonaId) return false
     const previous = chatAddonStatesByPersona
@@ -298,15 +653,17 @@ export default function InputArea({ chatId }: InputAreaProps) {
       },
     }
     setChatAddonStatesByPersona(nextByPersona)
+    syncChatAddonMetadata(nextByPersona)
     try {
       await chatsApi.patchMetadata(chatId, { persona_addon_states: nextByPersona })
       return true
     } catch {
       setChatAddonStatesByPersona(previous)
-      toast.error('Failed to save add-on state for this chat')
+      syncChatAddonMetadata(previous)
+      toast.error(t('toast.failedSaveAddonState'))
       return false
     }
-  }, [activePersonaId, chatId, chatAddonStatesByPersona])
+  }, [activePersonaId, chatId, chatAddonStatesByPersona, syncChatAddonMetadata])
 
   const handleToggleAddonState = useCallback((addonId: string) => {
     void persistChatAddonOverride(addonId, !(effectivePersonaAddonStates[addonId] ?? false))
@@ -324,7 +681,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       const existing = Array.isArray(p.metadata?.addons) ? p.metadata.addons : []
       const addon: PersonaAddon = {
         id: uuidv7(),
-        label: label || 'Untitled add-on',
+        label: label || t('quickMenu.untitledAddon'),
         content,
         enabled: false,
         sort_order: existing.length,
@@ -338,17 +695,50 @@ export default function InputArea({ chatId }: InputAreaProps) {
       setNewAddonLabel('')
       setNewAddonContent('')
       setShowCreateAddon(false)
-      toast.success(overrideSaved ? 'Add-on created for this chat' : 'Add-on created, but could not enable it for this chat')
+      toast.success(overrideSaved ? t('toast.addonCreated') : t('toast.addonCreatedNotEnabled'))
     } catch {
-      toast.error('Failed to create add-on')
+      toast.error(t('toast.failedCreateAddon'))
     } finally {
       setCreatingAddon(false)
     }
-  }, [activePersonaId, creatingAddon, newAddonLabel, newAddonContent, persistChatAddonOverride])
+  }, [activePersonaId, creatingAddon, newAddonLabel, newAddonContent, persistChatAddonOverride, t])
 
   // iPhone-specific: match input bar bottom corners to device screen curvature
   const screenCornerRadius = useDeviceFrameRadius()
   const [inputFocused, setInputFocused] = useState(false)
+  const [sttStatus, setSttStatus] = useState<'idle' | 'starting' | 'listening' | 'processing'>('idle')
+  const [sttAudioFrame, setSttAudioFrame] = useState<STTAudioFrame | null>(null)
+  const sttEngineRef = useRef<STTEngine | null>(null)
+  const sttDraftBaseRef = useRef('')
+  const sttInterimTextRef = useRef('')
+  const sttFinalSegmentsRef = useRef<string[]>([])
+  const sttNormalizedFinalSegmentsRef = useRef<string[]>([])
+  const sttCommandStateRef = useRef<STTCommandState>({ thoughtDepth: 0 })
+  const sttShouldSendRef = useRef(false)
+
+  const isSTTSupported = useMemo(() => {
+    if (voiceSettings.sttProvider === 'webspeech') return isWebSpeechAvailable()
+    return getSupportedSTTAudioFormat() != null && typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
+  }, [voiceSettings.sttProvider])
+  const isListeningToSTT = sttStatus === 'starting' || sttStatus === 'listening' || sttStatus === 'processing'
+  const showSTTIndicator = isListeningToSTT
+  const sttIndicatorLabel = useMemo(() => {
+    if (sttStatus === 'starting') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttStartingMic') : t('input.sttPreparingRecording')
+    if (sttStatus === 'processing') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttFinalizingTranscript') : t('input.sttTranscribingAudio')
+    if (sttStatus === 'listening') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttListening') : t('input.sttRecording')
+    return ''
+  }, [sttStatus, voiceSettings.sttProvider, t])
+  const sttVisualizerBars = sttAudioFrame?.frequencies?.length ? sttAudioFrame.frequencies : STT_IDLE_BARS
+  const sttVisualizerLevel = sttAudioFrame ? Math.max(sttAudioFrame.amplitude, sttAudioFrame.peak * 0.65) : 0.16
+
+  const stopSTTSession = useCallback((mode: 'stop' | 'destroy' = 'stop') => {
+    const engine = sttEngineRef.current
+    if (!engine) return
+    setSttAudioFrame(null)
+    if (mode === 'destroy') engine.destroy()
+    else engine.stop()
+    if (mode === 'destroy') sttEngineRef.current = null
+  }, [])
 
   const syncTextareaMirrorScroll = useCallback(() => {
     const ta = textareaRef.current
@@ -368,6 +758,18 @@ export default function InputArea({ chatId }: InputAreaProps) {
   const queueTextareaSelection = useCallback((start: number, end = start, direction: 'forward' | 'backward' | 'none' = 'none') => {
     pendingSelectionRef.current = { start, end, direction }
   }, [])
+
+  const applySTTTranscript = useCallback((transcript: string, moveCaret = false) => {
+    const base = sttDraftBaseRef.current
+    const normalized = transcript.trim()
+    const nextText = normalized
+      ? (base ? `${base.replace(/\s+$/, '')} ${normalized}` : normalized)
+      : base
+
+    setText(nextText)
+    if (moveCaret) queueTextareaSelection(nextText.length)
+  }, [queueTextareaSelection])
+
 
   useLayoutEffect(() => {
     const ta = textareaRef.current
@@ -398,6 +800,11 @@ export default function InputArea({ chatId }: InputAreaProps) {
       requestAnimationFrame(() => resizeTextarea(textareaRef.current))
     }
   }, [impersonateDraftContent, setImpersonateDraftContent, resizeTextarea])
+
+  useEffect(() => () => {
+    sttEngineRef.current?.destroy()
+    sttEngineRef.current = null
+  }, [])
 
   // ── Draft input persistence ──────────────────────────────────────────
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -510,9 +917,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
           slug: slugifyName(c.name),
           muted: mutedCharacterIds.includes(id),
           image_id: (c as any).image_id ?? null,
+          extensions: (c as any).extensions ?? undefined,
         }
       })
-      .filter(Boolean) as Array<{ id: string; name: string; slug: string; muted: boolean; image_id: string | null }>
+      .filter(Boolean) as Array<{ id: string; name: string; slug: string; muted: boolean; image_id: string | null; extensions?: Record<string, any> }>
     const ranked = members
       .map((m) => {
         const lname = m.name.toLowerCase()
@@ -536,8 +944,44 @@ export default function InputArea({ chatId }: InputAreaProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [atQuery, isGroupChat, groupCharacterIds, mutedCharacterIds, characters])
 
+  // While hidden for mobile edit, the RO below cannot observe a display:none
+  // element, so --lcs-input-safe-zone would freeze at the pre-edit (potentially
+  // tall) value and leave a void under the message list. Override directly.
+  useLayoutEffect(() => {
+    if (!hideForMobileEdit) return
+    const parent = containerRef.current?.parentElement
+    if (!parent) return
+    let syncRaf = 0
+
+    const syncHiddenEditSafeZone = () => {
+      const rootStyle = getComputedStyle(document.documentElement)
+      const keyboardInset = parseFloat(rootStyle.getPropertyValue('--app-keyboard-inset-bottom')) || 0
+      parent.style.setProperty('--lcs-input-safe-zone', `${Math.max(16, Math.round(16 + keyboardInset))}px`)
+    }
+
+    const scheduleHiddenEditSafeZoneSync = () => {
+      if (syncRaf) cancelAnimationFrame(syncRaf)
+      syncRaf = requestAnimationFrame(() => {
+        syncRaf = 0
+        syncHiddenEditSafeZone()
+      })
+    }
+
+    syncHiddenEditSafeZone()
+    window.addEventListener('resize', scheduleHiddenEditSafeZoneSync)
+    window.visualViewport?.addEventListener('resize', scheduleHiddenEditSafeZoneSync)
+    window.visualViewport?.addEventListener('scroll', scheduleHiddenEditSafeZoneSync)
+
+    return () => {
+      if (syncRaf) cancelAnimationFrame(syncRaf)
+      window.removeEventListener('resize', scheduleHiddenEditSafeZoneSync)
+      window.visualViewport?.removeEventListener('resize', scheduleHiddenEditSafeZoneSync)
+      window.visualViewport?.removeEventListener('scroll', scheduleHiddenEditSafeZoneSync)
+    }
+  }, [hideForMobileEdit])
+
   // ResizeObserver — set --lcs-input-safe-zone on parent so scroll padding stays in sync
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) return
     const parent = el.parentElement
@@ -558,7 +1002,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       } else {
         bottomOffset = parseFloat(getComputedStyle(el).bottom) || 12
       }
-      parent.style.setProperty('--lcs-input-safe-zone', `${h + bottomOffset + 16}px`)
+      parent.style.setProperty('--lcs-input-safe-zone', `${h + bottomOffset + 8}px`)
     }
 
     const ro = new ResizeObserver(update)
@@ -567,7 +1011,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     // On iOS PWA, the virtual keyboard changes `bottom` via CSS variable but
     // doesn't change the element's size — ResizeObserver alone won't catch it.
-    // Listen to visualViewport resize (keyboard open/close) and re-compute.
+    // WebKit can report keyboard geometry via resize and/or scroll, so listen
+    // to both to keep the message-list safe-zone aligned with the input bar.
     let vpFrame = 0
     const onViewportResize = () => {
       // Run after main.tsx's syncViewportVars (also uses requestAnimationFrame)
@@ -576,6 +1021,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
     if (isIOSPwa) {
       window.visualViewport?.addEventListener('resize', onViewportResize)
+      window.visualViewport?.addEventListener('scroll', onViewportResize)
     }
 
     return () => {
@@ -583,6 +1029,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
       cancelAnimationFrame(vpFrame)
       if (isIOSPwa) {
         window.visualViewport?.removeEventListener('resize', onViewportResize)
+        window.visualViewport?.removeEventListener('scroll', onViewportResize)
       }
     }
   }, [])
@@ -590,19 +1037,20 @@ export default function InputArea({ chatId }: InputAreaProps) {
   // Document-level Escape to stop generation
   useEffect(() => {
     const handleEscape = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape' && isStreaming) {
+      // Peers can't stop the host's generation — ignore Escape for them.
+      if (e.key === 'Escape' && isGeneratingInChat && !isRoomPeer) {
         e.preventDefault()
         e.stopPropagation()
-        generateApi.stop(activeGenerationId || undefined).catch(console.error)
+        generateApi.stop(generationIdForChat || undefined, chatId).catch(console.error)
         // If in optimistic phase, revert locally
-        if (!activeGenerationId) {
+        if (localGenerationInChat && !activeGenerationId) {
           stopStreaming()
         }
       }
     }
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [isStreaming, activeGenerationId, stopStreaming])
+  }, [isGeneratingInChat, generationIdForChat, localGenerationInChat, activeGenerationId, chatId, stopStreaming, isRoomPeer])
 
   useEffect(() => {
     if (openPopover !== 'persona') return
@@ -636,7 +1084,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     return DOCUMENT_EXTENSIONS.has(ext)
   }, [DOCUMENT_EXTENSIONS])
 
-  const handleAttachFiles = useCallback(async (files: FileList | null) => {
+  const handleAttachFiles = useCallback(async (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return
     setUploading(true)
     try {
@@ -648,18 +1096,18 @@ export default function InputArea({ chatId }: InputAreaProps) {
         if (isDoc) {
           // Document files → upload to chat databank for persistent reference
           try {
-            const chatLabel = characterName ? `${characterName} Chat` : 'Chat Documents'
+            const chatLabel = characterName ? t('toast.chatDocumentsNamed', { name: characterName }) : t('toast.chatDocuments')
             await databankApi.attachToChat(file, chatId, chatLabel)
             const docName = file.name.replace(/\.[^.]+$/, '')
-            toast.success(`"${docName}" added to chat databank`, { duration: 3000 })
+            toast.success(t('toast.docAddedToDatabank', { name: docName }), { duration: 3000 })
           } catch (err: any) {
-            toast.error(err?.body?.error || err?.message || `Failed to upload ${file.name}`, { title: 'Upload Failed' })
+            toast.error(err?.body?.error || err?.message || t('toast.uploadFileFailed', { name: file.name }), { title: t('toast.uploadFailed') })
           }
           continue
         }
 
         if (!isImage && !isAudio) {
-          toast.error(`Unsupported file type: ${file.name}`, { title: 'Upload Failed' })
+          toast.error(t('toast.unsupportedFileType', { name: file.name }), { title: t('toast.uploadFailed') })
           continue
         }
 
@@ -678,16 +1126,71 @@ export default function InputArea({ chatId }: InputAreaProps) {
       }
     } catch (err: any) {
       console.error('[InputArea] Attachment upload failed:', err)
-      toast.error(err?.message || 'Failed to upload attachment', { title: 'Upload Failed' })
+      toast.error(err?.message || t('toast.failedUploadAttachment'), { title: t('toast.uploadFailed') })
     } finally {
       setUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
-  }, [isDocumentFile, chatId, characterName])
+  }, [isDocumentFile, chatId, characterName, t])
 
   const removeAttachment = useCallback((imageId: string) => {
     setPendingAttachments((prev) => prev.filter((a) => a.image_id !== imageId))
   }, [])
+
+  // Paste-to-attach: pull any files (e.g. screenshots) out of the clipboard and
+  // route them through the same pipeline as the file picker. Plain-text pastes
+  // contain no files, so we leave the default behavior untouched for those.
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const files: File[] = []
+    for (const item of Array.from(items)) {
+      if (item.kind !== 'file') continue
+      const file = item.getAsFile()
+      if (!file) continue
+      // Clipboard images arrive with a generic name like "image.png"; stamp a
+      // friendlier, unique name so the attachment strip and saved filename read clearly.
+      if (file.type.startsWith('image/') && /^image\.\w+$/i.test(file.name)) {
+        const ext = file.name.slice(file.name.lastIndexOf('.'))
+        files.push(new File([file], `pasted-image-${Date.now()}${ext}`, { type: file.type }))
+      } else {
+        files.push(file)
+      }
+    }
+    if (files.length === 0) return
+    e.preventDefault()
+    handleAttachFiles(files)
+  }, [handleAttachFiles])
+
+  // Drag-and-drop: a counter tracks enter/leave across child elements so the
+  // overlay doesn't flicker as the cursor moves over nested nodes.
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return
+    e.preventDefault()
+    dragCounterRef.current += 1
+    setDragActive(true)
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return
+    e.preventDefault()
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    if (dragCounterRef.current === 0) return
+    e.preventDefault()
+    dragCounterRef.current -= 1
+    if (dragCounterRef.current === 0) setDragActive(false)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    const files = e.dataTransfer?.files
+    if (!files || files.length === 0) return
+    e.preventDefault()
+    dragCounterRef.current = 0
+    setDragActive(false)
+    handleAttachFiles(files)
+  }, [handleAttachFiles])
 
   // Detect trailing consecutive user messages (queued messages awaiting generation)
   const hasQueuedMessages = useMemo(() => {
@@ -697,9 +1200,92 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
     return false
   }, [messages])
+  const hasDraftContent = text.trim().length > 0 || pendingAttachments.length > 0
+  const [mobileQueueHoldState, setMobileQueueHoldState] = useState<MobileQueueHoldState>('idle')
+
+  const setMobileQueueHoldVisualState = useCallback((next: MobileQueueHoldState) => {
+    mobileQueueHoldStateRef.current = next
+    setMobileQueueHoldState(next)
+  }, [])
+
+  const suppressFollowupClick = useCallback((durationMs = 1500) => {
+    ignoreFollowupClickCountRef.current = 1
+    ignoreFollowupClickUntilRef.current = Date.now() + durationMs
+  }, [])
+
+  const clearTouchQueueTimers = useCallback(() => {
+    if (touchHoldPromptTimerRef.current) {
+      clearTimeout(touchHoldPromptTimerRef.current)
+      touchHoldPromptTimerRef.current = 0
+    }
+    if (touchQueueArmTimerRef.current) {
+      clearTimeout(touchQueueArmTimerRef.current)
+      touchQueueArmTimerRef.current = 0
+    }
+  }, [])
+
+  const syncMobileQueueHoldVisualState = useCallback((holdStartedAt: number, evaluatedAt: number) => {
+    if (touchHoldStartedAtRef.current !== holdStartedAt || mobileQueueHoldStateRef.current === 'queueing') {
+      return 'idle'
+    }
+
+    const nextState = getMobileQueueHoldPreviewState({
+      holdStartedAt,
+      evaluatedAt,
+      revealAfterMs: MOBILE_QUEUE_HOLD_PROMPT_MS,
+      thresholdMs: MOBILE_QUEUE_HOLD_MS,
+    })
+    if (nextState !== mobileQueueHoldStateRef.current) {
+      setMobileQueueHoldVisualState(nextState)
+    }
+    return nextState
+  }, [setMobileQueueHoldVisualState])
+
+  useEffect(() => {
+    return () => {
+      clearTouchQueueTimers()
+    }
+  }, [clearTouchQueueTimers])
+
+  useEffect(() => {
+    if ((mobileQueueHoldState === 'holding' || mobileQueueHoldState === 'armed') && (!hasDraftContent || isGeneratingInChat)) {
+      clearTouchQueueTimers()
+      setMobileQueueHoldVisualState('idle')
+    }
+  }, [mobileQueueHoldState, hasDraftContent, isGeneratingInChat, clearTouchQueueTimers, setMobileQueueHoldVisualState])
+
+  // Multiplayer room send. Returns 'sent' (routed to the room — caller stops),
+  // 'blocked' (off-turn / closed freeform window — caller stops), or 'local'
+  // (not in a room, or host in round-robin → caller does its normal local
+  // send/queue). Shared by send AND queue so both are turn/window-gated
+  // identically — queueing must not be a bypass.
+  const attemptRoomSend = useCallback((): 'sent' | 'blocked' | 'local' => {
+    const mp = useStore.getState()
+    if (!mp.mpRoomId) return 'local'
+    if (!mp.isMyTurn()) {
+      toast.info(mp.mpTurnStrategy === 'freeform' ? 'The freeform window is closed' : 'Wait for your turn')
+      return 'blocked'
+    }
+    // The host in round-robin sends locally (owns the chat); everyone else —
+    // peers always, and the host during a freeform window — submits via the room.
+    const hostFreeformContribution = mp.mpIsHost && mp.mpTurnStrategy === 'freeform'
+    if (mp.mpIsHost && !hostFreeformContribution) return 'local'
+    const roomContent = text.trim()
+    if (!roomContent) return 'blocked'
+    sendRoomAction({ type: 'room_message', content: roomContent })
+    setText('')
+    if (saveDraftInput) { try { localStorage.removeItem(DRAFT_KEY_PREFIX + chatId) } catch {} }
+    requestAnimationFrame(() => {
+      if (textareaRef.current) { resizeTextarea(textareaRef.current); textareaRef.current.focus() }
+    })
+    return 'sent'
+  }, [text, chatId, saveDraftInput, resizeTextarea])
 
   const handleQueueMessage = useCallback(async () => {
-    if (sendingRef.current || isStreaming) return
+    if (sendingRef.current || isGeneratingInChat) return
+    // In a room, queueing IS sending — gate by turn/window + route through the
+    // host (peers can't write to the chat directly).
+    if (attemptRoomSend() !== 'local') return
     const content = text.trim()
     const attachments = pendingAttachments.length > 0
       ? pendingAttachments.map(({ previewUrl: _, ...a }) => a)
@@ -721,8 +1307,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
     })
 
     try {
-      const effectivePersonaId = sendPersonaId || activePersonaId
-      const effectivePersonaName = personas.find((p) => p.id === effectivePersonaId)?.name || 'User'
+      const effectivePersonaId = isTemporaryChat ? null : (sendPersonaId || activePersonaId)
+      const effectivePersonaName = personas.find((p) => p.id === effectivePersonaId)?.name || t('userFallback')
       const extra: Record<string, any> = {}
       if (effectivePersonaId) extra.persona_id = effectivePersonaId
       if (attachments) extra.attachments = attachments
@@ -735,17 +1321,22 @@ export default function InputArea({ chatId }: InputAreaProps) {
       })
       addMessage(msg)
       if (sendPersonaId) setSendPersonaId(null)
-      toast.info('Message queued', { duration: 1500 })
+      toast.info(t('toast.messageQueued'), { duration: 1500 })
     } catch (err: any) {
       console.error('[InputArea] Failed to queue message:', err)
-      toast.error(err?.body?.error || err?.message || 'Failed to queue message')
+      toast.error(err?.body?.error || err?.message || t('toast.failedQueueMessage'))
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activePersonaId, personas, sendPersonaId, pendingAttachments, addMessage, saveDraftInput, resizeTextarea])
+  }, [text, chatId, isGeneratingInChat, isTemporaryChat, activePersonaId, personas, sendPersonaId, pendingAttachments, addMessage, saveDraftInput, resizeTextarea, attemptRoomSend])
 
   const handleSend = useCallback(async () => {
-    if (sendingRef.current || isStreaming) return
+    if (sendingRef.current || isGeneratingInChat) return
+
+    // Multiplayer: route through the room (turn/window-gated) unless we're the
+    // host in round-robin, who sends locally on their own chat.
+    if (attemptRoomSend() !== 'local') return
+
     const content = text.trim()
     const attachments = pendingAttachments.length > 0
       ? pendingAttachments.map(({ previewUrl: _, ...a }) => a)
@@ -769,14 +1360,16 @@ export default function InputArea({ chatId }: InputAreaProps) {
     })
 
     try {
-      const effectivePersonaId = sendPersonaId || activePersonaId
-      const effectivePersonaName = personas.find((p) => p.id === effectivePersonaId)?.name || 'User'
+      const effectivePersonaId = isTemporaryChat ? null : (sendPersonaId || activePersonaId)
+      const effectivePersonaName = personas.find((p) => p.id === effectivePersonaId)?.name || t('userFallback')
+      const presetId = getActivePresetForGeneration() || undefined
       const genOpts: import('@/api/generate').GenerateRequest = {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: effectivePersonaId || undefined,
         persona_addon_states: effectivePersonaId === activePersonaId ? activeGenerationAddonStates : undefined,
-        preset_id: getActivePresetForGeneration() || undefined,
+        preset_id: presetId,
+        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
         generation_type: 'normal' as const,
       }
 
@@ -803,18 +1396,25 @@ export default function InputArea({ chatId }: InputAreaProps) {
         })
       }
 
-      // Initial speaker: first mention → first unmuted → undefined.
+      const orderedMentionedIds = mentionedIds.length > 0
+        ? orderGroupResponseIds(mentionedIds, groupResponseOrder, { priorityIds: [mentionedIds[0]] })
+        : []
+
+      // Initial speaker: first mention → configured unmuted member order → undefined.
       if (isGroupChat && groupCharacterIds.length > 0) {
-        if (mentionedIds.length > 0) {
-          genOpts.target_character_id = mentionedIds[0]
+        if (orderedMentionedIds.length > 0) {
+          genOpts.target_character_id = orderedMentionedIds[0]
         } else {
-          const firstUnmuted = groupCharacterIds.find((id) => !mutedCharacterIds.includes(id))
+          const firstUnmuted = orderGroupResponseIds(
+            groupCharacterIds.filter((id) => !mutedCharacterIds.includes(id)),
+            groupResponseOrder,
+          )[0]
           if (firstUnmuted) genOpts.target_character_id = firstUnmuted
         }
       }
 
-      // Queue remaining mentioned members to speak in order after the first.
-      const remainingMentions = mentionedIds.slice(1)
+      // Queue remaining mentioned members after the direct-mention lead.
+      const remainingMentions = orderedMentionedIds.slice(1)
       if (isGroupChat && remainingMentions.length > 0) {
         setMentionQueue({
           chatId,
@@ -824,6 +1424,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
             persona_id: genOpts.persona_id,
             persona_addon_states: genOpts.persona_addon_states,
             preset_id: genOpts.preset_id,
+            force_preset_id: genOpts.force_preset_id,
           },
         })
       } else {
@@ -868,16 +1469,55 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } catch (err: any) {
       if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to send:', err)
-      const msg = err?.body?.error || err?.message || 'Failed to start generation'
+      const msg = err?.body?.error || err?.message || te('failedToStartGeneration')
       setStreamingError(msg)
-      toast.error(msg, { title: 'Generation Failed' })
+      toast.error(msg, { title: t('toast.generationFailed') })
     } finally {
       sendingRef.current = false
     }
-  }, [text, chatId, isStreaming, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages, isGroupChat, groupCharacterIds, mutedCharacterIds, characters, setMentionQueue, resizeTextarea])
+  }, [text, chatId, isGeneratingInChat, isTemporaryChat, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, personas, sendPersonaId, pendingAttachments, addMessage, startStreaming, setStreamingError, consumeOneshotGuides, saveDraftInput, hasQueuedMessages, isGroupChat, groupCharacterIds, mutedCharacterIds, groupResponseOrder, characters, setMentionQueue, resizeTextarea, attemptRoomSend])
+
+  const finalizeSTTTranscript = useCallback(() => {
+    const transcript = sttNormalizedFinalSegmentsRef.current.join(' ').trim()
+    const shouldSend = sttShouldSendRef.current
+
+    sttInterimTextRef.current = ''
+    sttFinalSegmentsRef.current = []
+    sttNormalizedFinalSegmentsRef.current = []
+    sttCommandStateRef.current = { thoughtDepth: 0 }
+    sttShouldSendRef.current = false
+
+    setSttStatus('idle')
+    stopSTTSession('destroy')
+
+    if (!transcript) {
+      pendingSTTActionRef.current = null
+      applySTTTranscript('', true)
+      return
+    }
+
+    pendingSTTActionRef.current = shouldSend ? 'send' : 'queue'
+    applySTTTranscript(transcript, true)
+  }, [applySTTTranscript, stopSTTSession])
+
+  useEffect(() => {
+    const pendingAction = pendingSTTActionRef.current
+    if (!pendingAction) return
+    if (!text.trim()) {
+      pendingSTTActionRef.current = null
+      return
+    }
+
+    pendingSTTActionRef.current = null
+    if (pendingAction === 'send') {
+      void handleSend()
+      return
+    }
+    void handleQueueMessage()
+  }, [text, handleQueueMessage, handleSend])
 
   const doRegenerate = useCallback(async (feedback?: string | null) => {
-    if (isStreaming) return
+    if (isGeneratingInChat) return
     const nonce = ++generationNonceRef.current
 
     // 1. Delete the last assistant message (if after the latest user turn)
@@ -920,14 +1560,19 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     // 4. Fire generation
     try {
+      const presetId = getActivePresetForGeneration() || undefined
       const genOpts: import('@/api/generate').GenerateRequest = {
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         persona_addon_states: activeGenerationAddonStates,
-        preset_id: getActivePresetForGeneration() || undefined,
+        preset_id: presetId,
+        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
         generation_type: 'normal',
         retain_council: retainCouncilForRegens || undefined,
+      }
+      if (isGroupChat && typeof lastMsg?.extra?.character_id === 'string') {
+        genOpts.target_character_id = lastMsg.extra.character_id
       }
       if (feedback) {
         genOpts.regen_feedback = feedback
@@ -942,14 +1587,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
       // Remove the placeholder on failure
       useStore.getState().removeMessage(placeholderId)
       console.error('[InputArea] Failed to regenerate:', err)
-      const msg = err?.body?.error || err?.message || 'Failed to regenerate'
+      const msg = err?.body?.error || err?.message || te('failedToRegenerate')
       setStreamingError(msg)
-      toast.error(msg, { title: 'Regeneration Failed' })
+      toast.error(msg, { title: t('toast.regenerationFailed') })
     }
-  }, [chatId, isStreaming, messages, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, regenFeedback.position, retainCouncilForRegens, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isGeneratingInChat, messages, isGroupChat, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, regenFeedback.position, retainCouncilForRegens, addMessage, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleRegenerate = useCallback(() => {
-    if (isStreaming) return
+    if (isGeneratingInChat) return
     if (regenFeedback.enabled) {
       openModal('regenFeedback', {
         onSubmit: (feedback: string) => doRegenerate(feedback),
@@ -958,19 +1603,26 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } else {
       doRegenerate()
     }
-  }, [isStreaming, regenFeedback.enabled, openModal, doRegenerate])
+  }, [isGeneratingInChat, regenFeedback.enabled, openModal, doRegenerate])
 
   const handleContinue = useCallback(async () => {
-    if (isStreaming) return
+    if (isGeneratingInChat) return
     const nonce = ++generationNonceRef.current
     beginStreaming(undefined, 'continue')
     try {
+      const lastAssistant = [...messages].reverse().find((msg) => !msg.is_user)
+      const targetCharacterId = isGroupChat && typeof lastAssistant?.extra?.character_id === 'string'
+        ? lastAssistant.extra.character_id
+        : undefined
+      const presetId = getActivePresetForGeneration() || undefined
       const res = await generateApi.continueGeneration({
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         persona_addon_states: activeGenerationAddonStates,
-        preset_id: getActivePresetForGeneration() || undefined,
+        preset_id: presetId,
+        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
+        target_character_id: targetCharacterId,
         retain_council: retainCouncilForRegens || undefined,
       })
       if (generationNonceRef.current !== nonce) return
@@ -979,14 +1631,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } catch (err: any) {
       if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to continue:', err)
-      const msg = err?.body?.error || err?.message || 'Failed to continue'
+      const msg = err?.body?.error || err?.message || te('failedToContinue')
       setStreamingError(msg)
-      toast.error(msg, { title: 'Continue Failed' })
+      toast.error(msg, { title: t('toast.continueFailed') })
     }
-  }, [chatId, isStreaming, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
+  }, [chatId, isGeneratingInChat, messages, isGroupChat, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, retainCouncilForRegens, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides])
 
   const handleImpersonate = useCallback(async (mode: import('@/api/generate').ImpersonateMode) => {
-    if (isStreaming) return
+    if (isGeneratingInChat) return
     const nonce = ++generationNonceRef.current
     const impersonateInput = text.trim()
     beginStreaming(undefined, 'impersonate_draft')
@@ -999,13 +1651,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
     }
     try {
       const forcedPresetId = mode === 'oneliner' ? impersonationPresetId : null
+      const presetId = forcedPresetId || getActivePresetForGeneration() || undefined
       const res = await generateApi.start({
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         persona_addon_states: activeGenerationAddonStates,
-        preset_id: forcedPresetId || getActivePresetForGeneration() || undefined,
-        force_preset_id: !!forcedPresetId,
+        preset_id: presetId,
+        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
         generation_type: 'impersonate',
         impersonate_mode: mode,
         impersonate_input: impersonateInput || undefined,
@@ -1017,26 +1670,29 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } catch (err: any) {
       if (generationNonceRef.current !== nonce) return
       console.error('[InputArea] Failed to impersonate:', err)
-      const msg = err?.body?.error || err?.message || 'Failed to impersonate'
+      const msg = err?.body?.error || err?.message || te('failedToImpersonate')
       setStreamingError(msg)
-      toast.error(msg, { title: 'Impersonation Failed' })
+      toast.error(msg, { title: t('toast.impersonationFailed') })
     }
-  }, [chatId, isStreaming, text, activeProfileId, activePersonaId, activeGenerationAddonStates, impersonationPresetId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides, resizeTextarea])
+  }, [chatId, isGeneratingInChat, text, activeProfileId, activePersonaId, activeGenerationAddonStates, impersonationPresetId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, consumeOneshotGuides, resizeTextarea])
 
   const handleStop = useCallback(async () => {
-    if (!isStreaming) return
+    if (!isGeneratingInChat) return
+    // Peers don't own the host's generation — stopping is the host's to do.
+    if (isRoomPeer) return
     try {
-      // If we have a generation ID, stop that specific generation.
-      // Otherwise (optimistic phase), stop all user generations.
-      await generateApi.stop(activeGenerationId || undefined)
+      // Stop the specific generation when we know its ID; the chat id lets the
+      // backend fall back to the chat's active generation if the ID is stale
+      // (or, in the optimistic phase, not yet known).
+      await generateApi.stop(generationIdForChat || undefined, chatId)
     } catch (err) {
       console.error('[InputArea] Failed to stop:', err)
     }
     // If we're in the optimistic phase (no WS events yet), revert locally
-    if (!activeGenerationId) {
+    if (localGenerationInChat && !activeGenerationId) {
       stopStreaming()
     }
-  }, [isStreaming, activeGenerationId, stopStreaming])
+  }, [isGeneratingInChat, generationIdForChat, localGenerationInChat, activeGenerationId, chatId, stopStreaming, isRoomPeer])
 
   const handleNewChat = useCallback(async () => {
     // For group chats, open group creator pre-populated with current members
@@ -1052,8 +1708,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
         openModal('greetingPicker', {
           character,
           onSelect: async (greetingIndex: number) => {
-            const toastId = toast.info('Creating chat and preparing Memory Cortex in the background…', {
-              title: 'Starting Chat',
+            const toastId = toast.info(t('toast.creatingChatCortex'), {
+              title: t('toast.startingChat'),
               duration: 60_000,
               dismissible: false,
             })
@@ -1067,14 +1723,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
             } catch (err) {
               toast.dismiss(toastId)
               console.error('[InputArea] Failed to create chat:', err)
-              toast.error('Failed to create chat')
+              toast.error(t('toast.failedCreateChat'))
             }
           },
         })
         return
       }
-      creationToastId = toast.info('Creating chat and preparing Memory Cortex in the background…', {
-        title: 'Starting Chat',
+      creationToastId = toast.info(t('toast.creatingChatCortex'), {
+        title: t('toast.startingChat'),
         duration: 60_000,
         dismissible: false,
       })
@@ -1085,7 +1741,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } catch (err) {
       if (creationToastId) toast.dismiss(creationToastId)
       console.error('[InputArea] Failed to start new chat:', err)
-      toast.error('Failed to start new chat')
+      toast.error(t('toast.failedStartNewChat'))
     }
   }, [activeCharacterId, isGroupChat, groupCharacterIds, navigate, openModal])
 
@@ -1094,8 +1750,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     let conversionToastId: string | null = null
     try {
-      conversionToastId = toast.info('Creating a new group chat from this conversation…', {
-        title: 'Converting Chat',
+      conversionToastId = toast.info(t('toast.creatingGroupFromChat'), {
+        title: t('toast.convertingChat'),
         duration: 60_000,
         dismissible: false,
       })
@@ -1109,21 +1765,21 @@ export default function InputArea({ chatId }: InputAreaProps) {
         chatId: converted.id,
         existingCharacterIds: [activeCharacterId],
       })
-      toast.success('Converted to group chat')
+      toast.success(t('toast.convertedToGroupChat'))
     } catch (err: any) {
       if (conversionToastId) toast.dismiss(conversionToastId)
       console.error('[InputArea] Failed to convert chat to group:', err)
-      toast.error(err?.body?.error || err?.message || 'Failed to convert chat', {
-        title: 'Conversion Failed',
+      toast.error(err?.body?.error || err?.message || t('toast.failedConvertChat'), {
+        title: t('toast.conversionFailed'),
       })
     }
   }, [chatId, activeCharacterId, isGroupChat, navigate, openModal])
 
   const handleDryRun = useCallback(async () => {
-    if (dryRunning || isStreaming) return
+    if (dryRunning || isGeneratingInChat) return
     const presetId = getActivePresetForGeneration()
     if (!presetId) {
-      toast.warning('No preset selected. Create or select a preset to dry-run.')
+      toast.warning(t('toast.noPresetForDryRun'))
       return
     }
     setDryRunning(true)
@@ -1134,6 +1790,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
         persona_id: activePersonaId || undefined,
         persona_addon_states: activeGenerationAddonStates,
         preset_id: presetId,
+        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
       })
       openModal('dryRun', result)
     } catch (err: any) {
@@ -1143,13 +1800,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
     } finally {
       setDryRunning(false)
     }
-  }, [chatId, dryRunning, isStreaming, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, openModal, setStreamingError])
+  }, [chatId, dryRunning, isGeneratingInChat, activeProfileId, activePersonaId, activeGenerationAddonStates, getActivePresetForGeneration, openModal, setStreamingError])
 
   const handleResolveMacros = useCallback(async () => {
-    if (resolvingMacros || isStreaming) return
+    if (resolvingMacros) return
     const template = text.trim()
     if (!template) {
-      toast.info('Nothing to resolve')
+      toast.info(t('toast.nothingToResolve'))
       return
     }
     setResolvingMacros(true)
@@ -1162,25 +1819,25 @@ export default function InputArea({ chatId }: InputAreaProps) {
         connection_id: activeProfileId || undefined,
       })
       if (res.text === text) {
-        toast.info('No macros found to resolve')
+        toast.info(t('toast.noMacrosFound'))
       } else {
         queueTextareaSelection(res.text.length)
         setText(res.text)
         const warns = res.diagnostics.filter((d) => d.level === 'warning' || d.level === 'error')
         if (warns.length > 0) {
-          toast.warning(`Macros resolved with ${warns.length} warning${warns.length !== 1 ? 's' : ''}`)
+          toast.warning(t('toast.macrosResolvedWithWarnings', { count: warns.length }))
         } else {
-          toast.success('Macros resolved')
+          toast.success(t('toast.macrosResolved'))
         }
       }
     } catch (err: any) {
       console.error('[InputArea] Macro resolution failed:', err)
-      const msg = err?.body?.error || err?.message || 'Failed to resolve macros'
+      const msg = err?.body?.error || err?.message || te('failedToResolveMacros')
       toast.error(msg)
     } finally {
       setResolvingMacros(false)
     }
-  }, [text, chatId, resolvingMacros, isStreaming, activeCharacterId, activePersonaId, activeProfileId, queueTextareaSelection])
+  }, [text, chatId, resolvingMacros, activeCharacterId, activePersonaId, activeProfileId, queueTextareaSelection])
 
   const handleHashSelect = useCallback((result: { slug: string; name: string }) => {
     const before = text.slice(0, hashStartIndex)
@@ -1249,37 +1906,105 @@ export default function InputArea({ chatId }: InputAreaProps) {
     [enterToSend, handleSend, handleQueueMessage, handleResolveMacros, openPopover, databankResults, databankActiveIdx, handleHashSelect, atResults, atActiveIdx, handleAtSelect]
   )
 
-  // Send button: cmd+click (mac) / ctrl+click (other) queues, normal click sends
+  // Mouse/keyboard activation still routes through click. Touch activation is
+  // handled on touchend and marks the follow-up synthetic click to ignore.
   const handleSendClick = useCallback((e: React.MouseEvent) => {
     unlockNotificationAudio()
     unlockTTSAudio()
-    if (queueLockRef.current) {
-      queueLockRef.current = false
+    if (ignoreFollowupClickCountRef.current > 0) {
+      ignoreFollowupClickCountRef.current -= 1
+      return
+    }
+    if (Date.now() < ignoreFollowupClickUntilRef.current) {
       return
     }
     const queueMod = isMac ? e.metaKey : e.ctrlKey
-    if (queueMod && (text.trim() || pendingAttachments.length > 0)) {
+    if (queueMod && hasDraftContent) {
       handleQueueMessage()
     } else {
       handleSend()
     }
-  }, [text, pendingAttachments, handleQueueMessage, handleSend])
+  }, [hasDraftContent, handleQueueMessage, handleSend])
 
-  // Long-press on send button (mobile, 2s) queues the message
-  const handleSendTouchStart = useCallback(() => {
-    if (!text.trim() && pendingAttachments.length === 0) return
-    touchTimerRef.current = window.setTimeout(() => {
-      queueLockRef.current = true
-      handleQueueMessage()
-    }, 2000)
-  }, [text, pendingAttachments, handleQueueMessage])
-
-  const handleSendTouchEnd = useCallback(() => {
-    if (touchTimerRef.current) {
-      clearTimeout(touchTimerRef.current)
-      touchTimerRef.current = 0
+  // Touch interactions with draft content are handled on touchend directly so
+  // the synthetic follow-up click cannot trigger a second action.
+  const handleSendTouchStart = useCallback((e: React.TouchEvent<HTMLButtonElement>) => {
+    if (!hasDraftContent || isGeneratingInChat) return
+    const holdStartedAt = e.timeStamp
+    touchHoldStartedAtRef.current = holdStartedAt
+    clearTouchQueueTimers()
+    if (mobileQueueHoldStateRef.current !== 'idle') {
+      setMobileQueueHoldVisualState('idle')
     }
-  }, [])
+    touchHoldPromptTimerRef.current = window.setTimeout(() => {
+      touchHoldPromptTimerRef.current = 0
+      syncMobileQueueHoldVisualState(holdStartedAt, holdStartedAt + MOBILE_QUEUE_HOLD_PROMPT_MS)
+    }, MOBILE_QUEUE_HOLD_PROMPT_MS)
+    touchQueueArmTimerRef.current = window.setTimeout(() => {
+      touchQueueArmTimerRef.current = 0
+      const nextState = syncMobileQueueHoldVisualState(holdStartedAt, holdStartedAt + MOBILE_QUEUE_HOLD_MS)
+      if (nextState !== 'armed') return
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        navigator.vibrate(12)
+      }
+    }, MOBILE_QUEUE_HOLD_MS)
+  }, [hasDraftContent, isGeneratingInChat, clearTouchQueueTimers, setMobileQueueHoldVisualState, syncMobileQueueHoldVisualState])
+
+  const handleSendTouchEnd = useCallback((e: React.TouchEvent<HTMLButtonElement>) => {
+    // Use the native event timestamps instead of Date.now(). On Android the
+    // button tap can trigger keyboard/viewport reflow before JS handles
+    // touchend, which inflates wall-clock duration and turns a tap into a
+    // false long-press.
+    const heldLongEnough = didMobileQueueHoldReachThreshold({
+      holdStartedAt: touchHoldStartedAtRef.current,
+      releasedAt: e.timeStamp,
+      thresholdMs: MOBILE_QUEUE_HOLD_MS,
+    })
+    touchHoldStartedAtRef.current = 0
+    clearTouchQueueTimers()
+    if (heldLongEnough && hasDraftContent) {
+      e.preventDefault()
+      e.stopPropagation()
+      unlockNotificationAudio()
+      unlockTTSAudio()
+      suppressFollowupClick()
+      setMobileQueueHoldVisualState('queueing')
+      void handleQueueMessage().finally(() => {
+        setMobileQueueHoldVisualState('idle')
+      })
+      return
+    }
+    if (hasDraftContent) {
+      e.preventDefault()
+      e.stopPropagation()
+      unlockNotificationAudio()
+      unlockTTSAudio()
+      suppressFollowupClick()
+      setMobileQueueHoldVisualState('idle')
+      void handleSend()
+      return
+    }
+    if (mobileQueueHoldStateRef.current === 'idle' && !hasDraftContent) {
+      e.preventDefault()
+      e.stopPropagation()
+      unlockNotificationAudio()
+      unlockTTSAudio()
+      suppressFollowupClick()
+      void handleSend()
+      return
+    }
+    if (mobileQueueHoldStateRef.current !== 'queueing') {
+      setMobileQueueHoldVisualState('idle')
+    }
+  }, [handleQueueMessage, handleSend, hasDraftContent, suppressFollowupClick, clearTouchQueueTimers, setMobileQueueHoldVisualState])
+
+  const handleSendTouchCancel = useCallback(() => {
+    touchHoldStartedAtRef.current = 0
+    clearTouchQueueTimers()
+    if (mobileQueueHoldStateRef.current !== 'queueing') {
+      setMobileQueueHoldVisualState('idle')
+    }
+  }, [clearTouchQueueTimers, setMobileQueueHoldVisualState])
 
   // Detect `#`/`@` autocomplete triggers from the textarea's current value
   // and caret position. Pulled out of `handleInput` so `compositionend` can
@@ -1334,6 +2059,115 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
     runAutocompleteDetection(ta)
   }, [runAutocompleteDetection])
+
+  const handleSTTToggle = useCallback(async () => {
+    if (isListeningToSTT) {
+      setSttStatus('processing')
+      stopSTTSession('stop')
+      return
+    }
+
+    if (!isSTTSupported) {
+      toast.warning(
+        voiceSettings.sttProvider === 'webspeech'
+          ? t('toast.speechRecognitionUnavailable')
+          : t('toast.audioRecordingUnsupported'),
+      )
+      return
+    }
+
+    if (voiceSettings.sttProvider === 'connection' && !voiceSettings.sttConnectionId) {
+      toast.warning(t('toast.selectSttConnection'))
+      openModal('settings')
+      return
+    }
+
+    try {
+      setSttStatus('starting')
+      setSttAudioFrame(null)
+      sttDraftBaseRef.current = text.trimEnd()
+      sttInterimTextRef.current = ''
+      sttFinalSegmentsRef.current = []
+      sttNormalizedFinalSegmentsRef.current = []
+      sttCommandStateRef.current = { thoughtDepth: 0 }
+      sttShouldSendRef.current = false
+
+      const engine = createSTTEngine({
+        provider: voiceSettings.sttProvider,
+        language: voiceSettings.sttLanguage,
+        continuous: voiceSettings.sttContinuous,
+        interimResults: voiceSettings.sttInterimResults,
+        autoSubmitOnSilence: voiceSettings.sttAutoSubmitOnSilence,
+        connectionId: voiceSettings.sttConnectionId,
+      })
+      sttEngineRef.current?.destroy()
+      sttEngineRef.current = engine
+
+      engine.onAudioFrame((frame) => {
+        setSttAudioFrame(frame)
+      })
+
+      engine.onResult((result) => {
+        if (result.isFinal) {
+          const { text: commandStrippedText, shouldSend } = stripSTTSendCommand(result.text)
+          if (shouldSend) sttShouldSendRef.current = true
+
+          const normalizedSegment = normalizeSTTTranscript(commandStrippedText, sttCommandStateRef.current)
+          sttFinalSegmentsRef.current = [...sttFinalSegmentsRef.current, result.text.trim()].filter(Boolean)
+          sttNormalizedFinalSegmentsRef.current = [...sttNormalizedFinalSegmentsRef.current, normalizedSegment].filter(Boolean)
+          sttInterimTextRef.current = ''
+        } else {
+          const { text: commandStrippedText } = stripSTTSendCommand(result.text)
+          sttInterimTextRef.current = normalizeSTTTranscript(commandStrippedText, { ...sttCommandStateRef.current })
+        }
+
+        const transcript = [...sttNormalizedFinalSegmentsRef.current, sttInterimTextRef.current].filter(Boolean).join(' ')
+        applySTTTranscript(transcript, result.isFinal)
+        setSttStatus(engine.isListening() ? 'listening' : 'idle')
+      })
+
+      engine.onStop(() => {
+        setSttAudioFrame(null)
+        void finalizeSTTTranscript()
+      })
+
+      engine.onError((err) => {
+        const msg = err.message || 'Speech-to-text failed'
+        stopSTTSession('destroy')
+        sttInterimTextRef.current = ''
+        sttFinalSegmentsRef.current = []
+        sttNormalizedFinalSegmentsRef.current = []
+        sttCommandStateRef.current = { thoughtDepth: 0 }
+        sttShouldSendRef.current = false
+        setSttAudioFrame(null)
+        setSttStatus('idle')
+        toast.error(msg, { title: t('toast.sttFailed') })
+      })
+
+      await engine.start()
+      setSttStatus(engine.isListening() ? 'listening' : 'idle')
+    } catch (err: any) {
+      stopSTTSession('destroy')
+      setSttStatus('idle')
+      toast.error(err?.message || t('toast.sttFailed'), { title: t('toast.sttFailed') })
+    }
+  }, [isListeningToSTT, isSTTSupported, voiceSettings, text, openModal, applySTTTranscript, stopSTTSession, finalizeSTTTranscript])
+
+  useEffect(() => {
+    if (isGeneratingInChat && isListeningToSTT) {
+      stopSTTSession('destroy')
+      setSttStatus('idle')
+    }
+  }, [isGeneratingInChat, isListeningToSTT, stopSTTSession])
+
+  useEffect(() => {
+    if (!isListeningToSTT) return
+    if (voiceSettings.sttProvider !== 'webspeech' && sttStatus === 'processing') return
+    if (voiceSettings.sttProvider === 'connection' && !voiceSettings.sttConnectionId) {
+      stopSTTSession('destroy')
+      setSttStatus('idle')
+    }
+  }, [voiceSettings.sttProvider, voiceSettings.sttConnectionId, isListeningToSTT, sttStatus, stopSTTSession])
 
   const handleCompositionStart = useCallback(() => {
     isComposingRef.current = true
@@ -1413,11 +2247,59 @@ export default function InputArea({ chatId }: InputAreaProps) {
     setSetting('guidedGenerations', next)
   }, [guidedGenerations, setSetting])
 
+  const mobileQueueHintKey = getMobileQueueHintKey({
+    supportsTouchQueueHold,
+    isGeneratingInChat,
+    mobileQueueHoldState,
+  })
+  const mobileQueueHint = mobileQueueHintKey ? t(mobileQueueHintKey) : null
+
+  let sendButtonTitle = t('input.nudgeFreshReply')
+  if (isGeneratingInChat) {
+    sendButtonTitle = t('input.stopGeneration')
+  } else if (mobileQueueHoldState === 'queueing') {
+    sendButtonTitle = t('input.queueingMessage')
+  } else if (mobileQueueHoldState === 'armed') {
+    sendButtonTitle = t('input.releaseToQueue')
+  } else if (mobileQueueHoldState === 'holding') {
+    sendButtonTitle = t('input.keepHoldingToQueue')
+  } else if (hasDraftContent) {
+    sendButtonTitle = supportsTouchQueueHold
+      ? t('input.sendMessage')
+      : t('input.sendMessageQueueHint', { mod: queueModLabel })
+  } else if (hasQueuedMessages) {
+    sendButtonTitle = t('input.sendQueuedMessages')
+  }
+
+  let sendButtonAriaLabel = t('input.nudgeFreshReply')
+  if (isGeneratingInChat) {
+    sendButtonAriaLabel = t('input.stopGeneration')
+  } else if (mobileQueueHoldState === 'queueing') {
+    sendButtonAriaLabel = t('input.queueingMessage')
+  } else if (mobileQueueHoldState === 'armed') {
+    sendButtonAriaLabel = t('input.releaseToQueue')
+  } else if (mobileQueueHoldState === 'holding') {
+    sendButtonAriaLabel = t('input.keepHoldingToQueue')
+  } else if (hasDraftContent) {
+    sendButtonAriaLabel = t('input.sendMessage')
+  } else if (hasQueuedMessages) {
+    sendButtonAriaLabel = t('input.sendQueuedMessages')
+  }
+
+  const sendButtonStyle: CSSProperties = {
+    '--send-btn-hold-duration': `${MOBILE_QUEUE_HOLD_MS}ms`,
+  } as CSSProperties
+  if (isGeneratingInChat) sendButtonStyle.opacity = 0.55
+
   return (
     <div
       data-component="InputArea"
       ref={containerRef}
       className={styles.container}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       style={(() => {
         const s: CSSProperties = {}
         if (screenCornerRadius) {
@@ -1429,6 +2311,13 @@ export default function InputArea({ chatId }: InputAreaProps) {
         return Object.keys(s).length ? s : undefined
       })()}
     >
+      {dragActive && (
+        <div className={styles.dropOverlay} aria-hidden="true">
+          <Paperclip size={20} />
+          <span>{t('input.dropToAttach')}</span>
+        </div>
+      )}
+
       {/* Author's Note Panel */}
       <AuthorsNotePanel
         chatId={chatId}
@@ -1436,148 +2325,165 @@ export default function InputArea({ chatId }: InputAreaProps) {
         onClose={() => setAuthorsNoteOpen(false)}
       />
 
-      {/* Action bar — home button always visible, rest hidden during streaming */}
+      {/* Action bar */}
       <div data-spindle-mount="chat_toolbar">
-        {isStreaming && (
-          <div className={styles.actionBar}>
-            <button type="button" className={styles.actionBtn} onClick={() => navigate('/')} title="Back to home">
-              <Home size={14} />
-            </button>
-          </div>
-        )}
-        {!isStreaming && (
-          <div className={styles.actionBar}>
-            <button type="button" className={styles.actionBtn} onClick={() => navigate('/')} title="Back to home">
-              <Home size={14} />
-            </button>
-            <span className={styles.actionDivider} />
-            <button type="button" className={styles.actionBtn} onClick={handleRegenerate} title="Regenerate">
-              <RotateCw size={14} />
-            </button>
-            <button type="button" className={styles.actionBtn} onClick={handleContinue} title="Continue">
-              <CornerDownLeft size={14} />
-            </button>
-            <button
-              type="button"
-              className={clsx(styles.actionBtn, openPopover === 'persona' && styles.actionBtnActive)}
-              onClick={() => setOpenPopover((p) => (p === 'persona' ? null : 'persona'))}
-              title="Send next message as persona"
-            >
-              <UserCircle size={14} />
-              {sendPersonaId && <span className={styles.badge}>1</span>}
-            </button>
-            {hasAltFields && (() => {
-              const selectionCount = Object.keys(altFieldSelections).length
-              const hasSelection = selectionCount > 0
-              // Build a descriptive title so the user can confirm what's bound
-              // to this chat without opening the popover.
-              const titleParts: string[] = []
+        <div className={styles.actionBar}>
+          <button type="button" className={styles.actionBtn} onClick={onNavigateHome ?? (() => navigate('/'))} title={t('input.backHome')}>
+            <Home size={14} />
+          </button>
+          <span className={styles.actionDivider} />
+          {!isGeneratingInChat && (
+            <>
+              <button type="button" className={styles.actionBtn} onClick={handleRegenerate} title={t('input.regenerate')}>
+                <RotateCw size={14} />
+              </button>
+              <button type="button" className={styles.actionBtn} onClick={handleContinue} title={t('input.continue')}>
+                <CornerDownLeft size={14} />
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={() => handleImpersonate('oneliner')}
+            title={`${t('quickMenu.oneLiner')}: ${t('quickMenu.oneLinerDesc')}`}
+            aria-label={t('quickMenu.oneLiner')}
+            disabled={isGeneratingInChat}
+            style={isGeneratingInChat ? { opacity: 0.5 } : undefined}
+          >
+            <MessageSquare size={14} />
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.actionBtn, openPopover === 'persona' && styles.actionBtnActive)}
+            onClick={() => setOpenPopover((p) => (p === 'persona' ? null : 'persona'))}
+            title={t('input.sendAsPersona')}
+          >
+            <UserCircle size={14} />
+            {sendPersonaId && <span className={styles.badge}>1</span>}
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.actionBtn, openPopover === 'connections' && styles.actionBtnActive)}
+            onClick={() => setOpenPopover((p) => (p === 'connections' ? null : 'connections'))}
+            title={activeProfile ? t('input.switchConnectionActive', { name: activeProfile.name }) : t('input.switchConnection')}
+          >
+            <Link2 size={14} />
+          </button>
+          {hasAltFields && (() => {
+            const selectionCount = activeAltSelectionCount
+            const hasSelection = selectionCount > 0
+            const titleParts: string[] = []
+            if (isGroupChat) {
+              for (const { char, altFields } of groupMembersWithAltFields) {
+                const selections = groupAltFieldSelections[char.id] || {}
+                const labels = Object.entries(selections)
+                  .map(([field, variantId]) => altFields[field]?.find((v) => v.id === variantId)?.label)
+                  .filter(Boolean)
+                if (labels.length > 0) titleParts.push(`${char.name}: ${labels.join(', ')}`)
+              }
+            } else {
               for (const [field, variantId] of Object.entries(altFieldSelections)) {
                 const variant = altFieldsData[field]?.find((v) => v.id === variantId)
                 if (variant) titleParts.push(`${field}: ${variant.label}`)
               }
-              const title = hasSelection
-                ? `Alternate fields — ${titleParts.join(', ')}`
-                : 'Alternate fields'
-              return (
-                <button
-                  type="button"
-                  className={clsx(
-                    styles.actionBtn,
-                    openPopover === 'altFields' && styles.actionBtnActive,
-                    hasSelection && styles.actionBtnHasSelection,
-                  )}
-                  onClick={() => setOpenPopover((p) => (p === 'altFields' ? null : 'altFields'))}
-                  title={title}
-                  aria-label={title}
-                >
-                  <Layers size={14} />
-                  {hasSelection && <span className={styles.badge}>{selectionCount}</span>}
-                </button>
-              )
-            })()}
-            {activePersonaId && (
+            }
+            const title = hasSelection
+              ? t('input.alternateFieldsActive', { details: titleParts.join(', ') })
+              : isGroupChat ? t('input.groupAlternateFields') : t('input.alternateFields')
+            return (
               <button
                 type="button"
                 className={clsx(
                   styles.actionBtn,
-                  openPopover === 'addons' && styles.actionBtnActive,
-                  chatAddonOverrideCount > 0 && styles.actionBtnHasSelection,
+                  openPopover === 'altFields' && styles.actionBtnActive,
+                  hasSelection && styles.actionBtnHasSelection,
                 )}
-                onClick={() => setOpenPopover((p) => (p === 'addons' ? null : 'addons'))}
-                title={chatAddonOverrideCount > 0 ? 'Persona add-ons — customized for this chat' : 'Persona add-ons'}
+                onClick={() => setOpenPopover((p) => (p === 'altFields' ? null : 'altFields'))}
+                title={title}
+                aria-label={title}
               >
-                <IconPlaylistAdd size={14} />
+                <Layers size={14} />
+                {hasSelection && <span className={styles.badge}>{selectionCount}</span>}
               </button>
+            )
+          })()}
+          {activePersonaId && (
+            <button
+              type="button"
+              className={clsx(
+                styles.actionBtn,
+                openPopover === 'addons' && styles.actionBtnActive,
+                chatAddonOverrideCount > 0 && styles.actionBtnHasSelection,
+              )}
+              onClick={() => setOpenPopover((p) => (p === 'addons' ? null : 'addons'))}
+              title={chatAddonOverrideCount > 0 ? t('input.personaAddonsCustomized') : t('input.personaAddons')}
+            >
+              <IconPlaylistAdd size={14} />
+              {chatAddonOverrideCount > 0 && <span className={styles.badge}>{chatAddonOverrideCount}</span>}
+            </button>
+          )}
+          <button
+            type="button"
+            className={clsx(
+              styles.actionBtn,
+              openPopover === 'guides' && styles.actionBtnActive,
+              activeGuideCount > 0 && styles.actionBtnHasSelection,
             )}
-            <button
-              type="button"
-              className={clsx(styles.actionBtn, openPopover === 'guides' && styles.actionBtnActive)}
-              onClick={() => setOpenPopover((p) => (p === 'guides' ? null : 'guides'))}
-              title="Guided generations"
-            >
-              <Compass size={14} />
-              {activeGuideCount > 0 && <span className={styles.badge}>{activeGuideCount}</span>}
-            </button>
-            <button
-              type="button"
-              className={clsx(styles.actionBtn, openPopover === 'quick' && styles.actionBtnActive)}
-              onClick={() => setOpenPopover((p) => (p === 'quick' ? null : 'quick'))}
-              title="Quick replies"
-            >
-              <MessageSquareQuote size={14} />
-            </button>
-            <button
-              type="button"
-              className={clsx(styles.actionBtn, openPopover === 'tools' && styles.actionBtnActive)}
-              onClick={() => setOpenPopover((p) => (p === 'tools' ? null : 'tools'))}
-              title="Tools"
-            >
-              <Wrench size={14} />
-            </button>
-            <button
-              type="button"
-              className={clsx(styles.actionBtn, openPopover === 'extras' && styles.actionBtnActive)}
-              onClick={() => setOpenPopover((p) => (p === 'extras' ? null : 'extras'))}
-              title="Extras"
-            >
-              <MoreHorizontal size={14} />
-            </button>
-          </div>
-        )}
-      </div>
-
-      {activeGuideCount > 0 && (
-        <div className={styles.guidePills}>
-          {activeGuides.map((g) => (
-            <button key={g.id} type="button" className={styles.guidePill} onClick={() => toggleGuide(g.id)}>
-              {g.name}
-            </button>
-          ))}
+            onClick={() => setOpenPopover((p) => (p === 'guides' ? null : 'guides'))}
+            title={t('input.guidedGenerations')}
+          >
+            <Compass size={14} />
+            {activeGuideCount > 0 && <span className={styles.badge}>{activeGuideCount}</span>}
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.actionBtn, openPopover === 'quick' && styles.actionBtnActive)}
+            onClick={() => setOpenPopover((p) => (p === 'quick' ? null : 'quick'))}
+            title={t('input.quickReplies')}
+          >
+            <MessageSquareQuote size={14} />
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.actionBtn, openPopover === 'tools' && styles.actionBtnActive)}
+            onClick={() => setOpenPopover((p) => (p === 'tools' ? null : 'tools'))}
+            title={t('input.tools')}
+          >
+            <Wrench size={14} />
+          </button>
+          <button
+            type="button"
+            className={clsx(styles.actionBtn, openPopover === 'extras' && styles.actionBtnActive)}
+            onClick={() => setOpenPopover((p) => (p === 'extras' ? null : 'extras'))}
+            title={t('input.extras')}
+          >
+            <MoreHorizontal size={14} />
+          </button>
         </div>
-      )}
+      </div>
 
       <div className={clsx(styles.popoverSlot, openPopover && styles.popoverSlotOpen)}>
         <div className={styles.popoverSlotInner}>
           {renderPopover === 'guides' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              {guidedGenerations.length === 0 && <div className={styles.popEmpty}>No guided generations configured.</div>}
+              {guidedGenerations.length === 0 && <div className={styles.popEmpty}>{t('quickMenu.noGuidedGenerations')}</div>}
               {guidedGenerations.map((g) => (
                 <button key={g.id} type="button" className={styles.popRowBtn} onClick={() => toggleGuide(g.id)}>
                   <span>{g.name}</span>
-                  <span className={styles.popMeta}>{g.enabled ? 'ON' : 'OFF'} • {g.mode}</span>
+                  <span className={styles.popMeta}>{g.enabled ? t('on') : t('off')} • {g.mode}</span>
                 </button>
               ))}
               <button type="button" className={styles.popLink} onClick={() => {
                 setOpenPopover(null)
                 useStore.getState().openSettings('guided')
-              }}>Manage in settings</button>
+              }}>{t('quickMenu.manageInSettings')}</button>
             </div>
           )}
 
           {renderPopover === 'quick' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              {activeQuickReplySets.length === 0 && <div className={styles.popEmpty}>No enabled quick reply sets.</div>}
+              {activeQuickReplySets.length === 0 && <div className={styles.popEmpty}>{t('quickMenu.noQuickReplySets')}</div>}
               {activeQuickReplySets.map((set) => (
                 <div key={set.id} className={styles.quickSet}>
                   <div className={styles.quickSetName}>{set.name}</div>
@@ -1592,7 +2498,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                         setOpenPopover(null)
                       }}
                     >
-                      <span>{reply.label || 'Untitled reply'}</span>
+                      <span>{reply.label || t('quickMenu.untitledReply')}</span>
                     </button>
                   ))}
                 </div>
@@ -1600,7 +2506,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
               <button type="button" className={styles.popLink} onClick={() => {
                 setOpenPopover(null)
                 useStore.getState().openSettings('quickReplies')
-              }}>Manage in settings</button>
+              }}>{t('quickMenu.manageInSettings')}</button>
             </div>
           )}
 
@@ -1615,10 +2521,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     setOpenPopover(null)
                   }}
                 >
-                  Clear one-shot persona
+                  {t('quickMenu.clearOneShotPersona')}
                 </button>
               )}
-              {personaList.length === 0 && <div className={styles.popEmpty}>No personas available.</div>}
+              {personaList.length === 0 && <div className={styles.popEmpty}>{t('quickMenu.noPersonas')}</div>}
               {personaList.map((p) => (
                 <button
                   key={p.id}
@@ -1652,6 +2558,35 @@ export default function InputArea({ chatId }: InputAreaProps) {
             </div>
           )}
 
+          {renderPopover === 'connections' && (
+            <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
+              {profiles.length === 0 && <div className={styles.popEmpty}>{t('quickMenu.noConnections')}</div>}
+              {profiles.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={clsx(styles.popRowBtn, activeProfileId === p.id && styles.popRowBtnActive)}
+                  onClick={() => {
+                    setActiveProfile(p.id)
+                    setOpenPopover(null)
+                  }}
+                >
+                  <span className={styles.personaMain}>
+                    <ProviderIcon kind="llm" provider={p.provider} size={22} />
+                    <span className={styles.personaNameGroup}>
+                      <span>{p.name}</span>
+                      <span className={styles.popMeta}>{p.provider}{p.model ? ` / ${p.model}` : ''}</span>
+                    </span>
+                  </span>
+                </button>
+              ))}
+              <button type="button" className={styles.popLink} onClick={() => {
+                setOpenPopover(null)
+                useStore.getState().openDrawer('connections')
+              }}>{t('quickMenu.manageConnections')}</button>
+            </div>
+          )}
+
           {renderPopover === 'tools' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
               <button
@@ -1661,7 +2596,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   setOpenPopover(null)
                   openModal('manageChats', {
                     characterId: activeCharacterId,
-                    characterName: isGroupChat ? 'Group Chat' : (characterName || 'Character'),
+                    characterName: isGroupChat ? t('quickMenu.groupChat') : (characterName || t('characterFallback')),
                     isGroupChat,
                     groupCharacterIds,
                   })
@@ -1669,7 +2604,20 @@ export default function InputArea({ chatId }: InputAreaProps) {
               >
                 <span className={styles.personaMain}>
                   <FolderOpen size={14} />
-                  <span>Manage Chats</span>
+                  <span>{t('quickMenu.manageChats')}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className={styles.popRowBtn}
+                onClick={() => {
+                  setOpenPopover(null)
+                  handleNewChat()
+                }}
+              >
+                <span className={styles.personaMain}>
+                  <FilePlus size={14} />
+                  <span>{t('quickMenu.newChat')}</span>
                 </span>
               </button>
               <button
@@ -1686,6 +2634,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
                       onSaved: (updatedChat: import('@/types/api').Chat) => {
                         const value = updatedChat.metadata?.impersonation_preset_id
                         setImpersonationPresetId(typeof value === 'string' && value ? value : null)
+                        const mode = updatedChat.metadata?.group_scenario_override?.mode
+                        setGroupScenarioMode(mode === 'member' || mode === 'custom' ? mode : 'individual')
                       },
                     })
                   } catch (err) {
@@ -1695,7 +2645,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
               >
                 <span className={styles.personaMain}>
                   <Settings2 size={14} />
-                  <span>{isGroupChat ? 'Group Settings' : 'Chat Settings'}</span>
+                  <span>{isGroupChat ? t('quickMenu.groupSettings') : t('quickMenu.chatSettings')}</span>
                 </span>
               </button>
               {!isGroupChat && activeCharacterId && (
@@ -1709,7 +2659,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 >
                   <span className={styles.personaMain}>
                     <UserPlus size={14} />
-                    <span>Convert to Group Chat</span>
+                    <span>{t('quickMenu.convertToGroupChat')}</span>
                   </span>
                 </button>
               )}
@@ -1723,7 +2673,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
               >
                 <span className={styles.personaMain}>
                   <UsersRound size={14} />
-                  <span>New Group Chat</span>
+                  <span>{t('quickMenu.newGroupChat')}</span>
                 </span>
               </button>
               <button
@@ -1736,7 +2686,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
               >
                 <span className={styles.personaMain}>
                   <StickyNote size={14} />
-                  <span>Author's Note</span>
+                  <span>{t('quickMenu.authorsNote')}</span>
                 </span>
               </button>
               <button
@@ -1745,25 +2695,25 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 onClick={async () => {
                   setOpenPopover(null)
                   try {
-                    toast.info('Recompiling chat memories...')
+                    toast.info(t('toast.recompilingMemories'))
                     const res = await memoryCortexApi.warm(chatId, { force: true })
                     if (res.cortex.status === 'started') {
-                      toast.success('Memory rebuild started. Cortex progress will continue in the background.')
+                      toast.success(t('toast.memoryRebuildStarted'))
                     } else if (res.chatMemory.status === 'complete') {
-                      toast.success('Long-term chat memory rebuilt.')
+                      toast.success(t('toast.memoryRebuilt'))
                     } else if (res.reason === 'chat_vectorization_disabled') {
-                      toast.error('Long-term chat memory vectorization is not enabled')
+                      toast.error(t('toast.memoryVectorizationDisabled'))
                     } else {
-                      toast.info('No memory rebuild was needed for this chat.')
+                      toast.info(t('toast.noMemoryRebuildNeeded'))
                     }
                   } catch (err: any) {
-                    toast.error(err?.message || 'Failed to recompile memories')
+                    toast.error(err?.message || t('toast.failedRecompileMemories'))
                   }
                 }}
               >
                 <span className={styles.personaMain}>
                   <BrainCircuit size={14} />
-                  <span>Recompile Memories</span>
+                  <span>{t('quickMenu.recompileMemories')}</span>
                 </span>
               </button>
               {hasExpressions && !expressionDisplay.enabled && (
@@ -1777,7 +2727,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 >
                   <span className={styles.personaMain}>
                     <Drama size={14} />
-                    <span>Show Expression Display</span>
+                    <span>{t('quickMenu.showExpressionDisplay')}</span>
                   </span>
                 </button>
               )}
@@ -1787,7 +2737,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
           {renderPopover === 'extras' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
               <div className={styles.extrasSection}>
-                <div className={styles.quickSetName}>Impersonate</div>
+                <div className={styles.quickSetName}>{t('quickMenu.impersonate')}</div>
                 {lastImpersonateInput && (
                   <button
                     type="button"
@@ -1804,7 +2754,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     <span className={styles.personaMain}>
                       <ScrollText size={14} />
                       <span className={styles.personaNameGroup}>
-                        <span>Restore last input</span>
+                        <span>{t('quickMenu.restoreLastInput')}</span>
                         <span className={styles.personaTitle}>{lastImpersonateInput.length > 60 ? lastImpersonateInput.slice(0, 60) + '…' : lastImpersonateInput}</span>
                       </span>
                     </span>
@@ -1817,12 +2767,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     setOpenPopover(null)
                     handleImpersonate('prompts')
                   }}
+                  disabled={isGeneratingInChat}
+                  style={isGeneratingInChat ? { opacity: 0.5 } : undefined}
                 >
                   <span className={styles.personaMain}>
                     <ScrollText size={14} />
                     <span className={styles.personaNameGroup}>
-                      <span>Preset Prompts</span>
-                      <span className={styles.personaTitle}>Full assembly with impersonate-triggered blocks</span>
+                      <span>{t('quickMenu.presetPrompts')}</span>
+                      <span className={styles.personaTitle}>{t('quickMenu.presetPromptsDesc')}</span>
                     </span>
                   </span>
                 </button>
@@ -1833,12 +2785,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     setOpenPopover(null)
                     handleImpersonate('oneliner')
                   }}
+                  disabled={isGeneratingInChat}
+                  style={isGeneratingInChat ? { opacity: 0.5 } : undefined}
                 >
                   <span className={styles.personaMain}>
                     <MessageSquare size={14} />
                     <span className={styles.personaNameGroup}>
-                      <span>One-liner</span>
-                      <span className={styles.personaTitle}>Chat history + impersonation nudge only</span>
+                      <span>{t('quickMenu.oneLiner')}</span>
+                      <span className={styles.personaTitle}>{t('quickMenu.oneLinerDesc')}</span>
                     </span>
                   </span>
                 </button>
@@ -1847,32 +2801,19 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   className={styles.popRowBtn}
                   disabled
                   style={{ opacity: 0.4 }}
-                  title="Coming soon"
+                  title={t('quickMenu.comingSoon')}
                 >
                   <span className={styles.personaMain}>
                     <Crown size={14} />
                     <span className={styles.personaNameGroup}>
-                      <span>Sovereign Hand</span>
-                      <span className={styles.personaTitle}>Co-pilot guided impersonation (coming soon)</span>
+                      <span>{t('quickMenu.sovereignHand')}</span>
+                      <span className={styles.personaTitle}>{t('quickMenu.sovereignHandDesc')}</span>
                     </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={styles.popRowBtn}
-                  onClick={() => {
-                    setOpenPopover(null)
-                    handleNewChat()
-                  }}
-                >
-                  <span className={styles.personaMain}>
-                    <FilePlus size={14} />
-                    <span>New Chat</span>
                   </span>
                 </button>
                 {(() => {
                   const hasPreset = !!getActivePresetForGeneration()
-                  const dryRunDisabled = dryRunning || !hasPreset
+                  const dryRunDisabled = dryRunning || !hasPreset || isGeneratingInChat
                   return (
                     <button
                       type="button"
@@ -1883,14 +2824,14 @@ export default function InputArea({ chatId }: InputAreaProps) {
                       }}
                       disabled={dryRunDisabled}
                       style={dryRunDisabled ? { opacity: 0.5 } : undefined}
-                      title={!hasPreset ? 'No preset selected' : undefined}
+                      title={!hasPreset ? t('quickMenu.noPresetSelected') : undefined}
                     >
                       <span className={styles.personaMain}>
                         <Eye size={14} />
                         <span className={styles.personaNameGroup}>
-                          <span>Dry Run</span>
+                          <span>{t('quickMenu.dryRun')}</span>
                           <span className={styles.personaTitle}>
-                            {hasPreset ? 'Preview the full prompt sent to the AI without generating' : 'Select a preset to enable dry run'}
+                            {hasPreset ? t('quickMenu.dryRunDesc') : t('quickMenu.dryRunSelectPreset')}
                           </span>
                         </span>
                       </span>
@@ -1910,8 +2851,8 @@ export default function InputArea({ chatId }: InputAreaProps) {
                   <span className={styles.personaMain}>
                     <Braces size={14} />
                     <span className={styles.personaNameGroup}>
-                      <span>Resolve Macros</span>
-                      <span className={styles.personaTitle}>Replace macros in input text ({isMac ? '⌘' : 'Ctrl'}+L)</span>
+                      <span>{t('quickMenu.resolveMacros')}</span>
+                      <span className={styles.personaTitle}>{t('quickMenu.resolveMacrosDesc', { mod: queueModLabel })}</span>
                     </span>
                   </span>
                 </button>
@@ -1922,69 +2863,159 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
           {renderPopover === 'altFields' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              <div className={styles.quickSetName}>Alternate Fields</div>
-              {(['description', 'personality', 'scenario'] as const).map((field) => {
-                const variants = altFieldsData[field]
-                if (!Array.isArray(variants) || variants.length === 0) return null
-                const selectedId = altFieldSelections[field] || ''
-                const isOverridden = !!selectedId
-                return (
-                  <div
-                    key={field}
-                    className={styles.popRowBtn}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      cursor: 'default',
-                      // Subtle accent border on rows that have an active override
-                      // so the user sees at a glance which fields are bound.
-                      borderLeft: isOverridden
-                        ? '2px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
-                        : '2px solid transparent',
-                      paddingLeft: isOverridden ? 6 : 8,
-                    }}
-                  >
-                    <span
-                      style={{
-                        textTransform: 'capitalize',
-                        color: isOverridden
-                          ? 'var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
-                          : undefined,
-                        fontWeight: isOverridden ? 600 : undefined,
-                      }}
-                    >
-                      {field}
-                    </span>
-                    <select
-                      style={{
-                        marginLeft: 8,
-                        flex: 1,
-                        minWidth: 0,
-                        padding: '3px 6px',
-                        fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))',
-                        background: 'var(--lumiverse-fill-hover)',
-                        border: isOverridden
-                          ? '1px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.6))'
-                          : '1px solid var(--lumiverse-border)',
-                        borderRadius: 6,
-                        color: 'var(--lumiverse-text)',
-                        outline: 'none',
-                        cursor: 'pointer',
-                      }}
-                      value={selectedId}
-                      onChange={(e) => handleAltFieldSelect(field, e.target.value || null)}
-                    >
-                      <option value="">Default</option>
-                      {variants.map((v) => (
-                        <option key={v.id} value={v.id}>{v.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                )
-              })}
-              {Object.values(altFieldsData).every((arr) => !arr?.length) && (
-                <div className={styles.popEmpty}>No alternate fields configured.</div>
+              <div className={styles.quickSetName}>{isGroupChat ? t('quickMenu.groupAlternateFields') : t('quickMenu.alternateFields')}</div>
+              {isGroupChat ? (
+                <>
+                  {groupScenarioMode !== 'individual' && (
+                    <div className={styles.popEmpty}>{t('quickMenu.scenarioGroupControlled')}</div>
+                  )}
+                  {groupMembersWithAltFields.map(({ char, altFields }) => {
+                    const memberSelections = groupAltFieldSelections[char.id] || {}
+                    const memberSelectionCount = Object.keys(memberSelections).length
+                    return (
+                      <div
+                        key={char.id}
+                        className={styles.popRowBtn}
+                        style={{
+                          alignItems: 'stretch',
+                          flexDirection: 'column',
+                          cursor: 'default',
+                          borderLeft: memberSelectionCount > 0
+                            ? '2px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
+                            : '2px solid transparent',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span className={styles.personaAvatar}>
+                            {char.avatar_path || char.image_id ? (
+                              <img
+                                className={styles.personaAvatarImg}
+                                src={getCharacterAvatarThumbUrl(char) || undefined}
+                                alt={char.name}
+                                loading="lazy"
+                              />
+                            ) : (
+                              <span className={styles.personaFallback}>{char.name.slice(0, 1).toUpperCase()}</span>
+                            )}
+                          </span>
+                          <span className={styles.personaNameGroup}>
+                            <span>{char.name}</span>
+                            {memberSelectionCount > 0 && <span className={styles.personaTitle}>{t('quickMenu.activeCount', { count: memberSelectionCount })}</span>}
+                          </span>
+                        </div>
+                        <div style={{ display: 'grid', gap: 6, marginTop: 6 }}>
+                          {ALT_FIELD_NAMES.map((field) => {
+                            const variants = altFields[field]
+                            if (!Array.isArray(variants) || variants.length === 0) return null
+                            const selectedId = memberSelections[field] || ''
+                            const isScenarioDisabled = field === 'scenario' && groupScenarioMode !== 'individual'
+                            return (
+                              <label key={field} style={{ display: 'grid', gridTemplateColumns: '82px minmax(0, 1fr)', gap: 8, alignItems: 'center' }}>
+                                <span style={{ textTransform: 'capitalize', fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))', color: selectedId ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)' }}>{field}</span>
+                                <select
+                                  name={`group-alt-${field}`}
+                                  aria-label={t('quickMenu.fieldVariantFor', { field, name: char.name })}
+                                  style={{
+                                    minWidth: 0,
+                                    padding: '3px 6px',
+                                    fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))',
+                                    background: 'var(--lumiverse-fill-hover)',
+                                    border: selectedId
+                                      ? '1px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.6))'
+                                      : '1px solid var(--lumiverse-border)',
+                                    borderRadius: 6,
+                                    color: 'var(--lumiverse-text)',
+                                    outline: 'none',
+                                    cursor: isScenarioDisabled ? 'not-allowed' : 'pointer',
+                                    opacity: isScenarioDisabled ? 0.55 : 1,
+                                  }}
+                                  value={selectedId}
+                                  disabled={isScenarioDisabled}
+                                  title={isScenarioDisabled ? t('quickMenu.scenarioGroupControlled') : undefined}
+                                  onChange={(e) => handleGroupAltFieldSelect(char.id, field, e.target.value || null)}
+                                >
+                                  <option value="">{t('defaultOption')}</option>
+                                  {variants.map((v) => (
+                                    <option key={v.id} value={v.id}>{v.label}</option>
+                                  ))}
+                                </select>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {groupMembersWithAltFields.length === 0 && (
+                    <div className={styles.popEmpty}>{t('quickMenu.noGroupAltFields')}</div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {ALT_FIELD_NAMES.map((field) => {
+                    const variants = altFieldsData[field]
+                    if (!Array.isArray(variants) || variants.length === 0) return null
+                    const selectedId = altFieldSelections[field] || ''
+                    const isOverridden = !!selectedId
+                    return (
+                      <div
+                        key={field}
+                        className={styles.popRowBtn}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          cursor: 'default',
+                          borderLeft: isOverridden
+                            ? '2px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
+                            : '2px solid transparent',
+                          paddingLeft: isOverridden ? 6 : 8,
+                        }}
+                      >
+                        <span
+                          style={{
+                            textTransform: 'capitalize',
+                            color: isOverridden
+                              ? 'var(--lumiverse-primary, rgba(140, 130, 255, 0.95))'
+                              : undefined,
+                            fontWeight: isOverridden ? 600 : undefined,
+                          }}
+                        >
+                          {field}
+                        </span>
+                        <select
+                          name={`alt-${field}`}
+                          aria-label={t('quickMenu.fieldVariant', { field })}
+                          style={{
+                            marginLeft: 8,
+                            flex: 1,
+                            minWidth: 0,
+                            padding: '3px 6px',
+                            fontSize: 'calc(11px * var(--lumiverse-font-scale, 1))',
+                            background: 'var(--lumiverse-fill-hover)',
+                            border: isOverridden
+                              ? '1px solid var(--lumiverse-primary, rgba(140, 130, 255, 0.6))'
+                              : '1px solid var(--lumiverse-border)',
+                            borderRadius: 6,
+                            color: 'var(--lumiverse-text)',
+                            outline: 'none',
+                            cursor: 'pointer',
+                          }}
+                          value={selectedId}
+                          onChange={(e) => handleAltFieldSelect(field, e.target.value || null)}
+                        >
+                          <option value="">{t('defaultOption')}</option>
+                          {variants.map((v) => (
+                            <option key={v.id} value={v.id}>{v.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )
+                  })}
+                  {Object.values(altFieldsData).every((arr) => !arr?.length) && (
+                    <div className={styles.popEmpty}>{t('quickMenu.noAltFields')}</div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -1992,12 +3023,12 @@ export default function InputArea({ chatId }: InputAreaProps) {
           {renderPopover === 'addons' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
               <div className={styles.addonPopoverHeader}>
-                <span>Persona Add-Ons</span>
+                <span>{t('quickMenu.personaAddons')}</span>
                 <button
                   type="button"
                   className={styles.addonCreateToggle}
                   onClick={() => setShowCreateAddon((v) => !v)}
-                  title="Create an add-on for this chat"
+                  title={t('quickMenu.createAddonForChat')}
                 >
                   <Plus size={12} />
                 </button>
@@ -2006,16 +3037,20 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 <div className={styles.addonCreateForm}>
                   <input
                     type="text"
+                    name="addon-name"
+                    aria-label={t('quickMenu.addonName')}
                     className={styles.addonCreateInput}
                     value={newAddonLabel}
                     onChange={(e) => setNewAddonLabel(e.target.value)}
-                    placeholder="Add-on name"
+                    placeholder={t('quickMenu.addonName')}
                   />
                   <textarea
+                    name="addon-content"
+                    aria-label={t('quickMenu.addonContent')}
                     className={styles.addonCreateTextarea}
                     value={newAddonContent}
                     onChange={(e) => setNewAddonContent(e.target.value)}
-                    placeholder="Add-on content..."
+                    placeholder={t('quickMenu.addonContent')}
                     rows={3}
                   />
                   <button
@@ -2024,7 +3059,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     onClick={handleCreateChatAddon}
                     disabled={creatingAddon || (!newAddonLabel.trim() && !newAddonContent.trim())}
                   >
-                    {creatingAddon ? 'Creating...' : 'Create for this chat'}
+                    {creatingAddon ? t('quickMenu.creating') : t('quickMenu.createForChat')}
                   </button>
                 </div>
               )}
@@ -2039,9 +3074,9 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     >
                       <span className={styles.personaMain}>
                         <IconPlaylistAdd size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-primary)' : undefined }} />
-                        <span>{addon.label || 'Untitled add-on'}</span>
+                        <span>{addon.label || t('quickMenu.untitledAddon')}</span>
                       </span>
-                      <span className={styles.popMeta}>{addon.enabled ? 'ON' : 'OFF'}</span>
+                      <span className={styles.popMeta}>{addon.enabled ? t('on') : t('off')}</span>
                     </button>
                   ))}
                 </>
@@ -2049,7 +3084,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
               {effectiveAttachedGlobalAddons.length > 0 && (
                 <>
                   {effectivePersonaAddons.length > 0 && <div className={styles.popDivider} />}
-                  <div className={styles.quickSetName}>Global Add-Ons</div>
+                  <div className={styles.quickSetName}>{t('quickMenu.globalAddons')}</div>
                   {effectiveAttachedGlobalAddons.map((addon) => (
                     <button
                       key={addon.id}
@@ -2059,23 +3094,23 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     >
                       <span className={styles.personaMain}>
                         <Globe size={13} style={{ opacity: addon.enabled ? 1 : 0.4, color: addon.enabled ? 'var(--lumiverse-info, #42a5f5)' : undefined }} />
-                        <span>{addon.label || 'Untitled global add-on'}</span>
+                        <span>{addon.label || t('quickMenu.untitledGlobalAddon')}</span>
                       </span>
-                      <span className={styles.popMeta}>{addon.enabled ? 'ON' : 'OFF'}</span>
+                      <span className={styles.popMeta}>{addon.enabled ? t('on') : t('off')}</span>
                     </button>
                   ))}
                 </>
               )}
               {!hasAddons && !showCreateAddon && (
-                <div className={styles.popEmpty}>No add-ons configured. Use + to create one for this chat.</div>
+                <div className={styles.popEmpty}>{t('quickMenu.noAddons')}</div>
               )}
             </div>
           )}
 
           {renderPopover === 'databank' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              <div className={styles.quickSetName}>Documents</div>
-              {databankResults.length === 0 && <div className={styles.popEmpty}>No matching documents.</div>}
+              <div className={styles.quickSetName}>{t('quickMenu.documents')}</div>
+              {databankResults.length === 0 && <div className={styles.popEmpty}>{t('quickMenu.noMatchingDocuments')}</div>}
               {databankResults.map((r, i) => (
                 <button
                   key={`${r.databankId}-${r.slug}`}
@@ -2098,10 +3133,10 @@ export default function InputArea({ chatId }: InputAreaProps) {
 
           {renderPopover === 'groupMember' && (
             <div className={clsx(styles.popover, popoverClosing && styles.popoverClosing)}>
-              <div className={styles.quickSetName}>Mention member</div>
-              {atResults.length === 0 && <div className={styles.popEmpty}>No matching members.</div>}
+              <div className={styles.quickSetName}>{t('quickMenu.mentionMember')}</div>
+              {atResults.length === 0 && <div className={styles.popEmpty}>{t('quickMenu.noMatchingMembers')}</div>}
               {atResults.map((r, i) => {
-                const avatarUrl = getCharacterAvatarThumbUrlById(r.id, r.image_id)
+                const avatarUrl = getCharacterAvatarThumbUrl(r)
                 return (
                   <button
                     key={r.id}
@@ -2110,7 +3145,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                     style={r.muted ? { opacity: 0.55 } : undefined}
                     onMouseDown={(e) => { e.preventDefault(); handleAtSelect(r) }}
                     onMouseEnter={() => setAtActiveIdx(i)}
-                    title={r.muted ? `${r.name} (muted — mention will override)` : r.name}
+                    title={r.muted ? t('quickMenu.mutedMentionOverride', { name: r.name }) : r.name}
                   >
                     <span className={styles.personaMain}>
                       {avatarUrl ? (
@@ -2149,7 +3184,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                       )}
                       <span className={styles.personaNameGroup}>
                         <span>{r.name}</span>
-                        <span className={styles.personaTitle}>@{r.slug}{r.muted ? ' · muted' : ''}</span>
+                        <span className={styles.personaTitle}>@{r.slug}{r.muted ? t('quickMenu.mutedSuffix') : ''}</span>
                       </span>
                     </span>
                   </button>
@@ -2174,7 +3209,7 @@ export default function InputArea({ chatId }: InputAreaProps) {
                 type="button"
                 className={styles.attachmentRemove}
                 onClick={() => removeAttachment(att.image_id)}
-                aria-label="Remove attachment"
+                aria-label={t('input.removeAttachment')}
               >
                 <X size={10} />
               </button>
@@ -2187,85 +3222,177 @@ export default function InputArea({ chatId }: InputAreaProps) {
       <input
         ref={fileInputRef}
         type="file"
+        name="chat-attachment"
+        aria-label={t('input.attachFiles')}
+        aria-hidden="true"
+        tabIndex={-1}
         accept="image/*,audio/*,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.html,.htm,.yaml,.yml,.log,.rst,.rtf"
         multiple
         style={{ display: 'none' }}
         onChange={(e) => handleAttachFiles(e.target.files)}
       />
 
-      {/* Input row */}
-      <div className={styles.inputRow}>
-        {!isStreaming && (
+      {showSTTIndicator ? (
+        <button
+          type="button"
+          className={clsx(
+            styles.sttRecordingPanel,
+            sttAudioFrame && styles.sttIndicatorReactive,
+            sttStatus === 'processing' && styles.sttIndicatorProcessing,
+          )}
+          style={{
+            '--stt-glow-x': `${12 + sttVisualizerLevel * 12}%`,
+            '--stt-glow-size': `${10 + sttVisualizerLevel * 24}px`,
+          } as CSSProperties}
+          onClick={sttStatus === 'processing' ? undefined : handleSTTToggle}
+          disabled={sttStatus === 'processing'}
+          title={sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
+          aria-label={sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
+          aria-live="polite"
+        >
+          <span className={styles.sttRecordingStatus}>
+            {sttStatus === 'processing' || sttStatus === 'starting' ? (
+              <LoaderCircle size={15} className={styles.sttSpinner} />
+            ) : (
+              <Mic size={15} />
+            )}
+            <span>{sttIndicatorLabel}</span>
+          </span>
+          <span className={styles.sttRecordingWave} aria-hidden="true">
+            {sttVisualizerBars.map((bar, index) => {
+              const level = Math.max(0.08, Math.min(1, bar))
+              return (
+                <span
+                  key={index}
+                  className={styles.sttIndicatorBar}
+                  style={{
+                    '--stt-bar-height': `${8 + level * 34}px`,
+                    '--stt-bar-opacity': 0.45 + level * 0.55,
+                    '--stt-bar-saturate': 0.95 + level * 0.75,
+                    '--stt-bar-delay': `${index * 34}ms`,
+                  } as CSSProperties}
+                />
+              )
+            })}
+          </span>
+          <span className={styles.sttRecordingHint}>
+            {sttStatus === 'processing' ? t('input.transcribing') : t('input.tapToStopTranscribe')}
+          </span>
+        </button>
+      ) : (
+        <div className={styles.inputRow}>
           <button
             type="button"
             className={styles.attachBtn}
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
-            title="Attach image or audio"
-            aria-label="Attach file"
+            title={t('input.attachImageOrAudio')}
+            aria-label={t('input.attachFile')}
           >
             <Paperclip size={16} />
           </button>
-        )}
 
-        <div className={styles.inputWrapper}>
-          <div ref={mirrorRef} className={styles.textareaMirror} aria-hidden="true">
-            {mirrorContent}
+          {voiceSettings.sttShowMicButton && (
+            <button
+              type="button"
+              className={clsx(styles.attachBtn, styles.sttBtn)}
+              onClick={handleSTTToggle}
+              disabled={!isSTTSupported}
+              title={
+                !isSTTSupported
+                  ? voiceSettings.sttProvider === 'webspeech'
+                    ? t('input.speechRecognitionUnavailable')
+                    : t('input.audioRecordingUnavailable')
+                  : t('input.startStt')
+              }
+              aria-label={t('input.startStt')}
+              aria-pressed={false}
+            >
+              <Mic size={16} />
+            </button>
+          )}
+
+          <div className={styles.inputWrapper}>
+            <div ref={mirrorRef} className={styles.textareaMirror} aria-hidden="true">
+              {mirrorContent}
+            </div>
+            <textarea
+              ref={textareaRef}
+              name="chat-message"
+              aria-label={t('input.message')}
+              className={styles.textarea}
+              value={text}
+              onChange={handleInput}
+              onScroll={handleTextareaScroll}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              onCompositionStart={handleCompositionStart}
+              onCompositionEnd={handleCompositionEnd}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
+              placeholder={t('input.placeholder')}
+              rows={1}
+            />
           </div>
-          <textarea
-            ref={textareaRef}
-            className={styles.textarea}
-            value={text}
-            onChange={handleInput}
-            onScroll={handleTextareaScroll}
-            onKeyDown={handleKeyDown}
-            onCompositionStart={handleCompositionStart}
-            onCompositionEnd={handleCompositionEnd}
-            onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
-            placeholder="Type a message..."
-            rows={1}
-            disabled={isStreaming}
-          />
-        </div>
 
-        {isStreaming ? (
-          <button
-            type="button"
-            className={clsx(styles.sendBtn, styles.sendBtnStop)}
-            onClick={handleStop}
-            title="Stop generation"
-            aria-label="Stop generation"
-          >
-            <Square size={16} />
-          </button>
-        ) : (
-          <button
-            type="button"
-            className={styles.sendBtn}
-            onClick={handleSendClick}
-            onTouchStart={handleSendTouchStart}
-            onTouchEnd={handleSendTouchEnd}
-            onTouchCancel={handleSendTouchEnd}
-            title={
-              text.trim() || pendingAttachments.length > 0
-                ? `Send message (${queueModLabel}+click to queue)`
-                : hasQueuedMessages
-                  ? 'Send queued messages'
-                  : 'Nudge for a fresh reply'
-            }
-            aria-label={
-              text.trim() || pendingAttachments.length > 0
-                ? 'Send message'
-                : hasQueuedMessages
-                  ? 'Send queued messages'
-                  : 'Nudge for a fresh reply'
-            }
-          >
-            <Send size={16} />
-          </button>
-        )}
-      </div>
+          {isGeneratingInChat && !isRoomPeer ? (
+            <div className={styles.sendBtnShell}>
+              <button
+                type="button"
+                className={clsx(styles.sendBtn, styles.sendBtnStop)}
+                onClick={handleStop}
+                title={t('input.stopGeneration')}
+                aria-label={t('input.stopGeneration')}
+              >
+                <Square size={16} />
+              </button>
+            </div>
+          ) : (
+            <div className={styles.sendBtnShell}>
+              {mobileQueueHint ? (
+                <span
+                  className={clsx(
+                    styles.mobileQueueHint,
+                    mobileQueueHoldState === 'holding' && styles.mobileQueueHintHolding,
+                    mobileQueueHoldState === 'armed' && styles.mobileQueueHintReady,
+                    mobileQueueHoldState === 'queueing' && styles.mobileQueueHintQueueing
+                  )}
+                  aria-live="polite"
+                >
+                  {mobileQueueHint}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                className={clsx(
+                  styles.sendBtn,
+                  mobileQueueHoldState === 'holding' && styles.sendBtnHoldTracking,
+                  mobileQueueHoldState === 'armed' && styles.sendBtnHoldReady,
+                  mobileQueueHoldState === 'queueing' && styles.sendBtnQueueing
+                )}
+                onClick={handleSendClick}
+                onTouchStart={handleSendTouchStart}
+                onTouchEnd={handleSendTouchEnd}
+                onTouchCancel={handleSendTouchCancel}
+                disabled={isGeneratingInChat}
+                style={sendButtonStyle}
+                title={sendButtonTitle}
+                aria-label={sendButtonAriaLabel}
+              >
+                <span className={styles.sendBtnIcon}>
+                  {mobileQueueHoldState === 'queueing' ? (
+                    <LoaderCircle size={16} className={styles.sendBtnSpinner} />
+                  ) : mobileQueueHoldState === 'holding' || mobileQueueHoldState === 'armed' ? (
+                    <IconPlaylistAdd size={18} />
+                  ) : (
+                    <Send size={16} />
+                  )}
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

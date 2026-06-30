@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { X } from 'lucide-react'
 import LazyImage from '@/components/shared/LazyImage'
 import { expressionsApi } from '@/api/expressions'
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export default function ExpressionSlotCard({ label, imageId, onDelete, onRename, onPreview }: Props) {
+  const { t } = useTranslation('panels', { keyPrefix: 'characterEditor.expressionEditor' })
   const [editLabel, setEditLabel] = useState(label)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
 
@@ -45,7 +47,7 @@ export default function ExpressionSlotCard({ label, imageId, onDelete, onRename,
             e.stopPropagation()
             onDelete(label)
           }}
-          aria-label={`Delete ${label}`}
+          aria-label={t('deleteSlotAria', { label })}
         >
           <X size={12} />
         </button>

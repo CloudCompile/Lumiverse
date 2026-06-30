@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Plus } from 'lucide-react'
+import { Plus, Shuffle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { connectionsApi } from '@/api/connections'
+import { listAllConnections } from '@/api/listAllConnections'
 import { useStore } from '@/store'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ConnectionForm from './connection-manager/ConnectionForm'
@@ -17,7 +19,10 @@ const FALLBACK_PROVIDERS = [
   { id: 'pollinations', name: 'Pollinations', default_url: 'https://gen.pollinations.ai/v1' },
 ]
 
+const MODEL_ROULETTE_PROVIDER = 'model_roulette'
+
 export default function ConnectionManager() {
+  const { t } = useTranslation('panels')
   const profiles = useStore((s) => s.profiles)
   const setProfiles = useStore((s) => s.setProfiles)
   const addProfile = useStore((s) => s.addProfile)
@@ -30,6 +35,7 @@ export default function ConnectionManager() {
 
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [creatingProvider, setCreatingProvider] = useState('openai')
   const [deleteTarget, setDeleteTarget] = useState<ConnectionProfile | null>(null)
 
   useEffect(() => {
@@ -67,7 +73,7 @@ export default function ConnectionManager() {
       if (!cacheHit) setLoading(true)
       try {
         const [profilesResult, providersResult] = await Promise.allSettled([
-          connectionsApi.list({ limit: 100 }),
+          listAllConnections(connectionsApi),
           connectionsApi.providers(),
         ])
 
@@ -140,21 +146,36 @@ export default function ConnectionManager() {
   }, [deleteTarget, removeProfile])
 
   if (loading) {
-    return <div className={styles.loading}>Loading connections...</div>
+    return <div className={styles.loading}>{t('connectionManager.loading')}</div>
   }
 
   return (
     <div className={styles.manager}>
       {!creating && (
-        <button type="button" className={styles.createBtn} onClick={() => setCreating(true)}>
-          <Plus size={14} />
-          <span>New Connection</span>
-        </button>
+        <div className={styles.createActions}>
+          <button
+            type="button"
+            className={styles.createBtn}
+            onClick={() => { setCreatingProvider('openai'); setCreating(true) }}
+          >
+            <Plus size={14} />
+            <span>{t('connectionManager.newConnection')}</span>
+          </button>
+          <button
+            type="button"
+            className={styles.createBtn}
+            onClick={() => { setCreatingProvider(MODEL_ROULETTE_PROVIDER); setCreating(true) }}
+          >
+            <Shuffle size={14} />
+            <span>{t('connectionManager.newRoulette')}</span>
+          </button>
+        </div>
       )}
 
       {creating && (
         <ConnectionForm
           providers={providers}
+          initialProvider={creatingProvider}
           onSave={handleCreate}
           onCancel={() => setCreating(false)}
           onOAuthCreated={(profile) => {
@@ -178,17 +199,17 @@ export default function ConnectionManager() {
           />
         ))}
         {profiles.length === 0 && !creating && (
-          <div className={styles.empty}>No connections configured. Add one to start chatting.</div>
+          <div className={styles.empty}>{t('connectionManager.empty')}</div>
         )}
       </div>
 
       {deleteTarget && (
         <ConfirmationModal
-          title="Delete Connection"
-          message={`Delete "${deleteTarget.name}"? This cannot be undone.`}
+          title={t('connectionManager.deleteTitle')}
+          message={t('connectionManager.deleteMessage', { name: deleteTarget.name })}
           isOpen={true}
           variant="danger"
-          confirmText="Delete"
+          confirmText={t('connectionManager.deleteConfirm')}
           onConfirm={handleDelete}
           onCancel={() => setDeleteTarget(null)}
         />

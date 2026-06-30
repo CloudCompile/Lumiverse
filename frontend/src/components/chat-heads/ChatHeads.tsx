@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router'
-import { X, EyeOff, Columns2, Rows2, Wrench, AlertTriangle, Volume2, VolumeX } from 'lucide-react'
+import { X, EyeOff, Columns2, Rows2, Wrench, AlertTriangle, Volume2, VolumeX, PencilLine, UsersRound } from 'lucide-react'
 import { useStore } from '@/store'
 import { generateApi } from '@/api/generate'
 import { getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
@@ -27,6 +28,7 @@ function pixelToPct(px: number, viewport: number): number {
 // ═════════════════════════════════════════════════════════════════════════════
 
 export default function ChatHeads() {
+  const { t } = useTranslation('settings', { keyPrefix: 'display.chatHeads' })
   const chatHeads = useStore((s) => s.chatHeads)
   const activeChatId = useStore((s) => s.activeChatId)
   const savedPos = useStore((s) => s.chatHeadsPosition)
@@ -355,14 +357,14 @@ export default function ChatHeads() {
   const contextMenuItems = useMemo<ContextMenuEntry[]>(() => [
     {
       key: 'dir-col',
-      label: 'Vertical',
+      label: t('vertical'),
       icon: <Columns2 size={14} />,
       active: direction === 'column',
       onClick: () => setSetting('chatHeadsDirection', 'column'),
     },
     {
       key: 'dir-row',
-      label: 'Horizontal',
+      label: t('horizontal'),
       icon: <Rows2 size={14} />,
       active: direction === 'row',
       onClick: () => setSetting('chatHeadsDirection', 'row'),
@@ -370,19 +372,19 @@ export default function ChatHeads() {
     { key: 'div-1', type: 'divider' as const },
     {
       key: 'size-sm',
-      label: 'Small (36px)',
+      label: t('sizeSmall'),
       active: headSize <= 38,
       onClick: () => setSetting('chatHeadsSize', 36),
     },
     {
       key: 'size-md',
-      label: 'Medium (48px)',
+      label: t('sizeMedium'),
       active: headSize > 38 && headSize <= 54,
       onClick: () => setSetting('chatHeadsSize', 48),
     },
     {
       key: 'size-lg',
-      label: 'Large (64px)',
+      label: t('sizeLarge'),
       active: headSize > 54,
       onClick: () => setSetting('chatHeadsSize', 64),
     },
@@ -392,7 +394,7 @@ export default function ChatHeads() {
       type: 'custom' as const,
       content: (
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 12px', fontSize: 12.5, color: 'var(--lumiverse-text-muted)' }}>
-          Opacity
+          {t('opacityLabel')}
           <input
             type="range"
             min={20}
@@ -408,7 +410,7 @@ export default function ChatHeads() {
     { key: 'div-3', type: 'divider' as const },
     {
       key: 'completion-sound',
-      label: 'Completion sound',
+      label: t('completionSound'),
       icon: completionSoundEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />,
       active: completionSoundEnabled,
       onClick: () => setSetting('chatHeadsCompletionSoundEnabled', !completionSoundEnabled),
@@ -416,11 +418,11 @@ export default function ChatHeads() {
     { key: 'div-4', type: 'divider' as const },
     {
       key: 'hide',
-      label: 'Hide chat heads',
+      label: t('hide'),
       icon: <EyeOff size={14} />,
       onClick: () => setSetting('chatHeadsEnabled', false),
     },
-  ], [direction, headSize, opacity, completionSoundEnabled, setSetting])
+  ], [direction, headSize, opacity, completionSoundEnabled, setSetting, t])
 
   if (!enabled || displayed.length === 0) return null
 
@@ -469,7 +471,9 @@ function ChatHeadBubble({ head, size, index, isExiting }: { head: ChatHeadEntry;
     head.status === 'council' ||
     head.status === 'waiting' ||
     head.status === 'reasoning' ||
-    head.status === 'streaming'
+    head.status === 'streaming' ||
+    head.status === 'mp_your_turn' ||
+    head.status === 'mp_freeform'
   const isCompleted = head.status === 'completed' || head.status === 'stopped'
   const isError = head.status === 'error'
   const avatarUrl = head.avatarUrl || getCharacterAvatarThumbUrlById(head.characterId)
@@ -541,12 +545,33 @@ function ChatHeadBubble({ head, size, index, isExiting }: { head: ChatHeadEntry;
         <div className={`${styles.notifPip} ${styles.notifPipUnread}`} />
       )}
 
+      {/* Multiplayer: current user's turn */}
+      {head.status === 'mp_your_turn' && (
+        <div className={`${styles.notifPip} ${styles.notifPipTurn}`}><PencilLine className={styles.notifPipIcon} /></div>
+      )}
+
+      {/* Multiplayer: freeform writing window */}
+      {head.status === 'mp_freeform' && (
+        <div className={styles.speechBubble}>
+          <SpeechBubbleSvg />
+          <PencilLine className={styles.wrenchIcon} />
+        </div>
+      )}
+
+      {/* Multiplayer: waiting for another participant */}
+      {head.status === 'mp_waiting_turn' && (
+        <div className={`${styles.notifPip} ${styles.notifPipWaiting}`}><UsersRound className={styles.notifPipIcon} /></div>
+      )}
+
       {/* Error: pip with X icon */}
       {isError && (
         <div className={styles.notifPip}><X className={styles.notifPipIcon} /></div>
       )}
 
-      <div className={styles.tooltip}>{head.characterName}</div>
+      <div className={styles.tooltip}>
+        <div>{head.characterName}</div>
+        {head.subtitle && <div className={styles.tooltipSub}>{head.subtitle}</div>}
+      </div>
     </div>
   )
 }
@@ -575,12 +600,16 @@ function StatusBadge({ status }: { status: ChatHeadEntry['status'] }) {
       return <div className={`${styles.badge} ${styles.badgeError}`} />
     case 'reasoning':
     case 'streaming':
+    case 'mp_your_turn':
+    case 'mp_freeform':
       return <div className={`${styles.badge} ${styles.badgeActive}`} />
     case 'completed':
     case 'stopped':
       return <div className={`${styles.badge} ${styles.badgeCompleted}`} />
     case 'error':
       return <div className={`${styles.badge} ${styles.badgeError}`} />
+    case 'mp_waiting_turn':
+      return <div className={`${styles.badge} ${styles.badgeWaiting}`} />
     default:
       return null
   }

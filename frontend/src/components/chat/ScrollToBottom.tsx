@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ArrowDown } from 'lucide-react'
 import styles from './ScrollToBottom.module.css'
 
 const CHAT_SCROLL_TO_BOTTOM_EVENT = 'lumiverse:chat-scroll-bottom'
 
 export default function ScrollToBottom() {
+  const { t } = useTranslation('chat')
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
@@ -36,7 +38,7 @@ export default function ScrollToBottom() {
   if (!visible) return null
 
   return (
-    <button type="button" className={styles.btn} onClick={scrollDown} aria-label="Scroll to bottom">
+    <button type="button" className={styles.btn} onClick={scrollDown} aria-label={t('scrollToBottom')}>
       <ArrowDown size={18} />
     </button>
   )

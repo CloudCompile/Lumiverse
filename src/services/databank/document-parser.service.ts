@@ -3,7 +3,7 @@
  */
 
 import { env } from "../../env";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 
 export interface ParsedDocument {
   text: string;
@@ -29,7 +29,13 @@ export function getSupportedExtensions(): string[] {
  * Parse a file into plain text. Reads from the databank upload directory.
  */
 export async function parseDocument(userId: string, filePath: string): Promise<ParsedDocument> {
-  const fullPath = join(env.dataDir, "databank", userId, filePath);
+  // Guard against path traversal: resolve the full path and verify it stays
+  // within the user's own databank directory.
+  const base = join(env.dataDir, "databank", userId);
+  const fullPath = resolve(base, filePath);
+  if (!fullPath.startsWith(base + sep) && fullPath !== base) {
+    throw new Error(`Invalid file path: path traversal detected`);
+  }
   const file = Bun.file(fullPath);
 
   if (!(await file.exists())) {

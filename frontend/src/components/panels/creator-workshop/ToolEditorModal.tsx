@@ -1,4 +1,6 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { Plus, Trash2, Wrench, Code, Settings } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
@@ -16,13 +18,6 @@ interface SchemaProperty {
   description: string
   required: boolean
 }
-
-const TYPE_OPTIONS = [
-  { value: 'string', label: 'String' },
-  { value: 'number', label: 'Number' },
-  { value: 'boolean', label: 'Boolean' },
-  { value: 'integer', label: 'Integer' },
-]
 
 function parseSchemaProps(schema: Record<string, any>): SchemaProperty[] {
   const props = schema?.properties
@@ -48,34 +43,53 @@ function buildSchema(properties: SchemaProperty[]): Record<string, any> {
   return { type: 'object', properties: props, ...(required.length > 0 ? { required } : {}) }
 }
 
-function buildPromptGuide(properties: SchemaProperty[]): string {
+function buildPromptGuide(properties: SchemaProperty[], t: TFunction<'panels'>): string {
   const activeProps = properties.filter((prop) => prop.name.trim())
   if (activeProps.length === 0) {
     return [
-      'No structured fields configured.',
-      'Leave this section empty if you want a freeform council response.',
+      t('creatorWorkshop.toolEditor.promptGuideEmpty'),
+      t('creatorWorkshop.toolEditor.promptGuideFreeform'),
     ].join('\n')
   }
 
   const lines = [
-    'Suggested instruction to add to your prompt:',
+    t('creatorWorkshop.toolEditor.promptGuideIntro'),
     '',
-    'Return a concise response using these fields:',
+    t('creatorWorkshop.toolEditor.promptGuideReturn'),
   ]
 
   for (const prop of activeProps) {
-    const status = prop.required ? 'required' : 'optional'
-    const description = prop.description.trim() ? `: ${prop.description.trim()}` : ''
-    lines.push(`- ${prop.name.trim()} (${prop.type}, ${status})${description}`)
+    const status = prop.required
+      ? t('creatorWorkshop.shared.required')
+      : t('creatorWorkshop.shared.optional')
+    const description = prop.description.trim()
+      ? `: ${prop.description.trim()}`
+      : ''
+    lines.push(t('creatorWorkshop.toolEditor.promptGuideField', {
+      name: prop.name.trim(),
+      type: prop.type,
+      status,
+      description,
+    }))
   }
 
-  lines.push('Keep each field direct and easy for the council to use.')
+  lines.push(t('creatorWorkshop.toolEditor.promptGuideFooter'))
   return lines.join('\n')
 }
 
+const LOOM_COUNCIL_MACRO = '{{loomCouncilResult::your_variable}}'
+
 export default function ToolEditorModal() {
+  const { t } = useTranslation('panels')
   const modalProps = useStore((s) => s.modalProps)
   const closeModal = useStore((s) => s.closeModal)
+
+  const typeOptions = useMemo(() => [
+    { value: 'string', label: t('creatorWorkshop.shared.schemaType.string') },
+    { value: 'number', label: t('creatorWorkshop.shared.schemaType.number') },
+    { value: 'boolean', label: t('creatorWorkshop.shared.schemaType.boolean') },
+    { value: 'integer', label: t('creatorWorkshop.shared.schemaType.integer') },
+  ], [t])
 
   const packId = modalProps.packId as string
   const editingItem = modalProps.editingItem as LoomTool | undefined
@@ -181,83 +195,79 @@ export default function ToolEditorModal() {
     <>
       <ModalShell isOpen onClose={handleClose} maxWidth={720} maxHeight="90vh" closeOnEscape={false} className={styles.modal}>
         <div className={styles.header}>
-          <h3 className={styles.title}>{editingItem ? 'Edit Council Tool' : 'Create Council Tool'}</h3>
+          <h3 className={styles.title}>
+            {editingItem ? t('creatorWorkshop.toolEditor.editTitle') : t('creatorWorkshop.toolEditor.createTitle')}
+          </h3>
           <CloseButton onClick={handleClose} />
         </div>
 
         <div className={styles.body}>
           <div className={styles.helpCard}>
-            <div className={styles.helpTitle}>How custom council tools work</div>
-            <div className={styles.helpText}>
-              Pack tools send a focused prompt to the sidecar during council deliberation. The prompt is the main instruction. Structured fields are optional, and help you define the sections or values you want the tool to return.
-            </div>
+            <div className={styles.helpTitle}>{t('creatorWorkshop.toolEditor.helpTitle')}</div>
+            <div className={styles.helpText}>{t('creatorWorkshop.toolEditor.helpText')}</div>
             <div className={styles.helpList}>
-              <div>1. Write the prompt like instructions for a specialist council member.</div>
-              <div>2. Add structured fields only if you want a repeatable response shape.</div>
-              <div>3. Use a result variable if you want the raw result in <code>{'{{loomCouncilResult::your_variable}}'}</code>.</div>
+              <div>{t('creatorWorkshop.toolEditor.helpStep1')}</div>
+              <div>{t('creatorWorkshop.toolEditor.helpStep2')}</div>
+              <div>{t('creatorWorkshop.toolEditor.helpStep3', { macroExample: LOOM_COUNCIL_MACRO })}</div>
             </div>
           </div>
 
-          <EditorSection Icon={Wrench} title="Tool Details">
+          <EditorSection Icon={Wrench} title={t('creatorWorkshop.toolEditor.toolDetails')}>
             <div className={styles.row}>
               <div className={styles.rowHalf}>
-                <FormField label="Tool Name" required hint="Internal identifier, usually unique within the pack. Use snake_case.">
-                  <TextInput value={toolName} onChange={setToolName} placeholder="my_tool" autoFocus />
+                <FormField label={t('creatorWorkshop.toolEditor.toolName')} required hint={t('creatorWorkshop.toolEditor.toolNameHint')}>
+                  <TextInput value={toolName} onChange={setToolName} placeholder={t('creatorWorkshop.toolEditor.toolNamePlaceholder')} autoFocus />
                 </FormField>
               </div>
               <div className={styles.rowHalf}>
-                <FormField label="Display Name" required hint="The label council editors will see.">
-                  <TextInput value={displayName} onChange={setDisplayName} placeholder="My Tool" />
+                <FormField label={t('creatorWorkshop.toolEditor.displayName')} required hint={t('creatorWorkshop.toolEditor.displayNameHint')}>
+                  <TextInput value={displayName} onChange={setDisplayName} placeholder={t('creatorWorkshop.toolEditor.displayNamePlaceholder')} />
                 </FormField>
               </div>
             </div>
 
-            <FormField label="Description" hint="Explain when this tool should be used and what kind of guidance it gives.">
-              <TextInput value={description} onChange={setDescription} placeholder="What this tool does..." />
+            <FormField label={t('creatorWorkshop.toolEditor.description')} hint={t('creatorWorkshop.toolEditor.descriptionHint')}>
+              <TextInput value={description} onChange={setDescription} placeholder={t('creatorWorkshop.toolEditor.descriptionPlaceholder')} />
             </FormField>
 
-            <FormField label="Author">
-              <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
+            <FormField label={t('creatorWorkshop.shared.author')}>
+              <TextInput value={authorName} onChange={setAuthorName} placeholder={t('creatorWorkshop.loomEditor.authorPlaceholder')} />
             </FormField>
           </EditorSection>
 
-          <EditorSection Icon={Code} title="Tool Prompt">
-            <FormField label="Prompt" required hint="This is the main instruction the council member follows. Be explicit about scope, tone, and what the final answer should contain.">
-              <TextArea value={prompt} onChange={setPrompt} placeholder="You are a council specialist who reviews the latest story context and returns concise, actionable guidance..." rows={6} />
+          <EditorSection Icon={Code} title={t('creatorWorkshop.toolEditor.toolPrompt')}>
+            <FormField label={t('creatorWorkshop.toolEditor.prompt')} required hint={t('creatorWorkshop.toolEditor.promptHint')}>
+              <TextArea value={prompt} onChange={setPrompt} placeholder={t('creatorWorkshop.toolEditor.promptPlaceholder')} rows={6} />
             </FormField>
 
             <div className={styles.subtleCard}>
-              <div className={styles.subtleCardTitle}>Prompt helper</div>
-              <div className={styles.subtleCardText}>
-                For pack-created council tools, the fields below do not replace your prompt. If you want a structured response, tell the model to return those fields explicitly.
-              </div>
-              <pre className={styles.codeBlock}>{buildPromptGuide(schemaProps)}</pre>
+              <div className={styles.subtleCardTitle}>{t('creatorWorkshop.toolEditor.promptHelperTitle')}</div>
+              <div className={styles.subtleCardText}>{t('creatorWorkshop.toolEditor.promptHelperText')}</div>
+              <pre className={styles.codeBlock}>{buildPromptGuide(schemaProps, t)}</pre>
             </div>
           </EditorSection>
 
-          <EditorSection Icon={Settings} title="Structured Output Fields" defaultExpanded={schemaProps.length > 0}>
+          <EditorSection Icon={Settings} title={t('creatorWorkshop.toolEditor.structuredOutput')} defaultExpanded={schemaProps.length > 0}>
             <div className={styles.subtleCard}>
-              <div className={styles.subtleCardTitle}>What this means</div>
-              <div className={styles.subtleCardText}>
-                Add fields for the pieces of information you want back from the tool. Use `string` for most text, `boolean` for yes or no, `integer` for whole numbers, and `number` for decimals. Leave this empty if the tool should answer in freeform prose.
-              </div>
+              <div className={styles.subtleCardTitle}>{t('creatorWorkshop.toolEditor.structuredWhatTitle')}</div>
+              <div className={styles.subtleCardText}>{t('creatorWorkshop.toolEditor.structuredWhatText')}</div>
             </div>
 
             {schemaProps.map((prop, i) => (
               <div key={i} className={styles.schemaRow}>
                 <div className={styles.schemaFields}>
                   <div className={styles.schemaFieldRow}>
-                    <TextInput value={prop.name} onChange={(v) => updateProperty(i, 'name', v)} placeholder="field_name" />
-                    <Select value={prop.type} onChange={(v) => updateProperty(i, 'type', v)} options={TYPE_OPTIONS} />
+                    <TextInput value={prop.name} onChange={(v) => updateProperty(i, 'name', v)} placeholder={t('creatorWorkshop.toolEditor.fieldNamePlaceholder')} />
+                    <Select value={prop.type} onChange={(v) => updateProperty(i, 'type', v)} options={typeOptions} />
                   </div>
-                  <TextInput value={prop.description} onChange={(v) => updateProperty(i, 'description', v)} placeholder="What should go in this field?" />
+                  <TextInput value={prop.description} onChange={(v) => updateProperty(i, 'description', v)} placeholder={t('creatorWorkshop.toolEditor.fieldDescPlaceholder')} />
                   <label className={styles.checkboxLabel}>
                     <input
                       type="checkbox"
                       checked={prop.required}
                       onChange={(e) => updateProperty(i, 'required', e.target.checked)}
                     />
-                    Required field
+                    {t('creatorWorkshop.toolEditor.requiredField')}
                   </label>
                 </div>
                 <button type="button" className={styles.schemaRemoveBtn} onClick={() => removeProperty(i)}>
@@ -266,29 +276,29 @@ export default function ToolEditorModal() {
               </div>
             ))}
             <button type="button" className={styles.addPropertyBtn} onClick={addProperty}>
-              <Plus size={14} /> Add Field
+              <Plus size={14} /> {t('creatorWorkshop.toolEditor.addField')}
             </button>
 
             <div className={styles.previewBlock}>
-              <div className={styles.previewTitle}>Generated schema preview</div>
+              <div className={styles.previewTitle}>{t('creatorWorkshop.toolEditor.schemaPreview')}</div>
               <pre className={styles.codeBlock}>{schemaPreview}</pre>
             </div>
           </EditorSection>
 
-          <EditorSection Icon={Settings} title="Result Routing" defaultExpanded={false}>
+          <EditorSection Icon={Settings} title={t('creatorWorkshop.toolEditor.resultRouting')} defaultExpanded={false}>
             <div className={styles.subtleCard}>
-              <div className={styles.subtleCardTitle}>Where the result goes</div>
+              <div className={styles.subtleCardTitle}>{t('creatorWorkshop.toolEditor.resultRoutingTitle')}</div>
               <div className={styles.subtleCardText}>
-                Store in deliberation to let the whole council read this tool's output. Add a result variable when you also want the raw output available to prompts and presets through <code>{'{{loomCouncilResult::your_variable}}'}</code>.
+                {t('creatorWorkshop.toolEditor.resultRoutingText', { macroExample: LOOM_COUNCIL_MACRO })}
               </div>
             </div>
 
-            <FormField label="Result Variable" hint="Optional. Saves the tool output under a macro-friendly name like scene_data or continuity_notes.">
-              <TextInput value={resultVariable} onChange={setResultVariable} placeholder="result_var" />
+            <FormField label={t('creatorWorkshop.toolEditor.resultVariable')} hint={t('creatorWorkshop.toolEditor.resultVariableHint')}>
+              <TextInput value={resultVariable} onChange={setResultVariable} placeholder={t('creatorWorkshop.toolEditor.resultVariablePlaceholder')} />
             </FormField>
 
             <div className={styles.toggleRow}>
-              <span className={styles.toggleLabel}>Store in deliberation</span>
+              <span className={styles.toggleLabel}>{t('creatorWorkshop.toolEditor.storeInDeliberation')}</span>
               <button
                 type="button"
                 className={clsx(styles.toggle, storeInDeliberation && styles.toggleActive)}
@@ -297,16 +307,18 @@ export default function ToolEditorModal() {
                 <span className={styles.toggleKnob} />
               </button>
             </div>
-            <div className={styles.inlineHint}>
-              Turn this off for variable-only tools whose output should be consumed by macros or other logic without appearing in the shared council deliberation block.
-            </div>
+            <div className={styles.inlineHint}>{t('creatorWorkshop.toolEditor.storeInDeliberationHint')}</div>
           </EditorSection>
         </div>
 
         <div className={styles.footer}>
-          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="ghost" onClick={handleClose}>{t('creatorWorkshop.shared.cancel')}</Button>
           <Button variant="primary" onClick={handleSave} disabled={!canSave || saving}>
-            {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+            {saving
+              ? t('creatorWorkshop.shared.saving')
+              : editingItem
+                ? t('creatorWorkshop.shared.saveChanges')
+                : t('creatorWorkshop.shared.create')}
           </Button>
         </div>
       </ModalShell>
@@ -314,11 +326,11 @@ export default function ToolEditorModal() {
       {showDiscard && (
         <ConfirmationModal
           isOpen
-          title="Discard changes?"
-          message="You have unsaved changes. Are you sure you want to discard them?"
+          title={t('creatorWorkshop.shared.discardTitle')}
+          message={t('creatorWorkshop.shared.discardMessage')}
           variant="warning"
-          confirmText="Discard"
-          cancelText="Keep editing"
+          confirmText={t('creatorWorkshop.shared.discard')}
+          cancelText={t('creatorWorkshop.shared.keepEditing')}
           onConfirm={() => {
             setShowDiscard(false)
             closeModal()

@@ -87,6 +87,8 @@ export async function queryCortex(
     for (const id of fallbackIds) candidateChunkIds.add(id);
   }
 
+  removeExcludedMessageChunks(db, query.chatId, candidateChunkIds, query.excludeMessageIds);
+
   // 1c. Load salience data for all candidates
   const salienceMap = loadSalienceMap(db, query.chatId, candidateChunkIds);
 
@@ -371,6 +373,30 @@ function getRecentVectorizedChunkIds(db: any, chatId: string, limit: number): st
   return rows.map((r) => r.id);
 }
 
+function removeExcludedMessageChunks(
+  db: any,
+  chatId: string,
+  candidateChunkIds: Set<string>,
+  excludeMessageIds?: string[],
+): void {
+  if (candidateChunkIds.size === 0 || !excludeMessageIds || excludeMessageIds.length === 0) return;
+  const excluded = new Set(excludeMessageIds);
+  const ids = [...candidateChunkIds];
+  for (let i = 0; i < ids.length; i += 500) {
+    const batch = ids.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(",");
+    const rows = db
+      .query(`SELECT id, message_ids FROM chat_chunks WHERE chat_id = ? AND id IN (${placeholders})`)
+      .all(chatId, ...batch) as Array<{ id: string; message_ids: string | null }>;
+    for (const row of rows) {
+      const messageIds = safeJsonArray(row.message_ids);
+      if (messageIds.some((id) => excluded.has(id))) {
+        candidateChunkIds.delete(row.id);
+      }
+    }
+  }
+}
+
 interface SalienceData {
   score: number;
   emotionalTags: string[];
@@ -452,7 +478,10 @@ async function searchChatChunksScoped(
   return filtered.map((h: any) => ({
     chunkId: h.chunk_id,
     content: h.content,
-    distance: h.score, // LanceDB returns distance as score
+    // LanceDB returns distance as score. Cortex uses pure-vector search (no
+    // FTS leg), so score is always a real distance here; coerce defensively
+    // since searchChatChunks returns null for keyword-only hits elsewhere.
+    distance: h.score ?? 1,
   }));
 }
 
@@ -805,7 +834,7 @@ export async function queryVaultCortex(
         description: e.description,
         lastSeenAt: null,
         mentionCount: 0,
-        topFacts: safeJsonArray(e.facts),
+        topFacts: safeJsonArray(e.facts).map((f: string) => entityGraph.stripFactTags(f)),
         emotionalProfile,
         relationships: [],
       });

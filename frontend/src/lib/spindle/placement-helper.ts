@@ -10,12 +10,28 @@ import type {
   SpindleInputBarActionOptions,
   SpindleInputBarActionHandle,
 } from 'lumiverse-spindle-types'
+import type {
+  SpindleCharacterEditorTabOptions,
+  SpindleCharacterEditorTabHandle,
+} from './character-editor-types'
 import { useStore } from '@/store'
+import type { TabLocation } from './tab-mobility-types'
+import { isTabDispatchable } from './tab-dispatch'
+import {
+  getCharacterEditorState,
+  subscribeCharacterEditorState,
+  setCharacterEditorActiveTab,
+} from './character-editor-helper'
 
 let placementCounter = 0
 function nextId(extensionId: string, kind: string): string {
   return `spindle:${extensionId}:${kind}:${++placementCounter}`
 }
+
+// ── Tab Mobility Handle Cache ──
+// Each call to createTabMobilityHandle subscribes to useStore.
+// Cache one handle per extensionId to avoid subscription leaks.
+const _tabMobilityCache = new Map<string, ReturnType<typeof createTabMobilityHandle>>
 
 function getStore() {
   return useStore.getState()
@@ -82,6 +98,58 @@ export function createDrawerTabHandle(
     destroy() {
       unsubscribeStore()
       getStore().unregisterDrawerTab(tabId)
+      activateHandlers.clear()
+    },
+    onActivate(handler: () => void): () => void {
+      activateHandlers.add(handler)
+      return () => { activateHandlers.delete(handler) }
+    },
+  }
+}
+
+// ── Character Editor Tab ──
+
+export function createCharacterEditorTabHandle(
+  extensionId: string,
+  options: SpindleCharacterEditorTabOptions,
+): SpindleCharacterEditorTabHandle {
+  const tabId = nextId(extensionId, `character-editor-tab:${options.id}`)
+  const root = document.createElement('div')
+  root.setAttribute('data-spindle-extension-root', extensionId)
+  root.setAttribute('data-spindle-character-editor-tab', tabId)
+
+  const activateHandlers = new Set<() => void>()
+  let wasActive = getCharacterEditorState().open && getCharacterEditorState().activeTabId === tabId
+
+  const unsubscribeState = subscribeCharacterEditorState((state) => {
+    const isActive = state.open && state.activeTabId === tabId
+    if (isActive && !wasActive) {
+      for (const handler of activateHandlers) {
+        try { handler() } catch { /* no-op */ }
+      }
+    }
+    wasActive = isActive
+  })
+
+  getStore().registerCharacterEditorTab({
+    id: tabId,
+    extensionId,
+    title: options.title,
+    root,
+  })
+
+  return {
+    root,
+    tabId,
+    setTitle(title: string) {
+      getStore().updateCharacterEditorTab(tabId, { title })
+    },
+    activate() {
+      setCharacterEditorActiveTab(tabId)
+    },
+    destroy() {
+      unsubscribeState()
+      getStore().unregisterCharacterEditorTab(tabId)
       activateHandlers.clear()
     },
     onActivate(handler: () => void): () => void {
@@ -304,7 +372,7 @@ export function createAppMountHandle(
     extensionId,
     root,
     className: options?.className,
-    position: options?.position ?? 'end',
+    position: (options?.position ?? 'end') as 'start' | 'end' | 'app-overlay',
     visible: true,
   })
 
@@ -365,10 +433,51 @@ export function createInputBarActionHandle(
   }
 }
 
+// ── Tab Mobility ──
+
+/**
+ * Create a tab mobility handle for an extension. Filters to (a) own
+ * extension's tabs, (b) CORE_DRAWER_TAB_IDS.
+ */
+export function createTabMobilityHandle(extensionId: string): {
+  requestTabLocation(tabId: string, location: TabLocation): void
+} {
+  const cached = _tabMobilityCache.get(extensionId)
+  if (cached) return cached
+
+  const handle = createTabMobilityHandleUncached(extensionId)
+  _tabMobilityCache.set(extensionId, handle)
+  return handle
+}
+
+/** Clear the cached tab mobility handle for an extension (call on unload). */
+export function clearTabMobilityHandle(extensionId: string): void {
+  _tabMobilityCache.delete(extensionId)
+}
+
+function createTabMobilityHandleUncached(extensionId: string): {
+  requestTabLocation(tabId: string, location: TabLocation): void
+} {
+  return {
+    requestTabLocation(tabId: string, location: TabLocation): void {
+      if (!isTabDispatchable(tabId, extensionId, getStore().drawerTabs)) return
+      getStore().moveTabTo(tabId, location)
+    },
+  }
+}
+
 // ── Cleanup ──
 
 export function destroyAllPlacementsForExtension(extensionId: string) {
   const store = getStore()
+
+  for (const tab of store.drawerTabs.filter((t) => t.extensionId === extensionId)) {
+    try { tab.root.remove() } catch { /* no-op */ }
+  }
+
+  for (const tab of store.characterEditorTabs.filter((t) => t.extensionId === extensionId)) {
+    try { tab.root.remove() } catch { /* no-op */ }
+  }
 
   // Clean up DOM for app mounts
   for (const m of store.appMounts.filter((m) => m.extensionId === extensionId)) {

@@ -17,6 +17,7 @@ import {
   readPersonasFromDisk,
   readCharacterChatFile,
   readGroupDefinitions,
+  readGroupChatFileEntries,
   readGroupChatFile,
   parseDateString,
 } from "./st-reader";
@@ -122,11 +123,17 @@ export async function importCharacters(
         continue;
       }
 
-      const buffer = await fs.readFile(filePath);
+      const [buffer, fileStat] = await Promise.all([
+        fs.readFile(filePath),
+        fs.stat(filePath).catch(() => null),
+      ]);
       const bytes = new Uint8Array(buffer);
       const file = new File([bytes], filename, { type: "image/png" });
 
       const cardInput = await extractCardFromPng(file);
+      if (cardInput.created_at == null && fileStat) {
+        cardInput.created_at = fileStat.createdAt ?? fileStat.modifiedAt;
+      }
       const character = createCharacter(userId, cardInput);
       setCharacterSourceFilename(userId, character.id, filename);
 
@@ -367,6 +374,24 @@ export async function importGroupChats(
   const groupDefs = await readGroupDefinitions(stDataDir, fs);
   if (groupDefs.length === 0) return { imported, failed, skipped, totalMessages };
 
+  const groupChatFiles = await readGroupChatFileEntries(stDataDir, fs);
+  const referencedChatIds = new Set<string>();
+  for (const group of groupDefs) {
+    for (const chatId of group.chatIds) {
+      referencedChatIds.add(
+        chatId.toLowerCase().endsWith(".jsonl") ? fs.basename(chatId, ".jsonl") : chatId
+      );
+    }
+  }
+
+  const unreferencedGroupChatFiles = groupChatFiles.filter((entry) => !referencedChatIds.has(entry.id));
+  if (unreferencedGroupChatFiles.length > 0) {
+    failed += unreferencedGroupChatFiles.length;
+    logger.warn(
+      `${unreferencedGroupChatFiles.length} group chat file(s) were not listed in any groups/*.json chats array and could not be matched to a group`
+    );
+  }
+
   // Count total chat files for progress
   let totalChatsToProcess = 0;
   for (const gd of groupDefs) totalChatsToProcess += gd.chatIds.length;
@@ -396,6 +421,8 @@ export async function importGroupChats(
       const chatData = await readGroupChatFile(stDataDir, chatId, personaNameToId, filenameToId, fs);
 
       if (!chatData) {
+        logger.warn(`Could not read group chat "${group.name}/${chatId}", skipping`);
+        failed++;
         processedChats++;
         logger.progress("Importing group chats", processedChats, totalChatsToProcess);
         await maybeYield();

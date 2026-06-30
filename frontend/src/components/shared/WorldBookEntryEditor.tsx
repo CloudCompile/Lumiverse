@@ -1,36 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { ChevronRight, Hash } from 'lucide-react'
-import { Spinner } from '@/components/shared/Spinner'
+import { useTranslation } from 'react-i18next'
+import { ChevronRight } from 'lucide-react'
 import { Toggle } from '@/components/shared/Toggle'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
+import TokenCountButton from '@/components/shared/TokenCountButton'
 import clsx from 'clsx'
 import type { WorldBookEntry } from '@/types/api'
 import { getVectorIndexStatusDescription, getVectorIndexStatusLabel } from '@/lib/worldBookVectorization'
-import { tokenizersApi } from '@/api/tokenizers'
-import { useStore } from '@/store'
+import { useWorldBookEntryLabels } from '@/lib/i18n/worldBookEntryLabels'
 import NumberStepper from './NumberStepper'
 import styles from './WorldBookEntryEditor.module.css'
-
-export const POSITION_OPTIONS = [
-  { value: 0, label: 'Before Main Prompt' },
-  { value: 1, label: 'After Main Prompt' },
-  { value: 2, label: 'Before AN' },
-  { value: 3, label: 'After AN' },
-  { value: 4, label: 'At Depth' },
-]
-
-export const ROLE_OPTIONS = [
-  { value: 'system', label: 'System' },
-  { value: 'user', label: 'User' },
-  { value: 'assistant', label: 'Assistant' },
-]
-
-export const SELECTIVE_LOGIC_OPTIONS = [
-  { value: 0, label: 'AND All Keys' },
-  { value: 1, label: 'NOT None' },
-  { value: 2, label: 'OR Any Key' },
-  { value: 3, label: 'NOT All' },
-]
 
 export interface EntryEditorProps {
   entry: WorldBookEntry
@@ -39,10 +18,14 @@ export interface EntryEditorProps {
 }
 
 export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdate }: EntryEditorProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'worldBookPanel.entryEditor' })
+  const { positionOptions, roleOptions, selectiveLogicOptions } = useWorldBookEntryLabels()
+
   const [groupOpen, setGroupOpen] = useState(false)
   const [timingOpen, setTimingOpen] = useState(false)
   const [recursionOpen, setRecursionOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
+  const recursionInvalidated = entry.vectorized
   const vectorStatusClass =
     entry.vector_index_status === 'indexed'
       ? styles.vectorStatusIndexed
@@ -51,13 +34,6 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
         : entry.vector_index_status === 'pending'
           ? styles.vectorStatusPending
           : styles.vectorStatusNotEnabled
-
-  // Token count state
-  const [tokenCounting, setTokenCounting] = useState(false)
-  const [tokenCount, setTokenCount] = useState<number | null>(null)
-  const [tokenCountApprox, setTokenCountApprox] = useState(false)
-  const activeProfileId = useStore((s) => s.activeProfileId)
-  const profiles = useStore((s) => s.profiles)
 
   // Local state for text fields to prevent prop-sync from overwriting in-progress edits
   const [content, setContent] = useState(entry.content)
@@ -76,39 +52,11 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
     setOutletName(entry.outlet_name || '')
     setPrimaryKeys(entry.key.join(', '))
     setSecondaryKeys(entry.keysecondary.join(', '))
-    setTokenCount(null)
-    setTokenCountApprox(false)
   }, [entry])
-
-  const handleCountTokens = useCallback(async () => {
-    const profile = profiles.find(p => p.id === activeProfileId) || profiles.find(p => p.is_default)
-    setTokenCounting(true)
-    try {
-      if (profile?.model) {
-        const result = await tokenizersApi.countForModel(profile.model, content)
-        if (result.token_count != null) {
-          setTokenCount(result.token_count)
-          setTokenCountApprox(false)
-        } else {
-          setTokenCount(Math.ceil(content.length / 4))
-          setTokenCountApprox(true)
-        }
-      } else {
-        setTokenCount(Math.ceil(content.length / 4))
-        setTokenCountApprox(true)
-      }
-    } catch {
-      setTokenCount(Math.ceil(content.length / 4))
-      setTokenCountApprox(true)
-    }
-    setTokenCounting(false)
-  }, [activeProfileId, profiles, content])
 
   const handleContentChange = useCallback(
     (v: string) => {
       setContent(v)
-      setTokenCount(null)
-      setTokenCountApprox(false)
       onUpdate(entry.id, { content: v })
     },
     [entry.id, onUpdate]
@@ -152,12 +100,12 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
   )
 
   return (
-    <div className={styles.entryEditor}>
+    <div className={styles.entryEditor} data-world-book-entry-editor="true">
       {/* Identity & Content */}
-      <span className={styles.sectionHeading}>Identity & Content</span>
+      <span className={styles.sectionHeading}>{t('sections.identity')}</span>
       <div className={styles.entryFieldGroup}>
         <div className={styles.entryField}>
-          <label className={styles.fieldLabel}>Comment / Label</label>
+          <label className={styles.fieldLabel}>{t('fields.comment')}</label>
           <input
             type="text"
             className={styles.entryInput}
@@ -166,17 +114,17 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           />
         </div>
         <div className={styles.entryField}>
-          <label className={styles.fieldLabel}>Outlet Name</label>
+          <label className={styles.fieldLabel}>{t('fields.outletName')}</label>
           <input
             type="text"
             className={styles.entryInput}
             value={outletName}
             onChange={handleOutletNameChange}
-            placeholder="Use with {{outlet::name}}"
+            placeholder={t('outletPlaceholder')}
           />
         </div>
         <div className={styles.entryField}>
-          <label className={styles.fieldLabel}>Primary Keys (comma-separated)</label>
+          <label className={styles.fieldLabel}>{t('fields.primaryKeys')}</label>
           <input
             type="text"
             className={styles.entryInput}
@@ -185,7 +133,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           />
         </div>
         <div className={styles.entryField}>
-          <label className={styles.fieldLabel}>Secondary Keys (comma-separated)</label>
+          <label className={styles.fieldLabel}>{t('fields.secondaryKeys')}</label>
           <input
             type="text"
             className={styles.entryInput}
@@ -195,42 +143,31 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
         </div>
         <div className={styles.entryField}>
           <div className={styles.fieldLabelRow}>
-            <label className={styles.fieldLabel}>Content</label>
-            <button
-              type="button"
-              className={styles.tokenCountBtn}
-              onClick={handleCountTokens}
-              disabled={tokenCounting || !content.trim()}
-              title="Estimate token count using current model's tokenizer"
-            >
-              {tokenCounting ? <Spinner size={11} fast /> : <Hash size={11} />}
-              {tokenCount != null
-                ? <span className={styles.tokenCountValue}>{tokenCountApprox ? '~' : ''}{tokenCount.toLocaleString()} tokens</span>
-                : 'Count tokens'}
-            </button>
+            <label className={styles.fieldLabel}>{t('fields.content')}</label>
+            <TokenCountButton text={content} />
           </div>
           <ExpandableTextarea
             className={styles.entryTextarea}
             value={content}
             onChange={handleContentChange}
-            title={comment || 'Entry Content'}
+            title={comment || t('entryContentTitle')}
             rows={4}
           />
         </div>
       </div>
 
       {/* Injection */}
-      <span className={styles.sectionHeading}>Injection</span>
+      <span className={styles.sectionHeading}>{t('sections.injection')}</span>
       <div className={styles.entryFieldGroup}>
         <div className={styles.entryFieldRow}>
           <div className={styles.entryField}>
-            <label className={styles.fieldLabel}>Position</label>
+            <label className={styles.fieldLabel}>{t('fields.position')}</label>
             <select
               className={styles.entrySelect}
               value={entry.position}
               onChange={(e) => onImmediateUpdate(entry.id, { position: Number(e.target.value) })}
             >
-              {POSITION_OPTIONS.map((opt) => (
+              {positionOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
@@ -239,7 +176,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           </div>
           {entry.position === 4 && (
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>Depth</label>
+              <label className={styles.fieldLabel}>{t('fields.depth')}</label>
               <NumberStepper
                 value={entry.depth}
                 min={0}
@@ -248,13 +185,13 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
             </div>
           )}
           <div className={styles.entryField}>
-            <label className={styles.fieldLabel}>Role</label>
+            <label className={styles.fieldLabel}>{t('fields.role')}</label>
             <select
               className={styles.entrySelect}
               value={entry.role || 'system'}
               onChange={(e) => onImmediateUpdate(entry.id, { role: e.target.value })}
             >
-              {ROLE_OPTIONS.map((opt) => (
+              {roleOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
@@ -262,7 +199,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
             </select>
           </div>
           <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-            <label className={styles.fieldLabel}>Order</label>
+            <label className={styles.fieldLabel}>{t('fields.order')}</label>
             <NumberStepper
               value={entry.order_value}
               onChange={(v) => onImmediateUpdate(entry.id, { order_value: v ?? 0 })}
@@ -272,48 +209,48 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
       </div>
 
       {/* Activation */}
-      <span className={styles.sectionHeading}>Activation</span>
+      <span className={styles.sectionHeading}>{t('sections.activation')}</span>
       <div className={styles.entryFieldGroup}>
         <div className={styles.toggleRow}>
           <Toggle.Checkbox
             checked={entry.selective}
             onChange={() => onImmediateUpdate(entry.id, { selective: !entry.selective })}
-            label="Selective"
+            label={t('toggles.selective')}
           />
           <Toggle.Checkbox
             checked={entry.constant}
             onChange={() => onImmediateUpdate(entry.id, { constant: !entry.constant })}
-            label="Constant"
+            label={t('toggles.constant')}
           />
           <Toggle.Checkbox
             checked={entry.disabled}
             onChange={() => onImmediateUpdate(entry.id, { disabled: !entry.disabled })}
-            label="Disabled"
+            label={t('toggles.disabled')}
           />
           <Toggle.Checkbox
             checked={entry.case_sensitive}
             onChange={() => onImmediateUpdate(entry.id, { case_sensitive: !entry.case_sensitive })}
-            label="Case Sensitive"
+            label={t('toggles.caseSensitive')}
           />
           <Toggle.Checkbox
             checked={entry.match_whole_words}
             onChange={() => onImmediateUpdate(entry.id, { match_whole_words: !entry.match_whole_words })}
-            label="Match Whole Words"
+            label={t('toggles.matchWholeWords')}
           />
           <Toggle.Checkbox
             checked={entry.use_regex}
             onChange={() => onImmediateUpdate(entry.id, { use_regex: !entry.use_regex })}
-            label="Use Regex"
+            label={t('toggles.useRegex')}
           />
           <Toggle.Checkbox
             checked={entry.use_probability}
             onChange={() => onImmediateUpdate(entry.id, { use_probability: !entry.use_probability })}
-            label="Use Probability"
+            label={t('toggles.useProbability')}
           />
           <Toggle.Checkbox
             checked={entry.vectorized}
             onChange={() => onImmediateUpdate(entry.id, { vectorized: !entry.vectorized })}
-            label="Vectorized"
+            label={t('toggles.vectorized')}
           />
         </div>
         <div className={styles.vectorStatusRow}>
@@ -326,7 +263,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
         </div>
         <div className={styles.entryFieldRow}>
           <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-            <label className={styles.fieldLabel}>Probability</label>
+            <label className={styles.fieldLabel}>{t('fields.probability')}</label>
             <NumberStepper
               value={entry.probability}
               min={0}
@@ -335,7 +272,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
             />
           </div>
           <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-            <label className={styles.fieldLabel}>Scan Depth</label>
+            <label className={styles.fieldLabel}>{t('fields.scanDepth')}</label>
             <NumberStepper
               value={entry.scan_depth}
               min={0}
@@ -345,13 +282,13 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           </div>
           {entry.selective && (
             <div className={styles.entryField}>
-              <label className={styles.fieldLabel}>Selective Logic</label>
+              <label className={styles.fieldLabel}>{t('fields.selectiveLogic')}</label>
               <select
                 className={styles.entrySelect}
                 value={entry.selective_logic}
                 onChange={(e) => onImmediateUpdate(entry.id, { selective_logic: Number(e.target.value) })}
               >
-                {SELECTIVE_LOGIC_OPTIONS.map((opt) => (
+                {selectiveLogicOptions.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>
@@ -372,20 +309,20 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           size={12}
           className={clsx(styles.groupToggleIcon, timingOpen && styles.groupToggleOpen)}
         />
-        Timing
+        {t('sections.timing')}
       </button>
       {timingOpen && (
         <div className={styles.entryFieldGroup}>
           <div className={styles.entryFieldRow}>
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>Priority</label>
+              <label className={styles.fieldLabel}>{t('fields.priority')}</label>
               <NumberStepper
                 value={entry.priority}
                 onChange={(v) => onImmediateUpdate(entry.id, { priority: v ?? 0 })}
               />
             </div>
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>Sticky</label>
+              <label className={styles.fieldLabel}>{t('fields.sticky')}</label>
               <NumberStepper
                 value={entry.sticky}
                 min={0}
@@ -393,7 +330,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
               />
             </div>
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>Cooldown</label>
+              <label className={styles.fieldLabel}>{t('fields.cooldown')}</label>
               <NumberStepper
                 value={entry.cooldown}
                 min={0}
@@ -401,7 +338,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
               />
             </div>
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>Delay</label>
+              <label className={styles.fieldLabel}>{t('fields.delay')}</label>
               <NumberStepper
                 value={entry.delay}
                 min={0}
@@ -422,25 +359,33 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           size={12}
           className={clsx(styles.groupToggleIcon, recursionOpen && styles.groupToggleOpen)}
         />
-        Recursion
+        {t('sections.recursion')}{recursionInvalidated ? t('sections.recursionInactiveSuffix') : ''}
       </button>
       {recursionOpen && (
         <div className={styles.entryFieldGroup}>
+          {recursionInvalidated && (
+            <div className={styles.inactiveNote}>
+              {t('recursionInactiveNote')}
+            </div>
+          )}
           <div className={styles.toggleRow}>
             <Toggle.Checkbox
               checked={entry.prevent_recursion}
               onChange={() => onImmediateUpdate(entry.id, { prevent_recursion: !entry.prevent_recursion })}
-              label="Prevent Recursion"
+              label={t('toggles.preventRecursion')}
+              disabled={recursionInvalidated}
             />
             <Toggle.Checkbox
               checked={entry.exclude_recursion}
               onChange={() => onImmediateUpdate(entry.id, { exclude_recursion: !entry.exclude_recursion })}
-              label="Exclude Recursion"
+              label={t('toggles.excludeRecursion')}
+              disabled={recursionInvalidated}
             />
             <Toggle.Checkbox
               checked={entry.delay_until_recursion}
               onChange={() => onImmediateUpdate(entry.id, { delay_until_recursion: !entry.delay_until_recursion })}
-              label="Delay Until Recursion"
+              label={t('toggles.delayUntilRecursion')}
+              disabled={recursionInvalidated}
             />
           </div>
         </div>
@@ -456,13 +401,13 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           size={12}
           className={clsx(styles.groupToggleIcon, groupOpen && styles.groupToggleOpen)}
         />
-        Group
+        {t('sections.group')}
       </button>
       {groupOpen && (
         <div className={styles.entryFieldGroup}>
           <div className={styles.entryFieldRow}>
             <div className={styles.entryField}>
-              <label className={styles.fieldLabel}>Group Name</label>
+              <label className={styles.fieldLabel}>{t('fields.groupName')}</label>
               <input
                 type="text"
                 className={styles.entryInput}
@@ -471,7 +416,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
               />
             </div>
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>Weight</label>
+              <label className={styles.fieldLabel}>{t('fields.weight')}</label>
               <NumberStepper
                 value={entry.group_weight}
                 onChange={(v) => onImmediateUpdate(entry.id, { group_weight: v ?? 0 })}
@@ -481,7 +426,7 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           <Toggle.Checkbox
             checked={entry.group_override}
             onChange={() => onImmediateUpdate(entry.id, { group_override: !entry.group_override })}
-            label="Group Override"
+            label={t('toggles.groupOverride')}
           />
         </div>
       )}
@@ -496,16 +441,16 @@ export default function WorldBookEntryEditor({ entry, onUpdate, onImmediateUpdat
           size={12}
           className={clsx(styles.groupToggleIcon, metadataOpen && styles.groupToggleOpen)}
         />
-        Metadata
+        {t('sections.metadata')}
       </button>
       {metadataOpen && (
         <div className={styles.entryFieldGroup}>
           <div className={styles.entryField}>
-            <label className={styles.fieldLabel}>UID</label>
+            <label className={styles.fieldLabel}>{t('fields.uid')}</label>
             <span className={styles.readOnlyValue}>{entry.uid}</span>
           </div>
           <div className={styles.entryField}>
-            <label className={styles.fieldLabel}>Automation ID</label>
+            <label className={styles.fieldLabel}>{t('fields.automationId')}</label>
             <input
               type="text"
               className={styles.entryInput}

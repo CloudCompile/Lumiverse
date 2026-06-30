@@ -10,9 +10,11 @@ import PersonaCardList from './persona-browser/PersonaCardList'
 import PersonaEditor from './persona-browser/PersonaEditor'
 import CreatePersonaForm from './persona-browser/CreatePersonaForm'
 import Pagination from '@/components/shared/Pagination'
+import { useTranslation } from 'react-i18next'
 import styles from './PersonaManager.module.css'
 
 export default function PersonaManager() {
+  const { t } = useTranslation('panels')
   const browser = usePersonaBrowser()
   const openModal = useStore((s) => s.openModal)
   const { createFolder, renameFolder: renameStoredFolder, deleteFolder: deleteStoredFolder } = useFolders('personaFolders', browser.allPersonas)
@@ -89,9 +91,9 @@ export default function PersonaManager() {
       })
       setRenamingFolder(null)
       setRenamingValue('')
-      toast.success(`Renamed folder to "${newName}"${result.count > 0 ? ` and updated ${result.count} persona${result.count === 1 ? '' : 's'}` : ''}`)
+      toast.success(t('personaManager.renamedFolderSuccess', { name: newName, count: result.count }))
     } catch (err: any) {
-      toast.error(err.body?.error || err.message || 'Failed to rename folder')
+      toast.error(err.body?.error || err.message || t('personaManager.renameFolderFailed'))
     } finally {
       setRenameBusy(false)
     }
@@ -101,10 +103,10 @@ export default function PersonaManager() {
     const name = folder.trim()
     if (!name || deletingFolder) return
     openModal('confirm', {
-      title: 'Delete Persona Folder',
-      message: `Delete folder "${name}"? Personas in this folder will move to Uncategorized.`,
+      title: t('personaManager.deleteFolderTitle'),
+      message: t('personaManager.deleteFolderMessage', { name }),
       variant: 'danger',
-      confirmText: 'Delete',
+      confirmText: t('personaManager.delete'),
       onConfirm: async () => {
         setDeletingFolder(name)
         try {
@@ -115,9 +117,9 @@ export default function PersonaManager() {
             next.delete(name)
             return next
           })
-          toast.success(`Deleted folder "${name}"${result.count > 0 ? ` and moved ${result.count} persona${result.count === 1 ? '' : 's'} to Uncategorized` : ''}`)
+          toast.success(t('personaManager.deletedFolderSuccess', { name, count: result.count }))
         } catch (err: any) {
-          toast.error(err.body?.error || err.message || 'Failed to delete folder')
+          toast.error(err.body?.error || err.message || t('personaManager.deleteFolderFailed'))
         } finally {
           setDeletingFolder(null)
         }
@@ -168,7 +170,7 @@ export default function PersonaManager() {
   )
 
   if (browser.loading && browser.allPersonas.length === 0) {
-    return <div className={styles.loading}>Loading personas...</div>
+    return <div className={styles.loading}>{t('personaManager.loading')}</div>
   }
 
   return (
@@ -200,7 +202,7 @@ export default function PersonaManager() {
       )}
 
       {browser.groupedPersonas.length === 0 ? (
-        <div className={styles.loading}>No personas found.</div>
+        <div className={styles.loading}>{t('personaManager.noPersonasFound')}</div>
       ) : (
         groupedPersonas.map((group) => {
           const folderKey = group.folder || '__uncategorized'
@@ -225,15 +227,15 @@ export default function PersonaManager() {
                           if (e.key === 'Escape') handleCancelRenameFolder()
                         }}
                         disabled={renameBusy}
-                        placeholder="Folder name"
+                        placeholder={t('personaManager.folderName')}
                       />
                       <button
                         type="button"
                         className={styles.folderActionBtn}
                         onClick={() => void handleSubmitRenameFolder()}
                         disabled={renameBusy || !renamingValue.trim()}
-                        title="Confirm rename"
-                        aria-label="Confirm rename"
+                        title={t('personaManager.confirmRename')}
+                        aria-label={t('personaManager.confirmRename')}
                       >
                         <Check size={12} />
                       </button>
@@ -242,8 +244,8 @@ export default function PersonaManager() {
                         className={styles.folderActionBtn}
                         onClick={handleCancelRenameFolder}
                         disabled={renameBusy}
-                        title="Cancel rename"
-                        aria-label="Cancel rename"
+                        title={t('personaManager.cancelRename')}
+                        aria-label={t('personaManager.cancelRename')}
                       >
                         <X size={12} />
                       </button>
@@ -259,7 +261,7 @@ export default function PersonaManager() {
                           size={12}
                           className={`${styles.folderChevron} ${!isCollapsed ? styles.folderChevronOpen : ''}`}
                         />
-                        <span className={styles.folderName}>{group.folder || 'Uncategorized'}</span>
+                        <span className={styles.folderName}>{group.folder || t('personaManager.uncategorized')}</span>
                         <span className={styles.folderCount}>{group.personas.length}</span>
                       </button>
                       {group.folder && (
@@ -272,8 +274,8 @@ export default function PersonaManager() {
                               handleStartRenameFolder(group.folder)
                             }}
                             disabled={deletingFolder === group.folder}
-                            title={`Rename ${group.folder}`}
-                            aria-label={`Rename ${group.folder}`}
+                            title={t('personaManager.renameFolder', { name: group.folder })}
+                            aria-label={t('personaManager.renameFolder', { name: group.folder })}
                           >
                             <Pencil size={12} />
                           </button>
@@ -285,8 +287,8 @@ export default function PersonaManager() {
                               void handleDeleteFolder(group.folder)
                             }}
                             disabled={deletingFolder === group.folder}
-                            title={`Delete ${group.folder}`}
-                            aria-label={`Delete ${group.folder}`}
+                            title={t('personaManager.deleteFolder', { name: group.folder })}
+                            aria-label={t('personaManager.deleteFolder', { name: group.folder })}
                           >
                             <Trash2 size={12} />
                           </button>

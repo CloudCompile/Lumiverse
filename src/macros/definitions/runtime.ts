@@ -93,4 +93,21 @@ export function registerStateMacros(): void {
       return (ctx.env.extra.theme?.mode as string) || "dark";
     },
   });
+
+  registry.registerMacro({
+    builtIn: true,
+    terminal: false,
+    name: "presetBlock",
+    category: "State",
+    description: "Resolve a Lumiverse preset runtime block",
+    returnType: "string",
+    args: [{ name: "key", description: "Sealed block key" }],
+    aliases: ["pblock"],
+    handler: async (ctx) => {
+      const key = (ctx.args[0] ?? "").trim();
+      if (!key) return "";
+      const { resolveSealedPresetBlock } = await import("../../lumihub/sealed-presets");
+      return resolveSealedPresetBlock(ctx.env.extra.presetMetadata, key);
+    },
+  });
 }

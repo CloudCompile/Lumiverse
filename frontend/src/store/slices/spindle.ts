@@ -3,8 +3,23 @@ import type { SpindleSlice, PendingPermissionRequest, PendingTextEditorRequest, 
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/loader'
+import { scheduleLowPriorityTask } from '@/lib/low-priority-task'
+import { yieldToBrowser } from '@/lib/spindle/browser-scheduler'
 
 const MUTED_THEMES_KEY = 'lumiverse:mutedExtensionThemes'
+const FRONTEND_HYDRATION_CONCURRENCY = 4
+
+function isHighPriorityFrontend(ext: {
+  enabled: boolean
+  has_frontend: boolean
+  granted_permissions: string[]
+}): boolean {
+  if (!ext.enabled || !ext.has_frontend) return false
+  return (
+    ext.granted_permissions.includes('ui_panels') ||
+    ext.granted_permissions.includes('app_manipulation')
+  )
+}
 
 function loadMutedThemes(): Record<string, boolean> {
   try {
@@ -28,6 +43,7 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
   extensionThemeOverrides: {},
   mutedExtensionThemes: loadMutedThemes(),
+  chatStyleModes: {},
   extensionOperationStatus: null,
   bulkUpdateStatus: null,
   spindlePrivileged: false,
@@ -43,25 +59,68 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
       const { extensions, isPrivileged } = await spindleApi.list()
       set({ extensions, spindlePrivileged: isPrivileged })
 
-      queueMicrotask(() => {
-        void Promise.allSettled(
-          extensions.map(async (ext) => {
-            const status = get().extensionOperationStatus
-            const updateReloadPending =
-              status?.extensionId === ext.id &&
-              (status.operation === 'updating' || status.operation === 'updated')
+      scheduleLowPriorityTask(() => {
+        const hydrateExtension = async (ext: typeof extensions[number]) => {
+          const status = get().extensionOperationStatus
+          const updateReloadPending =
+            status?.extensionId === ext.id &&
+            (status.operation === 'updating' || status.operation === 'updated')
 
-            if (updateReloadPending) return
+          if (updateReloadPending) return
 
-            if (ext.enabled && ext.has_frontend) {
-              const manifest = await spindleApi.getManifest(ext.id)
-              await loadFrontendExtension(ext.id, manifest)
-            } else {
-              await unloadFrontendExtension(ext.id)
+          if (ext.enabled && ext.has_frontend) {
+            const manifest = await spindleApi.getManifest(ext.id)
+            await loadFrontendExtension(ext.id, manifest)
+          } else {
+            await unloadFrontendExtension(ext.id)
+          }
+        }
+
+        void (async () => {
+          const hydrationQueue = extensions
+            .filter((ext) => ext.enabled && ext.has_frontend)
+            .sort((a, b) => {
+              const aPriority = isHighPriorityFrontend(a) ? 1 : 0
+              const bPriority = isHighPriorityFrontend(b) ? 1 : 0
+              if (aPriority !== bPriority) return bPriority - aPriority
+              return b.installed_at - a.installed_at
+            })
+
+          const cleanupQueue = extensions.filter((ext) => !(ext.enabled && ext.has_frontend))
+
+          let nextIndex = 0
+          const workerCount = Math.min(FRONTEND_HYDRATION_CONCURRENCY, Math.max(1, hydrationQueue.length))
+
+          if (hydrationQueue.length > 0) {
+            await Promise.allSettled(
+              Array.from({ length: workerCount }, async () => {
+                while (true) {
+                  const ext = hydrationQueue[nextIndex++]
+                  if (!ext) return
+
+                  try {
+                    await hydrateExtension(ext)
+                  } catch (err) {
+                    console.error(`[Spindle] Failed to hydrate frontend for ${ext.id}:`, err)
+                  }
+
+                  await yieldToBrowser({ when: 'paint' })
+                }
+              })
+            )
+          }
+
+          for (const ext of cleanupQueue) {
+            try {
+              await hydrateExtension(ext)
+            } catch (err) {
+              console.error(`[Spindle] Failed to reconcile frontend for ${ext.id}:`, err)
             }
-          })
-        )
-      })
+          }
+        })().catch((err) => {
+          console.error('[Spindle] Frontend hydration loop failed:', err)
+        })
+      }, { label: 'spindle frontend hydration' })
     } catch (err) {
       console.error('[Spindle] Failed to load extensions:', err)
     }
@@ -100,6 +159,7 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     await spindleApi.remove(id)
     spindleApi.clearManifestCache(id)
     await unloadFrontendExtension(id)
+    get().clearExtensionChatStyleModes(id)
     set((state) => {
       const { [id]: _o, ...overridesRest } = state.extensionThemeOverrides
       const { [id]: _m, ...mutedRest } = state.mutedExtensionThemes
@@ -122,17 +182,18 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
     const ext = get().extensions.find((e) => e.id === id)
     if (ext?.has_frontend) {
-      queueMicrotask(() => {
+      scheduleLowPriorityTask(() => {
         void spindleApi.getManifest(id)
           .then((manifest) => loadFrontendExtension(id, manifest))
           .catch((err) => console.error('[Spindle] Failed to load frontend after enable:', err))
-      })
+      }, { label: 'spindle frontend enable hydration' })
     }
   },
 
   disableExtension: async (id: string) => {
     await spindleApi.disable(id)
     await unloadFrontendExtension(id)
+    get().clearExtensionChatStyleModes(id)
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, enabled: false, status: 'stopped' as const } : e
@@ -154,6 +215,16 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   grantPermission: async (id: string, permission: string) => {
     const result = await spindleApi.setPermissions(id, { grant: [permission] })
+    set((state) => ({
+      extensions: state.extensions.map((e) =>
+        e.id === id ? { ...e, granted_permissions: result.granted as any } : e
+      ),
+    }))
+  },
+
+  grantPermissions: async (id: string, permissions: string[]) => {
+    if (permissions.length === 0) return
+    const result = await spindleApi.setPermissions(id, { grant: permissions })
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, granted_permissions: result.granted as any } : e
@@ -319,6 +390,57 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   clearAllExtensionThemeOverrides: () => {
     set({ extensionThemeOverrides: {} })
+  },
+
+  setChatStyleMode: (chatId: string, extensionId: string, mode: 'bounded' | 'extension-relaxed') => {
+    set((state) => {
+      const current = state.chatStyleModes[chatId] ?? {}
+      const hasClaim = extensionId in current
+      if (mode === 'bounded') {
+        if (!hasClaim) return state
+        const { [extensionId]: _, ...remaining } = current
+        const nextBucket = remaining
+        if (Object.keys(nextBucket).length === 0) {
+          const { [chatId]: __, ...rest } = state.chatStyleModes
+          return { chatStyleModes: rest }
+        }
+        return { chatStyleModes: { ...state.chatStyleModes, [chatId]: nextBucket } }
+      }
+      if (current[extensionId] === mode) return state
+      return {
+        chatStyleModes: {
+          ...state.chatStyleModes,
+          [chatId]: { ...current, [extensionId]: mode },
+        },
+      }
+    })
+  },
+
+  clearChatStyleMode: (chatId: string) => {
+    set((state) => {
+      if (!(chatId in state.chatStyleModes)) return state
+      const { [chatId]: _, ...rest } = state.chatStyleModes
+      return { chatStyleModes: rest }
+    })
+  },
+
+  clearExtensionChatStyleModes: (extensionId: string) => {
+    set((state) => {
+      let mutated = false
+      const next: Record<string, Record<string, 'extension-relaxed'>> = {}
+      for (const [chatId, bucket] of Object.entries(state.chatStyleModes)) {
+        if (!(extensionId in bucket)) {
+          next[chatId] = bucket
+          continue
+        }
+        mutated = true
+        const { [extensionId]: _, ...remaining } = bucket
+        if (Object.keys(remaining).length > 0) {
+          next[chatId] = remaining as Record<string, 'extension-relaxed'>
+        }
+      }
+      return mutated ? { chatStyleModes: next } : state
+    })
   },
 
   muteExtensionTheme: (extensionId: string) => {

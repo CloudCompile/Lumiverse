@@ -6,7 +6,6 @@ import type { Message } from "../types/message";
 import type { ConnectionProfile } from "../types/connection-profile";
 import type { GenerationType } from "../llm/types";
 import type { MacroEnv, MacroHandler, MacroDefinition } from "./types";
-import { stripLegacyDreamWeaverVoiceSection } from "../services/dream-weaver/runtime-prompt";
 
 export interface BuildEnvContext {
   character: Character;
@@ -29,10 +28,25 @@ export interface BuildEnvContext {
   targetCharacterName?: string;
   /** Optional abort signal — threaded onto MacroEnv so the evaluator can cancel between iterations. */
   signal?: AbortSignal;
+  /** Content of the regenerate/swipe target before the new swipe was staged. */
+  rejectedSwipe?: string;
+}
+
+export function resolvePersonaPronouns(persona: Persona | null): {
+  subjective: string;
+  objective: string;
+  possessive: string;
+} {
+  return {
+    subjective: persona?.subjective_pronoun?.trim() || "they",
+    objective: persona?.objective_pronoun?.trim() || "them",
+    possessive: persona?.possessive_pronoun?.trim() || "their",
+  };
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
   const { character, persona, chat, messages, generationType, connection } = ctx;
+  const personaPronouns = resolvePersonaPronouns(persona);
 
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastUserMsg = findLast(messages, (m) => m.is_user);
@@ -44,6 +58,15 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
   const groupLastSpeaker = isGroup
     ? (findLast(messages, (m) => !m.is_user)?.name || "")
     : "";
+  // Resolve the card composition mode. Mirrors the gate in prompt-assembly's
+  // getGroupCardMode — anything not explicitly "merge" / "merge_ignore_muted"
+  // falls back to "swap". Solo chats short-circuit to "solo".
+  const rawCardMode = chat.metadata?.group_card_mode;
+  const groupCardMode = !isGroup
+    ? "solo"
+    : (rawCardMode === "merge" || rawCardMode === "merge_ignore_muted")
+      ? rawCardMode
+      : "swap";
 
   return {
     commit: ctx.commit !== false,
@@ -59,7 +82,9 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
         : "",
       groupMemberCount: isGroup && allGroupNames ? String(allGroupNames.length) : "0",
       isGroupChat: isGroup ? "yes" : "no",
+      isNarrator: persona?.is_narrator ? "yes" : "no",
       groupLastSpeaker,
+      groupCardMode,
     },
     character: {
       name: character.name,
@@ -67,12 +92,12 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       personality: character.personality || "",
       scenario: character.scenario || "",
       persona: buildPersonaWithAddons(persona),
-      personaSubjectivePronoun: persona?.subjective_pronoun || "",
-      personaObjectivePronoun: persona?.objective_pronoun || "",
-      personaPossessivePronoun: persona?.possessive_pronoun || "",
+      personaSubjectivePronoun: personaPronouns.subjective,
+      personaObjectivePronoun: personaPronouns.objective,
+      personaPossessivePronoun: personaPronouns.possessive,
       mesExamples: character.mes_example || "",
       mesExamplesRaw: character.mes_example || "",
-      systemPrompt: stripLegacyDreamWeaverVoiceSection(character.system_prompt || "", character),
+      systemPrompt: character.system_prompt || "",
       postHistoryInstructions: character.post_history_instructions || "",
       depthPrompt: (character.extensions?.depth_prompt as string) || "",
       creatorNotes: character.creator_notes || "",
@@ -91,6 +116,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       firstIncludedMessageId: messages.length > 0 ? 0 : -1,
       lastSwipeId: lastMsg?.swipes ? lastMsg.swipes.length - 1 : 0,
       currentSwipeId: lastMsg?.swipe_id ?? 0,
+      rejectedSwipe: ctx.rejectedSwipe ?? "",
     },
     system: {
       model: connection?.model || "",
@@ -101,7 +127,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       isMobile: false,
     },
     variables: {
-      local: new Map(Object.entries((chat.metadata?.macro_variables?.local as Record<string, string>) || {})),
+      local: new Map(),
       global: new Map(Object.entries((chat.metadata?.macro_variables?.global as Record<string, string>) || {})),
       chat: new Map(Object.entries((chat.metadata?.chat_variables as Record<string, string>) || {})),
     },
@@ -110,9 +136,13 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     signal: ctx.signal,
     extra: {
       userId: ctx.userId ?? (chat as any).user_id as string | undefined,
+      characterId: character.id,
       messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
       chatCreatedAt: (chat as any).created_at as number | undefined,
       characterTags: Array.isArray((character as any).tags) ? (character as any).tags : [],
+      lastMessageTime: lastMsg && typeof lastMsg.send_date === "number"
+        ? lastMsg.send_date * 1000
+        : undefined,
     },
   };
 }

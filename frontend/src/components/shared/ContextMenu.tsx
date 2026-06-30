@@ -81,23 +81,62 @@ export default function ContextMenu({ position, items, onClose }: ContextMenuPro
   // Listen on both mousedown and pointerdown because some elements (e.g.
   // Spindle float widgets) call preventDefault() on pointerdown which
   // suppresses the subsequent mousedown event.
+  //
+  // The ~150ms `openedAt` guard ignores the synthetic mousedown/pointerdown
+  // that some browsers synthesize from the very touch sequence that opened
+  // the menu (e.g. long-press → synthetic contextmenu → touchend fires
+  // compatibility events). Per CLAUDE.md: popovers need this guard.
   useEffect(() => {
     if (!position) return
+    const openedAt = performance.now()
     const handleDown = (e: MouseEvent | PointerEvent) => {
+      if (performance.now() - openedAt < 150) return
       if (ref.current && !ref.current.contains(e.target as Node)) onClose()
     }
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
     }
+    // Dismiss on scroll, but only when the scroll moves the region the menu is
+    // anchored to. Scroll events don't bubble, so capture phase hears every
+    // scroller on the page — including unrelated ones like a lyrics widget or
+    // an extension panel. The menu is position:fixed, so those don't move it
+    // and closing on them is wrong. Filter by geometry instead:
+    //  - root document scroll → the whole viewport shifted → always dismiss.
+    //  - the menu's own scrollable content → never dismiss.
+    //  - a nested scroller → dismiss only if the anchor point (where the user
+    //    right-clicked) lies inside that scroller's box.
+    const handleScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (
+        !target ||
+        target === document ||
+        target === document.documentElement ||
+        target === document.body
+      ) {
+        onClose()
+        return
+      }
+      if (!(target instanceof Element)) return
+      if (ref.current?.contains(target)) return
+      const rect = target.getBoundingClientRect()
+      if (
+        position.x >= rect.left &&
+        position.x <= rect.right &&
+        position.y >= rect.top &&
+        position.y <= rect.bottom
+      ) {
+        onClose()
+      }
+    }
     document.addEventListener('mousedown', handleDown)
     document.addEventListener('pointerdown', handleDown)
     document.addEventListener('keydown', handleKey)
-    window.addEventListener('scroll', onClose, true)
+    window.addEventListener('scroll', handleScroll, true)
     return () => {
       document.removeEventListener('mousedown', handleDown)
       document.removeEventListener('pointerdown', handleDown)
       document.removeEventListener('keydown', handleKey)
-      window.removeEventListener('scroll', onClose, true)
+      window.removeEventListener('scroll', handleScroll, true)
     }
   }, [position, onClose])
 
@@ -125,7 +164,7 @@ export default function ContextMenu({ position, items, onClose }: ContextMenuPro
     if (rect.bottom > vh - 8) {
       el.style.top = `${(vh - rect.height - 8) / uiScale}px`
     }
-  }, [position])
+  }, [position, items])
 
   if (!position) return null
 

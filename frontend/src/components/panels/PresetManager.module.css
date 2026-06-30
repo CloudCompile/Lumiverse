@@ -201,7 +201,7 @@
 /* ── Keep in history row ── */
 .historyRow {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
@@ -211,10 +211,23 @@
   text-align: center;
 }
 
+.historyMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .historyHint {
   font-size: calc(11px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-dim);
-  white-space: nowrap;
+  line-height: 1.35;
+}
+
+.historySubHint {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  line-height: 1.35;
 }
 
 .clearBtn {

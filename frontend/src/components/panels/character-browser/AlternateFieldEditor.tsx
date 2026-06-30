@@ -1,6 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import { Plus, X, Pencil, Check } from 'lucide-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
+import TokenCountButton from '@/components/shared/TokenCountButton'
 import { uuidv7 } from '@/lib/uuid'
 import styles from './AlternateFieldEditor.module.css'
 import editorStyles from './CharacterEditorPage.module.css'
@@ -34,6 +37,8 @@ export default function AlternateFieldEditor({
   onAlternatesChange,
   rows = 4,
 }: Props) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
   const hasAlternates = alternates && alternates.length > 0
   const [activeVariantId, setActiveVariantId] = useState<string | null>(null) // null = default
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -125,12 +130,15 @@ export default function AlternateFieldEditor({
   if (!hasAlternates) {
     return (
       <div className={editorStyles.fieldGroup}>
-        <div className={styles.labelRow}>
+        <div className={styles.headerRow}>
           <span className={editorStyles.fieldLabel}>{label}</span>
-          <button type="button" className={styles.addVariantLink} onClick={handleAddVariant}>
-            <Plus size={11} />
-            Add variant
-          </button>
+          <div className={styles.headerActions}>
+            <TokenCountButton text={value} />
+            <button type="button" className={styles.addVariantLink} onClick={handleAddVariant}>
+              <Plus size={11} />
+              {t('characterEditor.alternateField.addVariant')}
+            </button>
+          </div>
         </div>
         <span className={editorStyles.fieldHelper}>{helper}</span>
         <ExpandableTextarea
@@ -139,7 +147,7 @@ export default function AlternateFieldEditor({
           onChange={onChange}
           rows={rows}
           title={label}
-          placeholder={`${label}...`}
+          placeholder={t('characterEditor.alternateField.fieldPlaceholder', { label })}
         />
       </div>
     )
@@ -147,10 +155,11 @@ export default function AlternateFieldEditor({
 
   return (
     <div className={editorStyles.fieldGroup}>
-      <div className={styles.labelRow}>
+      <div className={styles.headerRow}>
         <span className={editorStyles.fieldLabel}>{label}</span>
-        <span className={editorStyles.fieldHelper}>{helper}</span>
+        <TokenCountButton text={activeContent} />
       </div>
+      <span className={editorStyles.fieldHelper}>{helper}</span>
 
       {/* Variant tabs */}
       <div className={styles.variantBar}>
@@ -159,7 +168,7 @@ export default function AlternateFieldEditor({
           className={`${styles.variantTab} ${!activeVariantId ? styles.variantTabActive : ''}`}
           onClick={() => setActiveVariantId(null)}
         >
-          Default
+          {t('characterEditor.alternateField.default')}
         </button>
         {alternates!.map((variant) => (
           <div key={variant.id} className={styles.variantTabWrapper}>
@@ -191,17 +200,17 @@ export default function AlternateFieldEditor({
             )}
             {activeVariantId === variant.id && renamingId !== variant.id && (
               <div className={styles.variantActions}>
-                <button type="button" onClick={() => handleStartRename(variant)} title="Rename">
+                <button type="button" onClick={() => handleStartRename(variant)} title={tc('actions.edit')}>
                   <Pencil size={10} />
                 </button>
-                <button type="button" onClick={() => handleDeleteVariant(variant.id)} title="Delete variant">
+                <button type="button" onClick={() => handleDeleteVariant(variant.id)} title={t('characterEditor.alternateField.deleteVariant')}>
                   <X size={10} />
                 </button>
               </div>
             )}
           </div>
         ))}
-        <button type="button" className={styles.addVariantBtn} onClick={handleAddVariant} title="Add variant">
+        <button type="button" className={styles.addVariantBtn} onClick={handleAddVariant} title={t('characterEditor.alternateField.addVariantTitle')}>
           <Plus size={12} />
         </button>
       </div>
@@ -213,7 +222,7 @@ export default function AlternateFieldEditor({
         onChange={handleContentChange}
         rows={rows}
         title={activeVariant ? `${label} — ${activeVariant.label}` : label}
-        placeholder={`${label}...`}
+        placeholder={t('characterEditor.alternateField.fieldPlaceholder', { label })}
       />
     </div>
   )

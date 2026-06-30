@@ -14,6 +14,7 @@
     dev          - Start backend in watch mode
     setup           - Run setup wizard only
     reset-password  - Reset owner account password
+    edit-env        - Edit the .env file ($env:VISUAL/$env:EDITOR, else Notepad)
     migrate-st      - Run SillyTavern migration helper
     kill-pkgs       - Nuke lockfiles + node_modules, reinstall backend deps
 
@@ -23,15 +24,24 @@
 .PARAMETER KillPkgs
     Nuke lockfiles and node_modules, then reinstall backend dependencies
 
+.PARAMETER EditEnv
+    Open the .env file in an editor ($env:VISUAL/$env:EDITOR if set, else Notepad)
+
 .PARAMETER FrontendPath
     Path to frontend directory (default: ./frontend)
 
 .PARAMETER NoRunner
     Start without the visual terminal runner
+
+.PARAMETER UpgradeBun
+    Upgrade Bun to the latest stable release before continuing
+
+.PARAMETER UpgradeBunCanary
+    Upgrade Bun to the latest canary build before continuing
 #>
 
 param(
-    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "reset-password", "migrate-st", "kill-pkgs")]
+    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "reset-password", "edit-env", "migrate-st", "kill-pkgs")]
     [string]$Mode = "all",
 
     [Alias("b")]
@@ -45,7 +55,13 @@ param(
     [switch]$NoRunner,
 
     [Alias("k")]
-    [switch]$KillPkgs
+    [switch]$KillPkgs,
+
+    [switch]$EditEnv,
+
+    [switch]$UpgradeBun,
+
+    [switch]$UpgradeBunCanary
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,18 +146,57 @@ function Ensure-Bun {
     exit 1
 }
 
+# ─── Bun channel upgrade (optional) ─────────────────────────────────────────
+# Honors -UpgradeBun / -UpgradeBunCanary. Runs after Ensure-Bun so the binary
+# exists; `bun upgrade [--canary|--stable]` swaps the binary in-place.
+function Update-BunChannel {
+    if (-not $UpgradeBun -and -not $UpgradeBunCanary) { return }
+
+    $before = try { & bun --version } catch { "unknown" }
+
+    if ($UpgradeBunCanary) {
+        Write-Info "Upgrading Bun to latest canary (current: $before)..."
+        try { & bun upgrade --canary } catch {
+            Write-Err "Bun canary upgrade failed: $_"
+            Write-Warn "Continuing with the existing $before binary."
+            return
+        }
+    } else {
+        Write-Info "Upgrading Bun to latest stable (current: $before)..."
+        # --stable is a no-op for users already on stable but forces a switch
+        # back from canary for anyone who previously opted in.
+        try { & bun upgrade --stable } catch {
+            Write-Err "Bun stable upgrade failed: $_"
+            Write-Warn "Continuing with the existing $before binary."
+            return
+        }
+    }
+
+    $after = try { & bun --version } catch { "unknown" }
+    Write-Ok "Bun upgraded: $before -> $after"
+}
+
 # ─── First-run setup wizard ─────────────────────────────────────────────────
 
 function Invoke-SetupIfNeeded {
     $identityFile = Join-Path $BackendDir "data\lumiverse.identity"
-    $envFile = Join-Path $BackendDir ".env"
+    $credentialsFile = Join-Path $BackendDir "data\owner.credentials"
 
-    if (-not (Test-Path $identityFile) -or -not (Test-Path $envFile)) {
+    # A migrated data folder is already set up even if .env was not copied.
+    # The backend can fall back to defaults for missing .env values.
+    if (-not (Test-Path $identityFile) -or -not (Test-Path $credentialsFile)) {
         Write-Info "First run detected - launching setup wizard..."
         Write-Host ""
         Install-Deps $BackendDir "backend"
         Push-Location $BackendDir
         try { & bun run scripts/setup-wizard.ts } finally { Pop-Location }
+
+        if (-not (Test-Path $identityFile) -or -not (Test-Path $credentialsFile)) {
+            Write-Err "Setup wizard did not create the required identity and owner credentials."
+            Write-Err "Files expected at: $identityFile and $credentialsFile"
+            Write-Err "Try running the wizard manually: bun run setup"
+            exit 1
+        }
     }
 }
 
@@ -163,6 +218,13 @@ function Invoke-MigrateST {
     Write-Info "Launching SillyTavern migration helper..."
     Push-Location $BackendDir
     try { & bun run migrate:st } finally { Pop-Location }
+}
+
+function Invoke-EditEnv {
+    # No dep install - edit-env.ts only uses Bun built-ins + local ui/input
+    # helpers, so it's a quick hop to the editor (handy before first setup).
+    Push-Location $BackendDir
+    try { & bun run scripts/edit-env.ts } finally { Pop-Location }
 }
 
 # ─── Kill packages (nuke + reinstall) ──────────────────────────────────────
@@ -252,11 +314,21 @@ function Start-Backend {
 
     Install-Deps $BackendDir "backend"
 
-    # Clear Bun transpiler cache to avoid stale bytecode after updates
-    & bun --clear-cache 2>$null
+    # Clear Bun install cache to avoid stale tarballs after updates.
+    # Bun writes its `.env` autoload notice to stderr; PowerShell promotes any
+    # native stderr write to a NativeCommandError, so merge streams and discard.
+    try { & bun pm cache rm 2>&1 | Out-Null } catch { }
 
     $env:FRONTEND_DIR = $frontendDist
     Load-EnvFile
+
+    # smol (low-memory GC mode) defaults on; operators disable it persistently
+    # via LUMIVERSE_SMOL=false in .env (survives auto-updates, unlike bunfig.toml).
+    # The visual runner applies this itself in scripts/runner/server-manager.ts;
+    # this only covers the plain (no-runner) launch below.
+    $smolArgs = @("--smol")
+    $smolVal = if ($env:LUMIVERSE_SMOL) { $env:LUMIVERSE_SMOL.Trim().ToLower() } else { "" }
+    if ($smolVal -in @("false", "0", "off", "no")) { $smolArgs = @() }
 
     # Decide: visual runner or plain process
     $isTTY = [Environment]::UserInteractive -and -not $NoRunner
@@ -274,9 +346,9 @@ function Start-Backend {
         Push-Location $BackendDir
         try {
             if ($Mode -eq "dev") {
-                & bun run dev
+                & bun @smolArgs --watch src/index.ts
             } else {
-                & bun run start
+                & bun @smolArgs src/index.ts
             }
         } finally { Pop-Location }
     }
@@ -289,10 +361,12 @@ Write-Host "Lumiverse - Launcher" -ForegroundColor White
 Write-Host ""
 
 Ensure-Bun
+Update-BunChannel
 
 # Allow switches as shorthand for -Mode
 if ($MigrateST) { $Mode = "migrate-st" }
 if ($KillPkgs)  { $Mode = "kill-pkgs" }
+if ($EditEnv)   { $Mode = "edit-env" }
 
 switch ($Mode) {
     "all" {
@@ -321,6 +395,9 @@ switch ($Mode) {
     }
     "migrate-st" {
         Invoke-MigrateST
+    }
+    "edit-env" {
+        Invoke-EditEnv
     }
     "kill-pkgs" {
         Invoke-KillPkgs

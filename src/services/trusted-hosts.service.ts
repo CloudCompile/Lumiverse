@@ -26,13 +26,13 @@ export interface TrustedHostsSuggestions {
 // Matches letters, digits, dots, hyphens, underscores; plus bracketed IPv6. No
 // wildcards, no paths, no schemes. Port is added by normalization below.
 const HOSTNAME_PATTERN = /^(?:\[[0-9a-f:%.]+\]|[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)$/i;
-const TAILSCALE_DNS_SUFFIX = ".ts.net";
 const MAX_CONFIGURED_HOSTS = 32;
 const REVERSE_LOOKUP_TIMEOUT_MS = 1500;
 const TAILSCALE_TIMEOUT_MS = 2000;
 const SUGGESTIONS_CACHE_TTL_MS = 60_000;
 
 let networkInterfacesWarned = false;
+let malformedAddressWarned = false;
 let suggestionsCache: { value: TrustedHostsSuggestions; expiresAt: number } | null = null;
 let suggestionsInFlight: Promise<TrustedHostsSuggestions> | null = null;
 
@@ -48,6 +48,28 @@ function safeNetworkInterfaces(): ReturnType<typeof networkInterfaces> {
     }
     return {};
   }
+}
+
+// Bun 1.4.0 canary returns the placeholder `<addr family=N>` instead of the
+// real IPv6 address from os.networkInterfaces(). Reject anything that isn't a
+// syntactically plausible IP literal so we don't surface garbage in the
+// trusted-origins log or save it as an allowed host.
+const IPV4_LITERAL = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const IPV6_LITERAL = /^[0-9a-f:.]+(?:%[a-z0-9._-]+)?$/i;
+
+function isPlausibleIpLiteral(address: unknown, family: "IPv4" | "IPv6"): address is string {
+  if (typeof address !== "string" || address.length === 0) return false;
+  if (family === "IPv4") return IPV4_LITERAL.test(address);
+  return IPV6_LITERAL.test(address) && address.includes(":");
+}
+
+function rejectMalformedAddress(address: unknown, family: "IPv4" | "IPv6"): void {
+  if (malformedAddressWarned) return;
+  malformedAddressWarned = true;
+  console.warn(
+    `[trusted-hosts] Ignoring malformed ${family} address from os.networkInterfaces(): ${String(address)}. ` +
+      `This is likely a Bun runtime bug — try downgrading to a stable release if ${family} LAN entries are expected.`,
+  );
 }
 
 export class InvalidTrustedHostError extends Error {
@@ -66,7 +88,7 @@ interface NormalizedTrustedInput {
 
 // ─── Normalization / validation ─────────────────────────────────────────────
 
-function originForExplicitTailscaleUrl(input: string): NormalizedTrustedInput | null {
+function originForExplicitUrl(input: string): NormalizedTrustedInput | null {
   const trimmed = input.trim();
   if (!/^https?:\/\//i.test(trimmed)) return null;
 
@@ -78,8 +100,9 @@ function originForExplicitTailscaleUrl(input: string): NormalizedTrustedInput | 
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-  const hostname = parsed.hostname.toLowerCase();
-  if (!hostname.endsWith(TAILSCALE_DNS_SUFFIX)) return null;
+  if (parsed.username || parsed.password) {
+    throw new InvalidTrustedHostError(`Credentials are not allowed in trusted host URLs: ${input}`);
+  }
 
   const host = parsed.host.toLowerCase();
   if (!HOSTNAME_PATTERN.test(parsed.hostname) && !HOSTNAME_PATTERN.test(`[${parsed.hostname}]`)) {
@@ -95,8 +118,8 @@ function normalizeTrustedInput(input: string): NormalizedTrustedInput {
     throw new InvalidTrustedHostError("Host must be a string");
   }
 
-  const explicitTailscaleOrigin = originForExplicitTailscaleUrl(input);
-  if (explicitTailscaleOrigin) return explicitTailscaleOrigin;
+  const explicitOrigin = originForExplicitUrl(input);
+  if (explicitOrigin) return explicitOrigin;
 
   let value = input.trim();
   if (!value) throw new InvalidTrustedHostError("Host cannot be empty");
@@ -159,11 +182,10 @@ function normalizeTrustedInput(input: string): NormalizedTrustedInput {
 
 /**
  * Accepts user-entered values like "machine", "machine:7860",
- * "http://machine.tailnet.ts.net", "[::1]:7860". Returns a normalized
+ * "https://app.example.com", "machine.tailnet.ts.net", "[::1]:7860". Returns a normalized
  * lowercase entry suitable for persistence, or throws InvalidTrustedHostError.
- * Port defaults to env.port when omitted, except explicit `*.ts.net` URL
- * origins are preserved so Tailscale Serve's default HTTPS origin can be
- * allowlisted exactly.
+ * Port defaults to env.port when omitted, except explicit URL origins are
+ * preserved so reverse-proxy HTTPS origins can be allowlisted exactly.
  */
 export function normalizeHost(input: string): string {
   return normalizeTrustedInput(input).value;
@@ -195,8 +217,16 @@ function baselineEntries(): TrustedHostEntry[] {
     for (const addr of iface) {
       if (addr.internal) continue;
       if (addr.family === "IPv4") {
+        if (!isPlausibleIpLiteral(addr.address, "IPv4")) {
+          rejectMalformedAddress(addr.address, "IPv4");
+          continue;
+        }
         add(`${addr.address}:${env.port}`, "lan-ip");
       } else if (addr.family === "IPv6") {
+        if (!isPlausibleIpLiteral(addr.address, "IPv6")) {
+          rejectMalformedAddress(addr.address, "IPv6");
+          continue;
+        }
         const clean = addr.address.split("%")[0];
         add(`[${clean}]:${env.port}`, "lan-ip");
       }
@@ -399,11 +429,19 @@ async function buildHostnameSuggestions(baseline?: TrustedHostEntry[]): Promise<
     for (const addr of iface) {
       if (addr.internal) continue;
       if (addr.family === "IPv4") {
+        if (!isPlausibleIpLiteral(addr.address, "IPv4")) {
+          rejectMalformedAddress(addr.address, "IPv4");
+          continue;
+        }
         if (!seenIps.has(addr.address)) {
           seenIps.add(addr.address);
           ips.push(addr.address);
         }
       } else if (addr.family === "IPv6") {
+        if (!isPlausibleIpLiteral(addr.address, "IPv6")) {
+          rejectMalformedAddress(addr.address, "IPv6");
+          continue;
+        }
         const ip = `[${addr.address.split("%")[0]}]`;
         if (!seenIps.has(ip)) {
           seenIps.add(ip);

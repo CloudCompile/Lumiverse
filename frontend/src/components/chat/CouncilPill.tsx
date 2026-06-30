@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/types/ws-events'
 import clsx from 'clsx'
@@ -15,6 +16,7 @@ interface RespondedMember {
 type PillState = 'hidden' | 'loading' | 'complete'
 
 export default function CouncilPill() {
+  const { t } = useTranslation('chat')
   const [state, setState] = useState<PillState>('hidden')
   const [members, setMembers] = useState<RespondedMember[]>([])
   const [fadingOut, setFadingOut] = useState(false)
@@ -46,7 +48,7 @@ export default function CouncilPill() {
         memberAvatarUrl?: string | null
         results?: unknown[]
       }) => {
-        const name = payload.memberName || 'Member'
+        const name = payload.memberName || t('council.memberFallback')
         const avatarUrl = payload.memberAvatarUrl || null
         setMembers((prev) => [...prev, { memberName: name, avatarUrl }])
       }),
@@ -54,10 +56,8 @@ export default function CouncilPill() {
       wsClient.on(EventType.COUNCIL_COMPLETED, () => {
         setState('complete')
 
-        // Start fade-out after 2s
         hideTimerRef.current = setTimeout(() => {
           setFadingOut(true)
-          // After fade animation completes (400ms), hide entirely
           fadeTimerRef.current = setTimeout(() => {
             setState('hidden')
             setFadingOut(false)
@@ -71,7 +71,7 @@ export default function CouncilPill() {
       unsubs.forEach((unsub) => unsub())
       clearTimers()
     }
-  }, [clearTimers])
+  }, [clearTimers, t])
 
   if (state === 'hidden') return null
 
@@ -87,7 +87,7 @@ export default function CouncilPill() {
           state === 'complete' && styles.complete,
         )}
       >
-        <span className={styles.label}>Council</span>
+        <span className={styles.label}>{t('council.label')}</span>
         <div className={styles.avatarStack}>
           {members.map((m, i) => (
             <img
@@ -95,7 +95,7 @@ export default function CouncilPill() {
               className={styles.avatar}
               src={m.avatarUrl || FALLBACK_SVG}
               alt={m.memberName}
-              title={`${m.memberName} has spoken`}
+              title={t('council.hasSpoken', { name: m.memberName })}
             />
           ))}
           {members.length > 6 && (

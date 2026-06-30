@@ -6,31 +6,23 @@
   height: 100%;
   position: relative;
   overflow: clip;
-  background: var(--lumiverse-bg-deep);
+  background: transparent;
 }
 
 .hasSceneBackground {}
 
-.wallpaperLayer {
+.wallpaperTransitionLayer {
   position: absolute;
   inset: 0;
-  z-index: 0;
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
+  z-index: 2;
   pointer-events: none;
-  transition: opacity 400ms ease;
+  background: #000;
+  opacity: 0;
+  transition: opacity 260ms ease-in-out;
 }
 
-.wallpaperVideoLayer {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  pointer-events: none;
-  transition: opacity 400ms ease;
+.wallpaperTransitionLayerActive {
+  opacity: 1;
 }
 
 .sceneBackgroundLayer {
@@ -74,7 +66,7 @@
   min-height: 0;
   height: 100%;
   position: relative;
-  z-index: 2;
+  z-index: 3;
 }
 
 .chatColumn {
@@ -96,6 +88,43 @@
   min-height: 0;
   height: 100%;
   position: relative;
+}
+
+.chatColumnInner[data-chat-chrome-entering] .chatToolbar,
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageList']),
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='InputArea']),
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageSelectBar']) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chatColumnInner[data-chat-chrome-entering] .chatToolbar {
+  transform: translateY(-8px);
+}
+
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='InputArea']),
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageSelectBar']) {
+  transform: translateY(10px);
+}
+
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageList']) {
+  transform: translateY(6px);
+}
+
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='MessageList']),
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='InputArea']),
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='MessageSelectBar']) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='InputArea']),
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='MessageSelectBar']) {
+  transform: translateY(10px);
+}
+
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='MessageList']) {
+  transform: translateY(6px);
 }
 
 .noticeDock,
@@ -253,8 +282,7 @@
   flex-shrink: 0;
   background: var(--lcs-glass-bg, var(--lumiverse-bg-elevated));
   border-bottom: 1px solid var(--lcs-glass-border, var(--lumiverse-border));
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  transition: opacity 180ms ease, transform 180ms ease;
 }
 
 .toolbarBtn {
@@ -289,6 +317,12 @@
 /* GPU optimization: disable backdrop-filter on all cards during streaming */
 .streaming [data-message-id] {
   backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.streaming :global([data-component='InputArea']) {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 /* ── Portrait side wrapper — slides tab + panel as a unit ──
@@ -306,6 +340,7 @@
   top: 0;
   bottom: 0;
   z-index: 3;
+  pointer-events: none;
 }
 
 .portraitSideRight {
@@ -340,7 +375,8 @@
   }
 }
 
-/* Portrait side tab — flush, compact tab integrated into the flex layout */
+/* Portrait side tab — flush, compact tab integrated into the flex layout.
+   Styled to match ViewportDrawer's .drawerTab for visual consistency. */
 .portraitTab {
   flex: 0 0 auto;
   align-self: center;
@@ -349,10 +385,11 @@
   justify-content: center;
   width: var(--lumiverse-btn-icon);
   height: 48px;
-  background: var(--lcs-glass-bg);
-  border: 1px solid var(--lcs-glass-border);
-  color: var(--lumiverse-text-muted);
+  background: var(--lcs-glass-bg, var(--lumiverse-bg));
+  border: 1px solid var(--lumiverse-border-hover);
+  color: var(--lumiverse-primary);
   cursor: pointer;
+  pointer-events: auto;
   transition:
     background var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1)),
     color var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1)),
@@ -364,24 +401,44 @@
 }
 
 .portraitTab:hover {
-  background: var(--lumiverse-bg-hover);
+  background: var(--lumiverse-bg-hover, var(--lumiverse-bg));
+  border-color: var(--lumiverse-primary-050);
   color: var(--lumiverse-text);
-  border-color: var(--lumiverse-border-hover);
 }
 
 .portraitTabActive {
-  color: var(--lumiverse-primary-text);
-  border-color: var(--lumiverse-primary-020, rgba(140, 130, 255, 0.2));
+  background: var(--lumiverse-bg-hover, var(--lumiverse-bg));
+  border-color: var(--lumiverse-primary-050);
+  color: var(--lumiverse-text);
 }
 
 .portraitTabRight {
-  border-radius: 6px 0 0 6px;
+  border-radius: 12px 0 0 12px;
   border-right: none;
 }
 
 .portraitTabLeft {
-  border-radius: 0 6px 6px 0;
+  border-radius: 0 12px 12px 0;
   border-left: none;
+}
+
+/* Mobile drawer backdrop — fades behind the portrait panel and dismisses on tap.
+   Stacks below the panel (9991) but above chat content. Matches the visual
+   weight used by ViewportDrawer's backdrop. */
+.portraitBackdrop {
+  position: fixed;
+  inset: 0;
+  height: var(--app-scaled-viewport-height, calc(100vh / var(--lumiverse-ui-scale, 1)));
+  width: var(--app-scaled-viewport-width, calc(100vw / var(--lumiverse-ui-scale, 1)));
+  bottom: calc(0px - var(--ios-viewport-offset, 0px));
+  z-index: 9990;
+  background: var(--lumiverse-fill-heavy);
+  animation: portraitBackdropFadeIn 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes portraitBackdropFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @media (max-width: 600px) {
@@ -409,7 +466,42 @@
     font-size: calc(10px * var(--lumiverse-font-scale, 1));
   }
 
-  .portraitSide {
-    display: none;
+  /* Mobile: wrapper collapses to just the slim tab button width.
+     The PortraitPanel itself is rendered at ChatView root level as a
+     fixed-position drawer (see .panelOuterMobile in PortraitPanel.module.css). */
+  .portraitSide,
+  .portraitSideOpen {
+    width: var(--lumiverse-btn-icon);
+    /* Skip the expand animation on mobile — the drawer slides instead. */
+    transition: none;
+    /* Empty area around the slim tab passes clicks through to chat widgets
+       (e.g. ScrollToBottom near the right edge). The tab button below
+       re-enables pointer events on itself. */
+    pointer-events: none;
+  }
+
+  /* Force absolute positioning on mobile even in full-width chat mode,
+     so the slim tab floats over the chat column instead of stealing
+     flex space and shifting bubbles off-center. The desktop rule at
+     .body:not([data-chat-constrained]) .portraitSide normally switches
+     this to position: relative for full-width mode — we re-override here
+     because mobile always wants overlay behavior. */
+  .body:not([data-chat-constrained]) .portraitSide {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 3;
+  }
+  .body:not([data-chat-constrained]) .portraitSideLeft {
+    left: 0;
+    right: auto;
+  }
+  .body:not([data-chat-constrained]) .portraitSideRight {
+    right: 0;
+    left: auto;
+  }
+
+  .portraitTab {
+    pointer-events: auto;
   }
 }

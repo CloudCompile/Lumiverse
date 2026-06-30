@@ -1,13 +1,14 @@
 import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link2, Settings, Users, Plus, Package, Power, AlertTriangle, Cpu, Info, Edit2, Check, X, User, Sparkles, ChevronRight, Camera, RotateCcw, Link } from 'lucide-react'
 import { IconAdjustments, IconAdjustmentsHorizontal } from '@tabler/icons-react'
 import clsx from 'clsx'
 import { useStore } from '@/store'
-import { connectionsApi } from '@/api/connections'
+import { fetchConnectionModels } from '@/api/connectionModels'
 import { Toggle } from '@/components/shared/Toggle'
 import { Button, EditorSection, FormField } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
-import SearchableSelect from '@/components/shared/SearchableSelect'
+import ConnectionSelect from '@/components/shared/ConnectionSelect'
 import ModelCombobox from './connection-manager/ModelCombobox'
 import LoadoutSelector from './LoadoutSelector'
 import CouncilMemberItem from './council/CouncilMemberItem'
@@ -57,11 +58,12 @@ function Collapsible({ isOpen, children }: { isOpen: boolean; children: ReactNod
 }
 
 function InfoBox({ items }: { items: ReactNode[] }) {
+  const { t } = useTranslation('panels', { keyPrefix: 'councilManager' })
   return (
     <div className={promptStyles.infoBox}>
       <div className={promptStyles.infoBoxHeader}>
         <Info size={14} strokeWidth={2} />
-        <span>When enabled:</span>
+        <span>{t('whenEnabled')}</span>
       </div>
       <ul className={promptStyles.infoBoxList}>
         {items.map((item, i) => (
@@ -101,6 +103,8 @@ function SelectionBtn({
 }
 
 export default function CouncilManager() {
+  const { t } = useTranslation('panels', { keyPrefix: 'councilManager' })
+  const { t: tc } = useTranslation('common')
   const councilSettings = useStore((s) => s.councilSettings)
   const availableCouncilTools = useStore((s) => s.availableCouncilTools)
   const councilLoading = useStore((s) => s.councilLoading)
@@ -137,9 +141,9 @@ export default function CouncilManager() {
 
     setSidecarModelsLoading(true)
     try {
-      const result = await connectionsApi.models(councilProfiles.sidecarConfig.connectionProfileId)
-      setSidecarModels(result.models || [])
-      setSidecarModelLabels(result.model_labels || {})
+      const result = await fetchConnectionModels('llm', councilProfiles.sidecarConfig.connectionProfileId)
+      setSidecarModels(result.models)
+      setSidecarModelLabels(result.labels)
     } catch {
       setSidecarModels([])
       setSidecarModelLabels({})
@@ -176,8 +180,6 @@ export default function CouncilManager() {
   }, [loadAvailableTools])
 
   const ts = councilSettings.toolsSettings
-
-  const profileOptions = profiles.map((p) => ({ value: p.id, label: `${p.name} (${p.provider})` }))
 
   const handleToggleEnabled = useCallback(() => {
     saveCouncilSettings({
@@ -228,7 +230,7 @@ export default function CouncilManager() {
   const isCouncilActive = councilSettings.councilMode && councilMembersCount > 0
 
   if (councilLoading) {
-    return <div className={styles.loading}>Loading council settings...</div>
+    return <div className={styles.loading}>{t('loading')}</div>
   }
 
   return (
@@ -242,19 +244,19 @@ export default function CouncilManager() {
             onClick={handleToggleEnabled}
           >
             <Power size={14} />
-            {councilSettings.councilMode ? 'Council Enabled' : 'Council Disabled'}
+            {councilSettings.councilMode ? t('enabled') : t('disabled')}
           </button>
         </div>
 
         <div className={styles.profileBar}>
           <div className={styles.profileHeader}>
-            <span className={styles.profileLabel}>Profiles</span>
+            <span className={styles.profileLabel}>{t('profiles.label')}</span>
 
             {councilProfiles.activeSource !== 'none' && (
               <span className={styles.profileSourceBadge}>
-                {councilProfiles.activeSource === 'chat' ? 'CHAT'
-                  : councilProfiles.activeSource === 'character' ? 'CHAR'
-                    : 'DEFAULT'}
+                {councilProfiles.activeSource === 'chat' ? t('profiles.sourceChat')
+                  : councilProfiles.activeSource === 'character' ? t('profiles.sourceCharacter')
+                    : t('profiles.sourceDefault')}
               </span>
             )}
           </div>
@@ -265,24 +267,24 @@ export default function CouncilManager() {
                 className={styles.profileBtn}
                 onClick={councilProfiles.captureDefaults}
                 disabled={councilProfiles.isLoading}
-                title="Save the current council and sidecar settings as the default council profile"
+                title={t('profiles.captureTitle')}
                 type="button"
               >
-                <Camera size={10} /> Defaults
+                <Camera size={10} /> {t('profiles.defaults')}
               </button>
             ) : (
               <button
                 className={clsx(styles.profileBtn, styles.profileBtnActive)}
                 onClick={councilProfiles.captureDefaults}
                 disabled={councilProfiles.isLoading}
-                title="Resave the current council and sidecar settings as the default council profile"
+                title={t('profiles.resaveDefaultsTitle')}
                 type="button"
               >
-                <RotateCcw size={10} /> Defaults
+                <RotateCcw size={10} /> {t('profiles.defaults')}
                 <span
                   className={styles.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); councilProfiles.clearDefaults() }}
-                  title="Clear the default council profile"
+                  title={t('profiles.clearDefaultsTitle')}
                   role="button"
                   tabIndex={0}
                 >
@@ -298,26 +300,26 @@ export default function CouncilManager() {
                 disabled={councilProfiles.isLoading || !councilProfiles.activeCharacterId}
                 title={
                   councilProfiles.activeCharacterId
-                    ? 'Save the current council and sidecar settings to this character'
-                    : 'No active character - open a chat first'
+                    ? t('profiles.bindCharacter')
+                    : t('profiles.noCharacter')
                 }
                 type="button"
               >
-                <Link size={10} /> Character
+                <Link size={10} /> {t('profiles.character')}
               </button>
             ) : (
               <button
                 className={clsx(styles.profileBtn, styles.profileBtnActive)}
                 onClick={councilProfiles.bindToCharacter}
                 disabled={councilProfiles.isLoading || !councilProfiles.activeCharacterId}
-                title="Resave the current council and sidecar settings to this character"
+                title={t('profiles.rebindCharacter')}
                 type="button"
               >
-                <RotateCcw size={10} /> Character
+                <RotateCcw size={10} /> {t('profiles.character')}
                 <span
                   className={styles.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); councilProfiles.unbindCharacter() }}
-                  title="Remove character council binding"
+                  title={t('profiles.removeCharacter')}
                   role="button"
                   tabIndex={0}
                 >
@@ -333,26 +335,26 @@ export default function CouncilManager() {
                 disabled={councilProfiles.isLoading || !councilProfiles.activeChatId}
                 title={
                   councilProfiles.activeChatId
-                    ? 'Save the current council and sidecar settings to this chat'
-                    : 'No active chat - open a chat first'
+                    ? t('profiles.bindChat')
+                    : t('profiles.noChat')
                 }
                 type="button"
               >
-                <Link size={10} /> Chat
+                <Link size={10} /> {t('profiles.chat')}
               </button>
             ) : (
               <button
                 className={clsx(styles.profileBtn, styles.profileBtnActive)}
                 onClick={councilProfiles.bindToChat}
                 disabled={councilProfiles.isLoading || !councilProfiles.activeChatId}
-                title="Resave the current council and sidecar settings to this chat"
+                title={t('profiles.rebindChat')}
                 type="button"
               >
-                <RotateCcw size={10} /> Chat
+                <RotateCcw size={10} /> {t('profiles.chat')}
                 <span
                   className={styles.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); councilProfiles.unbindChat() }}
-                  title="Remove chat council binding"
+                  title={t('profiles.removeChat')}
                   role="button"
                   tabIndex={0}
                 >
@@ -363,33 +365,33 @@ export default function CouncilManager() {
           </div>
         </div>
 
-        <EditorSection Icon={Package} title="Council Loadout">
+        <EditorSection Icon={Package} title={t('sections.loadout')}>
           <LoadoutSelector />
         </EditorSection>
 
-        <EditorSection Icon={User} title="Lumia Selection">
+        <EditorSection Icon={User} title={t('sections.lumiaSelection')}>
           <p className={promptStyles.desc}>
-            Select Lumia definitions, behaviors, and personalities from your loaded packs.
+            {t('lumiaSelection.desc')}
           </p>
 
           <div className={clsx(promptStyles.selectionGroup, isCouncilActive && promptStyles.selectionGroupDisabled)}>
             <SelectionBtn
               icon={User}
-              label={chimeraMode ? 'Chimera Definitions' : 'Definition'}
+              label={chimeraMode ? t('lumiaSelection.chimeraDefinitions') : t('lumiaSelection.definition')}
               count={definitionCount}
               onClick={() => setLumiaModal('definition')}
               disabled={isCouncilActive}
             />
             <SelectionBtn
               icon={IconAdjustments}
-              label="Behaviors"
+              label={t('lumiaSelection.behaviors')}
               count={behaviorCount}
               onClick={() => setLumiaModal('behavior')}
               disabled={isCouncilActive}
             />
             <SelectionBtn
               icon={Sparkles}
-              label="Personalities"
+              label={t('lumiaSelection.personalities')}
               count={personalityCount}
               onClick={() => setLumiaModal('personality')}
               disabled={isCouncilActive}
@@ -398,29 +400,29 @@ export default function CouncilManager() {
 
           {isCouncilActive && (
             <p className={promptStyles.modeNote}>
-              Individual Lumia selections are disabled while Council Mode is active. Configure members below.
+              {t('lumiaSelection.councilActiveNote')}
             </p>
           )}
         </EditorSection>
 
-        <EditorSection Icon={IconAdjustmentsHorizontal} title="Lumia Modes">
+        <EditorSection Icon={IconAdjustmentsHorizontal} title={t('sections.lumiaModes')}>
           <p className={promptStyles.desc}>
-            Configure special Lumia modes for unique character setups.
+            {t('lumiaModes.desc')}
           </p>
 
           <div className={promptStyles.modeOption}>
             <ToggleRow
               checked={chimeraMode}
               onChange={handleChimeraModeChange}
-              label="Chimera Mode"
-              hint="Fuse multiple physical definitions into one hybrid form"
+              label={t('lumiaModes.chimeraMode')}
+              hint={t('lumiaModes.chimeraHint')}
             />
             <Collapsible isOpen={chimeraMode}>
               <InfoBox
                 items={[
-                  'Select multiple definitions in the Definition picker',
-                  'All selected forms will be fused into one Chimera',
-                  `Currently ${definitionCount} definition${definitionCount !== 1 ? 's' : ''} selected`,
+                  t('lumiaModes.chimeraInfo1'),
+                  t('lumiaModes.chimeraInfo2'),
+                  t('lumiaModes.chimeraInfo3', { count: definitionCount }),
                 ]}
               />
             </Collapsible>
@@ -429,7 +431,7 @@ export default function CouncilManager() {
           <div className={clsx(promptStyles.quirksSection, !lumiaQuirksEnabled && promptStyles.quirksSectionDisabled)}>
             <div className={promptStyles.quirksHeader}>
               <div className={promptStyles.quirksHeaderLeft}>
-                <span className={promptStyles.quirksLabel}>Behavioral Quirks</span>
+                <span className={promptStyles.quirksLabel}>{t('lumiaModes.quirks')}</span>
                 <ToggleRow
                   checked={lumiaQuirksEnabled}
                   onChange={handleQuirksEnabledChange}
@@ -444,20 +446,20 @@ export default function CouncilManager() {
                     setQuirksValue(lumiaQuirks)
                     setIsEditingQuirks(true)
                   }}
-                  title="Edit quirks"
+                  title={t('lumiaModes.editQuirks')}
                   icon={<Edit2 size={12} strokeWidth={1.5} />}
                 />
               )}
             </div>
             <p className={promptStyles.quirksHint}>
-              Extra behavioral modifications. Use <code>{'{{lumiaQuirks}}'}</code>
+              {t('lumiaModes.quirksHint', { macro: '{{lumiaQuirks}}' })}
             </p>
 
             {isEditingQuirks && lumiaQuirksEnabled ? (
               <div className={promptStyles.quirksEdit}>
                 <textarea
                   className={promptStyles.quirksTextarea}
-                  placeholder="Enter behavioral quirks..."
+                  placeholder={t('lumiaModes.quirksPlaceholder')}
                   value={quirksValue}
                   onChange={(e) => setQuirksValue(e.target.value)}
                   rows={3}
@@ -469,10 +471,10 @@ export default function CouncilManager() {
                     icon={<Check size={12} strokeWidth={2} />}
                     onClick={handleQuirksSave}
                   >
-                    Save
+                    {tc('actions.save')}
                   </Button>
                   <Button size="sm" icon={<X size={12} strokeWidth={2} />} onClick={handleQuirksCancel}>
-                    Cancel
+                    {tc('actions.cancel')}
                   </Button>
                 </div>
               </div>
@@ -481,37 +483,36 @@ export default function CouncilManager() {
                 {lumiaQuirks?.trim() ? (
                   <span>{lumiaQuirks}</span>
                 ) : (
-                  <span className={promptStyles.quirksEmpty}>No quirks set</span>
+                  <span className={promptStyles.quirksEmpty}>{t('lumiaModes.noQuirks')}</span>
                 )}
               </div>
             )}
           </div>
         </EditorSection>
 
-        {/* Sidecar LLM — shared connection used by council tools, expression detection, and other sidecar features */}
-        <EditorSection Icon={Cpu} title="Sidecar LLM">
+        <EditorSection Icon={Cpu} title={t('sections.sidecar')}>
           <div className={styles.inlineHint} style={{ marginBottom: 10 }}>
-            The sidecar connection is used by council tools, expression detection, and other background LLM features.
+            {t('sidecar.hint')}
           </div>
 
-          <FormField label="Connection Profile">
-            <SearchableSelect
+          <FormField label={t('sidecar.connectionProfile')}>
+            <ConnectionSelect
+              kind="llm"
               value={councilProfiles.sidecarConfig.connectionProfileId}
-              onChange={(val) => councilProfiles.saveSidecar({ connectionProfileId: val })}
-              options={profileOptions}
-              placeholder="Select a connection…"
-              searchPlaceholder="Search connections…"
-              emptyMessage="No connection profiles configured"
+              onChange={(val) => councilProfiles.saveSidecar({ connectionProfileId: val, model: profiles.find((p) => p.id === val)?.model || '' })}
+              placeholder={t('sidecar.selectConnection')}
+              searchPlaceholder={t('sidecar.searchConnections')}
+              emptyMessage={t('sidecar.noConnections')}
               clearable
-              clearLabel="No connection"
+              clearLabel={t('sidecar.clearConnection')}
             />
           </FormField>
 
-          <FormField label="Model">
+          <FormField label={t('sidecar.model')}>
             <ModelCombobox
               value={councilProfiles.sidecarConfig.model}
               onChange={(val) => councilProfiles.saveSidecar({ model: val })}
-              placeholder="e.g. claude-3-haiku-20240307"
+              placeholder={t('sidecar.modelPlaceholder')}
               models={sidecarModels}
               modelLabels={sidecarModelLabels}
               loading={sidecarModelsLoading}
@@ -519,13 +520,13 @@ export default function CouncilManager() {
               autoRefreshOnFocus
               refreshKey={councilProfiles.sidecarConfig.connectionProfileId}
               disabled={!councilProfiles.sidecarConfig.connectionProfileId}
-              emptyMessage={councilProfiles.sidecarConfig.connectionProfileId ? 'No models returned for this connection. Enter one manually.' : 'Select a connection profile to browse models.'}
-              browseHint={councilProfiles.sidecarConfig.connectionProfileId ? 'Click into the field to browse models for the selected connection, or type one manually.' : 'Select a connection profile first, then click into the field to browse models.'}
+              emptyMessage={councilProfiles.sidecarConfig.connectionProfileId ? t('sidecar.noModelsForConnection') : t('sidecar.selectConnectionFirst')}
+              browseHint={councilProfiles.sidecarConfig.connectionProfileId ? t('sidecar.browseHintWithConnection') : t('sidecar.browseHintNoConnection')}
             />
           </FormField>
 
           <div className={styles.fieldRow}>
-            <FormField label="Temperature">
+            <FormField label={t('sidecar.temperature')}>
               <NumberStepper
                 value={councilProfiles.sidecarConfig.temperature}
                 onChange={(val) => councilProfiles.saveSidecar({ temperature: val })}
@@ -534,7 +535,7 @@ export default function CouncilManager() {
                 step={0.05}
               />
             </FormField>
-            <FormField label="Top P">
+            <FormField label={t('sidecar.topP')}>
               <NumberStepper
                 value={councilProfiles.sidecarConfig.topP}
                 onChange={(val) => councilProfiles.saveSidecar({ topP: val })}
@@ -543,7 +544,7 @@ export default function CouncilManager() {
                 step={0.05}
               />
             </FormField>
-            <FormField label="Max Tokens">
+            <FormField label={t('sidecar.maxTokens')}>
               <NumberStepper
                 value={councilProfiles.sidecarConfig.maxTokens}
                 onChange={(val) => councilProfiles.saveSidecar({ maxTokens: val })}
@@ -555,54 +556,50 @@ export default function CouncilManager() {
           </div>
         </EditorSection>
 
-        {/* Tools Config — how tools are invoked (sidecar vs inline) */}
-        <EditorSection Icon={Link2} title="Tools Configuration">
-          <FormField label="Mode">
+        <EditorSection Icon={Link2} title={t('sections.tools')}>
+          <FormField label={t('tools.mode')}>
             <div className={styles.modeToggle}>
               <button
                 type="button"
                 className={`${styles.modeBtn}${(ts.mode ?? 'sidecar') === 'sidecar' ? ` ${styles.modeBtnActive}` : ''}`}
                 onClick={() => setCouncilToolsSettings({ mode: 'sidecar' })}
               >
-                Sidecar
+                {t('tools.sidecar')}
               </button>
               <button
                 type="button"
                 className={`${styles.modeBtn}${(ts.mode ?? 'sidecar') === 'inline' ? ` ${styles.modeBtnActive}` : ''}`}
                 onClick={() => setCouncilToolsSettings({ mode: 'inline' })}
               >
-                Inline
+                {t('tools.inline')}
               </button>
             </div>
           </FormField>
 
           {(ts.mode ?? 'sidecar') === 'sidecar' && (
             <div className={styles.inlineHint}>
-              Tools run on the sidecar LLM configured above. Each tool gets its own call.
+              {t('tools.sidecarHint')}
             </div>
           )}
 
           {(ts.mode ?? 'sidecar') === 'inline' && (
             <>
               <div className={styles.inlineHint}>
-                Tools are registered as function calls directly with the main LLM. No separate
-                sidecar model is used — the primary model handles tool invocations itself.
-                Requires <strong>Enable Function Calling</strong> in your Loom preset's completion settings.
+                {t('tools.inlineHint')}
               </div>
               {!functionCallingEnabled && (
                 <div className={styles.inlineWarning}>
                   <AlertTriangle size={14} />
-                  Function Calling is disabled in the active Loom preset. Inline tools will not be sent.
+                  {t('tools.inlineWarning')}
                 </div>
               )}
             </>
           )}
         </EditorSection>
 
-        {/* Context Settings */}
-        <EditorSection Icon={Settings} title="Context Settings">
+        <EditorSection Icon={Settings} title={t('sections.context')}>
           <div className={styles.fieldRow}>
-            <FormField label="Context Window" hint="Messages to include">
+            <FormField label={t('context.contextWindow')} hint={t('context.contextWindowHint')}>
               <NumberStepper
                 value={ts.sidecarContextWindow}
                 onChange={(val) => setCouncilToolsSettings({ sidecarContextWindow: val })}
@@ -610,7 +607,7 @@ export default function CouncilManager() {
                 max={100}
               />
             </FormField>
-            <FormField label="Max Words / Tool">
+            <FormField label={t('context.maxWordsPerTool')}>
               <NumberStepper
                 value={ts.maxWordsPerTool}
                 onChange={(val) => setCouncilToolsSettings({ maxWordsPerTool: val })}
@@ -619,7 +616,7 @@ export default function CouncilManager() {
                 step={25}
               />
             </FormField>
-            <FormField label="Timeout (ms)">
+            <FormField label={t('context.timeoutMs')}>
               <NumberStepper
                 value={ts.timeoutMs}
                 onChange={(val) => setCouncilToolsSettings({ timeoutMs: val })}
@@ -634,37 +631,36 @@ export default function CouncilManager() {
             <Toggle.Checkbox
               checked={ts.includeUserPersona}
               onChange={(checked) => setCouncilToolsSettings({ includeUserPersona: checked })}
-              label="Include User Persona"
+              label={t('context.includeUserPersona')}
             />
             <Toggle.Checkbox
               checked={ts.includeCharacterInfo}
               onChange={(checked) => setCouncilToolsSettings({ includeCharacterInfo: checked })}
-              label="Include Character Info"
+              label={t('context.includeCharacterInfo')}
             />
             <Toggle.Checkbox
               checked={ts.includeWorldInfo}
               onChange={(checked) => setCouncilToolsSettings({ includeWorldInfo: checked })}
-              label="Include World Info"
+              label={t('context.includeWorldInfo')}
             />
             <Toggle.Checkbox
               checked={ts.allowUserControl}
               onChange={(checked) => setCouncilToolsSettings({ allowUserControl: checked })}
-              label="Allow User Control"
+              label={t('context.allowUserControl')}
             />
             <Toggle.Checkbox
               checked={ts.retainResultsForRegens ?? false}
               onChange={(checked) => setCouncilToolsSettings({ retainResultsForRegens: checked })}
-              label="Retain Results for Regens/Swipes"
+              label={t('context.retainResults')}
             />
           </div>
 
           <div className={styles.inlineHint} style={{ marginTop: 10 }}>
-            Configure <strong>Settings → Web Search</strong> to enable the Web Search council tool for inline or sidecar use.
+            {t('context.webSearchHint')}
           </div>
         </EditorSection>
 
-        {/* Council Members */}
-        <EditorSection Icon={Users} title="Council Members">
+        <EditorSection Icon={Users} title={t('sections.members')}>
           {addMode === 'member' ? (
             <AddMemberDropdown
               existingMembers={councilSettings.members}
@@ -680,16 +676,16 @@ export default function CouncilManager() {
           ) : (
             <div className={styles.addButtons}>
               <Button variant="ghost" size="sm" icon={<Plus size={14} />} className={styles.addBtn} onClick={() => setAddMode('member')}>
-                Add Member
+                {t('members.addMember')}
               </Button>
               <Button variant="ghost" size="sm" icon={<Package size={14} />} className={styles.addBtn} onClick={() => setAddMode('pack')}>
-                Quick Add Pack
+                {t('members.quickAddPack')}
               </Button>
             </div>
           )}
 
           {councilSettings.members.length === 0 && addMode === 'none' && (
-            <div className={styles.emptyState}>No council members yet. Add one to get started.</div>
+            <div className={styles.emptyState}>{t('members.empty')}</div>
           )}
 
           {councilSettings.members.map((member) => (

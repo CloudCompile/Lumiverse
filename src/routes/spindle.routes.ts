@@ -16,6 +16,7 @@ import {
 } from "../spindle/ephemeral-pool.service";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
+import { ifNoneMatchSatisfies } from "../utils/http-cache";
 
 const app = new Hono();
 
@@ -43,11 +44,14 @@ app.get("/", async (c) => {
   const viewer = getViewer(c);
   const extensions = (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ({
     ...ext,
+    // L-07: Both branches of the ternary returned "stopped", so the "running"
+    // state was never surfaced to clients.  Fix: "disabled" for non-enabled
+    // extensions, "stopped" only for enabled ones that aren't currently running.
     status: lifecycle.isRunning(ext.id)
       ? "running"
       : ext.enabled
         ? "stopped"
-        : "stopped",
+        : "disabled",
   }));
   const isPrivileged = viewer.role === "owner" || viewer.role === "admin";
   return c.json({ extensions, isPrivileged });
@@ -171,6 +175,24 @@ app.post("/install", requireOwner, async (c) => {
     const body = await c.req.json();
     if (!body.github_url) {
       return c.json({ error: "github_url is required" }, 400);
+    }
+
+    // H-08: Validate the github_url to ensure it is a legitimate GitHub HTTPS
+    // URL.  Accepting arbitrary git URLs (including file://, ssh://, git+...,
+    // or git@ shorthand) would allow an owner to read local filesystem paths or
+    // connect to internal network services via the git clone step.
+    const githubUrl = String(body.github_url).trim();
+    let parsedGitUrl: URL;
+    try {
+      parsedGitUrl = new URL(githubUrl);
+    } catch {
+      return c.json({ error: "github_url is not a valid URL" }, 400);
+    }
+    if (parsedGitUrl.protocol !== "https:") {
+      return c.json({ error: "github_url must use https" }, 400);
+    }
+    if (parsedGitUrl.hostname !== "github.com") {
+      return c.json({ error: "github_url must be a github.com URL" }, 400);
     }
 
     const requestedScope =
@@ -471,7 +493,8 @@ app.get("/:id/manifest", async (c) => {
     if (!ext) return c.json({ error: "Not found" }, 404);
 
     const manifest = await managerSvc.getManifest(ext.identifier);
-    return c.json(manifest);
+    const frontendCacheKey = await managerSvc.getFrontendBundleCacheKey(ext.identifier);
+    return c.json(frontendCacheKey ? { ...manifest, frontend_cache_key: frontendCacheKey } : manifest);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
   }
@@ -543,14 +566,32 @@ app.get("/:id/frontend", async (c) => {
     return c.json({ error: "No frontend bundle" }, 404);
   }
 
-  const content = await Bun.file(bundlePath).text();
-  return new Response(content, {
+  const cacheKey = await managerSvc.getFrontendBundleCacheKey(ext.identifier);
+  const etag = cacheKey ? `"spindle-frontend-${ext.id}-${cacheKey}"` : undefined;
+  const versioned = !!cacheKey && c.req.query("v") === cacheKey;
+  const cacheControl = versioned
+    ? "private, max-age=31536000, immutable"
+    : "private, no-cache";
+
+  if (etag && ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        "Cache-Control": cacheControl,
+      },
+    });
+  }
+
+  const response = new Response(Bun.file(bundlePath), {
     headers: {
       "Content-Type": "application/javascript",
-      "Cache-Control": "no-cache",
+      "Cache-Control": cacheControl,
       "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; child-src 'none'; object-src 'none'; base-uri 'none'; upgrade-insecure-requests;",
     },
   });
+  if (etag) response.headers.set("ETag", etag);
+  return response;
 });
 
 export { app as spindleRoutes };

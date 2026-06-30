@@ -5,6 +5,7 @@ import { connectionsApi } from '@/api/connections'
 import { ApiError, BASE_URL } from '@/api/client'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
+import i18n from '@/i18n'
 import { enqueuePresetRegexOperation } from '@/lib/presetRegexQueue'
 import { getMacroCatalog } from '@/api/macros'
 import type { LoomPreset, PromptBlock, LoomConnectionProfile, MacroGroup, PromptVariableValues } from '@/lib/loom/types'
@@ -24,6 +25,7 @@ import {
   detectSupportedParamsFromProviders,
   getAvailableMacros,
   exportToSTPreset,
+  sanitizeLumiHubSealedBlocksForExport,
   normalizeCategoryBlockState,
   toggleBlockWithCategoryRules,
   coerceImportedLoomPreset,
@@ -363,6 +365,7 @@ export function useLoomBuilder() {
       copy.modelProfiles = { ...loom.modelProfiles }
       copy.promptVariables = JSON.parse(JSON.stringify(loom.promptVariables || {}))
       copy.source = loom.source ? { ...loom.source } : null
+      copy.coverUrl = loom.coverUrl
 
       const created = await presetsApi.create(marshalPreset(copy))
       const newLoom = unmarshalPreset(created)
@@ -504,10 +507,10 @@ export function useLoomBuilder() {
           if (regexResult.imported > 0) {
             const { loadRegexScripts } = useStore.getState() as any
             if (loadRegexScripts) await loadRegexScripts()
-            toast.success(`Imported ${regexResult.imported} regex script${regexResult.imported !== 1 ? 's' : ''} from preset`)
+            toast.success(i18n.t('panels.loomBuilder.toast.importedRegexFromPreset', { count: regexResult.imported }))
           }
           if (regexResult.errors.length > 0) {
-            toast.error(`${regexResult.errors.length} regex script${regexResult.errors.length !== 1 ? 's' : ''} failed to import`)
+            toast.error(i18n.t('panels.loomBuilder.toast.regexImportFailed', { count: regexResult.errors.length }))
           }
         } catch { /* regex import is best-effort */ }
       }
@@ -524,7 +527,7 @@ export function useLoomBuilder() {
   // Import from legacy preset JSON
   const importFromST = useCallback(async (stData: any, fileName: string) => {
     if (detectImportedPresetKind(stData) === 'loom') {
-      toast.warning('This file is a Loom preset. Use "Import Loom JSON" instead.', { title: 'Preset Import' })
+      toast.warning(i18n.t('panels.loomBuilder.toast.importLoomPresetInstead'), { title: i18n.t('panels.loomBuilder.toast.presetImportTitle') })
       return null
     }
     return persistImportedPreset(stData, fileName)
@@ -533,7 +536,7 @@ export function useLoomBuilder() {
   // Import from file (internal JSON format)
   const importFromFile = useCallback(async (jsonData: any, fileName?: string) => {
     if (detectImportedPresetKind(jsonData) === 'legacy') {
-      toast.warning('This file is a legacy preset. Use "Import Legacy Preset" instead.', { title: 'Preset Import' })
+      toast.warning(i18n.t('panels.loomBuilder.toast.importLegacyPresetInstead'), { title: i18n.t('panels.loomBuilder.toast.presetImportTitle') })
       return null
     }
     return persistImportedPreset(jsonData, fileName)
@@ -542,12 +545,13 @@ export function useLoomBuilder() {
   // Export internal JSON
   const exportInternal = useCallback(async () => {
     if (!activePreset) return null
+    const exportPreset = sanitizeLumiHubSealedBlocksForExport(activePreset)
     const regexExport = await regexApi.exportScripts(undefined, { preset_id: activePreset.id })
-    if (regexExport.scripts.length === 0) return activePreset
+    if (regexExport.scripts.length === 0) return exportPreset
     return {
-      ...activePreset,
+      ...exportPreset,
       extensions: {
-        ...((activePreset as any).extensions || {}),
+        ...((exportPreset as any).extensions || {}),
         regex_scripts: regexExport.scripts,
       },
     }
@@ -556,7 +560,7 @@ export function useLoomBuilder() {
   // Export as legacy (SillyTavern) JSON
   const exportLegacy = useCallback(() => {
     if (!activePreset) return null
-    return exportToSTPreset(activePreset)
+    return exportToSTPreset(sanitizeLumiHubSealedBlocksForExport(activePreset))
   }, [activePreset])
 
   // Available macros for the inserter — fetched from API, with local fallback

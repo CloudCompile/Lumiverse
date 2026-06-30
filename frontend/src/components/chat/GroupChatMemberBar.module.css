@@ -1,9 +1,9 @@
 /* ── Group Chat Member Bar ── */
 .barWrapper {
   position: sticky;
-  top: -16px;
+  top: 0;
   z-index: 10;
-  margin: -16px -20px 4px;
+  margin: 0 -20px 4px;
   border-radius: 0 0 var(--lcs-radius-sm, 8px) var(--lcs-radius-sm, 8px);
   background: var(--lumiverse-bg, rgba(18, 18, 24, 0.95));
   border: 1px solid var(--lcs-glass-border, rgba(255, 255, 255, 0.06));
@@ -18,15 +18,13 @@
 
 @media (max-width: 768px) {
   .barWrapper {
-    top: -8px;
-    margin: -8px -8px 4px;
+    margin: 0 -8px 4px;
   }
 }
 
 @media (max-width: 480px) {
   .barWrapper {
-    top: -6px;
-    margin: -6px -6px 4px;
+    margin: 0 -6px 4px;
   }
 }
 
@@ -169,6 +167,21 @@
   border: 1.5px solid var(--lumiverse-bg, rgba(18, 18, 24, 0.95));
 }
 
+.voiceBadge {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--lumiverse-primary-050, rgba(106, 163, 255, 0.3));
+  border: 1.5px solid var(--lumiverse-bg, rgba(18, 18, 24, 0.95));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--lumiverse-primary, #6aa3ff);
+}
+
 /* Talkativeness indicator as border opacity */
 .talkHigh .avatar,
 .talkHigh .avatarFallback {
@@ -203,4 +216,3 @@
   border-color: var(--lumiverse-primary-050);
   color: var(--lumiverse-primary);
 }
-

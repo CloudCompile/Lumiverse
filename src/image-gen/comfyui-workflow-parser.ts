@@ -15,6 +15,11 @@ export interface DetectedInjectionPoint {
     | "width"
     | "height"
     | "checkpoint"
+    | "lora_name"
+    | "lora_strength_model"
+    | "lora_strength_clip"
+    | "init_image"
+    | "denoise"
     | null;
 }
 
@@ -34,6 +39,7 @@ const KNOWN_FIELD_HINTS: Record<string, Record<string, DetectedInjectionPoint["s
     cfg: "cfg",
     sampler_name: "sampler_name",
     scheduler: "scheduler",
+    denoise: "denoise",
   },
   KSamplerAdvanced: {
     noise_seed: "seed",
@@ -52,6 +58,16 @@ const KNOWN_FIELD_HINTS: Record<string, Record<string, DetectedInjectionPoint["s
   },
   CheckpointLoaderSimple: {
     ckpt_name: "checkpoint",
+  },
+  LoraLoader: {
+    lora_name: "lora_name",
+    strength_model: "lora_strength_model",
+    strength_clip: "lora_strength_clip",
+  },
+  // img2img: the source image filename is injected into LoadImage at generation
+  // time (after we upload it to ComfyUI via /upload/image).
+  LoadImage: {
+    image: "init_image",
   },
 };
 

@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from 'react'
 import { Download, Upload } from 'lucide-react'
+import { Trans, useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import { validateCSS, sanitizeCSS } from '@/lib/cssValidator'
 import CSSEditor from './CSSEditor'
@@ -8,6 +9,7 @@ import styles from './CustomCSSPanel.module.css'
 import clsx from 'clsx'
 
 export default function CustomCSSPanel() {
+  const { t } = useTranslation('panels', { keyPrefix: 'customCssPanel' })
   const customCSS = useStore((s) => s.customCSS)
   const setCustomCSS = useStore((s) => s.setCustomCSS)
   const toggleCustomCSS = useStore((s) => s.toggleCustomCSS)
@@ -65,50 +67,54 @@ export default function CustomCSSPanel() {
 
   return (
     <div className={styles.panel}>
-      {/* Enable/disable toggle */}
       <div className={styles.toggleRow}>
-        <span className={styles.toggleLabel}>Custom CSS</span>
+        <span className={styles.toggleLabel}>{t('toggleLabel')}</span>
         <button
           type="button"
           className={clsx(styles.toggleSwitch, customCSS.enabled && styles.toggleSwitchOn)}
           onClick={handleToggle}
-          aria-label={customCSS.enabled ? 'Disable custom CSS' : 'Enable custom CSS'}
+          aria-label={customCSS.enabled ? t('disableAria') : t('enableAria')}
         />
       </div>
 
-      {/* Module browser */}
       <ModuleBrowser onInsertSelector={handleInsertSelector} />
 
-      {/* Editor */}
       <div className={styles.editorSection}>
-        <div className={styles.sectionLabel}>Editor</div>
+        <div className={styles.sectionLabel}>{t('editor')}</div>
         <CSSEditor value={customCSS.css} onChange={handleChange} />
       </div>
 
-      {/* Actions */}
       <div className={styles.actions}>
-        <button type="button" className={styles.actionBtn} onClick={handleExport} title="Export CSS">
-          <Download size={12} /> Export
+        <button type="button" className={styles.actionBtn} onClick={handleExport} title={t('exportTitle')}>
+          <Download size={12} /> {t('export')}
         </button>
-        <button type="button" className={styles.actionBtn} onClick={handleImport} title="Import CSS">
-          <Upload size={12} /> Import
+        <button type="button" className={styles.actionBtn} onClick={handleImport} title={t('importTitle')}>
+          <Upload size={12} /> {t('import')}
         </button>
       </div>
 
-      {/* Status bar */}
       <div className={styles.statusBar}>
         <span>
-          {validation.status === 'valid' && <span className={styles.statusValid}>Valid</span>}
-          {validation.status === 'error' && <span className={styles.statusError} title={validation.error}>Error: {validation.error}</span>}
-          {validation.status === 'empty' && <span className={styles.statusEmpty}>Empty</span>}
+          {validation.status === 'valid' && <span className={styles.statusValid}>{t('valid')}</span>}
+          {validation.status === 'error' && (
+            <span className={styles.statusError} title={validation.error}>
+              {t('errorPrefix')} {validation.error}
+            </span>
+          )}
+          {validation.status === 'empty' && <span className={styles.statusEmpty}>{t('empty')}</span>}
         </span>
-        <span>{byteCount > 0 ? `${byteCount.toLocaleString()} bytes` : ''}</span>
+        <span>{byteCount > 0 ? t('bytes', { count: byteCount }) : ''}</span>
       </div>
 
-      {/* Hint */}
       <div className={styles.hint}>
-        Target components with <code>[data-component="Name"]</code> selectors.
-        Emergency disable: <span className={styles.shortcut}>Ctrl+Shift+U</span>
+        <Trans
+          ns="panels"
+          i18nKey="customCssPanel.hint"
+          components={{
+            code: <code />,
+            shortcut: <span className={styles.shortcut} />,
+          }}
+        />
       </div>
     </div>
   )

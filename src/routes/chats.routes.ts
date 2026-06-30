@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import * as svc from "../services/chats.service";
 import * as personasSvc from "../services/personas.service";
 import * as charactersSvc from "../services/characters.service";
+import * as regexScriptsSvc from "../services/regex-scripts.service";
+import * as managerSvc from "../spindle/manager.service";
+import { pruneOrphanedWiState } from "../services/wi-state-prune.service";
 import { parsePagination } from "../services/pagination";
 import { RECENT_CHATS_DEFAULT_LIMIT } from "../types/pagination";
 import { parseStChatJsonl, parseStGroupChatJsonl } from "../migration/st-reader";
@@ -9,6 +12,9 @@ import {
   messageContentProcessorChain,
   type MessageContentProcessorCtx,
 } from "../spindle/message-content-processor";
+import { resolveRenderedMessageContent } from "../services/chat-macro-render.service";
+import { contentHasMacroHints } from "../services/vectorization-content.service";
+import { computeMessageTokenCount } from "../services/message-token-count";
 
 async function runMessageContentProcessors(
   ctx: MessageContentProcessorCtx,
@@ -46,6 +52,62 @@ async function processChatGreeting(userId: string, chat: { id: string }) {
 
 const app = new Hono();
 
+const DISPLAY_PREPROCESS_BATCH_MAX = 100;
+
+interface DisplayPreprocessItem {
+  messageId?: string;
+  messageIndex?: number;
+  role?: string;
+  rawContent: string;
+}
+
+function parseDisplayPreprocessItem(input: unknown): DisplayPreprocessItem | null {
+  if (!input || typeof input !== "object") return null;
+  const body = input as {
+    messageId?: unknown;
+    messageIndex?: unknown;
+    role?: unknown;
+    rawContent?: unknown;
+  };
+  if (typeof body.rawContent !== "string") return null;
+
+  return {
+    rawContent: body.rawContent,
+    ...(typeof body.messageId === "string" ? { messageId: body.messageId } : {}),
+    ...(typeof body.messageIndex === "number" ? { messageIndex: body.messageIndex } : {}),
+    ...(typeof body.role === "string" ? { role: body.role } : {}),
+  };
+}
+
+async function runDisplayPreprocessItem(
+  userId: string,
+  chatId: string,
+  item: DisplayPreprocessItem,
+  signal?: AbortSignal,
+) {
+  const processed = messageContentProcessorChain.count > 0
+    ? await messageContentProcessorChain.run({
+        chatId,
+        content: item.rawContent,
+        origin: "render",
+        userId,
+        ...(item.messageId ? { messageId: item.messageId } : {}),
+        extra: {
+          ...(typeof item.messageIndex === "number" ? { messageIndex: item.messageIndex } : {}),
+          ...(item.role ? { role: item.role, is_user: item.role === "user" } : {}),
+        },
+      }, userId, signal)
+    : { content: item.rawContent };
+
+  let content = processed.content ?? item.rawContent;
+  if (contentHasMacroHints(content)) {
+    const env = svc.buildMacroEnvForChat(userId, chatId);
+    if (env) content = await resolveRenderedMessageContent(content, env);
+  }
+
+  return { messageId: item.messageId, content };
+}
+
 // --- Chat endpoints ---
 
 app.get("/", (c) => {
@@ -64,13 +126,30 @@ app.get("/recent", (c) => {
 app.get("/recent-grouped", (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"), RECENT_CHATS_DEFAULT_LIMIT);
-  return c.json(svc.listRecentChatsGrouped(userId, pagination));
+  const search = c.req.query("search");
+  const sortParam = c.req.query("sort");
+  const directionParam = c.req.query("direction");
+  const sort: svc.GroupedRecentChatSort | undefined =
+    sortParam === "name" || sortParam === "recent" || sortParam === "created" ? sortParam : undefined;
+  const direction: "asc" | "desc" | undefined =
+    directionParam === "asc" || directionParam === "desc" ? directionParam : undefined;
+  return c.json(svc.listRecentChatsGrouped(userId, pagination, {
+    ...(search ? { search } : {}),
+    ...(sort ? { sort } : {}),
+    ...(direction ? { direction } : {}),
+  }));
 });
 
 app.get("/character-chats/:characterId", (c) => {
   const userId = c.get("userId");
   const characterId = c.req.param("characterId");
   return c.json(svc.listChatSummaries(userId, characterId));
+});
+
+app.delete("/character-chats/:characterId", (c) => {
+  const userId = c.get("userId");
+  const deleted = svc.deleteAllChatsForCharacter(userId, c.req.param("characterId"));
+  return c.json({ success: true, deleted });
 });
 
 app.get("/group-chats", (c) => {
@@ -89,6 +168,30 @@ app.post("/", async (c) => {
   const chat = svc.createChat(userId, body);
   await processChatGreeting(userId, chat);
   return c.json(chat, 201);
+});
+
+// Temporary character-less, persona-less chat for trying out a connection
+// profile. No greeting, hidden from recent lists, swept when the user
+// returns to the landing page (DELETE below). Registered before the /:id
+// routes so "temporary" never matches as a chat id.
+app.post("/temporary", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const chat = svc.createChat(userId, {
+    character_id: null,
+    name: typeof body?.name === "string" && body.name.trim() ? body.name : "Temporary Chat",
+    // no_preset opts the chat out of presets entirely (raw model test):
+    // generation skips preset blocks/parameters and the active/connection
+    // preset fallbacks.
+    metadata: { temporary: true, ...(body?.no_preset === true ? { no_preset: true } : {}) },
+  });
+  return c.json(chat, 201);
+});
+
+app.delete("/temporary", (c) => {
+  const userId = c.get("userId");
+  const deleted = svc.deleteTemporaryChats(userId);
+  return c.json({ success: true, deleted });
 });
 
 app.post("/group", async (c) => {
@@ -148,13 +251,36 @@ app.delete("/:id/members/:characterId", (c) => {
   return c.json(updated);
 });
 
+app.patch("/:id/members/:characterId/alternate-fields", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const selections = body?.selections;
+  if (!selections || typeof selections !== "object" || Array.isArray(selections)) {
+    return c.json({ error: "selections must be an object" }, 400);
+  }
+  const updated = svc.setGroupMemberAlternateFields(
+    userId,
+    c.req.param("id"),
+    c.req.param("characterId"),
+    selections,
+  );
+  if (!updated) {
+    return c.json({ error: "Not found, not a group chat/member, or invalid alternate field selection" }, 400);
+  }
+  return c.json(updated);
+});
+
 app.get("/:id", (c) => {
   const userId = c.get("userId");
   const chat = svc.getChat(userId, c.req.param("id"));
   if (!chat) return c.json({ error: "Not found" }, 404);
-  if (c.req.query("messages") === "false") return c.json(chat);
+  const ownerCandidates = managerSvc.getEnabledExtensionIdentifiers();
+  const character_display_owner = chat.character_id
+    ? charactersSvc.getCharacterDisplayOwner(userId, chat.character_id, ownerCandidates)
+    : null;
+  if (c.req.query("messages") === "false") return c.json({ ...chat, character_display_owner });
   const messages = svc.getMessages(userId, chat.id);
-  return c.json({ ...chat, messages });
+  return c.json({ ...chat, character_display_owner, messages });
 });
 
 app.put("/:id", async (c) => {
@@ -162,7 +288,16 @@ app.put("/:id", async (c) => {
   const chat = svc.getChat(userId, c.req.param("id"));
   if (!chat) return c.json({ error: "Not found" }, 404);
   const body = await c.req.json();
-  const updated = svc.updateChat(userId, chat.id, body);
+  let updated = svc.updateChat(userId, chat.id, body);
+  // PUT replaces metadata wholesale, so book attachments can change (or
+  // vanish) on any metadata write.
+  if (updated && body?.metadata !== undefined) {
+    const beforeIds = JSON.stringify(chat.metadata?.chat_world_book_ids ?? []);
+    const afterIds = JSON.stringify(updated.metadata?.chat_world_book_ids ?? []);
+    if (beforeIds !== afterIds) {
+      updated = pruneOrphanedWiState(userId, updated);
+    }
+  }
   return c.json(updated);
 });
 
@@ -186,12 +321,32 @@ app.patch("/:id/metadata", async (c) => {
     return c.json({ error: "Body must be an object of metadata keys" }, 400);
   }
   // Translate `null` sentinels to `undefined` so mergeChatMetadata deletes them.
+  // Also sanitize the `voiceOverrides` payload here — TTS voice routing is
+  // client-side, but defensive parsing keeps malformed clients from writing
+  // garbage that confuses the resolver later.
   const partial: Record<string, any> = {};
   for (const [key, value] of Object.entries(body)) {
-    partial[key] = value === null ? undefined : value;
+    if (value === null) {
+      partial[key] = undefined;
+      continue;
+    }
+    if (key === "voiceOverrides") {
+      const sanitized = svc.sanitizeVoiceOverrides(value);
+      // If the caller sent a voiceOverrides blob and nothing survived
+      // sanitization, treat it as a delete rather than silently keeping
+      // a stale value.
+      partial[key] = sanitized ?? undefined;
+      continue;
+    }
+    partial[key] = value;
   }
-  const updated = svc.mergeChatMetadata(userId, chatId, partial);
+  let updated = svc.mergeChatMetadata(userId, chatId, partial);
   if (!updated) return c.json({ error: "Not found" }, 404);
+
+  if ("chat_world_book_ids" in body) {
+    updated = pruneOrphanedWiState(userId, updated);
+  }
+
   return c.json(updated);
 });
 
@@ -424,14 +579,19 @@ app.get("/:chatId/messages", (c) => {
   const chat = svc.getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
+  // Lists ship the light projection (active swipe only, no per-swipe extra
+  // arrays) — non-active swipe data dominated the payload but is only needed
+  // by swipe actions, which re-fetch the full message. ?full=true opts out.
+  const light = c.req.query("full") !== "true";
+
   // tail=true fetches the last N messages efficiently (single index scan from end)
   if (c.req.query("tail") === "true") {
     const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 1000);
-    return c.json(svc.listMessagesTail(userId, chatId, limit));
+    return c.json(svc.listMessagesTail(userId, chatId, limit, { light }));
   }
 
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listMessages(userId, chatId, pagination));
+  return c.json(svc.listMessages(userId, chatId, pagination, { light }));
 });
 
 app.post("/:chatId/messages/bulk-hide", async (c) => {
@@ -494,6 +654,14 @@ app.post("/:chatId/messages", async (c) => {
   body.content = processed.content;
   if (processed.extra !== undefined) body.extra = processed.extra;
 
+  // Tokenize user-sent (and any manually-created) messages so they carry a
+  // tokenCount just like assistant messages do. Inline so the count rides the
+  // creation response/MESSAGE_SENT broadcast, avoiding a follow-up edit event.
+  const tokenCount = await computeMessageTokenCount(userId, body.content, body.connection_id);
+  if (tokenCount != null) {
+    body.extra = { ...(body.extra || {}), tokenCount };
+  }
+
   const msg = svc.createMessage(chatId, body, userId);
   return c.json(msg, 201);
 });
@@ -519,6 +687,33 @@ app.put("/:chatId/messages/:id", async (c) => {
     );
     body.content = processed.content;
     if (processed.extra !== undefined) body.extra = processed.extra;
+
+    const chat = svc.getChat(userId, chatId);
+    if (chat) {
+      const editScripts = regexScriptsSvc.getRunOnEditScripts(userId, {
+        characterId: chat.character_id ?? undefined,
+        chatId,
+      });
+      if (editScripts.length > 0) {
+        const existing = svc.getMessage(userId, messageId);
+        const placement = existing?.is_user ? "user_input" as const : "ai_output" as const;
+        body.content = await regexScriptsSvc.applyRegexScripts(
+          body.content,
+          editScripts,
+          placement,
+          0,
+        );
+      }
+    }
+
+    // Content changed → refresh the stored tokenCount so it doesn't reflect the
+    // pre-edit text. Merge onto the extra being saved (the edit may omit extra,
+    // in which case base off the message's current extra to avoid clobbering it).
+    const tokenCount = await computeMessageTokenCount(userId, body.content, body.connection_id);
+    if (tokenCount != null) {
+      const baseExtra = body.extra ?? svc.getMessage(userId, messageId)?.extra ?? {};
+      body.extra = { ...baseExtra, tokenCount };
+    }
   }
 
   const msg = svc.updateMessage(userId, messageId, body);
@@ -528,9 +723,20 @@ app.put("/:chatId/messages/:id", async (c) => {
 
 app.delete("/:chatId/messages/:id", (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  // M-30: Same chatId ownership guard as PUT above.
+  const existing = svc.getMessage(userId, c.req.param("id"));
+  if (!existing || existing.chat_id !== chatId) return c.json({ error: "Not found" }, 404);
   const deleted = svc.deleteMessage(userId, c.req.param("id"));
   if (!deleted) return c.json({ error: "Not found" }, 404);
   return c.json({ success: true });
+});
+
+app.delete("/:chatId/messages/:id/attachments/:imageId", (c) => {
+  const userId = c.get("userId");
+  const updated = svc.removeMessageAttachment(userId, c.req.param("id"), c.req.param("imageId"));
+  if (!updated) return c.json({ error: "Message not found" }, 404);
+  return c.json(updated);
 });
 
 app.post("/:chatId/messages/:id/swipe", async (c) => {
@@ -584,7 +790,26 @@ app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
     c.req.raw.signal,
   );
 
-  const msg = svc.updateSwipe(userId, messageId, idx, processed.content);
+  let finalContent = processed.content;
+  const chat = svc.getChat(userId, chatId);
+  if (chat) {
+    const editScripts = regexScriptsSvc.getRunOnEditScripts(userId, {
+      characterId: chat.character_id ?? undefined,
+      chatId,
+    });
+    if (editScripts.length > 0) {
+      const existing = svc.getMessage(userId, messageId);
+      const placement = existing?.is_user ? "user_input" as const : "ai_output" as const;
+      finalContent = await regexScriptsSvc.applyRegexScripts(
+        finalContent,
+        editScripts,
+        placement,
+        0,
+      );
+    }
+  }
+
+  const msg = svc.updateSwipe(userId, messageId, idx, finalContent);
   if (!msg) return c.json({ error: "Not found or invalid swipe index" }, 404);
   return c.json(msg);
 });
@@ -600,31 +825,34 @@ app.delete("/:chatId/messages/:id/swipe/:idx", (c) => {
 app.post("/:chatId/display-preprocess", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");
-  const body = (await c.req.json().catch(() => null)) as {
-    messageId?: unknown;
-    messageIndex?: unknown;
-    role?: unknown;
-    rawContent?: unknown;
-  } | null;
-  if (!body || typeof body.rawContent !== "string") {
+  const body = await c.req.json().catch(() => null);
+
+  if (body && typeof body === "object" && Array.isArray((body as { items?: unknown }).items)) {
+    const rawItems = (body as { items: unknown[] }).items;
+    if (rawItems.length > DISPLAY_PREPROCESS_BATCH_MAX) {
+      return c.json({ error: `items must contain at most ${DISPLAY_PREPROCESS_BATCH_MAX} entries` }, 400);
+    }
+
+    const items = rawItems.map(parseDisplayPreprocessItem);
+    if (items.some((item) => item === null)) {
+      return c.json({ error: "each item requires rawContent (string)" }, 400);
+    }
+
+    const processed = [];
+    for (const item of items as DisplayPreprocessItem[]) {
+      processed.push(await runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal));
+    }
+
+    return c.json({ items: processed });
+  }
+
+  const item = parseDisplayPreprocessItem(body);
+  if (!item) {
     return c.json({ error: "rawContent (string) required" }, 400);
   }
-  if (messageContentProcessorChain.count === 0) {
-    return c.json({ content: body.rawContent });
-  }
-  const role = typeof body.role === "string" ? body.role : undefined;
-  const processed = await messageContentProcessorChain.run({
-    chatId,
-    content: body.rawContent,
-    origin: "render",
-    userId,
-    ...(typeof body.messageId === "string" ? { messageId: body.messageId } : {}),
-    extra: {
-      ...(typeof body.messageIndex === "number" ? { messageIndex: body.messageIndex } : {}),
-      ...(role ? { role, is_user: role === "user" } : {}),
-    },
-  }, userId, c.req.raw.signal);
-  return c.json({ content: processed.content ?? body.rawContent });
+
+  const processed = await runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal);
+  return c.json({ content: processed.content });
 });
 
 export { app as chatsRoutes };

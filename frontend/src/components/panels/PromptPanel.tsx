@@ -1,6 +1,7 @@
 import { useState, useCallback, type ReactNode } from 'react'
 import { Hand, Filter, Info, ChevronRight } from 'lucide-react'
 import { IconScript, IconTool, IconTransform } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import { EditorSection } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
@@ -48,11 +49,12 @@ function Collapsible({ isOpen, children, className }: { isOpen: boolean; childre
 }
 
 function InfoBox({ items, muted = false }: { items: ReactNode[]; muted?: boolean }) {
+  const { t } = useTranslation('panels')
   return (
     <div className={clsx(styles.infoBox, muted && styles.infoBoxMuted)}>
       <div className={styles.infoBoxHeader}>
         <Info size={14} strokeWidth={2} />
-        <span>When enabled:</span>
+        <span>{t('promptPanel.whenEnabled')}</span>
       </div>
       <ul className={styles.infoBoxList}>
         {items.map((item, i) => (
@@ -82,12 +84,13 @@ function FilterItem({
   onDepthChange: (v: number | null) => void
   depthLabel?: string
 }) {
+  const { t } = useTranslation('panels')
   return (
     <div className={styles.filterItem}>
       <ToggleRow id={id} checked={enabled} onChange={onToggle} label={label} hint={hint} />
       <Collapsible isOpen={enabled}>
         <div className={styles.filterDepthRow}>
-          <span className={styles.filterDepthLabel}>{depthLabel || 'Keep in last N messages'}</span>
+          <span className={styles.filterDepthLabel}>{depthLabel || t('promptPanel.keepInLastN')}</span>
           <div className={styles.filterDepthInput}>
             <NumberStepper value={depthValue} onChange={(v) => onDepthChange(v ?? 1)} min={1} max={100} step={1} />
           </div>
@@ -146,6 +149,7 @@ function FilterKeepOnlyToggle({
 }
 
 export default function PromptPanel() {
+  const { t } = useTranslation('panels')
   const sovereignHand = useStore((s) => s.sovereignHand)
   const contextFilters = useStore((s) => s.contextFilters)
   const selectedLoomStyles = useStore((s) => s.selectedLoomStyles)
@@ -185,28 +189,29 @@ export default function PromptPanel() {
   return (
     <div className={styles.panel}>
       {/* ── Loom Content ── */}
-      <EditorSection Icon={IconScript} title="Loom Content" defaultExpanded={false}>
+      <EditorSection Icon={IconScript} title={t('promptPanel.loomContentTitle')} defaultExpanded={false}>
         <p className={styles.desc}>
-          Select narrative styles, utilities, and retrofits from your loaded packs. These are injected
-          via <code>{'{{loomStyle}}'}</code>, <code>{'{{loomUtils}}'}</code>, and <code>{'{{loomRetrofits}}'}</code> macros.
+          {t('promptPanel.loomContentDescPrefix')}{' '}
+          <code>{'{{loomStyle}}'}</code>, <code>{'{{loomUtils}}'}</code>, {t('promptPanel.and')}{' '}
+          <code>{'{{loomRetrofits}}'}</code> {t('promptPanel.loomContentDescSuffix')}
         </p>
 
         <div className={styles.selectionGroup}>
           <SelectionBtn
             icon={IconScript}
-            label="Narrative Styles"
+            label={t('promptPanel.narrativeStyles')}
             count={styleCount}
             onClick={() => setLoomModal('narrative_style')}
           />
           <SelectionBtn
             icon={IconTool}
-            label="Loom Utilities"
+            label={t('promptPanel.loomUtilities')}
             count={utilCount}
             onClick={() => setLoomModal('loom_utility')}
           />
           <SelectionBtn
             icon={IconTransform}
-            label="Retrofits"
+            label={t('promptPanel.retrofits')}
             count={retrofitCount}
             onClick={() => setLoomModal('retrofit')}
           />
@@ -214,60 +219,60 @@ export default function PromptPanel() {
       </EditorSection>
 
       {/* ── Sovereign Hand ── */}
-      <EditorSection Icon={Hand} title="Sovereign Hand" defaultExpanded={false}>
+      <EditorSection Icon={Hand} title={t('promptPanel.sovereignHandTitle')} defaultExpanded={false}>
         <p className={styles.desc}>
-          Enable Sovereign Hand integration to use advanced prompt manipulation features.
+          {t('promptPanel.sovereignHandDesc')}
         </p>
         <ToggleRow
           id="sovereign-hand"
           checked={sovereignEnabled}
           onChange={(v) => updateSovereignHand({ enabled: v })}
-          label="Use Sovereign Hand Features"
-          hint="Enables Sovereign Hand macros for advanced prompt control"
+          label={t('promptPanel.useSovereignHand')}
+          hint={t('promptPanel.useSovereignHandHint')}
         />
         <ToggleRow
           id="sovereign-exclude"
           checked={sovereignHand.excludeLastMessage}
           onChange={(v) => updateSovereignHand({ excludeLastMessage: v })}
-          label="Exclude Last Message from Context"
-          hint="When enabled, removes the last user message from the outgoing context"
+          label={t('promptPanel.excludeLastMessage')}
+          hint={t('promptPanel.excludeLastMessageHint')}
           disabled={!sovereignEnabled}
         />
         <ToggleRow
           id="sovereign-include"
           checked={sovereignHand.includeMessageInPrompt}
           onChange={(v) => updateSovereignHand({ includeMessageInPrompt: v })}
-          label="Include Message in Master Prompt"
-          hint="When enabled, includes the user message in the {{loomSovHand}} macro output"
+          label={t('promptPanel.includeMessageInMasterPrompt')}
+          hint={t('promptPanel.includeMessageInMasterPromptHint')}
           disabled={!sovereignEnabled}
         />
         <InfoBox
           muted={!sovereignEnabled}
           items={[
-            <><code>{'{{loomLastUserMessage}}'}</code> returns the last user message</>,
-            <><code>{'{{loomLastCharMessage}}'}</code> returns the last character message</>,
-            <><code>{'{{lastMessageName}}'}</code> returns the name of whoever sent the last message</>,
-            <><code>{'{{loomContinuePrompt}}'}</code> adds continuation instructions when character spoke last</>,
+            <><code>{'{{loomLastUserMessage}}'}</code> {t('promptPanel.loomLastUserMessage')}</>,
+            <><code>{'{{loomLastCharMessage}}'}</code> {t('promptPanel.loomLastCharMessage')}</>,
+            <><code>{'{{lastMessageName}}'}</code> {t('promptPanel.lastMessageName')}</>,
+            <><code>{'{{loomContinuePrompt}}'}</code> {t('promptPanel.loomContinuePrompt')}</>,
           ]}
         />
       </EditorSection>
 
       {/* ── Context Filters ── */}
-      <EditorSection Icon={Filter} title="Context Filters" defaultExpanded={false}>
+      <EditorSection Icon={Filter} title={t('promptPanel.contextFiltersTitle')} defaultExpanded={false}>
         <p className={styles.desc}>
-          Filter out specific content from the chat context before sending to the AI.
+          {t('promptPanel.contextFiltersDesc')}
         </p>
 
         {/* HTML Tags */}
         <FilterItem
           id="filter-html"
-          label="Strip HTML Tags"
-          hint="Removes formatting tags: <div>, <span>, <b>, <i>, etc."
+          label={t('promptPanel.stripHtmlTags')}
+          hint={t('promptPanel.stripHtmlTagsHint')}
           enabled={contextFilters.htmlTags.enabled}
           onToggle={(v) => updateContextFilter('htmlTags', 'enabled', v)}
           depthValue={contextFilters.htmlTags.keepDepth}
           onDepthChange={(v) => updateContextFilter('htmlTags', 'keepDepth', v)}
-          depthLabel="Keep HTML in last N messages"
+          depthLabel={t('promptPanel.keepHtmlDepth')}
         />
 
         {/* Strip Fonts sub-option */}
@@ -275,13 +280,13 @@ export default function PromptPanel() {
           <div className={styles.filterSub}>
             <FilterItem
               id="filter-fonts"
-              label="Also Strip Fonts"
-              hint="Remove <font> tags (used by some presets)"
+              label={t('promptPanel.alsoStripFonts')}
+              hint={t('promptPanel.alsoStripFontsHint')}
               enabled={contextFilters.htmlTags.stripFonts}
               onToggle={(v) => updateContextFilter('htmlTags', 'stripFonts', v)}
               depthValue={contextFilters.htmlTags.fontKeepDepth}
               onDepthChange={(v) => updateContextFilter('htmlTags', 'fontKeepDepth', v)}
-              depthLabel="Keep fonts in last N messages"
+              depthLabel={t('promptPanel.keepFontsDepth')}
             />
           </div>
         </Collapsible>
@@ -289,8 +294,8 @@ export default function PromptPanel() {
         {/* Details Blocks */}
         <FilterItem
           id="filter-details"
-          label="Filter Details Blocks"
-          hint="Removes <details> blocks from older messages"
+          label={t('promptPanel.filterDetailsBlocks')}
+          hint={t('promptPanel.filterDetailsBlocksHint')}
           enabled={contextFilters.detailsBlocks.enabled}
           onToggle={(v) => updateContextFilter('detailsBlocks', 'enabled', v)}
           depthValue={contextFilters.detailsBlocks.keepDepth}
@@ -302,8 +307,8 @@ export default function PromptPanel() {
               id="filter-details-keep-only"
               checked={contextFilters.detailsBlocks.keepOnly ?? false}
               onChange={(v) => updateContextFilter('detailsBlocks', 'keepOnly', v)}
-              label="Keep Only Details Content"
-              hint="Past the keep depth, discard everything except content inside <details> blocks"
+              label={t('promptPanel.keepOnlyDetailsContent')}
+              hint={t('promptPanel.keepOnlyDetailsContentHint')}
             />
           </div>
         </Collapsible>
@@ -311,13 +316,13 @@ export default function PromptPanel() {
         {/* Loom Tags */}
         <FilterItem
           id="filter-loom"
-          label="Filter Loom Tags"
-          hint="Removes Lucid Loom-related tags from older messages"
+          label={t('promptPanel.filterLoomTags')}
+          hint={t('promptPanel.filterLoomTagsHint')}
           enabled={contextFilters.loomItems.enabled}
           onToggle={(v) => updateContextFilter('loomItems', 'enabled', v)}
           depthValue={contextFilters.loomItems.keepDepth}
           onDepthChange={(v) => updateContextFilter('loomItems', 'keepDepth', v)}
-          depthLabel="Keep Loom tags in last N messages"
+          depthLabel={t('promptPanel.keepLoomTagsDepth')}
         />
         <Collapsible isOpen={contextFilters.loomItems.enabled}>
           <div className={styles.filterSub}>
@@ -325,8 +330,8 @@ export default function PromptPanel() {
               id="filter-loom-keep-only"
               checked={contextFilters.loomItems.keepOnly ?? false}
               onChange={(v) => updateContextFilter('loomItems', 'keepOnly', v)}
-              label="Keep Only Loom Content"
-              hint="Past the keep depth, discard everything except content inside Loom-related tags"
+              label={t('promptPanel.keepOnlyLoomContent')}
+              hint={t('promptPanel.keepOnlyLoomContentHint')}
             />
           </div>
         </Collapsible>

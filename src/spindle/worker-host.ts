@@ -7,6 +7,10 @@ import type {
   ToolRegistration,
   ExtensionInfo,
   ConnectionProfileDTO,
+  ConnectionReasoningBindingsDTO,
+  ReasoningSettingsDTO,
+  ReasoningEffortDTO,
+  ThinkingDisplayDTO,
   CharacterDTO,
   CharacterAvatarUploadDTO,
   ChatDTO,
@@ -19,6 +23,7 @@ import type {
   DatabankDocumentDTO,
   DatabankDocumentCreateDTO,
   PersonaDTO,
+  GlobalAddonDTO,
   ActivatedWorldInfoEntryDTO,
   DryRunResultDTO,
   ChatMemoryResultDTO,
@@ -30,8 +35,9 @@ import type {
   ImageUploadDTO,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
-import { validateHost, SSRFError } from "../utils/safe-fetch";
+import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { createOAuthState } from "./oauth-state";
+import * as spindleUploads from "./uploads";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { registry as macroRegistry } from "../macros";
@@ -53,7 +59,16 @@ import {
   type WorldInfoInterceptorResultDTO,
 } from "./world-info-interceptor";
 import { toolRegistry } from "./tool-registry";
+import {
+  setPromptRegexOwnedChats,
+  clearPromptRegexOwner,
+} from "./prompt-regex-ownership";
 import * as managerSvc from "./manager.service";
+import {
+  BUILT_IN_DRAWER_TABS,
+  getVisibleSettingsTabs as getVisibleUISettingsTabs,
+} from "./ui-registry";
+import { getUserExtensionDrawerTabs } from "./ui-frontend-state.service";
 import * as generateSvc from "../services/generate.service";
 import * as connectionsSvc from "../services/connections.service";
 import * as charactersSvc from "../services/characters.service";
@@ -63,10 +78,13 @@ import {
   setCharacterWorldBookIds,
 } from "../utils/character-world-books";
 import * as worldBooksSvc from "../services/world-books.service";
+import { pruneOrphanedWiState } from "../services/wi-state-prune.service";
+import * as presetsSvc from "../services/presets.service";
 import * as regexScriptsSvc from "../services/regex-scripts.service";
 import * as databanksSvc from "../services/databank";
 import * as filesSvc from "../services/files.service";
 import * as personasSvc from "../services/personas.service";
+import * as globalAddonsSvc from "../services/global-addons.service";
 import * as settingsSvc from "../services/settings.service";
 import * as councilSettingsSvc from "../services/council/council-settings.service";
 import * as packsSvc from "../services/packs.service";
@@ -77,9 +95,17 @@ import * as colorExtractionSvc from "../services/color-extraction.service";
 import { generateThemeVariables as generateThemeVariablesFn } from "../utils/theme-engine";
 import * as promptAssemblySvc from "../services/prompt-assembly.service";
 import * as embeddingsSvc from "../services/embeddings.service";
+import * as memoryCortexSvc from "../services/memory-cortex";
+import * as entityGraphSvc from "../services/memory-cortex/entity-graph";
+import * as cortexConsolidationSvc from "../services/memory-cortex/consolidation";
+import * as cortexVaultSvc from "../services/memory-cortex/vault";
+import * as chatMemoryCacheSvc from "../services/chat-memory-cache.service";
+import * as vectorizationQueueSvc from "../services/vectorization-queue.service";
 import * as tokenizerSvc from "../services/tokenizer.service";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
 import * as imagesSvc from "../services/images.service";
+import * as audioSvc from "../services/audio.service";
+import * as mediaSvc from "../services/media.service";
 import { spawnAsync } from "./spawn-async";
 import { getImageProvider, getImageProviderList } from "../image-gen/registry";
 import "../image-gen/index";
@@ -91,8 +117,10 @@ import {
   syncSharedRpcEndpoint,
   unregisterSharedRpcEndpoint,
   unregisterSharedRpcEndpointsByOwner,
+  type SharedRpcEndpointPolicy,
 } from "./shared-rpc-pool.service";
 import { getTextContent, type LlmMessage } from "../llm/types";
+import type { CreatePresetInput, UpdatePresetInput } from "../types/preset";
 import { getDb } from "../db/connection";
 import { normalizeSpindleAppNavigationPath } from "./url-safety";
 import {
@@ -117,17 +145,39 @@ import {
   unlinkSync,
   readdirSync,
   mkdirSync,
+  mkdtempSync,
   statSync,
   renameSync,
+  rmSync,
 } from "fs";
-import http from "node:http";
-import https from "node:https";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "crypto";
-import { join, resolve, relative, sep } from "path";
+import { join, resolve, relative, sep, extname } from "path";
+import { tmpdir } from "os";
 
 const EPHEMERAL_MAX_FILES = 250;
+const sharedRpcPermissionScope = new AsyncLocalStorage<string | undefined>();
 
+type ManagedSpindlePermission = Parameters<typeof managerSvc.hasPermission>[1];
 type TokenModelSource = "main" | "sidecar" | "explicit";
+
+type ChatAppendGenerationOptions = {
+  connection_id?: string;
+  persona_id?: string;
+  persona_addon_states?: Record<string, boolean>;
+  preset_id?: string;
+  force_preset_id?: boolean;
+  parameters?: Record<string, unknown>;
+  target_character_id?: string;
+  retain_council?: boolean;
+};
+
+type ChatAppendMessageOptions =
+  | boolean
+  | {
+      triggerGeneration?: boolean;
+      generation?: ChatAppendGenerationOptions;
+    };
 
 type TokenCountResult = {
   total_tokens: number;
@@ -136,6 +186,10 @@ type TokenCountResult = {
   tokenizer_id: string | null;
   tokenizer_name: string;
   approximate: boolean;
+};
+
+type ResolvedWorkerMediaSource = mediaSvc.ResolvedMediaSourceDTO & {
+  cleanup?: () => void;
 };
 
 type FrontendProcessState =
@@ -262,6 +316,8 @@ type BackendProcessRuntimeInit = {
   userId?: string;
 };
 
+type SpindleUserRole = "operator" | "admin" | "user";
+
 type HostToBackendProcessRuntime =
   | { type: "init"; process: BackendProcessRuntimeInit }
   | { type: "stop"; reason?: string }
@@ -277,8 +333,8 @@ type BackendProcessRuntimeToHost =
 
 type RuntimeWorkerToHost =
   | WorkerToHost
-  | { type: "rpc_pool_sync"; endpoint: string; value: unknown }
-  | { type: "rpc_pool_register_handler"; endpoint: string }
+  | { type: "rpc_pool_sync"; endpoint: string; value: unknown; policy?: SharedRpcEndpointPolicy }
+  | { type: "rpc_pool_register_handler"; endpoint: string; policy?: SharedRpcEndpointPolicy }
   | { type: "rpc_pool_unregister"; endpoint: string }
   | { type: "rpc_pool_read"; requestId: string; endpoint: string }
   | {
@@ -286,9 +342,12 @@ type RuntimeWorkerToHost =
       requestId: string;
       result?: unknown;
       error?: string;
+      rpcPermissionScopeId?: string;
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
+  | { type: "prompt_regex_set_owned"; chatIds: string[] }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
+  | { type: "user_get_role"; requestId: string; userId?: string }
   | {
       type: "user_storage_write_binary";
       requestId: string;
@@ -298,6 +357,17 @@ type RuntimeWorkerToHost =
     }
   | { type: "user_storage_move"; requestId: string; from: string; to: string; userId?: string }
   | { type: "user_storage_stat"; requestId: string; path: string; userId?: string }
+  | { type: "presets_list"; requestId: string; limit?: number; offset?: number; userId?: string }
+  | { type: "presets_get"; requestId: string; presetId: string; userId?: string }
+  | { type: "presets_create"; requestId: string; input: CreatePresetInput; userId?: string }
+  | { type: "presets_update"; requestId: string; presetId: string; input: UpdatePresetInput; userId?: string }
+  | { type: "presets_delete"; requestId: string; presetId: string; userId?: string }
+  | { type: "preset_blocks_list"; requestId: string; presetId: string; userId?: string }
+  | { type: "preset_blocks_get"; requestId: string; presetId: string; blockId: string; userId?: string }
+  | { type: "preset_blocks_create"; requestId: string; presetId: string; input: presetsSvc.CreatePromptBlockInput; index?: number; userId?: string }
+  | { type: "preset_blocks_update"; requestId: string; presetId: string; blockId: string; input: presetsSvc.UpdatePromptBlockInput; userId?: string }
+  | { type: "preset_blocks_delete"; requestId: string; presetId: string; blockId: string; userId?: string }
+  | { type: "preset_categories_list"; requestId: string; presetId: string; userId?: string }
   | {
       type: "tokens_count_text";
       requestId: string;
@@ -382,7 +452,16 @@ type RuntimeWorkerToHost =
       chatId?: string;
       userId?: string;
     }
+  | { type: "uploads_get"; requestId: string; uploadId: string; userId?: string }
+  | { type: "uploads_delete"; requestId: string; uploadId: string; userId?: string }
   | { type: "images_upload"; requestId: string; input: ImageUploadDTO; userId?: string }
+  | {
+      type: "images_upload_many";
+      requestId: string;
+      items: ImageUploadDTO[];
+      userId?: string;
+      concurrency?: number;
+    }
   | {
       type: "images_upload_from_data_url";
       requestId: string;
@@ -393,6 +472,12 @@ type RuntimeWorkerToHost =
       userId?: string;
     }
   | { type: "images_delete"; requestId: string; imageId: string; userId?: string }
+  | { type: "media_audio_convert"; requestId: string; input: mediaSvc.MediaConvertAudioRequestDTO }
+  | { type: "media_video_convert"; requestId: string; input: mediaSvc.MediaConvertVideoRequestDTO }
+  | { type: "media_video_transcode"; requestId: string; input: mediaSvc.MediaTranscodeVideoRequestDTO }
+  | { type: "media_video_remove_audio"; requestId: string; input: mediaSvc.MediaRemoveAudioFromVideoRequestDTO }
+  | { type: "media_video_add_audio"; requestId: string; input: mediaSvc.MediaAddAudioToVideoRequestDTO }
+  | { type: "media_video_from_image_audio"; requestId: string; input: mediaSvc.MediaCreateVideoFromImageAndAudioRequestDTO }
   | { type: "register_message_content_processor"; priority?: number }
   | {
       type: "message_content_processor_result";
@@ -475,7 +560,23 @@ type RuntimeWorkerToHost =
       processId: string;
       options?: { userId?: string; reason?: string };
     }
-  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string };
+  | { type: "backend_process_send"; processId: string; payload: unknown; userId?: string }
+  | { type: "ui_get_drawer_tabs"; requestId: string; userId?: string }
+  | { type: "ui_get_settings_tabs"; requestId: string; userId?: string }
+  | {
+      type: "ui_navigate";
+      requestId: string;
+      action:
+        | "open_drawer_tab"
+        | "close_drawer"
+        | "open_settings"
+        | "close_settings"
+        | "open_command_palette"
+        | "close_command_palette";
+      tabId?: string;
+      viewId?: string;
+      userId?: string;
+    };
 
 type RuntimeHostToWorker =
   | HostToWorker
@@ -484,6 +585,8 @@ type RuntimeHostToWorker =
       requestId: string;
       endpoint: string;
       requesterExtensionId: string;
+      rpcPermissionScopeId: string;
+      effectivePermissions: string[];
     }
   | {
       type: "message_content_processor_request";
@@ -499,6 +602,13 @@ type RuntimeHostToWorker =
       type: "world_info_interceptor_request";
       requestId: string;
       ctx: WorldInfoInterceptorCtxDTO;
+    }
+  | {
+      type: "permission_changed";
+      extensionId?: string;
+      permission: string;
+      granted: boolean;
+      allGranted: string[];
     }
   | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
   | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
@@ -662,6 +772,116 @@ function validateImageMagicBytes(data: Uint8Array, contentType: string): boolean
   return false;
 }
 
+/** Validate common browser-playable audio containers before proxying to widgets. */
+function validateAudioMagicBytes(data: Uint8Array, contentType: string): boolean {
+  if (data.length < 4) return false;
+
+  // MP3: ID3 tag or MPEG frame sync.
+  if (data[0] === 0x49 && data[1] === 0x44 && data[2] === 0x33) return true;
+  if (data[0] === 0xFF && (data[1] & 0xE0) === 0xE0) return true;
+
+  // WAV: RIFF....WAVE.
+  if (data.length >= 12 && data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46) {
+    if (data[8] === 0x57 && data[9] === 0x41 && data[10] === 0x56 && data[11] === 0x45) return true;
+  }
+
+  // Ogg / Opus / Vorbis.
+  if (data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53) return true;
+
+  // FLAC.
+  if (data[0] === 0x66 && data[1] === 0x4C && data[2] === 0x61 && data[3] === 0x43) return true;
+
+  // MP4/M4A: ISO BMFF ftyp box.
+  if (data.length >= 12 && data[4] === 0x66 && data[5] === 0x74 && data[6] === 0x79 && data[7] === 0x70) return true;
+
+  // WebM/Matroska: EBML header.
+  if (data[0] === 0x1A && data[1] === 0x45 && data[2] === 0xDF && data[3] === 0xA3) return true;
+
+  // MIDI.
+  if (contentType.includes("midi") && data[0] === 0x4D && data[1] === 0x54 && data[2] === 0x68 && data[3] === 0x64) return true;
+
+  return false;
+}
+
+/** Validate common web font container formats before proxying to widgets. */
+function validateFontMagicBytes(data: Uint8Array, _contentType: string): boolean {
+  if (data.length < 4) return false;
+
+  // WOFF: "wOFF"
+  if (data[0] === 0x77 && data[1] === 0x4F && data[2] === 0x46 && data[3] === 0x46) return true;
+
+  // WOFF2: "wOF2"
+  if (data[0] === 0x77 && data[1] === 0x4F && data[2] === 0x46 && data[3] === 0x32) return true;
+
+  // TTF: 00 01 00 00 (TrueType outline version 1.0 fixed-point).
+  if (data[0] === 0x00 && data[1] === 0x01 && data[2] === 0x00 && data[3] === 0x00) return true;
+
+  // OTF: "OTTO"
+  if (data[0] === 0x4F && data[1] === 0x54 && data[2] === 0x54 && data[3] === 0x4F) return true;
+
+  // TTC (TrueType Collection): "ttcf"
+  if (data[0] === 0x74 && data[1] === 0x74 && data[2] === 0x63 && data[3] === 0x66) return true;
+
+  return false;
+}
+
+const REASONING_EFFORT_VALUES = new Set<ReasoningEffortDTO>([
+  "auto",
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "max",
+  "xhigh",
+]);
+
+const THINKING_DISPLAY_VALUES = new Set<ThinkingDisplayDTO>([
+  "auto",
+  "summarized",
+  "omitted",
+]);
+
+function coerceReasoningSettings(raw: unknown): ReasoningSettingsDTO | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const effort = REASONING_EFFORT_VALUES.has(r.reasoningEffort as ReasoningEffortDTO)
+    ? (r.reasoningEffort as ReasoningEffortDTO)
+    : "auto";
+  const display = THINKING_DISPLAY_VALUES.has(r.thinkingDisplay as ThinkingDisplayDTO)
+    ? (r.thinkingDisplay as ThinkingDisplayDTO)
+    : "auto";
+  return {
+    apiReasoning: r.apiReasoning === true,
+    reasoningEffort: effort,
+    thinkingDisplay: display,
+    prefix: typeof r.prefix === "string" ? r.prefix : "",
+    suffix: typeof r.suffix === "string" ? r.suffix : "",
+    autoParse: r.autoParse !== false,
+    keepInHistory: typeof r.keepInHistory === "number" ? r.keepInHistory : 0,
+  };
+}
+
+/**
+ * Parse the `metadata.reasoningBindings` blob on a connection into a typed
+ * `ConnectionReasoningBindingsDTO`. Returns `null` when the connection has
+ * no binding attached — callers should treat that as "fall back to the
+ * user's global reasoning setting" during generation.
+ */
+function extractReasoningBindingsDTO(
+  metadata: Record<string, any> | null | undefined,
+): ConnectionReasoningBindingsDTO | null {
+  const blob = metadata?.reasoningBindings;
+  if (!blob || typeof blob !== "object" || Array.isArray(blob)) return null;
+  const settings = coerceReasoningSettings((blob as any).settings);
+  if (!settings) return null;
+  const promptBias = (blob as any).promptBias;
+  return {
+    settings,
+    ...(typeof promptBias === "string" ? { promptBias } : {}),
+  };
+}
+
 function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
   const out = new Uint8Array(total);
   let offset = 0;
@@ -670,56 +890,6 @@ function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
     offset += c.byteLength;
   }
   return out;
-}
-
-function requestWithAddressFamily(
-  url: string,
-  options: { method?: string; headers?: Record<string, string>; body?: string },
-  family: 4 | 6
-): Promise<{
-  status: number;
-  statusText: string;
-  headers: Record<string, string>;
-  body: string;
-}> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const request = (parsed.protocol === "https:" ? https : http).request(
-      parsed,
-      {
-        method: options.method || "GET",
-        headers: options.headers,
-        family,
-        timeout: CORS_PROXY_TIMEOUT_MS,
-      },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk) => {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        });
-        response.on("end", () => {
-          resolve({
-            status: response.statusCode || 0,
-            statusText: response.statusMessage || "",
-            headers: Object.fromEntries(
-              Object.entries(response.headers).map(([key, value]) => [
-                key,
-                Array.isArray(value) ? value.join(", ") : String(value ?? ""),
-              ])
-            ),
-            body: Buffer.concat(chunks).toString("utf8"),
-          });
-        });
-      }
-    );
-
-    request.on("timeout", () => {
-      request.destroy(new Error(`CORS proxy request timed out after ${CORS_PROXY_TIMEOUT_MS}ms`));
-    });
-    request.on("error", reject);
-    if (options.body) request.write(options.body);
-    request.end();
-  });
 }
 
 export class WorkerHost {
@@ -797,6 +967,7 @@ export class WorkerHost {
   private frontendProcessKeyIndex = new Map<string, string>();
   private backendProcesses = new Map<string, BackendProcessRecord>();
   private backendProcessKeyIndex = new Map<string, string>();
+  private sharedRpcPermissionScopes = new Map<string, Set<string>>();
 
   constructor(
     public readonly extensionId: string,
@@ -824,6 +995,24 @@ export class WorkerHost {
     if (!userId || userId !== this.installedByUserId) {
       throw new Error("Extension is user-scoped and cannot access this user context");
     }
+  }
+
+  private getGrantedPermissions(): ManagedSpindlePermission[] {
+    const granted = managerSvc.getGrantedPermissions(this.manifest.identifier);
+    const scopeId = sharedRpcPermissionScope.getStore();
+    if (!scopeId) return granted;
+
+    const scoped = this.sharedRpcPermissionScopes.get(scopeId);
+    if (!scoped) return [];
+    return granted.filter((permission) => scoped.has(permission));
+  }
+
+  private hasPermission(permission: ManagedSpindlePermission): boolean {
+    const scopeId = sharedRpcPermissionScope.getStore();
+    if (!scopeId) return managerSvc.hasPermission(this.manifest.identifier, permission);
+
+    const scoped = this.sharedRpcPermissionScopes.get(scopeId);
+    return Boolean(scoped?.has(permission)) && managerSvc.hasPermission(this.manifest.identifier, permission);
   }
 
   private resolveFrontendProcessUserId(userId?: string): string {
@@ -1140,7 +1329,10 @@ export class WorkerHost {
       throw new Error(`Backend process entry not found: ${normalized}`);
     }
 
-    const blocked = managerSvc.detectDangerousBackendCapabilities(await Bun.file(entryPath).text());
+    const blocked = managerSvc.detectDangerousBackendCapabilities(
+      await Bun.file(entryPath).text(),
+      managerSvc.declaredCapabilitiesFromManifest(this.manifest),
+    );
     if (blocked.length > 0) {
       throw new Error(
         `Backend process entry \"${normalized}\" uses blocked backend capabilities: ${blocked.join(", ")}`
@@ -1561,6 +1753,9 @@ export class WorkerHost {
     // Unregister all tools for this extension
     toolRegistry.unregisterByExtension(this.extensionId);
 
+    // Drop any prompt-regex ownership claims so the host resumes its own pass
+    clearPromptRegexOwner(this.extensionId);
+
     // Unregister all macros registered by this extension
     for (const macroName of this.registeredMacroNames) {
       macroRegistry.unregisterMacro(macroName);
@@ -1577,6 +1772,10 @@ export class WorkerHost {
 
     // Clear theme overrides
     this.clearThemeOverrides();
+
+    // Clear chat-style-mode claims, broadcasts null-chatId per affected user
+    // so frontend stores drop this extension's relaxation claims.
+    this.clearChatStyleModes();
 
     // Unregister interceptors and context handlers
     interceptorPipeline.unregisterByExtension(this.extensionId);
@@ -1604,10 +1803,13 @@ export class WorkerHost {
   }
 
   private handleRuntimeTransportFailure(error: unknown): void {
+    // Already torn down by an earlier failure on this stack, bail before recursing.
+    if (!this.runtime) return;
     const message = error instanceof Error ? error.message : String(error);
     console.warn(
       `[Spindle:${this.manifest.identifier}] Runtime transport failed, cleaning up: ${message}`
     );
+    this.runtime = null;
     this.cleanup();
   }
 
@@ -1723,7 +1925,13 @@ export class WorkerHost {
    * no restart needed.
    */
   notifyPermissionChanged(permission: string, granted: boolean, allGranted: string[]): void {
-    this.postToWorker({ type: "permission_changed", permission, granted, allGranted });
+    this.postToWorker({
+      type: "permission_changed",
+      extensionId: this.manifest.identifier,
+      permission,
+      granted,
+      allGranted,
+    });
   }
 
   /**
@@ -1831,44 +2039,57 @@ export class WorkerHost {
   private requestSharedRpcValue(
     endpoint: string,
     requesterExtensionId: string,
+    effectivePermissions: readonly string[],
   ): Promise<unknown> {
     const requestId = crypto.randomUUID();
+    const rpcPermissionScopeId = crypto.randomUUID();
+    this.sharedRpcPermissionScopes.set(rpcPermissionScopeId, new Set(effectivePermissions));
 
     this.postToWorker({
       type: "rpc_pool_request",
       requestId,
       endpoint,
       requesterExtensionId,
+      rpcPermissionScopeId,
+      effectivePermissions: [...effectivePermissions],
     });
 
     return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.sharedRpcPermissionScopes.delete(rpcPermissionScopeId);
+      };
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
+        cleanup();
         reject(new Error(`Shared RPC endpoint "${endpoint}" timed out`));
       }, WorkerHost.SHARED_RPC_REQUEST_TIMEOUT_MS);
 
       this.pendingRequests.set(requestId, {
         resolve: (value) => {
           clearTimeout(timeout);
+          cleanup();
           resolve(value);
         },
         reject: (reason) => {
           clearTimeout(timeout);
+          cleanup();
           reject(reason);
         },
       });
     });
   }
 
-  private handleRpcPoolSync(endpoint: string, value: unknown): void {
-    syncSharedRpcEndpoint(this.manifest.identifier, endpoint, value);
+  private handleRpcPoolSync(endpoint: string, value: unknown, policy?: SharedRpcEndpointPolicy): void {
+    syncSharedRpcEndpoint(this.manifest.identifier, endpoint, value, policy);
   }
 
-  private handleRpcPoolRegisterHandler(endpoint: string): void {
+  private handleRpcPoolRegisterHandler(endpoint: string, policy?: SharedRpcEndpointPolicy): void {
     registerSharedRpcRequestEndpoint(
       this.manifest.identifier,
       endpoint,
-      async (requesterExtensionId) => await this.requestSharedRpcValue(endpoint, requesterExtensionId),
+      async (requesterExtensionId, effectivePermissions) =>
+        await this.requestSharedRpcValue(endpoint, requesterExtensionId, effectivePermissions),
+      policy,
     );
   }
 
@@ -1878,7 +2099,11 @@ export class WorkerHost {
 
   private async handleRpcPoolRead(requestId: string, endpoint: string): Promise<void> {
     try {
-      const result = await readSharedRpcEndpoint(endpoint, this.manifest.identifier);
+      const result = await readSharedRpcEndpoint(
+        endpoint,
+        this.manifest.identifier,
+        managerSvc.getGrantedPermissions,
+      );
       this.postToWorker({ type: "response", requestId, result });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
@@ -1886,7 +2111,7 @@ export class WorkerHost {
   }
 
   private handleCreateOAuthState(requestId: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "oauth")) {
+    if (!this.hasPermission("oauth")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -1904,6 +2129,13 @@ export class WorkerHost {
   }
 
   private handleMessage(msg: RuntimeWorkerToHost): void {
+    const scopeId = typeof (msg as any).rpcPermissionScopeId === "string"
+      ? (msg as any).rpcPermissionScopeId
+      : undefined;
+    sharedRpcPermissionScope.run(scopeId, () => this.handleMessageInScope(msg));
+  }
+
+  private handleMessageInScope(msg: RuntimeWorkerToHost): void {
     switch (msg.type) {
       case "subscribe_event":
         this.handleSubscribeEvent(msg.event);
@@ -1927,7 +2159,7 @@ export class WorkerHost {
         // Strip parameters if the extension lacks the generation_parameters permission
         let interceptParams = msg.parameters;
         if (interceptParams && Object.keys(interceptParams).length > 0) {
-          if (!managerSvc.hasPermission(this.manifest.identifier, "generation_parameters")) {
+          if (!this.hasPermission("generation_parameters")) {
             console.warn(
               `[Spindle:${this.manifest.identifier}] Stripping interceptor parameters — generation_parameters permission not granted`
             );
@@ -2049,10 +2281,10 @@ export class WorkerHost {
         this.handlePermissionsGetGranted(msg.requestId);
         break;
       case "rpc_pool_sync":
-        this.handleRpcPoolSync(msg.endpoint, msg.value);
+        this.handleRpcPoolSync(msg.endpoint, msg.value, (msg as any).policy);
         break;
       case "rpc_pool_register_handler":
-        this.handleRpcPoolRegisterHandler(msg.endpoint);
+        this.handleRpcPoolRegisterHandler(msg.endpoint, (msg as any).policy);
         break;
       case "rpc_pool_unregister":
         this.handleRpcPoolUnregister(msg.endpoint);
@@ -2077,7 +2309,12 @@ export class WorkerHost {
         this.handleChatGetMessages(msg.requestId, msg.chatId);
         break;
       case "chat_append_message":
-        this.handleChatAppendMessage(msg.requestId, msg.chatId, msg.message);
+        void this.handleChatAppendMessage(
+          msg.requestId,
+          msg.chatId,
+          msg.message,
+          (msg as any).options,
+        );
         break;
       case "chat_update_message":
         this.handleChatUpdateMessage(
@@ -2276,6 +2513,40 @@ export class WorkerHost {
       case "vars_has_chat":
         this.handleVarsHasChat(msg.requestId, msg.chatId, msg.key);
         break;
+      // ─── Presets (gated: "presets") ─────────────────────────────────
+      case "presets_list":
+        this.handlePresetsList(msg.requestId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "presets_get":
+        this.handlePresetsGet(msg.requestId, msg.presetId, msg.userId);
+        break;
+      case "presets_create":
+        this.handlePresetsCreate(msg.requestId, msg.input, msg.userId);
+        break;
+      case "presets_update":
+        this.handlePresetsUpdate(msg.requestId, msg.presetId, msg.input, msg.userId);
+        break;
+      case "presets_delete":
+        this.handlePresetsDelete(msg.requestId, msg.presetId, msg.userId);
+        break;
+      case "preset_blocks_list":
+        this.handlePresetBlocksList(msg.requestId, msg.presetId, msg.userId);
+        break;
+      case "preset_blocks_get":
+        this.handlePresetBlocksGet(msg.requestId, msg.presetId, msg.blockId, msg.userId);
+        break;
+      case "preset_blocks_create":
+        this.handlePresetBlocksCreate(msg.requestId, msg.presetId, msg.input, msg.index, msg.userId);
+        break;
+      case "preset_blocks_update":
+        this.handlePresetBlocksUpdate(msg.requestId, msg.presetId, msg.blockId, msg.input, msg.userId);
+        break;
+      case "preset_blocks_delete":
+        this.handlePresetBlocksDelete(msg.requestId, msg.presetId, msg.blockId, msg.userId);
+        break;
+      case "preset_categories_list":
+        this.handlePresetCategoriesList(msg.requestId, msg.presetId, msg.userId);
+        break;
       // ─── Characters (gated: "characters") ─────────────────────────────
       case "characters_list":
         this.handleCharactersList(msg.requestId, msg.limit, msg.offset, msg.userId);
@@ -2315,6 +2586,136 @@ export class WorkerHost {
       case "chats_get_memories":
         this.handleChatsGetMemories(msg.requestId, msg.chatId, msg.topK, msg.userId);
         break;
+      // ─── Memory Cortex & Long-Term Chat Memory (gated: "memories") ───
+      case "memories_config_get":
+        this.handleMemoriesConfigGet(msg.requestId, msg.userId);
+        break;
+      case "memories_config_put":
+        this.handleMemoriesConfigPut(msg.requestId, msg.patch, msg.userId);
+        break;
+      case "memories_query_cortex":
+        this.handleMemoriesQueryCortex(msg.requestId, msg.query);
+        break;
+      case "memories_query_linked":
+        this.handleMemoriesQueryLinked(msg.requestId, msg.chatId, msg.queryText, msg.userId);
+        break;
+      case "memories_get_cached":
+        this.handleMemoriesGetCached(msg.requestId, msg.chatId);
+        break;
+      case "memories_get_cached_linked":
+        this.handleMemoriesGetCachedLinked(msg.requestId, msg.chatId);
+        break;
+      case "memories_invalidate_cache":
+        this.handleMemoriesInvalidateCache(msg.requestId, msg.chatId);
+        break;
+      case "memories_invalidate_linked_cache":
+        this.handleMemoriesInvalidateLinkedCache(msg.requestId, msg.chatId);
+        break;
+      case "memories_entities_list":
+        this.handleMemoriesEntitiesList(msg.requestId, msg.chatId, msg.activeOnly, msg.limit, msg.userId);
+        break;
+      case "memories_entities_get":
+        this.handleMemoriesEntitiesGet(msg.requestId, msg.entityId, msg.userId);
+        break;
+      case "memories_entities_find_by_name":
+        this.handleMemoriesEntitiesFindByName(msg.requestId, msg.chatId, msg.name, msg.userId);
+        break;
+      case "memories_entities_upsert":
+        this.handleMemoriesEntitiesUpsert(msg.requestId, msg.chatId, msg.entity, msg.chunkId ?? null, msg.createdAt, msg.userId);
+        break;
+      case "memories_entities_update_status":
+        this.handleMemoriesEntitiesUpdateStatus(msg.requestId, msg.entityId, msg.patch, msg.userId);
+        break;
+      case "memories_entities_add_facts":
+        this.handleMemoriesEntitiesAddFacts(msg.requestId, msg.entityId, msg.facts, msg.userId);
+        break;
+      case "memories_entities_get_facts":
+        this.handleMemoriesEntitiesGetFacts(msg.requestId, msg.entityId, msg.userId);
+        break;
+      case "memories_entities_update_emotional_valence":
+        this.handleMemoriesEntitiesUpdateEmotionalValence(msg.requestId, msg.entityId, msg.valence, msg.userId);
+        break;
+      case "memories_relations_list":
+        this.handleMemoriesRelationsList(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_relations_list_all":
+        this.handleMemoriesRelationsListAll(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_relations_for_entity":
+        this.handleMemoriesRelationsForEntity(msg.requestId, msg.chatId, msg.entityId, msg.userId);
+        break;
+      case "memories_relations_for_entities":
+        this.handleMemoriesRelationsForEntities(msg.requestId, msg.chatId, msg.entityIds, msg.limit, msg.userId);
+        break;
+      case "memories_relations_upsert":
+        this.handleMemoriesRelationsUpsert(msg.requestId, msg.chatId, msg.relation, msg.chunkId ?? null, msg.userId);
+        break;
+      case "memories_consolidations_list":
+        this.handleMemoriesConsolidationsList(msg.requestId, msg.chatId, msg.tier, msg.userId);
+        break;
+      case "memories_consolidations_latest_arc":
+        this.handleMemoriesConsolidationsLatestArc(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_consolidations_run":
+        this.handleMemoriesConsolidationsRun(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_salience_get":
+        this.handleMemoriesSalienceGet(msg.requestId, msg.chatId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "memories_vaults_list":
+        this.handleMemoriesVaultsList(msg.requestId, msg.userId);
+        break;
+      case "memories_vaults_get":
+        this.handleMemoriesVaultsGet(msg.requestId, msg.vaultId, msg.userId);
+        break;
+      case "memories_vaults_get_chunks":
+        this.handleMemoriesVaultsGetChunks(msg.requestId, msg.vaultId, msg.userId);
+        break;
+      case "memories_vaults_create":
+        this.handleMemoriesVaultsCreate(msg.requestId, msg.input, msg.userId);
+        break;
+      case "memories_vaults_rename":
+        this.handleMemoriesVaultsRename(msg.requestId, msg.vaultId, msg.name, msg.userId);
+        break;
+      case "memories_vaults_delete":
+        this.handleMemoriesVaultsDelete(msg.requestId, msg.vaultId, msg.userId);
+        break;
+      case "memories_vaults_reindex":
+        this.handleMemoriesVaultsReindex(msg.requestId, msg.vaultId, msg.userId);
+        break;
+      case "memories_links_list":
+        this.handleMemoriesLinksList(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_links_attach":
+        this.handleMemoriesLinksAttach(msg.requestId, msg.input, msg.userId);
+        break;
+      case "memories_links_remove":
+        this.handleMemoriesLinksRemove(msg.requestId, msg.chatId, msg.linkId, msg.userId);
+        break;
+      case "memories_links_toggle":
+        this.handleMemoriesLinksToggle(msg.requestId, msg.chatId, msg.linkId, msg.enabled, msg.userId);
+        break;
+      case "memories_chat_chunks_list":
+        this.handleMemoriesChatChunksList(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_chat_memory_get":
+        this.handleMemoriesChatMemoryGet(msg.requestId, msg.chatId, msg.topK, msg.userId);
+        break;
+      case "memories_chat_memory_warm":
+        this.handleMemoriesChatMemoryWarm(msg.requestId, msg.chatId, msg.force, msg.userId);
+        break;
+      case "memories_chat_memory_invalidate":
+        this.handleMemoriesChatMemoryInvalidate(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_stats_usage":
+        this.handleMemoriesStatsUsage(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_stats_ingestion_status":
+        this.handleMemoriesStatsIngestionStatus(msg.requestId, msg.chatId, msg.userId);
+        break;
+      case "memories_stats_ingestion_telemetry":
+        this.handleMemoriesStatsIngestionTelemetry(msg.requestId, msg.chatId, msg.userId);
+        break;
       // ─── World Books (gated: "world_books") ──────────────────────────
       case "world_books_list":
         this.handleWorldBooksList(msg.requestId, msg.limit, msg.offset, msg.userId);
@@ -2350,6 +2751,19 @@ export class WorkerHost {
       // ─── Activated World Info (gated: "world_books") ─────────────────
       case "world_books_get_activated":
         this.handleWorldBooksGetActivated(msg.requestId, msg.chatId, msg.userId);
+        break;
+      // ─── Global World Books (gated: "world_books") ───────────────────
+      case "world_books_get_global":
+        this.handleWorldBooksGetGlobal(msg.requestId, msg.userId);
+        break;
+      case "world_books_set_global":
+        this.handleWorldBooksSetGlobal(msg.requestId, msg.worldBookIds, msg.userId);
+        break;
+      case "world_books_activate_global":
+        this.handleWorldBooksActivateGlobal(msg.requestId, msg.worldBookId, msg.userId);
+        break;
+      case "world_books_deactivate_global":
+        this.handleWorldBooksDeactivateGlobal(msg.requestId, msg.worldBookId, msg.userId);
         break;
       // ─── Regex Scripts (gated: "regex_scripts") ──────────────────────
       case "regex_scripts_list":
@@ -2449,6 +2863,9 @@ export class WorkerHost {
       case "images_upload":
         this.handleImagesUpload(msg.requestId, msg.input, msg.userId);
         break;
+      case "images_upload_many":
+        this.handleImagesUploadMany(msg.requestId, msg.items, msg.userId, msg.concurrency);
+        break;
       case "images_upload_from_data_url":
         this.handleImagesUploadFromDataUrl(
           msg.requestId,
@@ -2461,6 +2878,24 @@ export class WorkerHost {
         break;
       case "images_delete":
         this.handleImagesDelete(msg.requestId, msg.imageId, msg.userId);
+        break;
+      case "media_audio_convert":
+        this.handleMediaAudioConvert(msg.requestId, msg.input);
+        break;
+      case "media_video_convert":
+        this.handleMediaVideoConvert(msg.requestId, msg.input);
+        break;
+      case "media_video_transcode":
+        this.handleMediaVideoTranscode(msg.requestId, msg.input);
+        break;
+      case "media_video_remove_audio":
+        this.handleMediaVideoRemoveAudio(msg.requestId, msg.input);
+        break;
+      case "media_video_add_audio":
+        this.handleMediaVideoAddAudio(msg.requestId, msg.input);
+        break;
+      case "media_video_from_image_audio":
+        this.handleMediaVideoFromImageAudio(msg.requestId, msg.input);
         break;
       // ─── Personas (gated: "personas") ──────────────────────────────────
       case "personas_list":
@@ -2490,6 +2925,16 @@ export class WorkerHost {
       case "personas_get_world_book":
         this.handlePersonasGetWorldBook(msg.requestId, msg.personaId, msg.userId);
         break;
+      // ─── Global Add-ons (gated: "personas") ─────────────────────────
+      case "global_addons_list":
+        this.handleGlobalAddonsList(msg.requestId, msg.limit, msg.offset, msg.userId);
+        break;
+      case "global_addons_get":
+        this.handleGlobalAddonsGet(msg.requestId, msg.addonId, msg.userId);
+        break;
+      case "global_addons_update":
+        this.handleGlobalAddonsUpdate(msg.requestId, msg.addonId, msg.input, msg.userId);
+        break;
       // ─── Council (free tier, read-only) ─────────────────────────────
       case "council_get_settings":
         this.handleCouncilGetSettings(msg.requestId, msg.userId);
@@ -2513,12 +2958,25 @@ export class WorkerHost {
       case "log":
         this.handleLog(msg.level, msg.message);
         break;
+      case "prompt_regex_set_owned":
+        setPromptRegexOwnedChats(this.extensionId, msg.chatIds);
+        break;
       // ─── Commands (free tier) ─────────────────────────────────────────
       case "commands_register":
         this.handleCommandsRegister(msg.commands);
         break;
       case "commands_unregister":
         this.handleCommandsUnregister(msg.commandIds);
+        break;
+      // ─── UI Automation (free tier) ────────────────────────────────────
+      case "ui_get_drawer_tabs":
+        this.handleUIGetDrawerTabs(msg.requestId, msg.userId);
+        break;
+      case "ui_get_settings_tabs":
+        this.handleUIGetSettingsTabs(msg.requestId, msg.userId);
+        break;
+      case "ui_navigate":
+        this.handleUINavigate(msg.requestId, msg.action, msg.tabId, msg.viewId, msg.userId);
         break;
       // ─── Version (free tier) ─────────────────────────────────────────
       case "version_get_backend":
@@ -2537,6 +2995,13 @@ export class WorkerHost {
       case "tokens_count_chat":
         this.handleTokensCountChat(msg.requestId, msg.chatId, msg.model, msg.modelSource, msg.userId);
         break;
+      // ─── Resumable uploads (free tier) ────────────────────────────────
+      case "uploads_get":
+        this.handleUploadsGet(msg.requestId, msg.uploadId, msg.userId);
+        break;
+      case "uploads_delete":
+        this.handleUploadsDelete(msg.requestId, msg.uploadId, msg.userId);
+        break;
       // ─── Push Notifications (gated: "push_notification") ──────────────
       case "push_send":
         this.handlePushSend(msg.requestId, msg.title, msg.body, msg.tag, msg.url, msg.userId, msg.icon, msg.rawTitle, msg.image);
@@ -2544,9 +3009,19 @@ export class WorkerHost {
       case "push_get_status":
         this.handlePushGetStatus(msg.requestId, msg.userId);
         break;
-      // ─── User Visibility (free tier — no permission needed) ─────────────
+      // ─── Web Search (gated: "web_search") ──────────────────────────────
+      case "web_search_query":
+        void this.handleWebSearchQuery(msg.requestId, msg.query, msg.count, msg.scrape, msg.userId);
+        break;
+      case "web_search_get_settings":
+        void this.handleWebSearchGetSettings(msg.requestId, msg.userId);
+        break;
+      // ─── User Context (free tier — no permission needed) ────────────────
       case "user_is_visible":
         this.handleUserIsVisible(msg.requestId, msg.userId);
+        break;
+      case "user_get_role":
+        this.handleUserGetRole(msg.requestId, msg.userId);
         break;
       // ─── Text Editor (free tier — no permission needed) ─────────────────
       case "text_editor_open":
@@ -2623,6 +3098,10 @@ export class WorkerHost {
       case "image_gen_models":
         this.handleImageGenModels(msg.requestId, msg.connectionId, msg.userId);
         break;
+      // ─── Chat style mode (gated: "app_manipulation") ────────────────────
+      case "chat_set_style_mode":
+        this.handleChatSetStyleMode(msg.requestId, msg.chatId, msg.mode, msg.userId);
+        break;
       // ─── Theme (gated: "app_manipulation") ──────────────────────────────
       case "theme_apply":
         this.handleThemeApply(msg.requestId, msg.overrides, msg.userId);
@@ -2679,7 +3158,7 @@ export class WorkerHost {
     // Generation lifecycle/streaming events require the generation permission
     if (
       WorkerHost.GENERATION_EVENTS.has(eventType) &&
-      !managerSvc.hasPermission(this.manifest.identifier, "generation")
+      !this.hasPermission("generation")
     ) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] Generation permission required for event: ${event}`
@@ -2702,6 +3181,12 @@ export class WorkerHost {
     const unsub = eventBus.on(eventType, (msg) => {
       if (scopedUserId && msg.userId !== scopedUserId) {
         return;
+      }
+      if (eventType === EventType.SPINDLE_PERMISSION_CHANGED) {
+        const payload = (msg.payload ?? {}) as { extensionId?: string; identifier?: string };
+        if (payload.extensionId !== this.extensionId && payload.identifier !== this.manifest.identifier) {
+          return;
+        }
       }
       this.postToWorker({
         type: "event",
@@ -2878,7 +3363,7 @@ export class WorkerHost {
   // ─── Interceptor registration ────────────────────────────────────────
 
   private handleRegisterInterceptor(priority?: number): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "interceptor")) {
+    if (!this.hasPermission("interceptor")) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] Interceptor permission not granted`
       );
@@ -2911,10 +3396,28 @@ export class WorkerHost {
         const requestId = crypto.randomUUID();
         const timeoutMs = resolveTimeoutMs();
 
+        // Expose chat-history membership explicitly on the DTO so an extension
+        // applying prompt-target regex inline can rebuild the host's depth frame
+        // (depth gating is chat-history-only; injected non-history blocks are
+        // ungated and must not shift real-turn numbering). Shallow-copy so the
+        // synthetic flag never leaks onto the outbound LLM payload.
+        const messagesWithHistoryFlag = messages.map((m) => {
+          const llm = m as unknown as LlmMessage;
+          if (!promptAssemblySvc.isChatHistoryMessage(llm)) return m;
+          const sourceMessageId = promptAssemblySvc.getSourceMessageId(llm);
+          const sourceIndexInChat = promptAssemblySvc.getSourceIndexInChat(llm);
+          return {
+            ...m,
+            __isChatHistory: true,
+            ...(sourceMessageId !== undefined ? { sourceMessageId } : {}),
+            ...(sourceIndexInChat !== undefined ? { sourceIndexInChat } : {}),
+          };
+        });
+
         this.postToWorker({
           type: "intercept_request",
           requestId,
-          messages,
+          messages: messagesWithHistoryFlag,
           context,
         });
 
@@ -2960,7 +3463,9 @@ export class WorkerHost {
       messageIndex,
       name: label,
       role: message.role,
-      content: message.content,
+      content: typeof message.content === "string"
+        ? message.content
+        : message.content.map((part: any) => part.text || "").join(""),
       extensionId: this.manifest.identifier,
       extensionName,
     };
@@ -2969,7 +3474,7 @@ export class WorkerHost {
   // ─── Tool registration ───────────────────────────────────────────────
 
   private handleRegisterTool(toolDTO: any): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "tools")) {
+    if (!this.hasPermission("tools")) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] Tools permission not granted`
       );
@@ -2994,7 +3499,7 @@ export class WorkerHost {
     requestId: string,
     input: any
   ): Promise<void> {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+    if (!this.hasPermission("generation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3030,6 +3535,7 @@ export class WorkerHost {
             parameters: input.parameters,
             connection_id: input.connection_id,
             tools: input.tools,
+            reasoning: input.reasoning,
             signal: abortController.signal,
           });
           break;
@@ -3039,6 +3545,7 @@ export class WorkerHost {
             connection_id: input.connection_id,
             parameters: input.parameters,
             tools: input.tools,
+            reasoning: input.reasoning,
             signal: abortController.signal,
           });
           break;
@@ -3088,7 +3595,7 @@ export class WorkerHost {
     requestId: string,
     input: any
   ): Promise<void> {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+    if (!this.hasPermission("generation")) {
       this.postToWorker({
         type: "generation_stream_error",
         requestId,
@@ -3131,6 +3638,7 @@ export class WorkerHost {
             parameters: input.parameters,
             connection_id: input.connection_id,
             tools: input.tools,
+            reasoning: input.reasoning,
             signal: abortController.signal,
           });
           break;
@@ -3140,6 +3648,7 @@ export class WorkerHost {
             connection_id: input.connection_id,
             parameters: input.parameters,
             tools: input.tools,
+            reasoning: input.reasoning,
             signal: abortController.signal,
           });
           break;
@@ -3212,7 +3721,7 @@ export class WorkerHost {
   // ─── Image Generation (gated by "image_gen" permission) ────────────
 
   private async handleImageGenGenerate(requestId: string, input: any): Promise<void> {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "image_gen")) {
+    if (!this.hasPermission("image_gen")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3293,7 +3802,7 @@ export class WorkerHost {
   }
 
   private handleImageGenProviders(requestId: string, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "image_gen")) {
+    if (!this.hasPermission("image_gen")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3315,7 +3824,7 @@ export class WorkerHost {
   }
 
   private handleImageGenConnectionsList(requestId: string, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "image_gen")) {
+    if (!this.hasPermission("image_gen")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3340,7 +3849,7 @@ export class WorkerHost {
   }
 
   private handleImageGenConnectionsGet(requestId: string, connectionId: string, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "image_gen")) {
+    if (!this.hasPermission("image_gen")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3365,7 +3874,7 @@ export class WorkerHost {
   }
 
   private async handleImageGenModels(requestId: string, connectionId: string, userId?: string): Promise<void> {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "image_gen")) {
+    if (!this.hasPermission("image_gen")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3408,7 +3917,7 @@ export class WorkerHost {
   }
 
   private handleConnectionsList(requestId: string, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+    if (!this.hasPermission("generation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3440,6 +3949,7 @@ export class WorkerHost {
         is_default: c.is_default,
         has_api_key: c.has_api_key,
         metadata: c.metadata,
+        reasoning_bindings: extractReasoningBindingsDTO(c.metadata),
         created_at: c.created_at,
         updated_at: c.updated_at,
       }));
@@ -3454,7 +3964,7 @@ export class WorkerHost {
     connectionId: string,
     userId?: string
   ): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+    if (!this.hasPermission("generation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -3490,6 +4000,7 @@ export class WorkerHost {
         is_default: c.is_default,
         has_api_key: c.has_api_key,
         metadata: c.metadata,
+        reasoning_bindings: extractReasoningBindingsDTO(c.metadata),
         created_at: c.created_at,
         updated_at: c.updated_at,
       };
@@ -3580,7 +4091,10 @@ export class WorkerHost {
   private handleStorageDelete(requestId: string, path: string): void {
     try {
       const fullPath = this.resolveStoragePath(path);
-      if (existsSync(fullPath)) unlinkSync(fullPath);
+      if (existsSync(fullPath)) {
+        if (statSync(fullPath).isDirectory()) rmSync(fullPath, { recursive: true, force: true });
+        else unlinkSync(fullPath);
+      }
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
@@ -3782,7 +4296,10 @@ export class WorkerHost {
     try {
       const resolvedUserId = this.resolveUserScopedUserId(userId);
       const fullPath = this.resolveUserStoragePath(path, resolvedUserId);
-      if (existsSync(fullPath)) unlinkSync(fullPath);
+      if (existsSync(fullPath)) {
+        if (statSync(fullPath).isDirectory()) rmSync(fullPath, { recursive: true, force: true });
+        else unlinkSync(fullPath);
+      }
       this.postToWorker({ type: "response", requestId, result: true });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
@@ -3985,7 +4502,7 @@ export class WorkerHost {
   // ─── Ephemeral storage ────────────────────────────────────────────────
 
   private getEphemeralBasePath(): string {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "ephemeral_storage")) {
+    if (!this.hasPermission("ephemeral_storage")) {
       throw new Error(`${PERMISSION_DENIED_PREFIX} ephemeral_storage — Ephemeral storage permission not granted`);
     }
     const base = resolve(this.getStorageRootPath(this.manifest.identifier), ".ephemeral");
@@ -4009,7 +4526,7 @@ export class WorkerHost {
   private getEphemeralReservationsPath(identifier: string = this.manifest.identifier): string {
     if (
       identifier === this.manifest.identifier &&
-      !managerSvc.hasPermission(this.manifest.identifier, "ephemeral_storage")
+      !this.hasPermission("ephemeral_storage")
     ) {
       throw new Error(`${PERMISSION_DENIED_PREFIX} ephemeral_storage — Ephemeral storage permission not granted`);
     }
@@ -4619,7 +5136,7 @@ export class WorkerHost {
 
   private handlePermissionsGetGranted(requestId: string): void {
     try {
-      const granted = managerSvc.getGrantedPermissions(this.manifest.identifier);
+      const granted = this.getGrantedPermissions();
       this.postToWorker({ type: "response", requestId, result: granted });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
@@ -4644,7 +5161,7 @@ export class WorkerHost {
 
   private handleChatGetMessages(requestId: string, chatId: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
       }
 
@@ -4671,13 +5188,21 @@ export class WorkerHost {
 
         return {
           id: m.id,
+          chat_id: m.chat_id,
+          index_in_chat: m.index_in_chat,
+          is_user: m.is_user,
+          name: m.name,
           role,
           content: m.content,
+          send_date: m.send_date,
           extra,
           metadata,
           swipe_id: swipeId,
           swipes,
           swipe_dates: swipeDates,
+          parent_message_id: m.parent_message_id,
+          branch_id: m.branch_id,
+          created_at: m.created_at,
         };
       });
 
@@ -4687,18 +5212,26 @@ export class WorkerHost {
     }
   }
 
-  private handleChatAppendMessage(
+  private async handleChatAppendMessage(
     requestId: string,
     chatId: string,
     message: {
       role: "system" | "user" | "assistant";
       content: string;
       metadata?: Record<string, unknown>;
-    }
-  ): void {
+    },
+    options?: ChatAppendMessageOptions,
+  ): Promise<void> {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
+      }
+
+      const triggerGeneration =
+        options === true ||
+        (typeof options === "object" && options !== null && options.triggerGeneration === true);
+      if (triggerGeneration && !this.hasPermission("generation")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} generation — Generation permission not granted`);
       }
 
       const userId = this.getChatOwnerId(chatId);
@@ -4726,10 +5259,35 @@ export class WorkerHost {
         userId
       );
 
+      let generationId: string | undefined;
+      if (triggerGeneration) {
+        const generationOptions =
+          typeof options === "object" &&
+          options !== null &&
+          typeof options.generation === "object" &&
+          options.generation !== null
+            ? options.generation
+            : undefined;
+        const generation = await generateSvc.startGeneration({
+          userId,
+          chat_id: chatId,
+          generation_type: "normal",
+          connection_id: generationOptions?.connection_id,
+          persona_id: generationOptions?.persona_id,
+          persona_addon_states: generationOptions?.persona_addon_states,
+          preset_id: generationOptions?.preset_id,
+          force_preset_id: generationOptions?.force_preset_id,
+          parameters: generationOptions?.parameters,
+          target_character_id: generationOptions?.target_character_id,
+          retain_council: generationOptions?.retain_council,
+        });
+        generationId = generation.generationId;
+      }
+
       this.postToWorker({
         type: "response",
         requestId,
-        result: { id: created.id },
+        result: generationId ? { id: created.id, generationId } : { id: created.id },
       });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
@@ -4747,10 +5305,11 @@ export class WorkerHost {
       swipe_id?: number;
       swipe_dates?: number[];
       reasoning?: { text?: string | null; duration?: number | null };
+      skipChunkRebuild?: boolean;
     }
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
       }
 
@@ -4774,13 +5333,14 @@ export class WorkerHost {
       if (patch.reasoning && typeof patch.reasoning === "object") {
         const r = patch.reasoning;
         if (r.text !== undefined) {
-          if (r.text === null) delete extra.reasoning;
+          if (r.text === null) extra.reasoning = null;
           else extra.reasoning = r.text;
           extraDirty = true;
         }
         if (r.duration !== undefined) {
-          if (r.duration === null) delete extra.reasoning_duration;
-          else extra.reasoning_duration = r.duration;
+          delete extra.reasoning_duration;
+          if (r.duration === null) extra.reasoningDuration = null;
+          else extra.reasoningDuration = r.duration;
           extraDirty = true;
         }
       }
@@ -4791,6 +5351,7 @@ export class WorkerHost {
         swipes: patch.swipes,
         swipe_id: patch.swipe_id,
         swipe_dates: patch.swipe_dates,
+        skipChunkRebuild: patch.skipChunkRebuild === true,
       });
 
       this.postToWorker({ type: "response", requestId, result: true });
@@ -4805,7 +5366,7 @@ export class WorkerHost {
     messageId: string
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
       }
 
@@ -4832,7 +5393,7 @@ export class WorkerHost {
     hidden: boolean,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
       }
 
@@ -4859,7 +5420,7 @@ export class WorkerHost {
     hidden: boolean,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
       }
 
@@ -4887,7 +5448,7 @@ export class WorkerHost {
     messageId: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+      if (!this.hasPermission("chat_mutation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chat_mutation — Chat mutation permission not granted`);
       }
 
@@ -4966,7 +5527,7 @@ export class WorkerHost {
   }
 
   private enforceTrackedEventPermission(): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "event_tracking")) {
+    if (!this.hasPermission("event_tracking")) {
       throw new Error(`${PERMISSION_DENIED_PREFIX} event_tracking — Event tracking permission not granted`);
     }
   }
@@ -5107,7 +5668,8 @@ export class WorkerHost {
     url: string,
     options: any
   ): Promise<void> {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "cors_proxy")) {
+    options = options || {};
+    if (!this.hasPermission("cors_proxy")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -5117,93 +5679,82 @@ export class WorkerHost {
     }
 
     const isBinary = options?.responseType === "arraybuffer";
+    const binaryMediaType: "audio" | "font" | "image" =
+      options?.mediaType === "audio" ? "audio"
+      : options?.mediaType === "font" ? "font"
+      : "image";
 
     try {
-      // Validate URL against SSRF before making the request
-      const parsed = new URL(url);
-      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-        throw new SSRFError(`Only http and https URLs are allowed`);
-      }
-      await validateHost(parsed.hostname);
+      const response = await safeFetch(url, {
+        method: options.method || "GET",
+        headers: options.headers,
+        body: options.body,
+        timeoutMs: CORS_PROXY_TIMEOUT_MS,
+        maxBytes: CORS_PROXY_MAX_BODY_BYTES,
+      });
 
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), CORS_PROXY_TIMEOUT_MS);
-        let response: Response;
-        try {
-          response = await fetch(url, {
-            method: options.method || "GET",
-            headers: options.headers,
-            body: options.body,
-            signal: controller.signal,
-          });
-        } finally {
-          clearTimeout(timer);
-        }
-        // Reject obvious oversize responses up-front; for unknown lengths we
-        // still cap the buffered body below.
-        const declared = response.headers.get("content-length");
-        if (declared && parseInt(declared, 10) > CORS_PROXY_MAX_BODY_BYTES) {
+      // Reject obvious oversize responses up-front; for unknown lengths we
+      // still cap the buffered body below.
+      const declared = response.headers.get("content-length");
+      if (declared && parseInt(declared, 10) > CORS_PROXY_MAX_BODY_BYTES) {
+        throw new Error(
+          `CORS proxy response too large (declared ${declared} bytes, max ${CORS_PROXY_MAX_BODY_BYTES})`,
+        );
+      }
+
+      if (isBinary) {
+        // Transparent proxy for sandboxed widgets: only serve approved media data.
+        const contentType = (response.headers.get("content-type") || "").toLowerCase();
+        const isAllowedContentType =
+          binaryMediaType === "audio"
+            ? contentType.startsWith("audio/") || contentType.startsWith("application/ogg")
+            : binaryMediaType === "font"
+              ? contentType.startsWith("font/") ||
+                contentType === "application/font-woff" ||
+                contentType === "application/font-woff2" ||
+                contentType === "application/x-font-ttf" ||
+                contentType === "application/x-font-otf" ||
+                contentType === "application/vnd.ms-fontobject"
+              : contentType.startsWith("image/");
+        if (!isAllowedContentType) {
           throw new Error(
-            `CORS proxy response too large (declared ${declared} bytes, max ${CORS_PROXY_MAX_BODY_BYTES})`,
+            `CORS proxy transparent proxy only serves ${binaryMediaType} data (received Content-Type: ${contentType || "unknown"})`
           );
         }
 
-        if (isBinary) {
-          // Transparent proxy for sandboxed widgets: only serve image data
-          const contentType = (response.headers.get("content-type") || "").toLowerCase();
-          if (!contentType.startsWith("image/")) {
-            throw new Error(
-              `CORS proxy transparent proxy only serves image data (received Content-Type: ${contentType || "unknown"})`
-            );
-          }
-
-          const binary = await readResponseBodyBinaryCapped(response, CORS_PROXY_MAX_BODY_BYTES);
-          if (!contentType.includes("svg") && !validateImageMagicBytes(binary, contentType)) {
-            throw new Error("CORS proxy transparent proxy rejected: downloaded content does not match a known image format");
-          }
-
-          this.postToWorker({
-            type: "response",
-            requestId,
-            result: {
-              status: response.status,
-              statusText: response.statusText,
-              headers: Object.fromEntries(response.headers.entries()),
-              body: Buffer.from(binary).toString("base64"),
-              encoding: "base64",
-            },
-          });
-        } else {
-          const text = await readResponseBodyCapped(response, CORS_PROXY_MAX_BODY_BYTES);
-          this.postToWorker({
-            type: "response",
-            requestId,
-            result: {
-              status: response.status,
-              statusText: response.statusText,
-              headers: Object.fromEntries(response.headers.entries()),
-              body: text,
-            },
-          });
-        }
-      } catch (fetchErr: any) {
-        if (isBinary) {
-          throw fetchErr;
-        }
-        if (/^\d+\.\d+\.\d+\.\d+$/.test(parsed.hostname)) {
-          throw fetchErr;
+        const binary = await readResponseBodyBinaryCapped(response, CORS_PROXY_MAX_BODY_BYTES);
+        const hasValidMagic =
+          binaryMediaType === "audio"
+            ? validateAudioMagicBytes(binary, contentType)
+            : binaryMediaType === "font"
+              ? validateFontMagicBytes(binary, contentType)
+              : contentType.includes("svg") || validateImageMagicBytes(binary, contentType);
+        if (!hasValidMagic) {
+          throw new Error(`CORS proxy transparent proxy rejected: downloaded content does not match a known ${binaryMediaType} format`);
         }
 
-        const retried = await requestWithAddressFamily(url, {
-          method: options.method || "GET",
-          headers: options.headers,
-          body: options.body,
-        }, 4);
         this.postToWorker({
           type: "response",
           requestId,
-          result: retried,
+          result: {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            body: Buffer.from(binary).toString("base64"),
+            encoding: "base64",
+          },
+        });
+      } else {
+        const text = await readResponseBodyCapped(response, CORS_PROXY_MAX_BODY_BYTES);
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            body: text,
+          },
         });
       }
     } catch (err: any) {
@@ -5215,7 +5766,7 @@ export class WorkerHost {
 
   private handleRegisterContextHandler(priority?: number): void {
     if (
-      !managerSvc.hasPermission(this.manifest.identifier, "context_handler")
+      !this.hasPermission("context_handler")
     ) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] Context handler permission not granted`
@@ -5271,7 +5822,7 @@ export class WorkerHost {
   // ─── Message content processor ───────────────────────────────────────
 
   private handleRegisterMessageContentProcessor(priority?: number): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "chat_mutation")) {
+    if (!this.hasPermission("chat_mutation")) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] chat_mutation permission not granted for registerMessageContentProcessor`
       );
@@ -5324,7 +5875,7 @@ export class WorkerHost {
   }
 
   private handleRegisterMacroInterceptor(priority?: number): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "macro_interceptor")) {
+    if (!this.hasPermission("macro_interceptor")) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] macro_interceptor permission not granted for registerMacroInterceptor`
       );
@@ -5376,7 +5927,7 @@ export class WorkerHost {
   }
 
   private handleRegisterWorldInfoInterceptor(priority?: number): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+    if (!this.hasPermission("generation")) {
       console.warn(
         `[Spindle:${this.manifest.identifier}] generation permission not granted for registerWorldInfoInterceptor`
       );
@@ -5651,6 +6202,154 @@ export class WorkerHost {
     }
   }
 
+  // ─── Presets CRUD (gated: "presets") ────────────────────────────────
+
+  private resolvePresetUserOrThrow(userId?: string): string {
+    if (!this.hasPermission("presets")) {
+      throw new Error(`${PERMISSION_DENIED_PREFIX} presets — Presets permission not granted`);
+    }
+    const resolvedUserId = this.resolveEffectiveUserId(userId);
+    if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+    this.enforceScopedUser(resolvedUserId);
+    return resolvedUserId;
+  }
+
+  private handlePresetsList(requestId: string, limit?: number, offset?: number, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      const result = presetsSvc.listPresets(resolvedUserId, {
+        limit: Math.min(limit || 50, 200),
+        offset: offset || 0,
+      });
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: { data: result.data, total: result.total },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetsGet(requestId: string, presetId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      this.postToWorker({ type: "response", requestId, result: presetsSvc.getPreset(resolvedUserId, presetId) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetsCreate(requestId: string, input: CreatePresetInput, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      if (!input?.name || typeof input.name !== "string" || !input.name.trim()) {
+        throw new Error("Preset name is required");
+      }
+      if (!input?.provider || typeof input.provider !== "string" || !input.provider.trim()) {
+        throw new Error("Preset provider is required");
+      }
+      const preset = presetsSvc.createPreset(resolvedUserId, input);
+      this.postToWorker({ type: "response", requestId, result: preset });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetsUpdate(requestId: string, presetId: string, input: UpdatePresetInput, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      const preset = presetsSvc.updatePreset(resolvedUserId, presetId, input || {});
+      if (!preset) throw new Error("Preset not found");
+      this.postToWorker({ type: "response", requestId, result: preset });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetsDelete(requestId: string, presetId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      this.postToWorker({ type: "response", requestId, result: presetsSvc.deletePreset(resolvedUserId, presetId) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetBlocksList(requestId: string, presetId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      const blocks = presetsSvc.listPromptBlocks(resolvedUserId, presetId);
+      if (!blocks) throw new Error("Preset not found");
+      this.postToWorker({ type: "response", requestId, result: blocks });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetBlocksGet(requestId: string, presetId: string, blockId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      this.postToWorker({ type: "response", requestId, result: presetsSvc.getPromptBlock(resolvedUserId, presetId, blockId) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetBlocksCreate(
+    requestId: string,
+    presetId: string,
+    input: presetsSvc.CreatePromptBlockInput,
+    index?: number,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      const block = presetsSvc.createPromptBlock(resolvedUserId, presetId, input || {}, index);
+      if (!block) throw new Error("Preset not found");
+      this.postToWorker({ type: "response", requestId, result: block });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetBlocksUpdate(
+    requestId: string,
+    presetId: string,
+    blockId: string,
+    input: presetsSvc.UpdatePromptBlockInput,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      const block = presetsSvc.updatePromptBlock(resolvedUserId, presetId, blockId, input || {});
+      if (!block) throw new Error("Prompt block not found");
+      this.postToWorker({ type: "response", requestId, result: block });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetBlocksDelete(requestId: string, presetId: string, blockId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      this.postToWorker({ type: "response", requestId, result: presetsSvc.deletePromptBlock(resolvedUserId, presetId, blockId) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handlePresetCategoriesList(requestId: string, presetId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolvePresetUserOrThrow(userId);
+      const groups = presetsSvc.listPromptBlockCategories(resolvedUserId, presetId);
+      if (!groups) throw new Error("Preset not found");
+      this.postToWorker({ type: "response", requestId, result: groups });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
   // ─── Characters (gated: "characters") ──────────────────────────────
 
   private toCharacterDTO(c: any): CharacterDTO {
@@ -5695,7 +6394,7 @@ export class WorkerHost {
 
   private handleCharactersList(requestId: string, limit?: number, offset?: number, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+      if (!this.hasPermission("characters")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5721,7 +6420,7 @@ export class WorkerHost {
 
   private handleCharactersGet(requestId: string, characterId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+      if (!this.hasPermission("characters")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5741,7 +6440,7 @@ export class WorkerHost {
 
   private handleCharactersCreate(requestId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+      if (!this.hasPermission("characters")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5790,7 +6489,7 @@ export class WorkerHost {
   ): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+        if (!this.hasPermission("characters")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5822,7 +6521,7 @@ export class WorkerHost {
 
   private handleCharactersUpdate(requestId: string, characterId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+      if (!this.hasPermission("characters")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5867,7 +6566,7 @@ export class WorkerHost {
 
   private handleCharactersDelete(requestId: string, characterId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "characters")) {
+      if (!this.hasPermission("characters")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5911,7 +6610,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+      if (!this.hasPermission("images")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5949,7 +6648,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+      if (!this.hasPermission("images")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -5975,7 +6674,7 @@ export class WorkerHost {
   private handleImagesUpload(requestId: string, input: any, userId?: string): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+        if (!this.hasPermission("images")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6012,6 +6711,84 @@ export class WorkerHost {
     })();
   }
 
+  private handleImagesUploadMany(
+    requestId: string,
+    items: any[],
+    userId?: string,
+    concurrency?: number,
+  ): void {
+    (async () => {
+      try {
+        if (!this.hasPermission("images")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        if (!Array.isArray(items)) {
+          throw new Error("items must be an array of ImageUploadDTO");
+        }
+
+        const normalised: imagesSvc.UploadImagesItem[] = new Array(items.length);
+        const failures: Array<{ index: number; error: string }> = [];
+        for (let i = 0; i < items.length; i++) {
+          const input = items[i];
+          if (!input || typeof input !== "object") {
+            failures.push({ index: i, error: "item must be an object" });
+            continue;
+          }
+          if (!(input.data instanceof Uint8Array) || input.data.byteLength === 0) {
+            failures.push({ index: i, error: "Image data must be a non-empty Uint8Array" });
+            continue;
+          }
+          normalised[i] = {
+            data: input.data,
+            filename: typeof input.filename === "string" && input.filename.trim()
+              ? input.filename.trim()
+              : "image.png",
+            mime_type: typeof input.mime_type === "string" && input.mime_type.trim()
+              ? input.mime_type.trim()
+              : "image/png",
+            ...(typeof input.owner_character_id === "string" && input.owner_character_id.trim()
+              ? { owner_character_id: input.owner_character_id.trim() }
+              : {}),
+            ...(typeof input.owner_chat_id === "string" && input.owner_chat_id.trim()
+              ? { owner_chat_id: input.owner_chat_id.trim() }
+              : {}),
+          };
+        }
+
+        const validIndices: number[] = [];
+        const validItems: imagesSvc.UploadImagesItem[] = [];
+        for (let i = 0; i < normalised.length; i++) {
+          if (normalised[i] !== undefined) {
+            validIndices.push(i);
+            validItems.push(normalised[i]!);
+          }
+        }
+
+        const batchResults = await imagesSvc.uploadImages(resolvedUserId, validItems, {
+          owner_extension_identifier: this.manifest.identifier,
+          concurrency,
+        });
+
+        const results: Array<{ id?: string; error?: string }> = new Array(items.length);
+        for (const f of failures) results[f.index] = { error: f.error };
+        for (let k = 0; k < validIndices.length; k++) {
+          const out = batchResults[k]!;
+          results[validIndices[k]!] = out.id !== undefined
+            ? { id: out.id }
+            : { error: out.error ?? "unknown error" };
+        }
+
+        this.postToWorker({ type: "response", requestId, result: results });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
   private handleImagesUploadFromDataUrl(
     requestId: string,
     dataUrl: string,
@@ -6022,7 +6799,7 @@ export class WorkerHost {
   ): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+        if (!this.hasPermission("images")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6051,7 +6828,7 @@ export class WorkerHost {
 
   private handleImagesDelete(requestId: string, imageId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "images")) {
+      if (!this.hasPermission("images")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} images — Images permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6063,6 +6840,288 @@ export class WorkerHost {
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
+  }
+
+  private tempExtensionForMediaSource(filename?: string, mimeType?: string): string {
+    const explicit = extname(filename || "").trim().toLowerCase();
+    if (/^\.[a-z0-9]{1,8}$/.test(explicit)) return explicit;
+
+    switch ((mimeType || "").trim().toLowerCase()) {
+      case "video/mp4":
+        return ".mp4";
+      case "video/webm":
+        return ".webm";
+      case "video/quicktime":
+        return ".mov";
+      case "video/x-m4v":
+        return ".m4v";
+      case "video/x-matroska":
+        return ".mkv";
+      case "audio/mpeg":
+      case "audio/mp3":
+        return ".mp3";
+      case "audio/wav":
+      case "audio/x-wav":
+        return ".wav";
+      case "audio/ogg":
+      case "audio/ogg; codecs=opus":
+      case "audio/opus":
+        return ".ogg";
+      case "audio/aac":
+        return ".aac";
+      case "audio/flac":
+        return ".flac";
+      case "audio/mp4":
+        return ".m4a";
+      case "audio/webm":
+        return ".webm";
+      case "image/png":
+        return ".png";
+      case "image/jpeg":
+        return ".jpg";
+      case "image/webp":
+        return ".webp";
+      case "image/gif":
+        return ".gif";
+      case "image/avif":
+        return ".avif";
+      case "image/svg+xml":
+        return ".svg";
+      default:
+        return ".bin";
+    }
+  }
+
+  private async resolveMediaSource(
+    source: mediaSvc.MediaSourceDTO,
+    resolvedUserId: string,
+  ): Promise<ResolvedWorkerMediaSource> {
+    if (!source || typeof source !== "object") {
+      throw new Error("input.source is required");
+    }
+
+    switch (source.kind) {
+      case "inline": {
+        if (!(source.data instanceof Uint8Array) || source.data.byteLength === 0) {
+          throw new Error("inline media source data must be a non-empty Uint8Array");
+        }
+        const workdir = mkdtempSync(join(tmpdir(), "lumiverse-spindle-media-src-"));
+        const filename = typeof source.filename === "string" && source.filename.trim()
+          ? source.filename.trim()
+          : `inline${this.tempExtensionForMediaSource(undefined, source.mime_type)}`;
+        const ext = this.tempExtensionForMediaSource(filename, source.mime_type);
+        const path = join(workdir, `input${ext}`);
+        await Bun.write(path, source.data);
+        return {
+          path,
+          filename,
+          mime_type: typeof source.mime_type === "string" && source.mime_type.trim()
+            ? source.mime_type.trim()
+            : undefined,
+          cleanup: () => {
+            try {
+              rmSync(workdir, { recursive: true, force: true });
+            } catch {
+              /* ignore cleanup failure */
+            }
+          },
+        };
+      }
+      case "upload": {
+        const uploadId = typeof source.upload_id === "string" ? source.upload_id.trim() : "";
+        if (!uploadId) throw new Error("upload media source requires upload_id");
+        const rec = spindleUploads.getUpload(uploadId);
+        if (!rec || rec.ownerUserId !== resolvedUserId || rec.extensionIdentifier !== this.manifest.identifier) {
+          throw new Error("upload media source not found");
+        }
+        return {
+          path: rec.path,
+          filename: (typeof source.filename === "string" && source.filename.trim()) ? source.filename.trim() : rec.fileName,
+          mime_type: typeof source.mime_type === "string" && source.mime_type.trim()
+            ? source.mime_type.trim()
+            : undefined,
+        };
+      }
+      case "image": {
+        const imageId = typeof source.image_id === "string" ? source.image_id.trim() : "";
+        if (!imageId) throw new Error("image media source requires image_id");
+        const image = imagesSvc.getImage(resolvedUserId, imageId);
+        if (!image) throw new Error("image media source not found");
+        const path = await imagesSvc.getImageFilePath(resolvedUserId, imageId);
+        if (!path) throw new Error("image media source file not found");
+        return {
+          path,
+          filename: image.original_filename || image.id,
+          mime_type: image.mime_type || undefined,
+        };
+      }
+      case "audio": {
+        const audioId = typeof source.audio_id === "string" ? source.audio_id.trim() : "";
+        if (!audioId) throw new Error("audio media source requires audio_id");
+        const audio = audioSvc.getAudio(resolvedUserId, audioId);
+        if (!audio) throw new Error("audio media source not found");
+        const path = audioSvc.getAudioFilePath(resolvedUserId, audioId);
+        if (!path) throw new Error("audio media source file not found");
+        return {
+          path,
+          filename: audio.original_filename || audio.filename,
+          mime_type: audio.mime_type || undefined,
+        };
+      }
+      default:
+        throw new Error("unsupported media source kind");
+    }
+  }
+
+  private cleanupResolvedMediaSource(source: ResolvedWorkerMediaSource | null | undefined): void {
+    try {
+      source?.cleanup?.();
+    } catch {
+      /* ignore cleanup failure */
+    }
+  }
+
+  private handleMediaAudioConvert(requestId: string, input: mediaSvc.MediaConvertAudioRequestDTO): void {
+    (async () => {
+      let source: ResolvedWorkerMediaSource | null = null;
+      try {
+        if (!this.hasPermission("media")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} media — Media permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(input?.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        source = await this.resolveMediaSource(input?.source as mediaSvc.MediaSourceDTO, resolvedUserId);
+        const result = await mediaSvc.convertAudio(source, input);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
+      } finally {
+        this.cleanupResolvedMediaSource(source);
+      }
+    })();
+  }
+
+  private handleMediaVideoConvert(requestId: string, input: mediaSvc.MediaConvertVideoRequestDTO): void {
+    (async () => {
+      let source: ResolvedWorkerMediaSource | null = null;
+      try {
+        if (!this.hasPermission("media")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} media — Media permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(input?.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        source = await this.resolveMediaSource(input?.source as mediaSvc.MediaSourceDTO, resolvedUserId);
+        mediaSvc.assertLikelyVideoSource(source);
+        const result = await mediaSvc.convertVideo(source, input);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
+      } finally {
+        this.cleanupResolvedMediaSource(source);
+      }
+    })();
+  }
+
+  private handleMediaVideoTranscode(requestId: string, input: mediaSvc.MediaTranscodeVideoRequestDTO): void {
+    (async () => {
+      let source: ResolvedWorkerMediaSource | null = null;
+      try {
+        if (!this.hasPermission("media")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} media — Media permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(input?.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        source = await this.resolveMediaSource(input?.source as mediaSvc.MediaSourceDTO, resolvedUserId);
+        mediaSvc.assertLikelyVideoSource(source);
+        const result = await mediaSvc.transcodeVideo(source, input);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
+      } finally {
+        this.cleanupResolvedMediaSource(source);
+      }
+    })();
+  }
+
+  private handleMediaVideoRemoveAudio(requestId: string, input: mediaSvc.MediaRemoveAudioFromVideoRequestDTO): void {
+    (async () => {
+      let source: ResolvedWorkerMediaSource | null = null;
+      try {
+        if (!this.hasPermission("media")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} media — Media permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(input?.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        source = await this.resolveMediaSource(input?.source as mediaSvc.MediaSourceDTO, resolvedUserId);
+        mediaSvc.assertLikelyVideoSource(source);
+        const result = await mediaSvc.removeAudioFromVideo(source, input);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
+      } finally {
+        this.cleanupResolvedMediaSource(source);
+      }
+    })();
+  }
+
+  private handleMediaVideoAddAudio(requestId: string, input: mediaSvc.MediaAddAudioToVideoRequestDTO): void {
+    (async () => {
+      let video: ResolvedWorkerMediaSource | null = null;
+      let audio: ResolvedWorkerMediaSource | null = null;
+      try {
+        if (!this.hasPermission("media")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} media — Media permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(input?.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        video = await this.resolveMediaSource(input?.video as mediaSvc.MediaSourceDTO, resolvedUserId);
+        audio = await this.resolveMediaSource(input?.audio as mediaSvc.MediaSourceDTO, resolvedUserId);
+        mediaSvc.assertLikelyVideoSource(video, "video");
+        const result = await mediaSvc.addAudioToVideo(video, audio, input);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
+      } finally {
+        this.cleanupResolvedMediaSource(video);
+        this.cleanupResolvedMediaSource(audio);
+      }
+    })();
+  }
+
+  private handleMediaVideoFromImageAudio(requestId: string, input: mediaSvc.MediaCreateVideoFromImageAndAudioRequestDTO): void {
+    (async () => {
+      let image: ResolvedWorkerMediaSource | null = null;
+      let audio: ResolvedWorkerMediaSource | null = null;
+      try {
+        if (!this.hasPermission("media")) {
+          throw new Error(`${PERMISSION_DENIED_PREFIX} media — Media permission not granted`);
+        }
+        const resolvedUserId = this.resolveEffectiveUserId(input?.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+
+        image = await this.resolveMediaSource(input?.image as mediaSvc.MediaSourceDTO, resolvedUserId);
+        audio = await this.resolveMediaSource(input?.audio as mediaSvc.MediaSourceDTO, resolvedUserId);
+        mediaSvc.assertLikelyImageSource(image, "image");
+        const result = await mediaSvc.createVideoFromImageAndAudio(image, audio, input);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err?.message || String(err) });
+      } finally {
+        this.cleanupResolvedMediaSource(image);
+        this.cleanupResolvedMediaSource(audio);
+      }
+    })();
   }
 
   // ─── Chats CRUD (gated: "chats") ──────────────────────────────────
@@ -6086,7 +7145,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+      if (!this.hasPermission("chats")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6113,7 +7172,7 @@ export class WorkerHost {
 
   private handleChatsGet(requestId: string, chatId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+      if (!this.hasPermission("chats")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6129,7 +7188,7 @@ export class WorkerHost {
 
   private handleChatsGetActive(requestId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+      if (!this.hasPermission("chats")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6151,15 +7210,26 @@ export class WorkerHost {
 
   private handleChatsUpdate(requestId: string, chatId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+      if (!this.hasPermission("chats")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
       if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
       this.enforceScopedUser(resolvedUserId);
 
-      const c = chatsSvc.updateChat(resolvedUserId, chatId, input || {});
+      const before = chatsSvc.getChat(resolvedUserId, chatId);
+      let c = chatsSvc.updateChat(resolvedUserId, chatId, input || {});
       if (!c) throw new Error("Chat not found");
+      // Spindle metadata updates are full replaces, so book attachments can
+      // change (or vanish) on any metadata write — mirror the REST routes'
+      // orphaned wi_state pruning.
+      if (input?.metadata !== undefined) {
+        const beforeIds = JSON.stringify(before?.metadata?.chat_world_book_ids ?? []);
+        const afterIds = JSON.stringify(c.metadata?.chat_world_book_ids ?? []);
+        if (beforeIds !== afterIds) {
+          c = pruneOrphanedWiState(resolvedUserId, c);
+        }
+      }
       this.postToWorker({ type: "response", requestId, result: this.toChatDTO(c) });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
@@ -6168,7 +7238,7 @@ export class WorkerHost {
 
   private handleChatsDelete(requestId: string, chatId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+      if (!this.hasPermission("chats")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6238,7 +7308,7 @@ export class WorkerHost {
 
   private handleWorldBooksList(requestId: string, limit?: number, offset?: number, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6264,7 +7334,7 @@ export class WorkerHost {
 
   private handleWorldBooksGet(requestId: string, worldBookId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6280,7 +7350,7 @@ export class WorkerHost {
 
   private handleWorldBooksCreate(requestId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6304,7 +7374,7 @@ export class WorkerHost {
 
   private handleWorldBooksUpdate(requestId: string, worldBookId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6321,7 +7391,7 @@ export class WorkerHost {
 
   private handleWorldBooksDelete(requestId: string, worldBookId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6345,7 +7415,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6371,7 +7441,7 @@ export class WorkerHost {
 
   private handleWorldBookEntriesGet(requestId: string, entryId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6387,7 +7457,7 @@ export class WorkerHost {
 
   private handleWorldBookEntriesCreate(requestId: string, worldBookId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6404,7 +7474,7 @@ export class WorkerHost {
 
   private handleWorldBookEntriesUpdate(requestId: string, entryId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6421,7 +7491,7 @@ export class WorkerHost {
 
   private handleWorldBookEntriesDelete(requestId: string, entryId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6479,7 +7549,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6520,7 +7590,7 @@ export class WorkerHost {
 
   private handleDatabanksGet(requestId: string, databankId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6536,7 +7606,7 @@ export class WorkerHost {
 
   private handleDatabanksCreate(requestId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6567,7 +7637,7 @@ export class WorkerHost {
 
   private handleDatabanksUpdate(requestId: string, databankId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6590,7 +7660,7 @@ export class WorkerHost {
   private handleDatabanksDelete(requestId: string, databankId: string, userId?: string): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        if (!this.hasPermission("databanks")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6617,7 +7687,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6643,7 +7713,7 @@ export class WorkerHost {
 
   private handleDatabankDocumentsGet(requestId: string, documentId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6665,7 +7735,7 @@ export class WorkerHost {
   ): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        if (!this.hasPermission("databanks")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6720,7 +7790,7 @@ export class WorkerHost {
 
   private handleDatabankDocumentsUpdate(requestId: string, documentId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6743,7 +7813,7 @@ export class WorkerHost {
   private handleDatabankDocumentsDelete(requestId: string, documentId: string, userId?: string): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        if (!this.hasPermission("databanks")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6762,7 +7832,7 @@ export class WorkerHost {
 
   private handleDatabankDocumentsGetContent(requestId: string, documentId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+      if (!this.hasPermission("databanks")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6783,7 +7853,7 @@ export class WorkerHost {
   private handleDatabankDocumentsReprocess(requestId: string, documentId: string, userId?: string): void {
     (async () => {
       try {
-        if (!managerSvc.hasPermission(this.manifest.identifier, "databanks")) {
+        if (!this.hasPermission("databanks")) {
           throw new Error(`${PERMISSION_DENIED_PREFIX} databanks — Databanks permission not granted`);
         }
         const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6826,7 +7896,7 @@ export class WorkerHost {
 
   private handlePersonasList(requestId: string, limit?: number, offset?: number, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6852,7 +7922,7 @@ export class WorkerHost {
 
   private handlePersonasGet(requestId: string, personaId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6868,7 +7938,7 @@ export class WorkerHost {
 
   private handlePersonasGetDefault(requestId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6884,7 +7954,7 @@ export class WorkerHost {
 
   private handlePersonasGetActive(requestId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6906,7 +7976,7 @@ export class WorkerHost {
 
   private handlePersonasCreate(requestId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6934,7 +8004,7 @@ export class WorkerHost {
 
   private handlePersonasUpdate(requestId: string, personaId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6951,7 +8021,7 @@ export class WorkerHost {
 
   private handlePersonasDelete(requestId: string, personaId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6967,7 +8037,7 @@ export class WorkerHost {
 
   private handlePersonasSwitch(requestId: string, personaId: string | null, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -6990,7 +8060,7 @@ export class WorkerHost {
 
   private handlePersonasGetWorldBook(requestId: string, personaId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "personas")) {
+      if (!this.hasPermission("personas")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7012,6 +8082,79 @@ export class WorkerHost {
     }
   }
 
+  // ─── Global Add-ons (gated: "personas") ──────────────────────────────
+
+  private toGlobalAddonDTO(a: any): GlobalAddonDTO {
+    return {
+      id: a.id,
+      label: a.label || "",
+      content: a.content || "",
+      sort_order: a.sort_order ?? 0,
+      metadata: (typeof a.metadata === "object" && a.metadata) ? a.metadata : {},
+      created_at: a.created_at,
+      updated_at: a.updated_at,
+    };
+  }
+
+  private handleGlobalAddonsList(requestId: string, limit?: number, offset?: number, userId?: string): void {
+    try {
+      if (!this.hasPermission("personas")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const result = globalAddonsSvc.listGlobalAddons(resolvedUserId, {
+        limit: Math.min(limit || 50, 200),
+        offset: offset || 0,
+      });
+      this.postToWorker({
+        type: "response",
+        requestId,
+        result: {
+          data: result.data.map((a) => this.toGlobalAddonDTO(a)),
+          total: result.total,
+        },
+      });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleGlobalAddonsGet(requestId: string, addonId: string, userId?: string): void {
+    try {
+      if (!this.hasPermission("personas")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const addon = globalAddonsSvc.getGlobalAddon(resolvedUserId, addonId);
+      this.postToWorker({ type: "response", requestId, result: addon ? this.toGlobalAddonDTO(addon) : null });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleGlobalAddonsUpdate(requestId: string, addonId: string, input: any, userId?: string): void {
+    try {
+      if (!this.hasPermission("personas")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} personas — Personas permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const addon = globalAddonsSvc.updateGlobalAddon(resolvedUserId, addonId, input || {});
+      if (!addon) throw new Error("Global add-on not found");
+      this.postToWorker({ type: "response", requestId, result: this.toGlobalAddonDTO(addon) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
   // ─── Activated World Info (gated: "world_books") ─────────────────────
 
   private async handleWorldBooksGetActivated(
@@ -7020,7 +8163,7 @@ export class WorkerHost {
     userId?: string,
   ): Promise<void> {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "world_books")) {
+      if (!this.hasPermission("world_books")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7035,9 +8178,97 @@ export class WorkerHost {
         keys: e.keys,
         source: e.source,
         score: e.score,
+        bookId: e.bookId,
+        // The published Spindle SDK's WorldBookSourceDTO has no "peer" variant
+        // (a relayed multiplayer participant's persona lorebook). Surface it to
+        // extensions as its closest valid kind — "persona" — rather than bumping
+        // the SDK contract; the host's own Prompt Breakdown keeps the distinction.
+        bookSource: e.bookSource === "peer" ? "persona" : e.bookSource,
       }));
 
       this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Global World Books (gated: "world_books") ───────────────────────
+
+  // Global activation lives in the per-user "globalWorldBooks" setting, the
+  // same store the frontend World Book panel writes. putSetting emits
+  // SETTINGS_UPDATED, which keeps open frontend tabs in sync.
+  private readGlobalWorldBookIds(userId: string): string[] {
+    const raw = settingsSvc.getSetting(userId, "globalWorldBooks")?.value;
+    return this.sanitizeWorldBookIds(raw);
+  }
+
+  private requireWorldBooksUser(userId?: string): string {
+    if (!this.hasPermission("world_books")) {
+      throw new Error(`${PERMISSION_DENIED_PREFIX} world_books — World Books permission not granted`);
+    }
+    const resolvedUserId = this.resolveEffectiveUserId(userId);
+    if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+    this.enforceScopedUser(resolvedUserId);
+    return resolvedUserId;
+  }
+
+  private handleWorldBooksGetGlobal(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.requireWorldBooksUser(userId);
+      this.postToWorker({ type: "response", requestId, result: this.readGlobalWorldBookIds(resolvedUserId) });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksSetGlobal(requestId: string, worldBookIds: unknown, userId?: string): void {
+    try {
+      const resolvedUserId = this.requireWorldBooksUser(userId);
+      // Drop IDs that don't resolve to an existing book rather than throwing:
+      // the stored setting may carry stale IDs of since-deleted books, and a
+      // round-tripped getGlobal() → setGlobal() must not fail because of them.
+      const ids = this.sanitizeWorldBookIds(worldBookIds).filter((id) =>
+        worldBooksSvc.getWorldBook(resolvedUserId, id),
+      );
+      settingsSvc.putSetting(resolvedUserId, "globalWorldBooks", ids);
+      this.postToWorker({ type: "response", requestId, result: ids });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksActivateGlobal(requestId: string, worldBookId: unknown, userId?: string): void {
+    try {
+      const resolvedUserId = this.requireWorldBooksUser(userId);
+      if (typeof worldBookId !== "string" || !worldBookId.trim()) {
+        throw new Error("worldBookId is required");
+      }
+      if (!worldBooksSvc.getWorldBook(resolvedUserId, worldBookId)) {
+        throw new Error("World book not found");
+      }
+      const ids = this.readGlobalWorldBookIds(resolvedUserId);
+      if (!ids.includes(worldBookId)) {
+        ids.push(worldBookId);
+        settingsSvc.putSetting(resolvedUserId, "globalWorldBooks", ids);
+      }
+      this.postToWorker({ type: "response", requestId, result: ids });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleWorldBooksDeactivateGlobal(requestId: string, worldBookId: unknown, userId?: string): void {
+    try {
+      const resolvedUserId = this.requireWorldBooksUser(userId);
+      if (typeof worldBookId !== "string" || !worldBookId.trim()) {
+        throw new Error("worldBookId is required");
+      }
+      const current = this.readGlobalWorldBookIds(resolvedUserId);
+      const ids = current.filter((id) => id !== worldBookId);
+      if (ids.length !== current.length) {
+        settingsSvc.putSetting(resolvedUserId, "globalWorldBooks", ids);
+      }
+      this.postToWorker({ type: "response", requestId, result: ids });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
@@ -7082,7 +8313,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "regex_scripts")) {
+      if (!this.hasPermission("regex_scripts")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} regex_scripts — Regex Scripts permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7121,7 +8352,7 @@ export class WorkerHost {
 
   private handleRegexScriptsGet(requestId: string, scriptId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "regex_scripts")) {
+      if (!this.hasPermission("regex_scripts")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} regex_scripts — Regex Scripts permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7143,7 +8374,7 @@ export class WorkerHost {
     userId?: string,
   ): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "regex_scripts")) {
+      if (!this.hasPermission("regex_scripts")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} regex_scripts — Regex Scripts permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7167,7 +8398,7 @@ export class WorkerHost {
 
   private handleRegexScriptsCreate(requestId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "regex_scripts")) {
+      if (!this.hasPermission("regex_scripts")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} regex_scripts — Regex Scripts permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7191,7 +8422,7 @@ export class WorkerHost {
 
   private handleRegexScriptsUpdate(requestId: string, scriptId: string, input: any, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "regex_scripts")) {
+      if (!this.hasPermission("regex_scripts")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} regex_scripts — Regex Scripts permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7209,7 +8440,7 @@ export class WorkerHost {
 
   private handleRegexScriptsDelete(requestId: string, scriptId: string, userId?: string): void {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "regex_scripts")) {
+      if (!this.hasPermission("regex_scripts")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} regex_scripts — Regex Scripts permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7231,7 +8462,7 @@ export class WorkerHost {
     userId?: string,
   ): Promise<void> {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "generation")) {
+      if (!this.hasPermission("generation")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} generation — Generation permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7250,12 +8481,9 @@ export class WorkerHost {
         parameters: input.parameters,
       });
 
-      // Map LlmMessage[] to LlmMessageDTO[] (flatten multipart content to string)
       const messagesDTO: LlmMessageDTO[] = dryRunResult.messages.map((m) => ({
         role: m.role,
-        content: typeof m.content === "string"
-          ? m.content
-          : m.content.map((p: any) => p.text || "").join(""),
+        content: m.content,
         name: m.name,
       }));
 
@@ -7298,7 +8526,7 @@ export class WorkerHost {
     userId?: string,
   ): Promise<void> {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "chats")) {
+      if (!this.hasPermission("chats")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} chats — Chats permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7341,9 +8569,923 @@ export class WorkerHost {
         settingsSource: memoryResult.settingsSource,
         chunksAvailable: memoryResult.chunksAvailable,
         chunksPending: memoryResult.chunksPending,
+        retrievalMode: memoryResult.retrievalMode,
       };
 
       this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── Memory Cortex & Long-Term Chat Memory (gated: "memories") ───────
+
+  private requireMemoriesPermission(): void {
+    if (!this.hasPermission("memories")) {
+      throw new Error(`${PERMISSION_DENIED_PREFIX} memories — Memories permission not granted`);
+    }
+  }
+
+  /** Permission + userId resolution + chat ownership check used by every
+   *  chat-scoped memories.* handler. Returns the resolved userId. */
+  private resolveMemoriesChatContext(chatId: string, userId?: string): string {
+    this.requireMemoriesPermission();
+    const resolvedUserId = this.resolveEffectiveUserId(userId);
+    if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+    this.enforceScopedUser(resolvedUserId);
+    const chat = chatsSvc.getChat(resolvedUserId, chatId);
+    if (!chat) throw new Error("Chat not found");
+    return resolvedUserId;
+  }
+
+  /** Permission + userId resolution + entity ownership check (via chat). */
+  private resolveMemoriesEntityContext(
+    entityId: string,
+    userId?: string,
+  ): { userId: string; chatId: string } {
+    this.requireMemoriesPermission();
+    const resolvedUserId = this.resolveEffectiveUserId(userId);
+    if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+    this.enforceScopedUser(resolvedUserId);
+    const entity = entityGraphSvc.getEntity(entityId);
+    if (!entity) throw new Error("Entity not found");
+    const chat = chatsSvc.getChat(resolvedUserId, entity.chatId);
+    if (!chat) throw new Error("Entity not owned by caller");
+    return { userId: resolvedUserId, chatId: entity.chatId };
+  }
+
+  /** Permission + userId resolution + vault ownership check. */
+  private resolveMemoriesVaultContext(vaultId: string, userId?: string): string {
+    this.requireMemoriesPermission();
+    const resolvedUserId = this.resolveEffectiveUserId(userId);
+    if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+    this.enforceScopedUser(resolvedUserId);
+    const vault = cortexVaultSvc.getVaultRow(resolvedUserId, vaultId);
+    if (!vault) throw new Error("Vault not found");
+    return resolvedUserId;
+  }
+
+  private handleMemoriesConfigGet(requestId: string, userId?: string): void {
+    try {
+      this.requireMemoriesPermission();
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const config = memoryCortexSvc.getCortexConfig(resolvedUserId);
+      this.postToWorker({ type: "response", requestId, result: config });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesConfigPut(requestId: string, patch: any, userId?: string): void {
+    try {
+      this.requireMemoriesPermission();
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      if (!patch || typeof patch !== "object") throw new Error("patch must be an object");
+      const config = memoryCortexSvc.putCortexConfig(resolvedUserId, patch);
+      this.postToWorker({ type: "response", requestId, result: config });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesQueryCortex(requestId: string, query: any): void {
+    (async () => {
+      try {
+        this.requireMemoriesPermission();
+        if (!query || typeof query !== "object") throw new Error("query is required");
+        if (typeof query.chatId !== "string" || !query.chatId) throw new Error("query.chatId is required");
+        const resolvedUserId = this.resolveEffectiveUserId(query.userId);
+        if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+        this.enforceScopedUser(resolvedUserId);
+        const chat = chatsSvc.getChat(resolvedUserId, query.chatId);
+        if (!chat) throw new Error("Chat not found");
+
+        const result = await memoryCortexSvc.queryCortex({
+          chatId: query.chatId,
+          userId: resolvedUserId,
+          queryText: typeof query.queryText === "string" ? query.queryText : "",
+          entityFilter: Array.isArray(query.entityFilter) ? query.entityFilter : undefined,
+          timeRange: query.timeRange,
+          emotionalContext: Array.isArray(query.emotionalContext) ? query.emotionalContext : undefined,
+          generationType: typeof query.generationType === "string" ? query.generationType : "normal",
+          topK: typeof query.topK === "number" && query.topK > 0 ? query.topK : 10,
+          includeConsolidations: query.includeConsolidations !== false,
+          includeRelationships: query.includeRelationships !== false,
+          excludeMessageIds: Array.isArray(query.excludeMessageIds) ? query.excludeMessageIds : undefined,
+        });
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleMemoriesQueryLinked(
+    requestId: string,
+    chatId: string,
+    queryText: string | undefined,
+    userId?: string,
+  ): void {
+    (async () => {
+      try {
+        const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+        const result = await memoryCortexSvc.queryLinkedCortex(chatId, resolvedUserId, undefined, queryText);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleMemoriesGetCached(requestId: string, chatId: string): void {
+    try {
+      this.requireMemoriesPermission();
+      // Cached reads return null for chats the caller never populated, and
+      // the cache is only filled by callers that already had ownership.
+      const result = memoryCortexSvc.getCachedCortexResult(chatId);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesGetCachedLinked(requestId: string, chatId: string): void {
+    try {
+      this.requireMemoriesPermission();
+      const result = memoryCortexSvc.getCachedLinkedCortexResult(chatId);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesInvalidateCache(requestId: string, chatId: string): void {
+    try {
+      this.resolveMemoriesChatContext(chatId);
+      memoryCortexSvc.invalidateCortexCache(chatId);
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesInvalidateLinkedCache(requestId: string, chatId: string): void {
+    try {
+      this.resolveMemoriesChatContext(chatId);
+      memoryCortexSvc.invalidateLinkedCortexCache(chatId);
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesList(
+    requestId: string,
+    chatId: string,
+    activeOnly: boolean | undefined,
+    limit: number | undefined,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const entities = activeOnly === false
+        ? entityGraphSvc.getEntities(chatId)
+        : entityGraphSvc.getActiveEntities(chatId, typeof limit === "number" && limit > 0 ? limit : 500);
+      this.postToWorker({ type: "response", requestId, result: entities });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesGet(requestId: string, entityId: string, userId?: string): void {
+    try {
+      this.requireMemoriesPermission();
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const entity = entityGraphSvc.getEntity(entityId);
+      if (!entity) {
+        this.postToWorker({ type: "response", requestId, result: null });
+        return;
+      }
+      const chat = chatsSvc.getChat(resolvedUserId, entity.chatId);
+      if (!chat) {
+        this.postToWorker({ type: "response", requestId, result: null });
+        return;
+      }
+      this.postToWorker({ type: "response", requestId, result: entity });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesFindByName(
+    requestId: string,
+    chatId: string,
+    name: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const entity = entityGraphSvc.findEntityByName(chatId, name);
+      this.postToWorker({ type: "response", requestId, result: entity });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesUpsert(
+    requestId: string,
+    chatId: string,
+    entity: any,
+    chunkId: string | null,
+    createdAt: number | undefined,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      if (!entity || typeof entity.name !== "string" || !entity.name.trim()) {
+        throw new Error("entity.name is required");
+      }
+      if (typeof entity.type !== "string") throw new Error("entity.type is required");
+      const ts = typeof createdAt === "number" && createdAt > 0 ? createdAt : Math.floor(Date.now() / 1000);
+      const id = entityGraphSvc.upsertEntity(
+        chatId,
+        {
+          name: entity.name,
+          type: entity.type,
+          aliases: Array.isArray(entity.aliases) ? entity.aliases : [],
+          confidence: typeof entity.confidence === "number" ? entity.confidence : 0.9,
+          role: entity.role,
+          provisional: !!entity.provisional,
+        },
+        // Empty-string sentinel matches the host's own ingestion path for
+        // mentions that aren't attributed to a chunk yet.
+        chunkId ?? "",
+        ts,
+      );
+      // Extensions can flag an upsert as a curated edit so future rebuilds
+      // preserve the row's curated fields. Mirrors the REST PUT semantics.
+      if (entity.markUserEdited === true) {
+        entityGraphSvc.markEntityUserEdited(id);
+      }
+      const result = entityGraphSvc.getEntity(id);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesUpdateStatus(
+    requestId: string,
+    entityId: string,
+    patch: any,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesEntityContext(entityId, userId);
+      if (!patch || typeof patch.status !== "string") throw new Error("patch.status is required");
+      entityGraphSvc.updateEntityStatus(entityId, patch.status);
+      const result = entityGraphSvc.getEntity(entityId);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesAddFacts(
+    requestId: string,
+    entityId: string,
+    facts: string[],
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesEntityContext(entityId, userId);
+      if (!Array.isArray(facts)) throw new Error("facts must be an array of strings");
+      entityGraphSvc.addEntityFacts(entityId, facts);
+      const result = entityGraphSvc.getEntity(entityId);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesGetFacts(
+    requestId: string,
+    entityId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesEntityContext(entityId, userId);
+      const facts = entityGraphSvc.getEntityFacts(entityId);
+      this.postToWorker({ type: "response", requestId, result: facts });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesEntitiesUpdateEmotionalValence(
+    requestId: string,
+    entityId: string,
+    valence: Record<string, number>,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesEntityContext(entityId, userId);
+      if (!valence || typeof valence !== "object") throw new Error("valence must be an object");
+      entityGraphSvc.updateEntityEmotionalValence(entityId, valence);
+      const result = entityGraphSvc.getEntity(entityId);
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesRelationsList(requestId: string, chatId: string, userId?: string): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const relations = entityGraphSvc.getRelations(chatId);
+      this.postToWorker({ type: "response", requestId, result: relations });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesRelationsListAll(requestId: string, chatId: string, userId?: string): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const relations = entityGraphSvc.getAllRelationsUnfiltered(chatId);
+      this.postToWorker({ type: "response", requestId, result: relations });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesRelationsForEntity(
+    requestId: string,
+    chatId: string,
+    entityId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const relations = entityGraphSvc.getActiveEdgesForEntity(chatId, entityId);
+      this.postToWorker({ type: "response", requestId, result: relations });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesRelationsForEntities(
+    requestId: string,
+    chatId: string,
+    entityIds: string[],
+    limit: number | undefined,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      if (!Array.isArray(entityIds)) throw new Error("entityIds must be an array");
+      const relations = entityGraphSvc.getRelationsForEntities(chatId, entityIds, limit);
+      this.postToWorker({ type: "response", requestId, result: relations });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesRelationsUpsert(
+    requestId: string,
+    chatId: string,
+    relation: any,
+    chunkId: string | null,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      if (!relation || typeof relation !== "object") throw new Error("relation is required");
+      if (typeof relation.source !== "string" || !relation.source) throw new Error("relation.source is required");
+      if (typeof relation.target !== "string" || !relation.target) throw new Error("relation.target is required");
+      if (typeof relation.type !== "string") throw new Error("relation.type is required");
+
+      const sourceEntity = entityGraphSvc.findEntityByName(chatId, relation.source);
+      const targetEntity = entityGraphSvc.findEntityByName(chatId, relation.target);
+      if (!sourceEntity || !targetEntity) {
+        // Silent drop matches the ingestion pipeline's behaviour for edges
+        // whose endpoints aren't in the graph yet.
+        this.postToWorker({ type: "response", requestId, result: null });
+        return;
+      }
+
+      entityGraphSvc.upsertRelation(
+        chatId,
+        {
+          source: relation.source,
+          target: relation.target,
+          type: relation.type,
+          label: typeof relation.label === "string" ? relation.label : "",
+          sentiment: typeof relation.sentiment === "number" ? relation.sentiment : 0,
+        },
+        sourceEntity.id,
+        targetEntity.id,
+        chunkId ?? "",
+      );
+
+      const created = entityGraphSvc
+        .getRelations(chatId)
+        .find(
+          (r) =>
+            r.sourceEntityId === sourceEntity.id &&
+            r.targetEntityId === targetEntity.id &&
+            r.relationType === relation.type,
+        ) ?? null;
+      // Extensions can flag a relation upsert as a curated edit so future
+      // rebuilds preserve the curated fields (label, strength, sentiment).
+      if (created && relation.markUserEdited === true) {
+        entityGraphSvc.markRelationUserEdited(created.id);
+      }
+      this.postToWorker({ type: "response", requestId, result: created });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesConsolidationsList(
+    requestId: string,
+    chatId: string,
+    tier: number | undefined,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const consolidations = cortexConsolidationSvc.getConsolidations(chatId, tier);
+      this.postToWorker({ type: "response", requestId, result: consolidations });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesConsolidationsLatestArc(
+    requestId: string,
+    chatId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const arc = cortexConsolidationSvc.getLatestArc(chatId);
+      this.postToWorker({ type: "response", requestId, result: arc });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesConsolidationsRun(requestId: string, chatId: string, userId?: string): void {
+    (async () => {
+      try {
+        const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+        const cortexConfig = memoryCortexSvc.getCortexConfig(resolvedUserId);
+        if (!cortexConfig.consolidation?.enabled) {
+          throw new Error("Consolidation is disabled in cortex config");
+        }
+        // Fire-and-forget — never block the worker on background consolidation.
+        // Heuristic / extractive mode runs without a sidecar generate fn;
+        // sidecar mode requires route-layer plumbing to resolve a connection,
+        // which we don't replicate here on purpose (keeps the worker surface
+        // simple and predictable).
+        void cortexConsolidationSvc
+          .maybeConsolidate(resolvedUserId, chatId, cortexConfig.consolidation)
+          .catch((err) => console.warn("[Spindle:memories] consolidations.run() failed:", err));
+        this.postToWorker({ type: "response", requestId, result: undefined });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleMemoriesSalienceGet(
+    requestId: string,
+    chatId: string,
+    limit: number | undefined,
+    offset: number | undefined,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const lim = Math.min(typeof limit === "number" && limit > 0 ? limit : 100, 500);
+      const off = typeof offset === "number" && offset >= 0 ? offset : 0;
+      const rows = getDb()
+        .query(
+          `SELECT chunk_id, chat_id, score, score_source, emotional_tags, status_changes,
+                  narrative_flags, has_dialogue, has_action, has_internal_thought,
+                  word_count, scored_at, scored_by
+             FROM memory_salience
+            WHERE chat_id = ?
+            ORDER BY scored_at DESC
+            LIMIT ? OFFSET ?`,
+        )
+        .all(chatId, lim, off) as Array<{
+          chunk_id: string;
+          chat_id: string;
+          score: number;
+          score_source: string;
+          emotional_tags: string;
+          status_changes: string;
+          narrative_flags: string;
+          has_dialogue: number;
+          has_action: number;
+          has_internal_thought: number;
+          word_count: number;
+          scored_at: number;
+          scored_by: string | null;
+        }>;
+
+      const parseJsonArr = (raw: string): any[] => {
+        if (!raw) return [];
+        try { return JSON.parse(raw); } catch { return []; }
+      };
+
+      const result = rows.map((r) => ({
+        chunkId: r.chunk_id,
+        chatId: r.chat_id,
+        score: r.score,
+        scoreSource: r.score_source,
+        emotionalTags: parseJsonArr(r.emotional_tags),
+        statusChanges: parseJsonArr(r.status_changes),
+        narrativeFlags: parseJsonArr(r.narrative_flags),
+        hasDialogue: !!r.has_dialogue,
+        hasAction: !!r.has_action,
+        hasInternalThought: !!r.has_internal_thought,
+        wordCount: r.word_count,
+        scoredAt: r.scored_at,
+        scoredBy: r.scored_by,
+      }));
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsList(requestId: string, userId?: string): void {
+    try {
+      this.requireMemoriesPermission();
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const vaults = cortexVaultSvc.listVaults(resolvedUserId);
+      this.postToWorker({ type: "response", requestId, result: vaults });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsGet(requestId: string, vaultId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveMemoriesVaultContext(vaultId, userId);
+      const contents = cortexVaultSvc.getVault(resolvedUserId, vaultId);
+      const vault = cortexVaultSvc.getVaultRow(resolvedUserId, vaultId);
+      const result = contents && vault
+        ? { vault, entities: contents.entities, relations: contents.relations }
+        : null;
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsGetChunks(
+    requestId: string,
+    vaultId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesVaultContext(vaultId, userId);
+      const chunks = cortexVaultSvc.getVaultChunks(vaultId);
+      this.postToWorker({ type: "response", requestId, result: chunks });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsCreate(requestId: string, input: any, userId?: string): void {
+    try {
+      this.requireMemoriesPermission();
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      if (!input || typeof input.chatId !== "string" || !input.chatId) throw new Error("input.chatId is required");
+      if (typeof input.name !== "string" || !input.name.trim()) throw new Error("input.name is required");
+      const chat = chatsSvc.getChat(resolvedUserId, input.chatId);
+      if (!chat) throw new Error("Chat not found");
+      const vault = cortexVaultSvc.createVault(
+        resolvedUserId,
+        input.chatId,
+        input.name.trim(),
+        typeof input.description === "string" ? input.description : undefined,
+      );
+      this.postToWorker({ type: "response", requestId, result: vault });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsRename(
+    requestId: string,
+    vaultId: string,
+    name: string,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveMemoriesVaultContext(vaultId, userId);
+      if (typeof name !== "string" || !name.trim()) throw new Error("name is required");
+      const ok = cortexVaultSvc.renameVault(resolvedUserId, vaultId, name.trim());
+      this.postToWorker({ type: "response", requestId, result: ok });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsDelete(requestId: string, vaultId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveMemoriesVaultContext(vaultId, userId);
+      const ok = cortexVaultSvc.deleteVault(resolvedUserId, vaultId);
+      this.postToWorker({ type: "response", requestId, result: ok });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesVaultsReindex(
+    requestId: string,
+    vaultId: string,
+    userId?: string,
+  ): void {
+    (async () => {
+      try {
+        const resolvedUserId = this.resolveMemoriesVaultContext(vaultId, userId);
+        const result = await cortexVaultSvc.reindexVault(resolvedUserId, vaultId);
+        this.postToWorker({ type: "response", requestId, result });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleMemoriesLinksList(requestId: string, chatId: string, userId?: string): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const links = cortexVaultSvc.getChatLinks(chatId);
+      this.postToWorker({ type: "response", requestId, result: links });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesLinksAttach(requestId: string, input: any, userId?: string): void {
+    try {
+      if (!input || typeof input.chatId !== "string" || !input.chatId) throw new Error("input.chatId is required");
+      if (input.linkType !== "vault" && input.linkType !== "interlink") {
+        throw new Error("input.linkType must be 'vault' or 'interlink'");
+      }
+      const resolvedUserId = this.resolveMemoriesChatContext(input.chatId, userId);
+      const links = cortexVaultSvc.attachLink(resolvedUserId, input.chatId, input.linkType, {
+        vaultId: typeof input.vaultId === "string" ? input.vaultId : undefined,
+        targetChatId: typeof input.targetChatId === "string" ? input.targetChatId : undefined,
+        label: typeof input.label === "string" ? input.label : undefined,
+        bidirectional: !!input.bidirectional,
+      });
+      this.postToWorker({ type: "response", requestId, result: links });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesLinksRemove(
+    requestId: string,
+    chatId: string,
+    linkId: string,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+      const ok = cortexVaultSvc.removeLink(resolvedUserId, chatId, linkId);
+      this.postToWorker({ type: "response", requestId, result: ok });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesLinksToggle(
+    requestId: string,
+    chatId: string,
+    linkId: string,
+    enabled: boolean,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+      const ok = cortexVaultSvc.toggleLink(resolvedUserId, chatId, linkId, enabled);
+      this.postToWorker({ type: "response", requestId, result: ok });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesChatChunksList(
+    requestId: string,
+    chatId: string,
+    userId?: string,
+  ): void {
+    try {
+      const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+      const rows = chatsSvc.getChatChunks(resolvedUserId, chatId);
+      const result = rows.map((row: any) => ({
+        id: row.id,
+        chatId: row.chat_id,
+        startMessageId: row.start_message_id,
+        endMessageId: row.end_message_id,
+        messageIds: row.message_ids,
+        content: row.content,
+        tokenCount: row.token_count,
+        messageCount: row.message_count,
+        vectorizedAt: row.vectorized_at,
+        vectorModel: row.vector_model,
+        retrievalCount: row.retrieval_count,
+        lastRetrievedAt: row.last_retrieved_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleMemoriesChatMemoryGet(
+    requestId: string,
+    chatId: string,
+    topK: number | undefined,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+      const chat = chatsSvc.getChat(resolvedUserId, chatId);
+      if (!chat) throw new Error("Chat not found");
+
+      const messages = chatsSvc.getMessages(resolvedUserId, chatId);
+      const chatMemSettingsRaw = settingsSvc.getSetting(resolvedUserId, "chatMemorySettings")?.value;
+      const chatMemSettings = chatMemSettingsRaw
+        ? embeddingsSvc.normalizeChatMemorySettings(chatMemSettingsRaw)
+        : null;
+
+      let perChatOverrides = (chat.metadata?.memory_settings as any) ?? null;
+      if (topK != null && topK > 0) {
+        perChatOverrides = { ...(perChatOverrides || {}), retrievalTopK: topK };
+      }
+
+      const memoryResult = await promptAssemblySvc.collectChatVectorMemory(
+        resolvedUserId, chatId, messages, chatMemSettings, perChatOverrides,
+      );
+
+      const result: ChatMemoryResultDTO = {
+        chunks: memoryResult.chunks.map((c) => ({
+          content: c.content,
+          score: c.score,
+          metadata: (typeof c.metadata === "object" && c.metadata) ? c.metadata : {},
+        })),
+        formatted: memoryResult.formatted,
+        count: memoryResult.count,
+        enabled: memoryResult.enabled,
+        queryPreview: memoryResult.queryPreview,
+        settingsSource: memoryResult.settingsSource,
+        chunksAvailable: memoryResult.chunksAvailable,
+        chunksPending: memoryResult.chunksPending,
+        retrievalMode: memoryResult.retrievalMode,
+      };
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesChatMemoryWarm(
+    requestId: string,
+    chatId: string,
+    force: boolean | undefined,
+    userId?: string,
+  ): void {
+    (async () => {
+      try {
+        const resolvedUserId = this.resolveMemoriesChatContext(chatId, userId);
+        const embeddings = await embeddingsSvc.getEmbeddingConfig(resolvedUserId);
+        if (!embeddings.enabled || !embeddings.vectorize_chat_messages) {
+          this.postToWorker({
+            type: "response",
+            requestId,
+            result: { status: "skipped", reason: "chat_vectorization_disabled" },
+          });
+          return;
+        }
+
+        if (chatsSvc.isChatChunkRebuildInProgress(chatId)) {
+          this.postToWorker({
+            type: "response",
+            requestId,
+            result: { status: "skipped", reason: "chunk_rebuild_in_progress" },
+          });
+          return;
+        }
+
+        if (force) {
+          await chatsSvc.rebuildChatChunks(resolvedUserId, chatId);
+          this.postToWorker({
+            type: "response",
+            requestId,
+            result: { status: "complete", reason: "chat_memory_rebuilt", rebuilt: true },
+          });
+          return;
+        }
+
+        const rebuilt = await chatsSvc.ensureChatMemoryFresh(resolvedUserId, chatId);
+        if (rebuilt) {
+          this.postToWorker({
+            type: "response",
+            requestId,
+            result: { status: "complete", reason: "chat_memory_warmed", rebuilt: true },
+          });
+          return;
+        }
+
+        const queued = vectorizationQueueSvc.queuePendingChatChunkVectorization(resolvedUserId, chatId, 4);
+        if (queued > 0) {
+          this.postToWorker({
+            type: "response",
+            requestId,
+            result: { status: "queued", reason: "chat_memory_warmup_resumed", vectorizationsQueued: queued },
+          });
+          return;
+        }
+
+        this.postToWorker({
+          type: "response",
+          requestId,
+          result: { status: "skipped", reason: "chat_memory_already_fresh" },
+        });
+      } catch (err: any) {
+        this.postToWorker({ type: "response", requestId, error: err.message });
+      }
+    })();
+  }
+
+  private handleMemoriesChatMemoryInvalidate(
+    requestId: string,
+    chatId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      chatMemoryCacheSvc.invalidateChatMemoryCache(chatId);
+      this.postToWorker({ type: "response", requestId, result: undefined });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesStatsUsage(requestId: string, chatId: string, userId?: string): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const stats = memoryCortexSvc.getCortexUsageStats(chatId);
+      this.postToWorker({ type: "response", requestId, result: stats });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesStatsIngestionStatus(
+    requestId: string,
+    chatId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const status = memoryCortexSvc.getIngestionStatus(chatId);
+      this.postToWorker({ type: "response", requestId, result: status });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleMemoriesStatsIngestionTelemetry(
+    requestId: string,
+    chatId: string,
+    userId?: string,
+  ): void {
+    try {
+      this.resolveMemoriesChatContext(chatId, userId);
+      const telemetry = memoryCortexSvc.getIngestionTelemetry(chatId);
+      this.postToWorker({ type: "response", requestId, result: telemetry });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
@@ -7502,6 +9644,126 @@ export class WorkerHost {
     return this.registeredCommands;
   }
 
+  // ─── UI Automation (free tier) ────────────────────────────────────────
+
+  private handleUIGetDrawerTabs(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (resolvedUserId) this.enforceScopedUser(resolvedUserId);
+
+      const builtIn = BUILT_IN_DRAWER_TABS.map((tab) => ({
+        id: tab.id,
+        shortName: tab.shortName,
+        tabName: tab.tabName,
+        tabDescription: tab.tabDescription,
+        keywords: [...tab.keywords],
+        source: "builtin" as const,
+      }));
+      const extensions = getUserExtensionDrawerTabs(resolvedUserId).map((tab) => ({
+        id: tab.id,
+        shortName: tab.shortName ?? tab.tabName,
+        tabName: tab.tabName,
+        tabDescription: tab.tabDescription ?? `Open ${tab.tabName} extension tab`,
+        keywords: tab.keywords ?? [],
+        source: "extension" as const,
+        extensionId: tab.extensionId,
+      }));
+      this.postToWorker({ type: "response", requestId, result: [...builtIn, ...extensions] });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleUIGetSettingsTabs(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (resolvedUserId) this.enforceScopedUser(resolvedUserId);
+
+      let role: string | null = null;
+      if (resolvedUserId) {
+        const row = getDb()
+          .query('SELECT role FROM "user" WHERE id = ?')
+          .get(resolvedUserId) as { role: string | null } | null;
+        role = row?.role ?? null;
+      }
+
+      const result = getVisibleUISettingsTabs(role).map((tab) => ({
+        id: tab.id,
+        shortName: tab.shortName,
+        tabName: tab.tabName,
+        tabDescription: tab.tabDescription,
+        keywords: [...tab.keywords],
+        ...(tab.role ? { role: tab.role } : {}),
+      }));
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleUINavigate(
+    requestId: string,
+    action:
+      | "open_drawer_tab"
+      | "close_drawer"
+      | "open_settings"
+      | "close_settings"
+      | "open_command_palette"
+      | "close_command_palette",
+    tabId?: string,
+    viewId?: string,
+    userId?: string,
+  ): void {
+    try {
+      const validActions = new Set([
+        "open_drawer_tab",
+        "close_drawer",
+        "open_settings",
+        "close_settings",
+        "open_command_palette",
+        "close_command_palette",
+      ]);
+      if (!validActions.has(action)) {
+        throw new Error(`Invalid UI navigate action: ${action}`);
+      }
+      if (action === "open_drawer_tab") {
+        if (typeof tabId !== "string" || !tabId.trim()) {
+          throw new Error("tabId is required for open_drawer_tab");
+        }
+      }
+
+      let targetUserId: string | undefined;
+      if (this.installScope === "user") {
+        targetUserId = this.installedByUserId ?? undefined;
+      } else if (typeof userId === "string" && userId.trim()) {
+        const resolvedUserId = this.resolveEffectiveUserId(userId);
+        if (resolvedUserId) {
+          this.enforceScopedUser(resolvedUserId);
+          targetUserId = resolvedUserId;
+        }
+      }
+
+      const safeTabId = typeof tabId === "string" ? tabId.slice(0, 100) : undefined;
+      const safeViewId = typeof viewId === "string" ? viewId.slice(0, 100) : undefined;
+
+      eventBus.emit(
+        EventType.SPINDLE_UI_NAVIGATE,
+        {
+          extensionId: this.extensionId,
+          extensionName: this.manifest.name,
+          action,
+          ...(safeTabId !== undefined ? { tabId: safeTabId } : {}),
+          ...(safeViewId !== undefined ? { viewId: safeViewId } : {}),
+        },
+        targetUserId,
+      );
+
+      this.postToWorker({ type: "response", requestId, result: { ok: true } });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
   // ─── Logging ─────────────────────────────────────────────────────────
 
   private handleLog(level: "info" | "warn" | "error", message: string): void {
@@ -7548,7 +9810,7 @@ export class WorkerHost {
     image?: string,
   ): Promise<void> {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "push_notification")) {
+      if (!this.hasPermission("push_notification")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} push_notification — Push notification permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7633,7 +9895,7 @@ export class WorkerHost {
 
   private async handlePushGetStatus(requestId: string, userId?: string): Promise<void> {
     try {
-      if (!managerSvc.hasPermission(this.manifest.identifier, "push_notification")) {
+      if (!this.hasPermission("push_notification")) {
         throw new Error(`${PERMISSION_DENIED_PREFIX} push_notification — Push notification permission not granted`);
       }
       const resolvedUserId = this.resolveEffectiveUserId(userId);
@@ -7655,7 +9917,66 @@ export class WorkerHost {
     }
   }
 
-  // ─── User Visibility (free tier) ────────────────────────────────────
+  // ─── Web Search (gated: "web_search") ──────────────────────────────────
+
+  private async handleWebSearchQuery(
+    requestId: string,
+    query: string,
+    count?: number,
+    scrape?: boolean,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      if (!this.hasPermission("web_search")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} web_search — Web search permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const webSearchSvc = await import("../services/web-search.service");
+      const response = await webSearchSvc.searchWeb(resolvedUserId, query, count, {
+        scrape: scrape !== false,
+      });
+
+      const payload: {
+        query: string;
+        results: typeof response.results;
+        documents?: typeof response.documents;
+        context?: string;
+      } = {
+        query: response.query,
+        results: response.results,
+      };
+      if (scrape !== false) {
+        payload.documents = response.documents;
+        payload.context = response.context;
+      }
+
+      this.postToWorker({ type: "response", requestId, result: payload });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleWebSearchGetSettings(requestId: string, userId?: string): Promise<void> {
+    try {
+      if (!this.hasPermission("web_search")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} web_search — Web search permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const settingsSvc = await import("../services/web-search-settings.service");
+      const settings = await settingsSvc.getWebSearchSettings(resolvedUserId);
+      this.postToWorker({ type: "response", requestId, result: settings });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  // ─── User Context (free tier) ───────────────────────────────────────
 
   private handleUserIsVisible(requestId: string, userId?: string): void {
     try {
@@ -7666,6 +9987,25 @@ export class WorkerHost {
         requestId,
         result: eventBus.isUserVisible(resolvedUserId),
       });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private handleUserGetRole(requestId: string, userId?: string): void {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const row = getDb()
+        .query('SELECT role FROM "user" WHERE id = ?')
+        .get(resolvedUserId) as { role: string | null } | null;
+      if (!row) throw new Error("User not found");
+
+      const result: SpindleUserRole =
+        row.role === "owner" ? "operator" : row.role === "admin" ? "admin" : "user";
+      this.postToWorker({ type: "response", requestId, result });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }
@@ -7712,7 +10052,7 @@ export class WorkerHost {
         throw new Error("No sidecar connection configured");
       }
 
-      const connection = connectionsSvc.getConnection(userId, sidecar.connectionProfileId);
+      const connection = connectionsSvc.resolveConnection(userId, sidecar.connectionProfileId);
       if (!connection) {
         throw new Error("Selected sidecar connection not found");
       }
@@ -7725,7 +10065,7 @@ export class WorkerHost {
       return { model, modelSource: "sidecar" };
     }
 
-    const connection = connectionsSvc.getDefaultConnection(userId);
+    const connection = connectionsSvc.resolveConnection(userId);
     if (!connection) {
       throw new Error("No default connection configured");
     }
@@ -7759,6 +10099,40 @@ export class WorkerHost {
       tokenizer_name: name,
       approximate: name === tokenizerSvc.APPROXIMATE_TOKENIZER_NAME,
     };
+  }
+
+  private async handleUploadsGet(requestId: string, uploadId: string, userId?: string): Promise<void> {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const rec = spindleUploads.getUpload(uploadId);
+      if (!rec || rec.ownerUserId !== resolvedUserId || rec.extensionIdentifier !== this.manifest.identifier) {
+        this.postToWorker({ type: "response", requestId, result: null });
+        return;
+      }
+      const data = await spindleUploads.readUploadBytes(uploadId);
+      this.postToWorker({ type: "response", requestId, result: { fileName: rec.fileName, size: data.byteLength, data } });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  private async handleUploadsDelete(requestId: string, uploadId: string, userId?: string): Promise<void> {
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+      const rec = spindleUploads.getUpload(uploadId);
+      if (!rec || rec.ownerUserId !== resolvedUserId || rec.extensionIdentifier !== this.manifest.identifier) {
+        this.postToWorker({ type: "response", requestId, result: false });
+        return;
+      }
+      spindleUploads.deleteUpload(uploadId);
+      this.postToWorker({ type: "response", requestId, result: true });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
   }
 
   private async handleTokensCountText(
@@ -8472,13 +10846,14 @@ export class WorkerHost {
         return;
       }
 
-      const { evaluate, buildEnv, initMacros, registry } = await import("../macros");
+      const { evaluate, buildEnv, initMacros, registry, resolvePersonaPronouns } = await import("../macros");
       initMacros();
 
       const chatsSvc = await import("../services/chats.service");
       const charactersSvc = await import("../services/characters.service");
       const personasSvc = await import("../services/personas.service");
       const connectionsSvc = await import("../services/connections.service");
+      const personaAddonStatesSvc = await import("../services/persona-addon-states");
 
       let env;
 
@@ -8486,11 +10861,17 @@ export class WorkerHost {
         const chat = chatsSvc.getChat(resolvedUserId, chatId);
         if (chat) {
           const charId = characterId || chat.character_id;
-          const character = charactersSvc.getCharacter(resolvedUserId, charId);
+          const { makeAssistantCharacter } = await import("../types/character");
+          const { isTemporaryChatMetadata } = await import("../types/chat");
+          const character = charId
+            ? charactersSvc.getCharacter(resolvedUserId, charId)
+            : makeAssistantCharacter();
           if (character) {
-            const persona = personasSvc.resolvePersonaOrDefault(resolvedUserId);
+            const persona = isTemporaryChatMetadata(chat.metadata)
+              ? null
+              : personaAddonStatesSvc.resolvePersonaForChatMacros(resolvedUserId, personasSvc.resolvePersonaOrDefault(resolvedUserId), chat.metadata);
             const messages = chatsSvc.getMessages(resolvedUserId, chatId);
-            const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
+            const connection = connectionsSvc.resolveConnection(resolvedUserId);
 
             env = buildEnv({
               character,
@@ -8508,8 +10889,8 @@ export class WorkerHost {
       if (!env && characterId) {
         const character = charactersSvc.getCharacter(resolvedUserId, characterId);
         if (character) {
-          const persona = personasSvc.resolvePersonaOrDefault(resolvedUserId);
-          const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
+          const persona = personaAddonStatesSvc.resolvePersonaForChatMacros(resolvedUserId, personasSvc.resolvePersonaOrDefault(resolvedUserId), null);
+          const connection = connectionsSvc.resolveConnection(resolvedUserId);
 
           env = buildEnv({
             character,
@@ -8526,24 +10907,25 @@ export class WorkerHost {
       if (!env) {
         // Minimal fallback
         const persona = personasSvc.getDefaultPersona(resolvedUserId);
-        const connection = connectionsSvc.getDefaultConnection(resolvedUserId);
+        const personaPronouns = resolvePersonaPronouns(persona);
+        const connection = connectionsSvc.resolveConnection(resolvedUserId);
         env = {
           commit,
           names: {
             user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
-            charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", groupLastSpeaker: "",
+            charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", isNarrator: persona?.is_narrator ? "yes" : "no", groupLastSpeaker: "", groupCardMode: "solo",
           },
           character: {
             name: "", description: "", personality: "", scenario: "", persona: persona?.description || "",
-            personaSubjectivePronoun: persona?.subjective_pronoun || "",
-            personaObjectivePronoun: persona?.objective_pronoun || "",
-            personaPossessivePronoun: persona?.possessive_pronoun || "",
+            personaSubjectivePronoun: personaPronouns.subjective,
+            personaObjectivePronoun: personaPronouns.objective,
+            personaPossessivePronoun: personaPronouns.possessive,
             mesExamples: "", mesExamplesRaw: "", systemPrompt: "", postHistoryInstructions: "",
             depthPrompt: "", creatorNotes: "", version: "", creator: "", firstMessage: "",
           },
           chat: {
             id: "", messageCount: 0, lastMessage: "", lastMessageName: "", lastUserMessage: "",
-            lastCharMessage: "", lastMessageId: -1, firstIncludedMessageId: -1, lastSwipeId: 0, currentSwipeId: 0,
+            lastCharMessage: "", lastMessageId: -1, firstIncludedMessageId: -1, lastSwipeId: 0, currentSwipeId: 0, rejectedSwipe: "",
           },
           system: {
             model: connection?.model || "", maxPrompt: 0, maxContext: 0, maxResponse: 0,
@@ -8562,13 +10944,108 @@ export class WorkerHost {
     }
   }
 
+  // ─── Chat style mode (gated: "app_manipulation") ────────────────────
+
+  /** Per-user chat-style-mode claims, outer key userId, inner key chatId.
+   *  Bucketed by user so dispose can emit cleanup events per affected user. */
+  private chatStyleModes = new Map<string, Map<string, "bounded" | "extension-relaxed">>();
+
+  private handleChatSetStyleMode(
+    requestId: string,
+    chatId: unknown,
+    mode: unknown,
+    userId?: string,
+  ): void {
+    if (!this.hasPermission("app_manipulation")) {
+      this.postToWorker({
+        type: "response",
+        requestId,
+        error: `${PERMISSION_DENIED_PREFIX} app_manipulation — Chat style mode requires the app_manipulation permission`,
+      });
+      return;
+    }
+    if (typeof chatId !== "string" || chatId.length === 0) {
+      this.postToWorker({ type: "response", requestId, error: "chatId must be a non-empty string" });
+      return;
+    }
+    if (mode !== "bounded" && mode !== "extension-relaxed") {
+      this.postToWorker({
+        type: "response",
+        requestId,
+        error: `mode must be 'bounded' or 'extension-relaxed', got ${JSON.stringify(mode)}`,
+      });
+      return;
+    }
+    try {
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) {
+        this.postToWorker({
+          type: "response",
+          requestId,
+          error: "userId is required for operator-scoped extensions",
+        });
+        return;
+      }
+      this.enforceScopedUser(resolvedUserId);
+
+      let userMap = this.chatStyleModes.get(resolvedUserId);
+      if (mode === "bounded") {
+        if (userMap) {
+          userMap.delete(chatId);
+          if (userMap.size === 0) this.chatStyleModes.delete(resolvedUserId);
+        }
+      } else {
+        if (!userMap) {
+          userMap = new Map();
+          this.chatStyleModes.set(resolvedUserId, userMap);
+        }
+        userMap.set(chatId, mode);
+      }
+
+      eventBus.emit(
+        EventType.SPINDLE_CHAT_STYLE_MODE,
+        {
+          extensionId: this.extensionId,
+          extensionName: this.manifest.name,
+          chatId,
+          mode,
+        },
+        resolvedUserId,
+      );
+
+      this.postToWorker({ type: "response", requestId, result: true });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message || "Chat style mode set failed" });
+    }
+  }
+
+  /** Called on worker shutdown to clear chat-style-mode claims. Emits one
+   *  null-chatId event per affected user so frontend stores drop this
+   *  extension's claims without per-chat enumeration. */
+  clearChatStyleModes(): void {
+    if (this.chatStyleModes.size === 0) return;
+    for (const userId of this.chatStyleModes.keys()) {
+      eventBus.emit(
+        EventType.SPINDLE_CHAT_STYLE_MODE,
+        {
+          extensionId: this.extensionId,
+          extensionName: this.manifest.name,
+          chatId: null,
+          mode: "bounded",
+        },
+        userId,
+      );
+    }
+    this.chatStyleModes.clear();
+  }
+
   // ─── Theme (gated: "app_manipulation") ──────────────────────────────
 
   /** Active CSS variable overrides for this extension, keyed by effective userId. */
   private themeOverrides = new Map<string, ThemeOverrideDTO>();
 
   private handleThemeApply(requestId: string, overrides: ThemeOverrideDTO, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+    if (!this.hasPermission("app_manipulation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -8701,7 +11178,7 @@ export class WorkerHost {
     palette: { accent?: { h?: number; s?: number; l?: number } } | null | undefined,
     userId?: string,
   ): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+    if (!this.hasPermission("app_manipulation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -8742,7 +11219,7 @@ export class WorkerHost {
   }
 
   private handleThemeClear(requestId: string, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+    if (!this.hasPermission("app_manipulation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -8822,7 +11299,7 @@ export class WorkerHost {
   }
 
   private handleThemeGetCurrent(requestId: string, userId?: string): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+    if (!this.hasPermission("app_manipulation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -8865,7 +11342,7 @@ export class WorkerHost {
   }
 
   private async handleColorExtract(requestId: string, imageId: string, userId?: string): Promise<void> {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+    if (!this.hasPermission("app_manipulation")) {
       this.postToWorker({
         type: "response",
         requestId,
@@ -8883,7 +11360,7 @@ export class WorkerHost {
   }
 
   private handleThemeGenerateVariables(requestId: string, config: any): void {
-    if (!managerSvc.hasPermission(this.manifest.identifier, "app_manipulation")) {
+    if (!this.hasPermission("app_manipulation")) {
       this.postToWorker({
         type: "response",
         requestId,

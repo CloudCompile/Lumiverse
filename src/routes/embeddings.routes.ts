@@ -1,8 +1,12 @@
 import { Hono } from "hono";
+import { requireOwnerStrict } from "../auth/middleware";
+import { env } from "../env";
 import { getDb } from "../db/connection";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as worldBooksSvc from "../services/world-books.service";
 import * as chatsSvc from "../services/chats.service";
+import * as vectorStoreCfg from "../services/vector-store-config.service";
+import { getActiveVectorStore, type CollectionName, type TableHealth } from "../services/vector-store";
 
 const app = new Hono();
 
@@ -120,6 +124,7 @@ app.post("/world-books/:bookId/reindex", async (c) => {
         try {
           const result = await embeddingsSvc.reindexWorldBookEntries(userId, entries, {
             batchSize,
+            force: true,
             onProgress: (progress) => {
               send("progress", progress);
             },
@@ -143,7 +148,8 @@ app.post("/world-books/:bookId/reindex", async (c) => {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     };
-    if (origin) {
+    // C-13: Only reflect origins that are in the configured trusted origins list.
+    if (origin && (env.trustAnyOrigin || env.trustedOriginsSet.has(origin))) {
       corsHeaders["Access-Control-Allow-Origin"] = origin;
       corsHeaders["Access-Control-Allow-Credentials"] = "true";
     }
@@ -152,7 +158,7 @@ app.post("/world-books/:bookId/reindex", async (c) => {
   }
 
   // Non-streaming fallback
-  const result = await embeddingsSvc.reindexWorldBookEntries(userId, entries, { batchSize });
+  const result = await embeddingsSvc.reindexWorldBookEntries(userId, entries, { batchSize, force: true });
   return c.json({ success: true, ...result });
 });
 
@@ -171,7 +177,7 @@ app.put("/chat-memory-settings", async (c) => {
   return c.json(updated);
 });
 
-app.post("/force-reset", async (c) => {
+app.post("/force-reset", requireOwnerStrict, async (c) => {
   try {
     const result = await embeddingsSvc.forceResetLanceDB();
     return c.json({ success: true, ...result });
@@ -182,7 +188,8 @@ app.post("/force-reset", async (c) => {
 
 app.post("/optimize", async (c) => {
   try {
-    await embeddingsSvc.optimizeTable();
+    const store = await getActiveVectorStore();
+    await store.optimize(["embeddings", "embeddings_world_books"]);
     return c.json({ success: true });
   } catch (err: any) {
     return c.json({ error: err.message || "Optimize failed" }, 500);
@@ -191,10 +198,78 @@ app.post("/optimize", async (c) => {
 
 app.get("/health", async (c) => {
   try {
-    const health = await embeddingsSvc.getVectorStoreHealth();
-    return c.json(health);
+    const store = await getActiveVectorStore();
+    const collections: CollectionName[] = ["embeddings", "embeddings_world_books"];
+    const entries = await Promise.all(collections.map(async (name) => [name, await store.health(name)] as const));
+    const tables = Object.fromEntries(entries) as Record<CollectionName, TableHealth>;
+    const health = combineVectorHealth(tables);
+    return c.json({ ...health, provider: store.id, capabilities: store.capabilities });
   } catch (err: any) {
     return c.json({ error: err.message || "Health check failed" }, 500);
+  }
+});
+
+function combineVectorHealth(tables: Record<CollectionName, TableHealth>) {
+  const values = Object.values(tables);
+  const existing = values.filter((table) => table.exists);
+  return {
+    exists: existing.length > 0,
+    rowCount: values.reduce((sum, table) => sum + table.rowCount, 0),
+    vectorIndexReady: existing.length === 0 || existing.every((table) => table.vectorIndexReady),
+    scalarIndexReady: existing.length === 0 || existing.every((table) => table.scalarIndexReady),
+    ftsIndexReady: existing.length === 0 || existing.every((table) => table.ftsIndexReady),
+    unindexedRowEstimate: values.reduce((sum, table) => sum + table.unindexedRowEstimate, 0),
+    lastIndexRebuildAt: Math.max(0, ...values.map((table) => table.lastIndexRebuildAt)),
+    indexes: values.flatMap((table, idx) => table.indexes.map((index) => ({
+      name: `${idx === 0 ? "embeddings" : "embeddings_world_books"}:${index.name}`,
+      type: index.type,
+    }))),
+    tables,
+  };
+}
+
+// --- Vector Store (database backend) configuration — owner-gated, global ---
+
+app.get("/vector-store/config", async (c) => {
+  try {
+    return c.json(await vectorStoreCfg.getVectorStoreConfigForApi());
+  } catch (err: any) {
+    return c.json({ error: err.message || "Failed to read vector store config" }, 500);
+  }
+});
+
+app.put("/vector-store/config", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    return c.json(await vectorStoreCfg.updateVectorStoreConfig(userId, body));
+  } catch (err: any) {
+    const msg = err?.message || "Failed to update vector store config";
+    if (/managed by the server owner|managed by environment/i.test(msg)) {
+      return c.json({ error: msg }, 403);
+    }
+    return c.json({ error: msg }, 400);
+  }
+});
+
+app.post("/vector-store/test", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const result = await vectorStoreCfg.testVectorStoreConnection(body);
+  return c.json(result, result.ok ? 200 : 400);
+});
+
+app.post("/vector-store/switch", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    return c.json(await vectorStoreCfg.switchVectorStoreProvider(userId, body));
+  } catch (err: any) {
+    const msg = err?.message || "Failed to switch vector store";
+    if (/managed by the server owner|managed by environment/i.test(msg)) {
+      return c.json({ error: msg }, 403);
+    }
+    // Validation/reachability failures: reject without having persisted.
+    return c.json({ error: msg }, 400);
   }
 });
 

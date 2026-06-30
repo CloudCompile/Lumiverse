@@ -71,8 +71,39 @@ class HeuristicWorkerHost {
   }
 }
 
-const host = new HeuristicWorkerHost();
+/**
+ * Round-robin pool of heuristic worker hosts.
+ *
+ * The previous implementation used a single shared worker. For workloads that
+ * fire concurrent heuristic requests (notably arbiter-mode rebuilds, where
+ * Promise.all queues 5+ chunks per batch and ~3 batches run concurrently),
+ * everything serialized inside that one worker — turning N parallel requests
+ * into N sequential ones.
+ *
+ * Each pool host owns its own worker, created lazily on first use. Hosts that
+ * are never used cost nothing. Round-robin distribution keeps utilization even
+ * without needing a real work-stealing queue.
+ */
+const HEURISTIC_WORKER_POOL_SIZE = 4;
+
+class HeuristicWorkerPool {
+  private hosts: HeuristicWorkerHost[];
+  private nextIdx = 0;
+
+  constructor(size: number) {
+    const count = Math.max(1, Math.floor(size));
+    this.hosts = Array.from({ length: count }, () => new HeuristicWorkerHost());
+  }
+
+  run(payload: HeuristicAnalysisInput): Promise<HeuristicAnalysisOutput> {
+    const host = this.hosts[this.nextIdx];
+    this.nextIdx = (this.nextIdx + 1) % this.hosts.length;
+    return host.run(payload);
+  }
+}
+
+const pool = new HeuristicWorkerPool(HEURISTIC_WORKER_POOL_SIZE);
 
 export function runHeuristicAnalysisInWorker(payload: HeuristicAnalysisInput): Promise<HeuristicAnalysisOutput> {
-  return host.run(payload);
+  return pool.run(payload);
 }

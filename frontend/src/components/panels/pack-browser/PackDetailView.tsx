@@ -1,4 +1,6 @@
 import { useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import { ChevronLeft, ChevronDown, ChevronRight, Plus, Pencil, Trash2, Settings, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { packsApi } from '@/api/packs'
 import LazyImage from '@/components/shared/LazyImage'
@@ -18,11 +20,18 @@ interface Props {
   onRefresh: () => void
 }
 
-const GENDER_LABELS: Record<number, string> = { 0: 'Fem', 1: 'Masc', 2: 'Neutral', 3: 'Any' }
-const CATEGORY_LABELS: Record<string, string> = {
-  narrative_style: 'Style',
-  loom_utility: 'Utility',
-  retrofit: 'Retrofit',
+function genderShortLabel(gender: number, t: (key: string) => string): string {
+  if (gender === 0) return t('creatorWorkshop.shared.gender.shortFem')
+  if (gender === 1) return t('creatorWorkshop.shared.gender.shortMasc')
+  if (gender === 2) return t('creatorWorkshop.shared.gender.shortNeutral')
+  return t('creatorWorkshop.shared.gender.shortAny')
+}
+
+function categoryLabel(category: string, t: (key: string) => string): string {
+  if (category === 'narrative_style') return t('creatorWorkshop.shared.category.style')
+  if (category === 'loom_utility') return t('creatorWorkshop.shared.category.utility')
+  if (category === 'retrofit') return t('creatorWorkshop.shared.category.retrofit')
+  return category
 }
 
 type PreviewTab = 'def' | 'pers' | 'behav'
@@ -38,14 +47,16 @@ function LumiaRow({
   onEdit: () => void
   onDelete: () => void
 }) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewTab, setPreviewTab] = useState<PreviewTab>('def')
 
   const tabs = [
-    item.definition ? { id: 'def' as PreviewTab, label: 'DEF' } : null,
-    item.personality ? { id: 'pers' as PreviewTab, label: 'PER' } : null,
-    item.behavior ? { id: 'behav' as PreviewTab, label: 'BEH' } : null,
-  ].filter((t): t is { id: PreviewTab; label: string } => t !== null)
+    item.definition ? { id: 'def' as PreviewTab, label: t('packBrowser.previewTabDef') } : null,
+    item.personality ? { id: 'pers' as PreviewTab, label: t('packBrowser.previewTabPers') } : null,
+    item.behavior ? { id: 'behav' as PreviewTab, label: t('packBrowser.previewTabBehav') } : null,
+  ].filter((tab): tab is { id: PreviewTab; label: string } => tab !== null)
 
   const hasContent = tabs.length > 0
   const effectiveTab = tabs.find((t) => t.id === previewTab) ? previewTab : (tabs[0]?.id ?? 'def')
@@ -70,21 +81,21 @@ function LumiaRow({
           <div className={styles.lumiaName}>{item.name}</div>
           {item.author_name && <div className={styles.lumiaAuthor}>{item.author_name}</div>}
         </div>
-        <span className={styles.genderBadge}>{GENDER_LABELS[item.gender_identity] ?? 'Any'}</span>
+        <span className={styles.genderBadge}>{genderShortLabel(item.gender_identity, t)}</span>
         {hasContent && (
           <Button
             size="icon-sm"
             variant="ghost"
             className={previewOpen ? styles.itemActionBtnActive : undefined}
             onClick={() => setPreviewOpen((o) => !o)}
-            title={previewOpen ? 'Hide preview' : 'Preview content'}
+            title={previewOpen ? t('packBrowser.hidePreview') : t('packBrowser.previewContent')}
             icon={previewOpen ? <EyeOff size={11} /> : <Eye size={11} />}
           />
         )}
         {isCustom && (
           <div className={styles.itemActions}>
-            <Button size="icon-sm" variant="ghost" onClick={onEdit} title="Edit" icon={<Pencil size={11} />} />
-            <Button size="icon-sm" variant="danger-ghost" onClick={onDelete} title="Delete" icon={<Trash2 size={11} />} />
+            <Button size="icon-sm" variant="ghost" onClick={onEdit} title={tc('actions.edit')} icon={<Pencil size={11} />} />
+            <Button size="icon-sm" variant="danger-ghost" onClick={onDelete} title={tc('actions.delete')} icon={<Trash2 size={11} />} />
           </div>
         )}
       </div>
@@ -92,14 +103,14 @@ function LumiaRow({
         <div className={styles.lumiaPreviewPanel}>
           {tabs.length > 1 && (
             <div className={styles.lumiaPreviewTabs}>
-              {tabs.map((t) => (
+              {tabs.map((tab) => (
                 <button
-                  key={t.id}
+                  key={tab.id}
                   type="button"
-                  className={clsx(styles.lumiaPreviewTab, effectiveTab === t.id && styles.lumiaPreviewTabActive)}
-                  onClick={() => setPreviewTab(t.id)}
+                  className={clsx(styles.lumiaPreviewTab, effectiveTab === tab.id && styles.lumiaPreviewTabActive)}
+                  onClick={() => setPreviewTab(tab.id)}
                 >
-                  {t.label}
+                  {tab.label}
                 </button>
               ))}
             </div>
@@ -113,7 +124,10 @@ function LumiaRow({
   )
 }
 
-export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefresh }: Props) {
+export default function PackDetailView({
+ pack, onBack, onEdit, onDelete, onRefresh }: Props) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
   const [lumiaOpen, setLumiaOpen] = useState(true)
   const [loomOpen, setLoomOpen] = useState(true)
   const [toolsOpen, setToolsOpen] = useState(true)
@@ -154,11 +168,11 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
     <div className={styles.detail}>
       <div className={styles.detailHeader}>
         <Button size="sm" variant="ghost" onClick={onBack} icon={<ChevronLeft size={13} />}>
-          Back
+          {t('packBrowser.back')}
         </Button>
         <div className={styles.detailMeta}>
           <div className={styles.detailName}>{pack.name}</div>
-          {pack.author && <div className={styles.detailAuthor}>by {pack.author}</div>}
+          {pack.author && <div className={styles.detailAuthor}>{t('packBrowser.byAuthor', { author: pack.author })}</div>}
         </div>
         <div className={styles.detailActions}>
           {pack.lumia_items.length > 0 && (
@@ -166,18 +180,18 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
               size="icon"
               variant="ghost"
               onClick={() => setRepairConfirm(true)}
-              title="Repair old Lumiverse gender mapping"
+              title={t('packBrowser.repairGenderTitle')}
               icon={<RefreshCw size={14} />}
             />
           )}
           {pack.is_custom && (
-            <Button size="icon" variant="ghost" onClick={onEdit} title="Edit pack" icon={<Settings size={14} />} />
+            <Button size="icon" variant="ghost" onClick={onEdit} title={t('packBrowser.editPack')} icon={<Settings size={14} />} />
           )}
           <Button
             size="icon"
             variant="danger-ghost"
             onClick={() => setDeletePackConfirm(true)}
-            title="Delete pack"
+            title={t('packBrowser.deletePack')}
             icon={<Trash2 size={14} />}
           />
         </div>
@@ -188,7 +202,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
         <div className={styles.section}>
           <div className={styles.sectionHeader} onClick={() => setLumiaOpen((o) => !o)}>
             {lumiaOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            <span className={styles.sectionTitle}>Lumia Characters</span>
+            <span className={styles.sectionTitle}>{t('packBrowser.lumiaCharacters')}</span>
             <span className={styles.sectionCount}>{pack.lumia_items.length}</span>
             {pack.is_custom && (
               <button
@@ -197,7 +211,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
                 onClick={(e) => { e.stopPropagation(); setEditingLumia(null); setShowLumiaEditor(true) }}
               >
                 <Plus size={11} />
-                Add
+                {t('packBrowser.add')}
               </button>
             )}
           </div>
@@ -213,7 +227,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
                 />
               ))}
               {pack.lumia_items.length === 0 && (
-                <div className={styles.emptyState}>No characters</div>
+                <div className={styles.emptyState}>{t('packBrowser.noCharacters')}</div>
               )}
             </div>
           )}
@@ -223,7 +237,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
         <div className={styles.section}>
           <div className={styles.sectionHeader} onClick={() => setLoomOpen((o) => !o)}>
             {loomOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            <span className={styles.sectionTitle}>Loom Items</span>
+            <span className={styles.sectionTitle}>{t('packBrowser.loomItems')}</span>
             <span className={styles.sectionCount}>{pack.loom_items.length}</span>
             {pack.is_custom && (
               <button
@@ -232,7 +246,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
                 onClick={(e) => { e.stopPropagation(); setEditingLoomItem(null); setShowLoomEditor(true) }}
               >
                 <Plus size={11} />
-                Add
+                {t('packBrowser.add')}
               </button>
             )}
           </div>
@@ -241,21 +255,21 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
               {pack.loom_items.map((item) => (
                 <div key={item.id} className={styles.loomRow}>
                   <div className={styles.loomName}>{item.name}</div>
-                  <span className={styles.categoryBadge}>{CATEGORY_LABELS[item.category] || item.category}</span>
+                  <span className={styles.categoryBadge}>{categoryLabel(item.category, t)}</span>
                   {pack.is_custom && (
                     <div className={styles.itemActions}>
                       <Button
                         size="icon-sm"
                         variant="ghost"
                         onClick={() => { setEditingLoomItem(item); setShowLoomEditor(true) }}
-                        title="Edit"
+                        title={tc('actions.edit')}
                         icon={<Pencil size={11} />}
                       />
                       <Button
                         size="icon-sm"
                         variant="danger-ghost"
                         onClick={() => setDeleteConfirm({ type: 'loom', id: item.id })}
-                        title="Delete"
+                        title={tc('actions.delete')}
                         icon={<Trash2 size={11} />}
                       />
                     </div>
@@ -263,7 +277,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
                 </div>
               ))}
               {pack.loom_items.length === 0 && (
-                <div className={styles.emptyState}>No loom items</div>
+                <div className={styles.emptyState}>{t('packBrowser.noLoomItems')}</div>
               )}
             </div>
           )}
@@ -273,7 +287,7 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
         <div className={styles.section}>
           <div className={styles.sectionHeader} onClick={() => setToolsOpen((o) => !o)}>
             {toolsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            <span className={styles.sectionTitle}>Loom Tools</span>
+            <span className={styles.sectionTitle}>{t('packBrowser.loomTools')}</span>
             <span className={styles.sectionCount}>{pack.loom_tools.length}</span>
           </div>
           {toolsOpen && (
@@ -281,11 +295,11 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
               {pack.loom_tools.map((tool) => (
                 <div key={tool.id} className={styles.loomRow}>
                   <div className={styles.loomName}>{tool.display_name || tool.tool_name}</div>
-                  <span className={styles.categoryBadge}>Tool</span>
+                  <span className={styles.categoryBadge}>{t('packBrowser.toolBadge')}</span>
                 </div>
               ))}
               {pack.loom_tools.length === 0 && (
-                <div className={styles.emptyState}>No tools</div>
+                <div className={styles.emptyState}>{t('packBrowser.noTools')}</div>
               )}
             </div>
           )}
@@ -316,10 +330,10 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
       {deleteConfirm && (
         <ConfirmationModal
           isOpen={true}
-          title="Delete Item"
-          message="Delete this item? This cannot be undone."
+          title={t('packBrowser.deleteItemTitle')}
+          message={t('packBrowser.deleteItemMessage')}
           variant="danger"
-          confirmText="Delete"
+          confirmText={tc('actions.delete')}
           onConfirm={handleDeleteItem}
           onCancel={() => setDeleteConfirm(null)}
         />
@@ -329,10 +343,10 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
       {deletePackConfirm && (
         <ConfirmationModal
           isOpen={true}
-          title="Delete Pack"
-          message="Delete this pack and all its items? This cannot be undone."
+          title={t('packBrowser.deletePackTitle')}
+          message={t('packBrowser.deletePackMessage')}
           variant="danger"
-          confirmText="Delete"
+          confirmText={tc('actions.delete')}
           onConfirm={() => { setDeletePackConfirm(false); onDelete() }}
           onCancel={() => setDeletePackConfirm(false)}
         />
@@ -341,10 +355,10 @@ export default function PackDetailView({ pack, onBack, onEdit, onDelete, onRefre
       {repairConfirm && (
         <ConfirmationModal
           isOpen={true}
-          title="Repair Old Lumiverse Gender Mapping"
-          message="Convert this pack from Lumiverse's older gender enum (0=Any, 1=Feminine, 2=Masculine) to the current enum (0=Feminine, 1=Masculine, 2=Neutral, 3=Any)? Use this only for packs created or edited under the old Lumiverse mapping."
+          title={t('packBrowser.repairGenderTitle')}
+          message={t('packBrowser.repairGenderMessage')}
           variant="warning"
-          confirmText="Repair"
+          confirmText={t('packBrowser.repair')}
           onConfirm={handleRepairLegacyGenderMapping}
           onCancel={() => setRepairConfirm(false)}
         />

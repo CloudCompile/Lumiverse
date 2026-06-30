@@ -29,14 +29,15 @@ export interface NanoGptUsageWindow {
   remaining: number;
   percentUsed: number;
   resetAt: number | null;
+  limit: number | null;
 }
 
 export interface NanoGptSubscriptionUsage {
   active: boolean;
-  limits: {
-    weeklyInputTokens: number | null;
-    dailyImages: number | null;
-  };
+  allowOverage: boolean;
+  // Typed usage windows mirroring NanoGPT's subscription payload. Each may be
+  // null when the plan doesn't meter that dimension.
+  dailyInputTokens: NanoGptUsageWindow | null;
   weeklyInputTokens: NanoGptUsageWindow | null;
   dailyImages: NanoGptUsageWindow | null;
   period: {
@@ -44,6 +45,22 @@ export interface NanoGptSubscriptionUsage {
   };
   state: string | null;
   graceUntil: string | null;
+}
+
+/**
+ * Parse a single Nano-GPT usage window from the raw API payload, folding in its
+ * matching `limits.<key>` value. The window object and its limit live under
+ * separate keys in NanoGPT's response, so callers pass both.
+ */
+function parseNanoGptUsageWindow(w: any, limit: any): NanoGptUsageWindow | null {
+  if (!w || typeof w !== "object") return null;
+  return {
+    used: typeof w.used === "number" ? w.used : 0,
+    remaining: typeof w.remaining === "number" ? w.remaining : 0,
+    percentUsed: typeof w.percentUsed === "number" ? w.percentUsed : 0,
+    resetAt: typeof w.resetAt === "number" ? w.resetAt : null,
+    limit: typeof limit === "number" ? limit : null,
+  };
 }
 
 function resolveNanoGptSubscriptionUsageUrl(profile: { api_url?: string | null }): string {
@@ -376,25 +393,12 @@ export async function fetchNanoGptSubscriptionUsage(userId: string, id: string):
     if (!res.ok) return null;
 
     const raw = await res.json() as any;
-    const weekly = raw?.weeklyInputTokens;
     return {
       active: !!raw?.active,
-      limits: {
-        weeklyInputTokens: typeof raw?.limits?.weeklyInputTokens === "number" ? raw.limits.weeklyInputTokens : null,
-        dailyImages: typeof raw?.limits?.dailyImages === "number" ? raw.limits.dailyImages : null,
-      },
-      weeklyInputTokens: weekly ? {
-        used: typeof weekly.used === "number" ? weekly.used : 0,
-        remaining: typeof weekly.remaining === "number" ? weekly.remaining : 0,
-        percentUsed: typeof weekly.percentUsed === "number" ? weekly.percentUsed : 0,
-        resetAt: typeof weekly.resetAt === "number" ? weekly.resetAt : null,
-      } : null,
-      dailyImages: raw?.dailyImages ? {
-        used: typeof raw.dailyImages.used === "number" ? raw.dailyImages.used : 0,
-        remaining: typeof raw.dailyImages.remaining === "number" ? raw.dailyImages.remaining : 0,
-        percentUsed: typeof raw.dailyImages.percentUsed === "number" ? raw.dailyImages.percentUsed : 0,
-        resetAt: typeof raw.dailyImages.resetAt === "number" ? raw.dailyImages.resetAt : null,
-      } : null,
+      allowOverage: !!raw?.allowOverage,
+      dailyInputTokens: parseNanoGptUsageWindow(raw?.dailyInputTokens, raw?.limits?.dailyInputTokens),
+      weeklyInputTokens: parseNanoGptUsageWindow(raw?.weeklyInputTokens, raw?.limits?.weeklyInputTokens),
+      dailyImages: parseNanoGptUsageWindow(raw?.dailyImages, raw?.limits?.dailyImages),
       period: {
         currentPeriodEnd: typeof raw?.period?.currentPeriodEnd === "string" ? raw.period.currentPeriodEnd : null,
       },

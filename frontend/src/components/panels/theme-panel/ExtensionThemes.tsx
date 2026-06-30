@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { Blocks } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Toggle } from '@/components/shared/Toggle'
 import { useStore } from '@/store'
 import type { ExtensionThemeOverride } from '@/types/store'
@@ -29,12 +30,10 @@ function extractSwatchColors(variables: Record<string, string>): string[] {
     }
   }
 
-  // Fill remaining slots from any other vars that look like colors
   if (colors.length < 4) {
     for (const [key, value] of Object.entries(variables)) {
       if (colors.length >= 4) break
       if (priorities.includes(key)) continue
-      // Heuristic: skip non-color values (px, ms, ease, font, linear-gradient, etc.)
       if (/^[0-9.]+px|^[0-9.]+ms|ease|font|gradient|inset|blur/i.test(value)) continue
       colors.push(value)
     }
@@ -44,6 +43,7 @@ function extractSwatchColors(variables: Record<string, string>): string[] {
 }
 
 function ActiveThemeCard({ override }: { override: ExtensionThemeOverride }) {
+  const { t } = useTranslation('panels', { keyPrefix: 'themePanel' })
   const muteTheme = useStore((s) => s.muteExtensionTheme)
   const swatches = useMemo(() => extractSwatchColors(override.variables), [override.variables])
   const varCount = Object.keys(override.variables).length
@@ -58,7 +58,7 @@ function ActiveThemeCard({ override }: { override: ExtensionThemeOverride }) {
       <div className={styles.info}>
         <span className={styles.name}>{override.extensionName}</span>
         <span className={styles.attribution}>
-          {varCount} override{varCount !== 1 ? 's' : ''} applied
+          {t('overridesApplied', { count: varCount })}
         </span>
       </div>
       <Toggle.Switch
@@ -70,6 +70,7 @@ function ActiveThemeCard({ override }: { override: ExtensionThemeOverride }) {
 }
 
 function MutedThemeCard({ override }: { override: ExtensionThemeOverride }) {
+  const { t } = useTranslation('panels', { keyPrefix: 'themePanel' })
   const unmuteTheme = useStore((s) => s.unmuteExtensionTheme)
   const swatches = useMemo(() => extractSwatchColors(override.variables), [override.variables])
 
@@ -82,7 +83,7 @@ function MutedThemeCard({ override }: { override: ExtensionThemeOverride }) {
       </div>
       <div className={styles.info}>
         <span className={styles.name}>{override.extensionName}</span>
-        <span className={styles.attribution}>Theme disabled</span>
+        <span className={styles.attribution}>{t('themeDisabled')}</span>
       </div>
       <Toggle.Switch
         checked={false}
@@ -93,6 +94,7 @@ function MutedThemeCard({ override }: { override: ExtensionThemeOverride }) {
 }
 
 export default function ExtensionThemes() {
+  const { t } = useTranslation('panels', { keyPrefix: 'themePanel' })
   const overrides = useStore((s) => s.extensionThemeOverrides)
   const muted = useStore((s) => s.mutedExtensionThemes)
 
@@ -104,7 +106,7 @@ export default function ExtensionThemes() {
     <div className={styles.section}>
       <div className={styles.header}>
         <span className={styles.headerIcon}><Blocks size={12} /></span>
-        <h4 className={styles.headerLabel}>Extension Themes</h4>
+        <h4 className={styles.headerLabel}>{t('extensionThemesTitle')}</h4>
       </div>
       <div className={styles.list}>
         {entries.map((override) =>

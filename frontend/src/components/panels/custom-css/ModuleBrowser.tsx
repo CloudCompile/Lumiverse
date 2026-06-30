@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { ChevronRight } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { CSS_MODULE_REGISTRY, generateSelector, type CSSModuleEntry } from '@/lib/cssModuleRegistry'
 import styles from './ModuleBrowser.module.css'
 import clsx from 'clsx'
@@ -9,6 +10,7 @@ interface ModuleBrowserProps {
 }
 
 export default function ModuleBrowser({ onInsertSelector }: ModuleBrowserProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'customCssPanel.moduleBrowser' })
   const [isOpen, setIsOpen] = useState(false)
   const [search, setSearch] = useState('')
 
@@ -20,7 +22,6 @@ export default function ModuleBrowser({ onInsertSelector }: ModuleBrowserProps) 
     )
   }, [search])
 
-  // Group by category
   const grouped = useMemo(() => {
     const map = new Map<string, CSSModuleEntry[]>()
     for (const entry of filtered) {
@@ -44,7 +45,7 @@ export default function ModuleBrowser({ onInsertSelector }: ModuleBrowserProps) 
             size={12}
             className={clsx(styles.chevron, isOpen && styles.chevronOpen)}
           />
-          Components ({CSS_MODULE_REGISTRY.length})
+          {t('components', { count: CSS_MODULE_REGISTRY.length })}
         </span>
       </div>
 
@@ -52,7 +53,7 @@ export default function ModuleBrowser({ onInsertSelector }: ModuleBrowserProps) 
         <>
           <input
             className={styles.searchInput}
-            placeholder="Search components..."
+            placeholder={t('searchPlaceholder')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -65,7 +66,7 @@ export default function ModuleBrowser({ onInsertSelector }: ModuleBrowserProps) 
                     key={entry.component}
                     className={styles.item}
                     onClick={() => handleClick(entry)}
-                    title={`Insert selector for ${entry.component}`}
+                    title={t('insertSelector', { name: entry.component })}
                   >
                     <div className={styles.itemLeft}>
                       <span className={styles.itemName}>{entry.component}</span>
@@ -77,7 +78,7 @@ export default function ModuleBrowser({ onInsertSelector }: ModuleBrowserProps) 
             ))}
             {filtered.length === 0 && (
               <div className={styles.itemDesc} style={{ padding: '8px' }}>
-                No matching components
+                {t('noMatches')}
               </div>
             )}
           </div>

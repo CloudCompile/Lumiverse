@@ -1,8 +1,10 @@
 import { useState, useCallback, useEffect, type ReactNode } from 'react'
+import { Trans, useTranslation } from 'react-i18next'
+
 import {
   FileText, Check, AlertCircle, Trash2, Save, RefreshCw,
   Settings, Clock, Cloud, ChevronDown, Play, Scissors, Link2,
-  Sparkles, RotateCcw,
+  Sparkles, RotateCcw, Hammer,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'motion/react'
 import clsx from 'clsx'
@@ -11,9 +13,10 @@ import NumberStepper from '@/components/shared/NumberStepper'
 import { Toggle } from '@/components/shared/Toggle'
 import { Badge } from '@/components/shared/Badge'
 import { Button } from '@/components/shared/FormComponents'
-import SearchableSelect from '@/components/shared/SearchableSelect'
+import ConnectionSelect from '@/components/shared/ConnectionSelect'
 import { Spinner } from '@/components/shared/Spinner'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
+import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import {
   loadSummarizationDefaults,
 } from '@/lib/summary/service'
@@ -23,7 +26,10 @@ import {
   SYSTEM_PROMPT_PLACEHOLDERS,
   USER_PROMPT_PLACEHOLDERS,
 } from '@/lib/summary/prompts'
-import type { SummaryMode, SummaryApiSource } from '@/lib/summary/types'
+import { DEFAULT_SUMMARY_REQUEST_TIMEOUT_MS, type SummaryMode, type SummaryApiSource } from '@/lib/summary/types'
+import { messagesApi } from '@/api/chats'
+import { useStore } from '@/store'
+import type { SummaryOperation } from '@/types/store'
 import styles from './SummaryEditor.module.css'
 
 // ─── Shared sub-components ────────────────────────────────────────
@@ -37,6 +43,7 @@ interface SectionProps {
 }
 
 function Section({ icon, title, children, defaultOpen = false, status }: SectionProps) {
+  const { t } = useTranslation('panels')
   const [open, setOpen] = useState(defaultOpen)
   return (
     <div className={styles.section}>
@@ -48,7 +55,7 @@ function Section({ icon, title, children, defaultOpen = false, status }: Section
         <span className={styles.sectionTitle}>{title}</span>
         {status !== undefined && (
           <Badge color={status ? 'primary' : 'neutral'} size="pill">
-            {status ? 'Active' : 'Off'}
+            {status ? t('summaryEditor.active') : t('summaryEditor.off')}
           </Badge>
         )}
       </button>
@@ -90,13 +97,26 @@ function NumberField({ label, hint, value, onChange, min, max, step = 1 }: {
 // ─── Summary Text Editor ──────────────────────────────────────────
 
 function SummaryTextEditor() {
+  const { t } = useTranslation('panels')
   const {
     summaryText, originalText, hasChat, hasChanges,
     isLoading, error,
     setSummaryText, generate, save, clear, loadSummary,
+    rebuildProgress,
+    rebuild,
   } = useSummary()
 
+  const activeChatId = useStore((s) => s.activeChatId)
+  const summarization = useStore((s) => s.summarization)
+  const activeOperation = useStore((s) => s.activeSummaryOperation)
+
   const [isSaving, setIsSaving] = useState(false)
+  const [showClearModal, setShowClearModal] = useState(false)
+  const [showRebuildModal, setShowRebuildModal] = useState(false)
+  const [rebuildInfo, setRebuildInfo] = useState<{ totalMessages: number; batchCount: number } | null>(null)
+
+  const isGenerating = activeOperation === 'generating'
+  const isRebuilding = activeOperation === 'rebuilding'
 
   const handleGenerate = useCallback(async () => {
     if (!hasChat || isLoading) return
@@ -117,28 +137,50 @@ function SummaryTextEditor() {
     }
   }, [save])
 
-  const handleClear = useCallback(async () => {
-    if (!confirm('Clear the summary for this chat?')) return
+  const handleClearConfirm = useCallback(async () => {
+    setShowClearModal(false)
     await clear()
   }, [clear])
 
+  const handleRebuildConfirm = useCallback(async () => {
+    setShowRebuildModal(false)
+    if (!rebuildInfo) return
+    await rebuild()
+  }, [rebuild, rebuildInfo])
+
+  const openRebuildModal = useCallback(async () => {
+    if (!hasChat || isLoading) return
+    // Get total message count for the confirmation dialog
+    let totalMessages = 0
+    try {
+      const msgPage = await messagesApi.list(activeChatId, { limit: 1 })
+      totalMessages = msgPage.total
+    } catch {
+      totalMessages = 0
+    }
+    const manualContext = summarization.manualMessageContext || 10
+    const batchCount = Math.ceil(totalMessages / manualContext)
+    setRebuildInfo({ totalMessages, batchCount })
+    setShowRebuildModal(true)
+  }, [hasChat, isLoading, activeChatId, summarization.manualMessageContext])
+
   return (
-    <Section icon={<FileText size={16} />} title="Summary Text" defaultOpen>
+    <Section icon={<FileText size={16} />} title={t('summaryEditor.summaryText')} defaultOpen>
       {/* Status */}
       {!hasChat ? (
         <div className={clsx(styles.status, styles.statusNoChat)}>
           <AlertCircle size={14} />
-          <span>No active chat</span>
+          <span>{t('summaryEditor.noActiveChat')}</span>
         </div>
       ) : originalText ? (
         <div className={clsx(styles.status, styles.statusExists)}>
           <Check size={14} />
-          <span>Summary exists for this chat</span>
+          <span>{t('summaryEditor.summaryExists')}</span>
         </div>
       ) : (
         <div className={clsx(styles.status, styles.statusEmpty)}>
           <AlertCircle size={14} />
-          <span>No summary yet</span>
+          <span>{t('summaryEditor.noSummaryYet')}</span>
         </div>
       )}
 
@@ -156,32 +198,89 @@ function SummaryTextEditor() {
         <Button
           size="icon" variant="primary"
           onClick={handleGenerate}
-          disabled={!hasChat || isLoading}
-          title={isLoading ? 'Generating...' : 'Generate'}
-          icon={isLoading ? <Spinner size={14} fast /> : <Play size={14} />}
+          disabled={!hasChat || isRebuilding}
+          title={isGenerating ? t('summaryEditor.generating') : isRebuilding ? t('summaryEditor.rebuildInProgress') : t('summaryEditor.generate')}
+          icon={isGenerating ? <Spinner size={14} fast /> : <Play size={14} />}
         />
         <Button
           size="icon" variant="ghost"
           onClick={loadSummary}
           disabled={!hasChat}
-          title="Refresh"
+          title={t('actions.refresh', { ns: 'common' })}
           icon={<RefreshCw size={14} />}
         />
         <Button
           size="icon" variant="danger-ghost"
-          onClick={handleClear}
-          disabled={!hasChat || !originalText}
-          title="Clear"
+          onClick={() => setShowClearModal(true)}
+          disabled={!hasChat || !originalText || isGenerating || isRebuilding}
+          title={t('actions.clear', { ns: 'common' })}
           icon={<Trash2 size={14} />}
         />
         <Button
           size="icon" variant="primary"
           onClick={handleSave}
-          disabled={!hasChat || !hasChanges}
-          title={isSaving ? 'Saved!' : 'Save'}
+          disabled={!hasChat || !hasChanges || isGenerating || isRebuilding}
+          title={isSaving ? t('summaryEditor.saved') : t('summaryEditor.save')}
           icon={isSaving ? <Check size={14} /> : <Save size={14} />}
         />
+        {/* Rebuild button */}
+        <Button
+          size="icon" variant="secondary"
+          onClick={openRebuildModal}
+          disabled={!hasChat || isGenerating}
+          title={isRebuilding ? t('summaryEditor.rebuilding') : t('summaryEditor.rebuildFromScratch')}
+          icon={isRebuilding ? <Spinner size={14} fast /> : <Hammer size={14} />}
+        />
       </div>
+
+      {/* Rebuild progress — shows immediately with batch count from store */}
+      {rebuildProgress && rebuildProgress.totalBatches > 0 && (
+        <motion.div
+          className={styles.rebuildProgress}
+          initial={{ opacity: 0, y: 5 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 5 }}
+        >
+          <Spinner size={12} fast />
+          <span>
+            {t('summaryEditor.rebuildBatchProgress', {
+              current: rebuildProgress.batchNumber + 1,
+              total: rebuildProgress.totalBatches,
+            })}
+          </span>
+        </motion.div>
+      )}
+
+      {/* Clear confirmation modal */}
+      <ConfirmationModal
+        isOpen={showClearModal}
+        onConfirm={handleClearConfirm}
+        onCancel={() => setShowClearModal(false)}
+        title={t('summaryEditor.clearModalTitle')}
+        message={t('summaryEditor.clearConfirm')}
+        variant="danger"
+        confirmText={t('actions.clear', { ns: 'common' })}
+      />
+
+      {/* Rebuild confirmation modal */}
+      <ConfirmationModal
+        isOpen={showRebuildModal}
+        onConfirm={handleRebuildConfirm}
+        onCancel={() => setShowRebuildModal(false)}
+        title={t('summaryEditor.rebuildModalTitle')}
+        message={rebuildInfo
+          ? (
+            <Trans
+              ns="panels"
+              i18nKey="summaryEditor.rebuildModalMessage"
+              values={{ totalMessages: rebuildInfo.totalMessages, batchCount: rebuildInfo.batchCount }}
+              components={{ strong: <strong /> }}
+            />
+          )
+          : t('summaryEditor.rebuildModalLoading')}
+        variant="warning"
+        confirmText={t('summaryEditor.rebuildConfirm')}
+      />
 
       {/* Unsaved changes */}
       <AnimatePresence>
@@ -192,7 +291,7 @@ function SummaryTextEditor() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 5 }}
           >
-            You have unsaved changes
+            {t('summaryEditor.unsavedChanges')}
           </motion.div>
         )}
       </AnimatePresence>
@@ -206,44 +305,44 @@ function SummaryTextEditor() {
 // ─── Summarization Config ─────────────────────────────────────────
 
 function SummarizationConfig() {
-  const { summarization, setSummarization, profiles, activeProfileId } = useSummary()
+  const { t } = useTranslation('panels')
+  const { summarization, setSummarization, profiles } = useSummary()
 
   const mode = summarization.mode
   const apiSource = summarization.apiSource
-
-  const connectionOptions = profiles.map((p) => ({
-    value: p.id,
-    label: `${p.name} (${p.provider})`,
-  }))
+  const updateRequestTimeoutMs = useCallback((value: number) => {
+    const next = Number.isFinite(value) ? value : DEFAULT_SUMMARY_REQUEST_TIMEOUT_MS
+    setSummarization({ requestTimeoutMs: Math.max(5_000, Math.round(next)) })
+  }, [setSummarization])
 
   return (
     <div className={styles.editor}>
       {/* Mode */}
-      <Section icon={<Settings size={16} />} title="Summarization Mode" status={mode !== 'disabled'} defaultOpen>
+      <Section icon={<Settings size={16} />} title={t('summaryEditor.summarizationMode')} status={mode !== 'disabled'} defaultOpen>
         <div className={styles.radioGroup}>
-          <RadioOption name="sum-mode" value="disabled" checked={mode === 'disabled'} onChange={(v) => setSummarization({ mode: v as SummaryMode })} label="Disabled" />
-          <RadioOption name="sum-mode" value="auto" checked={mode === 'auto'} onChange={(v) => setSummarization({ mode: v as SummaryMode })} label="Automatic" />
-          <RadioOption name="sum-mode" value="manual" checked={mode === 'manual'} onChange={(v) => setSummarization({ mode: v as SummaryMode })} label="Manual" />
+          <RadioOption name="sum-mode" value="disabled" checked={mode === 'disabled'} onChange={(v) => setSummarization({ mode: v as SummaryMode })} label={t('summaryEditor.disabled')} />
+          <RadioOption name="sum-mode" value="auto" checked={mode === 'auto'} onChange={(v) => setSummarization({ mode: v as SummaryMode })} label={t('summaryEditor.automatic')} />
+          <RadioOption name="sum-mode" value="manual" checked={mode === 'manual'} onChange={(v) => setSummarization({ mode: v as SummaryMode })} label={t('summaryEditor.manual')} />
         </div>
         <p className={styles.desc}>
-          {mode === 'disabled' && 'Summarization is turned off.'}
-          {mode === 'auto' && 'Summaries are generated automatically at set intervals.'}
-          {mode === 'manual' && 'Click the Generate button to create summaries on demand.'}
+          {mode === 'disabled' && t('summaryEditor.modeDisabledHint')}
+          {mode === 'auto' && t('summaryEditor.modeAutoHint')}
+          {mode === 'manual' && t('summaryEditor.modeManualHint')}
         </p>
       </Section>
 
       {/* Auto Settings */}
       {mode === 'auto' && (
-        <Section icon={<Clock size={16} />} title="Auto Settings" defaultOpen>
+        <Section icon={<Clock size={16} />} title={t('summaryEditor.autoSettings')} defaultOpen>
           <div className={styles.fieldRow}>
             <NumberField
-              id="sum-interval" label="Interval" hint="Every N messages"
+              id="sum-interval" label={t('summaryEditor.interval')} hint={t('summaryEditor.everyNMessages')}
               value={summarization.autoInterval}
               onChange={(v) => setSummarization({ autoInterval: v })}
               min={1}
             />
             <NumberField
-              id="sum-auto-ctx" label="Context" hint="Messages to include"
+              id="sum-auto-ctx" label={t('summaryEditor.context')} hint={t('summaryEditor.messagesToInclude')}
               value={summarization.autoMessageContext}
               onChange={(v) => setSummarization({ autoMessageContext: v })}
               min={1} max={100}
@@ -254,9 +353,9 @@ function SummarizationConfig() {
 
       {/* Manual Context */}
       {(mode === 'manual' || mode === 'auto') && (
-        <Section icon={<FileText size={16} />} title="Manual Context" defaultOpen={mode === 'manual'}>
+        <Section icon={<FileText size={16} />} title={t('summaryEditor.manualContext')} defaultOpen={mode === 'manual'}>
           <NumberField
-            id="sum-manual-ctx" label="Messages to include" hint="When generating manually"
+            id="sum-manual-ctx" label={t('summaryEditor.messagesToInclude')} hint={t('summaryEditor.whenGeneratingManually')}
             value={summarization.manualMessageContext}
             onChange={(v) => setSummarization({ manualMessageContext: v })}
             min={1} max={100}
@@ -266,76 +365,91 @@ function SummarizationConfig() {
 
       {/* API Source */}
       {mode !== 'disabled' && (
-        <Section icon={<Cloud size={16} />} title="API Source">
+        <Section icon={<Cloud size={16} />} title={t('summaryEditor.apiSource')}>
           <div className={styles.radioGroup}>
             <RadioOption
               name="sum-source" value="sidecar"
               checked={apiSource === 'sidecar'}
               onChange={(v) => setSummarization({ apiSource: v as SummaryApiSource })}
-              label="Sidecar Connection"
+              label={t('summaryEditor.sidecarConnection')}
             />
             <RadioOption
               name="sum-source" value="active"
               checked={apiSource === 'active'}
               onChange={(v) => setSummarization({ apiSource: v as SummaryApiSource })}
-              label="Active Connection"
+              label={t('summaryEditor.activeConnection')}
             />
             <RadioOption
               name="sum-source" value="dedicated"
               checked={apiSource === 'dedicated'}
               onChange={(v) => setSummarization({ apiSource: v as SummaryApiSource })}
-              label="Dedicated Connection"
+              label={t('summaryEditor.dedicatedConnection')}
             />
           </div>
           <p className={styles.desc}>
             {apiSource === 'sidecar'
-              ? 'Uses the shared Sidecar connection configured in your settings.'
+              ? t('summaryEditor.sidecarHint')
               : apiSource === 'active'
-                ? 'Uses whichever connection profile is currently active.'
-                : 'Uses a specific connection profile for all summarization.'}
+                ? t('summaryEditor.activeConnectionHint')
+                : t('summaryEditor.dedicatedConnectionHint')}
           </p>
         </Section>
       )}
 
       {/* Dedicated Connection Picker */}
       {mode !== 'disabled' && apiSource === 'dedicated' && (
-        <Section icon={<Link2 size={16} />} title="Dedicated Connection" defaultOpen>
-          {connectionOptions.length === 0 ? (
-            <p className={styles.desc}>No connection profiles configured. Create one in the Connections panel.</p>
+        <Section icon={<Link2 size={16} />} title={t('summaryEditor.dedicatedConnection')} defaultOpen>
+          {profiles.length === 0 ? (
+            <p className={styles.desc}>{t('summaryEditor.noConnectionProfiles')}</p>
           ) : (
             <div className={styles.field}>
-              <label className={styles.fieldLabel} htmlFor="sum-conn">Connection Profile</label>
-              <SearchableSelect
+              <label className={styles.fieldLabel} htmlFor="sum-conn">{t('summaryEditor.connectionProfile')}</label>
+              <ConnectionSelect
+                kind="llm"
                 value={summarization.dedicatedConnectionId || ''}
                 onChange={(val) => setSummarization({ dedicatedConnectionId: val || null })}
-                options={connectionOptions}
-                placeholder="Select a connection…"
-                searchPlaceholder="Search connections…"
-                ariaLabel="Connection Profile"
-                emptyMessage="No connection profiles configured"
+                placeholder={t('summaryEditor.selectConnection')}
+                searchPlaceholder={t('summaryEditor.searchConnections')}
+                ariaLabel={t('summaryEditor.connectionProfile')}
+                emptyMessage={t('summaryEditor.noConnectionProfiles')}
+                portal
                 clearable
-                clearLabel="No dedicated connection"
+                clearLabel={t('summaryEditor.noDedicatedConnection')}
               />
             </div>
           )}
         </Section>
       )}
 
+      {/* Request Timeout */}
+      {mode !== 'disabled' && (
+        <Section icon={<Clock size={16} />} title={t('summaryEditor.requestTimeout')}>
+          <NumberField
+            id="sum-timeout" label={t('summaryEditor.timeout')} hint={t('summaryEditor.timeoutHint')}
+            value={summarization.requestTimeoutMs}
+            onChange={updateRequestTimeoutMs}
+            min={5_000}
+            step={30_000}
+          />
+          <p className={styles.desc}>{t('summaryEditor.defaultTimeout', { value: DEFAULT_SUMMARY_REQUEST_TIMEOUT_MS })}</p>
+        </Section>
+      )}
+
       {/* Message Limit — trim chat history to N most recent messages during generation */}
-      <Section icon={<Scissors size={16} />} title="Message Limit" status={summarization.messageLimitEnabled}>
+      <Section icon={<Scissors size={16} />} title={t('summaryEditor.messageLimit')} status={summarization.messageLimitEnabled}>
         <div className={styles.toggleRow}>
           <Toggle.Switch
             checked={summarization.messageLimitEnabled}
             onChange={(v) => setSummarization({ messageLimitEnabled: v })}
             size="sm"
           />
-          <span className={styles.toggleLabel}>Limit messages in context</span>
+          <span className={styles.toggleLabel}>{t('summaryEditor.limitMessages')}</span>
         </div>
         {summarization.messageLimitEnabled && (
           <>
             <NumberField
-              label="Message count"
-              hint="Keep the N most recent messages during generation"
+              label={t('summaryEditor.messageCount')}
+              hint={t('summaryEditor.messageCountHint')}
               value={summarization.messageLimitCount}
               onChange={(v) => setSummarization({ messageLimitCount: v })}
               min={1}
@@ -343,8 +457,8 @@ function SummarizationConfig() {
             />
             <p className={styles.desc}>
               {summarization.mode !== 'disabled'
-                ? 'Older messages will be trimmed from context. Use {{loomSummary}} in your preset to retain context from the summary.'
-                : 'Older messages will be trimmed from context. Enable summarization to preserve context from older messages via the {{loomSummary}} macro.'}
+                ? t('summaryEditor.trimmedWithSummary')
+                : t('summaryEditor.trimmedWithoutSummary')}
             </p>
           </>
         )}
@@ -356,6 +470,7 @@ function SummarizationConfig() {
 // ─── Prompt Template Editor ───────────────────────────────────────
 
 function PromptTemplateConfig() {
+  const { t } = useTranslation('panels')
   const { summarization, setSummarization } = useSummary()
 
   const [defaults, setDefaults] = useState<{ systemPrompt: string; userPrompt: string }>({
@@ -401,37 +516,35 @@ function PromptTemplateConfig() {
   return (
     <Section
       icon={<Sparkles size={16} />}
-      title="Prompt Template"
+      title={t('summaryEditor.promptTemplate')}
       status={systemCustomized || userCustomized}
     >
       <p className={styles.desc}>
-        Customize how the model is instructed to produce summaries. Leave blank
-        to use the server defaults. These placeholders are substituted at
-        generation time:
+        {t('summaryEditor.promptTemplateHint')}
       </p>
 
       {/* System prompt */}
       <div className={styles.promptBlock}>
         <div className={styles.promptBlockHeader}>
           <span className={styles.promptBlockLabel}>
-            System Prompt
-            {systemCustomized && <Badge color="primary" size="pill">Customized</Badge>}
+            {t('summaryEditor.systemPrompt')}
+            {systemCustomized && <Badge color="primary" size="pill">{t('summaryEditor.customized')}</Badge>}
           </span>
           <button
             type="button"
             className={styles.promptResetBtn}
             onClick={resetSystem}
             disabled={!systemCustomized}
-            title="Restore server default"
+            title={t('summaryEditor.restoreServerDefault')}
           >
-            <RotateCcw size={11} /> Reset
+            <RotateCcw size={11} /> {t('summaryEditor.reset')}
           </button>
         </div>
         <ExpandableTextarea
           className={styles.textarea}
           value={systemValue}
           onChange={handleSystemChange}
-          title="Summarization System Prompt"
+          title={t('summaryEditor.summarizationSystemPrompt')}
           rows={8}
           spellCheck={false}
         />
@@ -448,24 +561,24 @@ function PromptTemplateConfig() {
       <div className={styles.promptBlock}>
         <div className={styles.promptBlockHeader}>
           <span className={styles.promptBlockLabel}>
-            User Prompt
-            {userCustomized && <Badge color="primary" size="pill">Customized</Badge>}
+            {t('summaryEditor.userPrompt')}
+            {userCustomized && <Badge color="primary" size="pill">{t('summaryEditor.customized')}</Badge>}
           </span>
           <button
             type="button"
             className={styles.promptResetBtn}
             onClick={resetUser}
             disabled={!userCustomized}
-            title="Restore server default"
+            title={t('summaryEditor.restoreServerDefault')}
           >
-            <RotateCcw size={11} /> Reset
+            <RotateCcw size={11} /> {t('summaryEditor.reset')}
           </button>
         </div>
         <ExpandableTextarea
           className={styles.textarea}
           value={userValue}
           onChange={handleUserChange}
-          title="Summarization User Prompt"
+          title={t('summaryEditor.summarizationUserPrompt')}
           rows={6}
           spellCheck={false}
         />
@@ -484,6 +597,9 @@ function PromptTemplateConfig() {
 // ─── Main Export ──────────────────────────────────────────────────
 
 export default function SummaryEditor() {
+  const { t } = useTranslation('common')
+  const { t: tc } = useTranslation('common')
+
   return (
     <div className={styles.editor}>
       <SummaryTextEditor />

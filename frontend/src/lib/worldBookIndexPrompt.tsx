@@ -1,5 +1,6 @@
 import { embeddingsApi } from '@/api/embeddings'
 import { worldBooksApi } from '@/api/world-books'
+import i18n from '@/i18n'
 import { toast } from '@/lib/toast'
 import { useStore } from '@/store'
 
@@ -8,31 +9,28 @@ type CandidateBook = {
   name: string
 }
 
+const wb = (key: string, options?: Record<string, unknown>) =>
+  i18n.t(`modals:worldBookIndex.${key}`, options)
+
 function needsInitialIndex(summary: { enabled_non_empty: number; indexed: number }): boolean {
   return summary.enabled_non_empty > 0 && summary.indexed === 0
 }
 
 function promptToIndex(books: CandidateBook[]): Promise<boolean> {
   const { openModal } = useStore.getState()
-  const noun = books.length === 1 ? 'lorebook' : 'lorebooks'
-  const pronoun = books.length === 1 ? 'it' : 'them'
-  const setupPhrase = books.length === 1 ? 'is set up' : 'are set up'
-  const missingPhrase = books.length === 1 ? 'does not have' : 'do not have'
+  const one = books.length === 1
 
   return new Promise((resolve) => {
     openModal('confirm', {
-      title: books.length === 1 ? 'Index This Lorebook?' : 'Index These Lorebooks?',
+      title: one ? wb('titleOne') : wb('titleMany'),
       variant: 'warning',
-      confirmText: 'Index now',
-      cancelText: 'Use another lorebook',
+      confirmText: wb('confirm'),
+      cancelText: wb('cancel'),
       message: (
         <div>
-          <p>
-            The selected {noun} {setupPhrase} for vector activation, but {pronoun} {missingPhrase} an index yet.
-            Index {pronoun} now so vector lookup is ready as soon as {books.length === 1 ? 'this lorebook is' : 'these lorebooks are'} attached to chat context.
-          </p>
+          <p>{one ? wb('bodyOne') : wb('bodyMany')}</p>
           <p>{books.map((book) => book.name).join(', ')}</p>
-          <p>Cancel keeps {books.length === 1 ? 'this lorebook' : 'these lorebooks'} unattached so you can pick a different one.</p>
+          <p>{one ? wb('cancelHintOne') : wb('cancelHintMany')}</p>
         </div>
       ),
       onConfirm: () => resolve(true),
@@ -91,10 +89,14 @@ export async function filterWorldBooksForChatContextAttachment(books: CandidateB
   }
 
   if (indexed > 0) {
-    toast.success(indexed === 1 ? `Indexed "${needsIndex[0].name}".` : `Indexed ${indexed} lorebooks.`)
+    toast.success(
+      indexed === 1
+        ? wb('toastIndexedOne', { name: needsIndex[0].name })
+        : wb('toastIndexedMany', { count: indexed }),
+    )
   }
   if (failed > 0) {
-    toast.error(failed === 1 ? 'A lorebook could not be indexed automatically.' : `${failed} lorebooks could not be indexed automatically.`)
+    toast.error(failed === 1 ? wb('toastFailedOne') : wb('toastFailedMany', { count: failed }))
   }
 
   return books.map((book) => book.id)

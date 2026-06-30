@@ -46,6 +46,19 @@ export const createConnectionsSlice: StateCreator<AppStore, [], [], ConnectionsS
         clearDirtyKey('reasoningSettings')
       }
     }
+
+    // Apply or restore promptBias ("Start Reply With") when bound on the profile
+    const newBoundPromptBias = newProfile?.metadata?.reasoningBindings?.promptBias
+    const oldBoundPromptBias = oldProfile?.metadata?.reasoningBindings?.promptBias
+    if (typeof newBoundPromptBias === 'string') {
+      set({ promptBias: newBoundPromptBias } as any)
+      settingsApi.put('promptBias', newBoundPromptBias).catch(() => {})
+      clearDirtyKey('promptBias')
+    } else if (typeof oldBoundPromptBias === 'string') {
+      set({ promptBias: '' } as any)
+      settingsApi.put('promptBias', '').catch(() => {})
+      clearDirtyKey('promptBias')
+    }
   },
 
   addProfile: (profile) => set((state) => ({ profiles: [...state.profiles, profile] })),
@@ -68,6 +81,11 @@ export const createConnectionsSlice: StateCreator<AppStore, [], [], ConnectionsS
       set({ reasoningSettings: { ...REASONING_DEFAULTS } } as any)
       settingsApi.put('reasoningSettings', { ...REASONING_DEFAULTS }).catch(() => {})
       clearDirtyKey('reasoningSettings')
+    }
+    if (wasActive && typeof removedProfile?.metadata?.reasoningBindings?.promptBias === 'string') {
+      set({ promptBias: '' } as any)
+      settingsApi.put('promptBias', '').catch(() => {})
+      clearDirtyKey('promptBias')
     }
   },
 

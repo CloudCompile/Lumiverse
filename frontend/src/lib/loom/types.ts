@@ -1,5 +1,11 @@
 export type LoomInjectTag = 'user_append' | 'assistant_append'
 
+export interface PromptVariableOption {
+  id: string
+  label: string
+  value: string
+}
+
 export type PromptVariableDef =
   | {
       id: string
@@ -40,9 +46,36 @@ export type PromptVariableDef =
       step?: number
       description?: string
     }
+  | {
+      id: string
+      name: string
+      label: string
+      type: 'select'
+      defaultValue: string
+      options: PromptVariableOption[]
+      description?: string
+    }
+  | {
+      id: string
+      name: string
+      label: string
+      type: 'switch'
+      defaultValue: 0 | 1
+      description?: string
+    }
+  | {
+      id: string
+      name: string
+      label: string
+      type: 'multiselect'
+      defaultValue: string[]
+      options: PromptVariableOption[]
+      separator?: string
+      description?: string
+    }
 
 export type PromptVariableType = PromptVariableDef['type']
-export type PromptVariableValue = string | number
+export type PromptVariableValue = string | number | string[]
 export type PromptVariableValues = Record<string /* blockId */, Record<string /* varName */, PromptVariableValue>>
 
 export interface PromptBlock {
@@ -57,8 +90,17 @@ export interface PromptBlock {
   isLocked: boolean
   color: string | null
   injectionTrigger: string[]
+  group?: string | null
   categoryMode?: 'radio' | 'checkbox' | null
   variables?: PromptVariableDef[]
+  /** When uploaded to LumiHub, content is extracted into a private sidecar block. */
+  sealed?: boolean
+  sealedKey?: string
+  /** LumiHub-installed sealed blocks are editable locally but never export raw content. */
+  sealedSource?: 'lumihub' | string
+  sealedOriginPresetId?: string
+  sealedOriginVersion?: string | null
+  sealedSha256?: string
 }
 
 export interface SamplerOverrides {
@@ -122,6 +164,11 @@ export interface LoomPreset {
   id: string
   name: string
   description: string
+  coverUrl: string | null
+  /** Published version label of the source preset (LumiHub install / Loom JSON export). Null for local presets. */
+  presetVersion: string | null
+  /** LumiHub provenance metadata (install source, hub id, slug, creator) preserved verbatim across edits. Null when not LumiHub-sourced. */
+  lumihubMeta: Record<string, unknown> | null
   schemaVersion: number
   createdAt: number
   updatedAt: number

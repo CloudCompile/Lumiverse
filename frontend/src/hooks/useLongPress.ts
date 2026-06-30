@@ -20,6 +20,7 @@ export function useLongPress({ onLongPress, delay = 500, moveThreshold = 10 }: U
   const startPos = useRef<LongPressPos>({ x: 0, y: 0 })
   const targetRef = useRef<Element | null>(null)
   const firedRef = useRef(false)
+  const nativeListenerTargetRef = useRef<Element | null>(null)
 
   const clear = useCallback(() => {
     if (timerRef.current) {
@@ -28,26 +29,54 @@ export function useLongPress({ onLongPress, delay = 500, moveThreshold = 10 }: U
     }
   }, [])
 
+  // Capture-phase contextmenu suppressor — iOS dispatches a contextmenu event
+  // when the image-lift/preview gesture starts. Catching it at capture phase
+  // on the touch target stops the native preview before our synthetic event
+  // fires. React's onContextMenu runs at bubble phase, which can be too late.
+  //
+  // Only suppress *trusted* native events. The synthetic contextmenu we dispatch
+  // below (isTrusted === false) must pass through untouched — otherwise it gets
+  // preventDefault()'d before reaching bubble-phase handlers, and consumers that
+  // gate on `e.defaultPrevented` (e.g. the drawer tab quick-menu) never fire.
+  const suppressNativeContextMenu = useCallback((e: Event) => {
+    if (e.isTrusted) e.preventDefault()
+  }, [])
+
+  const detachNativeContextMenu = useCallback(() => {
+    if (nativeListenerTargetRef.current) {
+      nativeListenerTargetRef.current.removeEventListener('contextmenu', suppressNativeContextMenu, true)
+      nativeListenerTargetRef.current = null
+    }
+  }, [suppressNativeContextMenu])
+
   const onTouchStart = useCallback((e: React.TouchEvent) => {
     firedRef.current = false
     const touch = e.touches[0]
     startPos.current = { x: touch.clientX, y: touch.clientY }
-    targetRef.current = e.target instanceof Element ? e.target : null
+    const target = e.target instanceof Element ? e.target : null
+    targetRef.current = target
+
+    detachNativeContextMenu()
+    if (target) {
+      target.addEventListener('contextmenu', suppressNativeContextMenu, true)
+      nativeListenerTargetRef.current = target
+    }
+
     clear()
     timerRef.current = setTimeout(() => {
-      const target = targetRef.current
+      const t = targetRef.current
       targetRef.current = null
-      if (!target) return
+      if (!t) return
       firedRef.current = true
       navigator.vibrate?.(50)
-      target.dispatchEvent(new MouseEvent('contextmenu', {
+      t.dispatchEvent(new MouseEvent('contextmenu', {
         bubbles: true,
         cancelable: true,
         clientX: touch.clientX,
         clientY: touch.clientY,
       }))
     }, delay)
-  }, [delay, clear])
+  }, [delay, clear, detachNativeContextMenu, suppressNativeContextMenu])
 
   const onTouchMove = useCallback((e: React.TouchEvent) => {
     if (!timerRef.current) return
@@ -61,11 +90,18 @@ export function useLongPress({ onLongPress, delay = 500, moveThreshold = 10 }: U
 
   const onTouchEnd = useCallback((e: React.TouchEvent) => {
     clear()
+    detachNativeContextMenu()
     if (firedRef.current) {
       e.preventDefault()
       firedRef.current = false
     }
-  }, [clear])
+  }, [clear, detachNativeContextMenu])
+
+  const onTouchCancel = useCallback(() => {
+    clear()
+    detachNativeContextMenu()
+    firedRef.current = false
+  }, [clear, detachNativeContextMenu])
 
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -73,5 +109,5 @@ export function useLongPress({ onLongPress, delay = 500, moveThreshold = 10 }: U
     onLongPress({ x: e.clientX, y: e.clientY })
   }, [onLongPress])
 
-  return { onTouchStart, onTouchMove, onTouchEnd, onContextMenu }
+  return { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel, onContextMenu }
 }

@@ -93,6 +93,10 @@ export interface GroupDefinition {
   createDate?: string;
 }
 
+export interface GroupChatFileEntry {
+  id: string;
+}
+
 export interface ReadChatFileOptions {
   stDataDir: string;
   charDirName: string;
@@ -602,6 +606,16 @@ export async function readGroupDefinitions(stDataDir: string, fs: FileSystem = d
   return results;
 }
 
+export async function readGroupChatFileEntries(stDataDir: string, fs: FileSystem = defaultFs): Promise<GroupChatFileEntry[]> {
+  const groupChatsDir = fs.join(stDataDir, "group chats");
+  if (!(await fs.exists(groupChatsDir))) return [];
+
+  const entries = await fs.readdir(groupChatsDir);
+  return entries
+    .filter((e) => e.isFile && fs.extname(e.name).toLowerCase() === ".jsonl")
+    .map((e) => ({ id: fs.basename(e.name, ".jsonl") }));
+}
+
 /**
  * Read a single group chat JSONL file.
  */
@@ -612,7 +626,8 @@ export async function readGroupChatFile(
   filenameToId?: Map<string, string>,
   fs: FileSystem = defaultFs,
 ): Promise<{ messages: ChatMessage[]; createdAt?: number } | null> {
-  const chatFilePath = fs.join(stDataDir, "group chats", `${chatId}.jsonl`);
+  const chatFileName = chatId.toLowerCase().endsWith(".jsonl") ? chatId : `${chatId}.jsonl`;
+  const chatFilePath = fs.join(stDataDir, "group chats", chatFileName);
   if (!(await fs.exists(chatFilePath))) return null;
 
   try {

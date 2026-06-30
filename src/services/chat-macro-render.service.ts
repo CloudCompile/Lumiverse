@@ -23,7 +23,6 @@ export async function resolveRenderedChatMessages(
   input: ResolveRenderedChatMessagesInput,
 ): Promise<{
   resolvedById: Map<string, string>;
-  localVariables?: Record<string, string>;
   globalVariables?: Record<string, string>;
   chatVariables?: Record<string, string>;
 }> {
@@ -57,7 +56,6 @@ export async function resolveRenderedChatMessages(
 
   return {
     resolvedById,
-    localVariables: Object.fromEntries(env.variables.local),
     globalVariables: Object.fromEntries(env.variables.global),
     chatVariables: Object.fromEntries(env.variables.chat),
   };
@@ -72,6 +70,17 @@ export async function resolveRenderedMessageContent(
   return healFormattingArtifacts((await evaluate(content, env, registry)).text);
 }
 
+export function buildPersistedMacroVariables(
+  existingMacroVars: Record<string, unknown>,
+  incomingGlobal: Record<string, string>,
+): Record<string, unknown> {
+  const existingGlobal = (existingMacroVars.global as Record<string, string> | undefined) ?? {};
+  return {
+    ...existingMacroVars,
+    global: { ...existingGlobal, ...incomingGlobal },
+  };
+}
+
 export function persistMacroVariableState(
   userId: string,
   chatId: string,
@@ -79,14 +88,12 @@ export function persistMacroVariableState(
 ): void {
   const chat = chatsSvc.getChat(userId, chatId);
   if (!chat) return;
-  const macroVariables = {
-    ...((chat.metadata?.macro_variables as Record<string, unknown>) || {}),
-    local: Object.fromEntries(env.variables.local),
-    global: Object.fromEntries(env.variables.global),
-  };
+
+  const existingMacroVars = (chat.metadata?.macro_variables as Record<string, unknown> | undefined) ?? {};
+  const existingChatVars = (chat.metadata?.chat_variables as Record<string, string> | undefined) ?? {};
   chatsSvc.mergeChatMetadata(userId, chatId, {
-    macro_variables: macroVariables,
-    chat_variables: Object.fromEntries(env.variables.chat),
+    macro_variables: buildPersistedMacroVariables(existingMacroVars, Object.fromEntries(env.variables.global)),
+    chat_variables: { ...existingChatVars, ...Object.fromEntries(env.variables.chat) },
   });
 }
 
@@ -98,7 +105,6 @@ export async function reconcileChatMessageMacros(
 
   const {
     resolvedById,
-    localVariables,
     globalVariables,
     chatVariables,
   } = await resolveRenderedChatMessages({
@@ -113,16 +119,14 @@ export async function reconcileChatMessageMacros(
     chatsSvc.updateMessage(input.userId, messageId, { content: resolved });
   }
 
-  if (input.persistVariables !== false && localVariables && globalVariables && chatVariables) {
+  if (input.persistVariables !== false && globalVariables && chatVariables) {
     const chat = chatsSvc.getChat(input.userId, input.chatId);
-    const macroVariables = {
-      ...((chat?.metadata?.macro_variables as Record<string, unknown>) || {}),
-      local: localVariables,
-      global: globalVariables,
-    };
+    // Env values win on collision but concurrent extension writes survive.
+    const existingMacroVars = (chat?.metadata?.macro_variables as Record<string, unknown> | undefined) ?? {};
+    const existingChatVars = (chat?.metadata?.chat_variables as Record<string, string> | undefined) ?? {};
     chatsSvc.mergeChatMetadata(input.userId, input.chatId, {
-      macro_variables: macroVariables,
-      chat_variables: chatVariables,
+      macro_variables: buildPersistedMacroVariables(existingMacroVars, globalVariables),
+      chat_variables: { ...existingChatVars, ...chatVariables },
     });
   }
 

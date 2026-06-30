@@ -189,7 +189,8 @@
 /* ── Right panel: book content ── */
 .content {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
+  overflow: hidden;
   padding: 16px 20px;
   display: flex;
   flex-direction: column;

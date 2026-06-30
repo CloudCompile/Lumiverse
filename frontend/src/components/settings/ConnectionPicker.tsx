@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   HardDrive,
   Globe,
@@ -29,6 +30,8 @@ interface ConnectionPickerProps {
 }
 
 export default function ConnectionPicker({ value, onChange, onConnected }: ConnectionPickerProps) {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
   const [testError, setTestError] = useState('')
   const [sftpAuth, setSftpAuth] = useState<SFTPAuthMode>(
@@ -114,11 +117,11 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
         onConnected?.(true)
       } else {
         setTestState('fail')
-        setTestError(result.error || 'Connection failed')
+        setTestError(result.error || t('connectionPicker.connectionFailed'))
       }
     } catch (err: any) {
       setTestState('fail')
-      setTestError(err?.body?.error || err?.message || 'Connection failed')
+      setTestError(err?.body?.error || err?.message || t('connectionPicker.connectionFailed'))
     }
   }
 
@@ -173,7 +176,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           await handleGdriveConnect()
         } catch (err: any) {
           setTestState('fail')
-          setTestError(err?.message || 'Authorization failed')
+          setTestError(err?.message || t('connectionPicker.authFailed'))
         }
         setGdriveLoading(false)
       }
@@ -190,7 +193,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       }, 500)
     } catch (err: any) {
       setTestState('fail')
-      setTestError(err?.body?.error || err?.message || 'Failed to initiate auth')
+      setTestError(err?.body?.error || err?.message || t('connectionPicker.initiateAuthFailed'))
       setGdriveLoading(false)
     }
   }
@@ -203,7 +206,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       onConnected?.(true)
     } catch (err: any) {
       setTestState('fail')
-      setTestError(err?.body?.error || err?.message || 'Failed to get access token')
+      setTestError(err?.body?.error || err?.message || t('connectionPicker.getTokenFailed'))
     }
   }
 
@@ -269,7 +272,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       window.open(auth_url, '_blank')
     } catch (err: any) {
       setTestState('fail')
-      setTestError(err?.body?.error || err?.message || 'Failed to initiate auth')
+      setTestError(err?.body?.error || err?.message || t('connectionPicker.initiateAuthFailed'))
     }
     setDbxLoading(false)
   }
@@ -287,7 +290,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       await handleDbxConnect()
     } catch (err: any) {
       setTestState('fail')
-      setTestError(err?.body?.error || err?.message || 'Authorization failed')
+      setTestError(err?.body?.error || err?.message || t('connectionPicker.authFailed'))
     }
     setDbxLoading(false)
   }
@@ -300,7 +303,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
       onConnected?.(true)
     } catch (err: any) {
       setTestState('fail')
-      setTestError(err?.body?.error || err?.message || 'Failed to get access token')
+      setTestError(err?.body?.error || err?.message || t('connectionPicker.getTokenFailed'))
     }
   }
 
@@ -346,7 +349,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           onClick={() => switchType('local')}
         >
           <HardDrive size={13} className={styles.tabIcon} />
-          Local
+          {t('connectionPicker.tabLocal')}
         </button>
         {availableTypes.includes('sftp') && (
           <button
@@ -395,17 +398,17 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
         <div className={styles.configForm}>
           <div className={styles.fieldRow}>
             <div className={styles.field}>
-              <label className={styles.label}>Host</label>
+              <label className={styles.label}>{t('connectionPicker.host')}</label>
               <input
                 className={styles.input}
                 type="text"
-                placeholder="192.168.1.50 or hostname"
+                placeholder={t('connectionPicker.hostPlaceholderSftp')}
                 value={sftp.host || ''}
                 onChange={(e) => updateField('host', e.target.value)}
               />
             </div>
             <div className={styles.fieldSmall}>
-              <label className={styles.label}>Port</label>
+              <label className={styles.label}>{t('connectionPicker.port')}</label>
                 <NumericInput
                   className={styles.input}
                   placeholder="22"
@@ -417,43 +420,43 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           </div>
 
           <div className={styles.field}>
-            <label className={styles.label}>Username</label>
+            <label className={styles.label}>{t('connectionPicker.username')}</label>
             <input
               className={styles.input}
               type="text"
-              placeholder="user"
+              placeholder={t('connectionPicker.usernamePlaceholder')}
               value={sftp.username || ''}
               onChange={(e) => updateField('username', e.target.value)}
             />
           </div>
 
           <div className={styles.field}>
-            <label className={styles.label}>Authentication</label>
+            <label className={styles.label}>{t('connectionPicker.authentication')}</label>
             <div className={styles.authTabs}>
               <button
                 type="button"
                 className={sftpAuth === 'password' ? styles.authTabActive : styles.authTab}
                 onClick={() => setSftpAuth('password')}
               >
-                Password
+                {t('connectionPicker.authPassword')}
               </button>
               <button
                 type="button"
                 className={sftpAuth === 'key' ? styles.authTabActive : styles.authTab}
                 onClick={() => setSftpAuth('key')}
               >
-                Private Key
+                {t('connectionPicker.authPrivateKey')}
               </button>
             </div>
           </div>
 
           {sftpAuth === 'password' ? (
             <div className={styles.field}>
-              <label className={styles.label}>Password</label>
+              <label className={styles.label}>{t('connectionPicker.password')}</label>
               <input
                 className={styles.input}
                 type="password"
-                placeholder="Password"
+                placeholder={t('connectionPicker.password')}
                 value={sftp.password || ''}
                 onChange={(e) => updateField('password', e.target.value)}
                 autoComplete="off"
@@ -462,11 +465,11 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           ) : (
             <>
               <div className={styles.field}>
-                <label className={styles.label}>Private Key</label>
+                <label className={styles.label}>{t('connectionPicker.privateKey')}</label>
                 {sftp.privateKey ? (
                   <div className={styles.fileUploaded}>
                     <KeyRound size={12} />
-                    Key loaded ({sftp.privateKey.length} chars)
+                    {t('connectionPicker.keyLoaded', { count: sftp.privateKey.length })}
                     <button type="button" className={styles.fileClear} onClick={clearKey}>
                       <X size={12} />
                     </button>
@@ -475,9 +478,9 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                   <div className={styles.fileUploadRow}>
                     <button type="button" className={styles.fileUploadBtn} onClick={handleKeyFileUpload}>
                       <Upload size={12} />
-                      Upload key file
+                      {t('connectionPicker.uploadKeyFile')}
                     </button>
-                    <span className={styles.hint}>or paste below</span>
+                    <span className={styles.hint}>{t('connectionPicker.orPasteBelow')}</span>
                   </div>
                 )}
                 <textarea
@@ -496,11 +499,11 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                 />
               </div>
               <div className={styles.field}>
-                <label className={styles.label}>Passphrase (optional)</label>
+                <label className={styles.label}>{t('connectionPicker.passphraseOptional')}</label>
                 <input
                   className={styles.input}
                   type="password"
-                  placeholder="Key passphrase"
+                  placeholder={t('connectionPicker.keyPassphrasePlaceholder')}
                   value={sftp.passphrase || ''}
                   onChange={(e) => updateField('passphrase', e.target.value)}
                   autoComplete="off"
@@ -512,11 +515,11 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           <div className={styles.testRow}>
             <button type="button" className={styles.testBtn} onClick={handleTest} disabled={!canTest}>
               {testState === 'testing' ? <Spinner size={11} /> : <Plug size={11} />}
-              Test Connection
+              {t('connectionPicker.testConnection')}
             </button>
             {testState === 'ok' && (
               <span className={styles.testOk}>
-                <CheckCircle size={12} /> Connected
+                <CheckCircle size={12} /> {t('connectionPicker.connected')}
               </span>
             )}
             {testState === 'fail' && (
@@ -533,17 +536,17 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
         <div className={styles.configForm}>
           <div className={styles.fieldRow}>
             <div className={styles.field}>
-              <label className={styles.label}>Host</label>
+              <label className={styles.label}>{t('connectionPicker.host')}</label>
               <input
                 className={styles.input}
                 type="text"
-                placeholder="nas.local or 192.168.1.100"
+                placeholder={t('connectionPicker.hostPlaceholderSmb')}
                 value={smb.host || ''}
                 onChange={(e) => updateField('host', e.target.value)}
               />
             </div>
             <div className={styles.fieldSmall}>
-              <label className={styles.label}>Port</label>
+              <label className={styles.label}>{t('connectionPicker.port')}</label>
                 <NumericInput
                   className={styles.input}
                   placeholder="445"
@@ -555,20 +558,20 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           </div>
 
           <div className={styles.field}>
-            <label className={styles.label}>Share Name</label>
+            <label className={styles.label}>{t('connectionPicker.shareName')}</label>
             <input
               className={styles.inputMono}
               type="text"
-              placeholder="shared, backups, SillyTavern..."
+              placeholder={t('connectionPicker.sharePlaceholder')}
               value={smb.share || ''}
               onChange={(e) => updateField('share', e.target.value)}
             />
-            <span className={styles.hint}>The name of the shared folder (e.g. \\host\<b>share</b>)</span>
+            <span className={styles.hint}>{t('connectionPicker.shareHint')}</span>
           </div>
 
           <div className={styles.fieldRow}>
             <div className={styles.field}>
-              <label className={styles.label}>Username (optional)</label>
+              <label className={styles.label}>{t('connectionPicker.usernameOptional')}</label>
               <input
                 className={styles.input}
                 type="text"
@@ -578,7 +581,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
               />
             </div>
             <div className={styles.field}>
-              <label className={styles.label}>Domain (optional)</label>
+              <label className={styles.label}>{t('connectionPicker.domainOptional')}</label>
               <input
                 className={styles.input}
                 type="text"
@@ -590,11 +593,11 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           </div>
 
           <div className={styles.field}>
-            <label className={styles.label}>Password (optional)</label>
+            <label className={styles.label}>{t('connectionPicker.passwordOptional')}</label>
             <input
               className={styles.input}
               type="password"
-              placeholder="Password"
+              placeholder={t('connectionPicker.password')}
               value={smb.password || ''}
               onChange={(e) => updateField('password', e.target.value)}
               autoComplete="off"
@@ -604,11 +607,11 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           <div className={styles.testRow}>
             <button type="button" className={styles.testBtn} onClick={handleTest} disabled={!canTest}>
               {testState === 'testing' ? <Spinner size={11} /> : <Plug size={11} />}
-              Test Connection
+              {t('connectionPicker.testConnection')}
             </button>
             {testState === 'ok' && (
               <span className={styles.testOk}>
-                <CheckCircle size={12} /> Connected
+                <CheckCircle size={12} /> {t('connectionPicker.connected')}
               </span>
             )}
             {testState === 'fail' && (
@@ -627,12 +630,10 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           {!gdriveStatus?.configured && (
             <>
               <p className={styles.hint}>
-                Connect to Google Drive using OAuth. Create a credential in the
-                Google Cloud Console (APIs &amp; Services &gt; Credentials) with the Drive API enabled,
-                then enter your Client ID below. A Client Secret is required for Web application credentials.
+                {t('connectionPicker.gdriveSetupHint')}
               </p>
               <div className={styles.field}>
-                <label className={styles.label}>Client ID</label>
+                <label className={styles.label}>{t('connectionPicker.clientId')}</label>
                 <input
                   className={styles.inputMono}
                   type="text"
@@ -642,7 +643,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                 />
               </div>
               <div className={styles.field}>
-                <label className={styles.label}>Client Secret (required for Web app credentials)</label>
+                <label className={styles.label}>{t('connectionPicker.clientSecret')}</label>
                 <input
                   className={styles.input}
                   type="password"
@@ -660,7 +661,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                   disabled={!gdriveClientId.trim() || gdriveSaving}
                 >
                   {gdriveSaving ? <Spinner size={11} /> : <KeyRound size={11} />}
-                  Save Credentials
+                  {t('connectionPicker.saveCredentials')}
                 </button>
               </div>
             </>
@@ -671,17 +672,17 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
             <>
               <div className={styles.testRow}>
                 <span className={styles.testOk}>
-                  <CheckCircle size={12} /> Google Drive authorized
+                  <CheckCircle size={12} /> {t('connectionPicker.gdriveAuthorized')}
                 </span>
                 <button type="button" className={styles.testBtn} onClick={handleGdriveRevoke}>
-                  <LogOut size={11} /> Disconnect
+                  <LogOut size={11} /> {t('connectionPicker.disconnect')}
                 </button>
               </div>
               {testState !== 'ok' && (
                 <div className={styles.testRow}>
                   <button type="button" className={styles.testBtn} onClick={handleGdriveConnect} disabled={gdriveLoading}>
                     {gdriveLoading ? <Spinner size={11} /> : <Plug size={11} />}
-                    Connect
+                    {t('connectionPicker.connect')}
                   </button>
                   {testState === 'fail' && (
                     <span className={styles.testFail}>
@@ -692,7 +693,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
               )}
               {gdriveStatus.hasCustomCredentials && (
                 <button type="button" className={styles.testBtn} onClick={handleGdriveClearCredentials}>
-                  <X size={11} /> Remove credentials
+                  <X size={11} /> {t('connectionPicker.removeCredentials')}
                 </button>
               )}
             </>
@@ -702,15 +703,15 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           {gdriveStatus?.configured && !gdriveStatus?.authorized && (
             <>
               <p className={styles.hint}>
-                Credentials saved. Click below to authorize Lumiverse to read your Google Drive files.
+                {t('connectionPicker.gdriveAuthorizeHint')}
               </p>
               <div className={styles.testRow}>
                 <button type="button" className={styles.testBtn} onClick={handleGdriveAuth} disabled={gdriveLoading}>
                   {gdriveLoading ? <Spinner size={11} /> : <IconBrandGoogleDrive size={11} />}
-                  Authorize Google Drive
+                  {t('connectionPicker.authorizeGDrive')}
                 </button>
                 <button type="button" className={styles.testBtn} onClick={handleGdriveClearCredentials}>
-                  <X size={11} /> Remove credentials
+                  <X size={11} /> {t('connectionPicker.removeCredentials')}
                 </button>
                 {testState === 'fail' && (
                   <span className={styles.testFail}>
@@ -729,11 +730,10 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
           {!dbxStatus?.configured && (
             <>
               <p className={styles.hint}>
-                Connect to Dropbox. Create an app at dropbox.com/developers and enter your App Key below.
-                No App Secret is needed.
+                {t('connectionPicker.dbxSetupHint')}
               </p>
               <div className={styles.field}>
-                <label className={styles.label}>App Key</label>
+                <label className={styles.label}>{t('connectionPicker.appKey')}</label>
                 <input
                   className={styles.inputMono}
                   type="text"
@@ -750,7 +750,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                   disabled={!dbxAppKey.trim() || dbxSaving}
                 >
                   {dbxSaving ? <Spinner size={11} /> : <KeyRound size={11} />}
-                  Save App Key
+                  {t('connectionPicker.saveAppKey')}
                 </button>
               </div>
             </>
@@ -760,17 +760,17 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
             <>
               <div className={styles.testRow}>
                 <span className={styles.testOk}>
-                  <CheckCircle size={12} /> Dropbox authorized
+                  <CheckCircle size={12} /> {t('connectionPicker.dbxAuthorized')}
                 </span>
                 <button type="button" className={styles.testBtn} onClick={handleDbxRevoke}>
-                  <LogOut size={11} /> Disconnect
+                  <LogOut size={11} /> {t('connectionPicker.disconnect')}
                 </button>
               </div>
               {testState !== 'ok' && (
                 <div className={styles.testRow}>
                   <button type="button" className={styles.testBtn} onClick={handleDbxConnect} disabled={dbxLoading}>
                     {dbxLoading ? <Spinner size={11} /> : <Plug size={11} />}
-                    Connect
+                    {t('connectionPicker.connect')}
                   </button>
                   {testState === 'fail' && (
                     <span className={styles.testFail}>
@@ -781,7 +781,7 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
               )}
               {dbxStatus.hasCustomAppKey && (
                 <button type="button" className={styles.testBtn} onClick={handleDbxClearCredentials}>
-                  <X size={11} /> Remove App Key
+                  <X size={11} /> {t('connectionPicker.removeAppKey')}
                 </button>
               )}
             </>
@@ -792,29 +792,29 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
               {!dbxAuthUrl ? (
                 <>
                   <p className={styles.hint}>
-                    Click below to open Dropbox authorization. You'll receive a code to paste back here.
+                    {t('connectionPicker.dbxAuthorizeHint1')}
                   </p>
                   <div className={styles.testRow}>
                     <button type="button" className={styles.testBtn} onClick={handleDbxAuth} disabled={dbxLoading}>
                       {dbxLoading ? <Spinner size={11} /> : <IconBrandDropbox size={11} />}
-                      Authorize Dropbox
+                      {t('connectionPicker.authorizeDropbox')}
                     </button>
                     <button type="button" className={styles.testBtn} onClick={handleDbxClearCredentials}>
-                      <X size={11} /> Remove App Key
+                      <X size={11} /> {t('connectionPicker.removeAppKey')}
                     </button>
                   </div>
                 </>
               ) : (
                 <>
                   <p className={styles.hint}>
-                    A new tab has opened. Sign in to Dropbox, authorize the app, then paste the code below.
+                    {t('connectionPicker.dbxAuthorizeHint2')}
                   </p>
                   <div className={styles.field}>
-                    <label className={styles.label}>Authorization Code</label>
+                    <label className={styles.label}>{t('connectionPicker.authCode')}</label>
                     <input
                       className={styles.inputMono}
                       type="text"
-                      placeholder="Paste the code from Dropbox here"
+                      placeholder={t('connectionPicker.authCodePlaceholder')}
                       value={dbxCode}
                       onChange={(e) => setDbxCode(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleDbxSubmitCode() }}
@@ -829,10 +829,10 @@ export default function ConnectionPicker({ value, onChange, onConnected }: Conne
                       disabled={!dbxCode.trim() || dbxLoading}
                     >
                       {dbxLoading ? <Spinner size={11} /> : <CheckCircle size={11} />}
-                      Submit Code
+                      {t('connectionPicker.submitCode')}
                     </button>
                     <button type="button" className={styles.testBtn} onClick={() => { setDbxAuthUrl(''); setDbxSessionToken(''); setDbxCode('') }}>
-                      <X size={11} /> Cancel
+                      <X size={11} /> {tc('actions.cancel')}
                     </button>
                   </div>
                 </>

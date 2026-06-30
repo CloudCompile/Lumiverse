@@ -10,6 +10,9 @@ import {
   listRecentChats,
   listRecentChatsGrouped,
   patchMessageExtra,
+  removeGroupMember,
+  setGroupMemberAlternateFields,
+  updateMessage,
 } from "./chats.service";
 
 function initChatsTestDb(): void {
@@ -21,8 +24,22 @@ function initChatsTestDb(): void {
     id TEXT PRIMARY KEY,
     user_id TEXT,
     name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    personality TEXT NOT NULL DEFAULT '',
+    scenario TEXT NOT NULL DEFAULT '',
+    first_mes TEXT NOT NULL DEFAULT '',
+    mes_example TEXT NOT NULL DEFAULT '',
+    creator TEXT NOT NULL DEFAULT '',
+    creator_notes TEXT NOT NULL DEFAULT '',
+    system_prompt TEXT NOT NULL DEFAULT '',
+    post_history_instructions TEXT NOT NULL DEFAULT '',
     avatar_path TEXT,
-    image_id TEXT
+    image_id TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    alternate_greetings TEXT NOT NULL DEFAULT '[]',
+    extensions TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL DEFAULT 1
   )`);
 
   db.run(`CREATE TABLE chats (
@@ -51,10 +68,36 @@ function initChatsTestDb(): void {
     branch_id TEXT,
     created_at INTEGER NOT NULL
   )`);
+
+  db.run(`CREATE TABLE chat_memory_cache (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    settings_key TEXT NOT NULL,
+    source_message_count INTEGER NOT NULL DEFAULT 0,
+    query_preview TEXT NOT NULL DEFAULT '',
+    chunks_json TEXT NOT NULL DEFAULT '[]',
+    formatted TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    settings_source TEXT NOT NULL DEFAULT 'global',
+    chunks_available INTEGER NOT NULL DEFAULT 0,
+    chunks_pending INTEGER NOT NULL DEFAULT 0,
+    retrieval_mode TEXT NOT NULL DEFAULT 'empty',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(chat_id, settings_key)
+  )`);
 }
 
 function seedCharacter(id: string, name: string): void {
   getDb().query("INSERT INTO characters (id, user_id, name) VALUES (?, ?, ?)").run(id, "u1", name);
+}
+
+function seedCharacterWithExtensions(id: string, extensions: Record<string, unknown> = {}): void {
+  getDb()
+    .query("INSERT INTO characters (id, user_id, name, extensions) VALUES (?, ?, ?, ?)")
+    .run(id, "u1", id, JSON.stringify(extensions));
 }
 
 function seedChat(id: string, characterId: string, name: string, metadata: string, updatedAt: number): void {
@@ -136,6 +179,58 @@ describe("recent chats", () => {
     expect(result.data[2].group_character_ids).toEqual(["c1", "c2"]);
   });
 
+  test("groups recent group chat forks by member set", () => {
+    seedChat("group-root", "c1", "Group", JSON.stringify({ group: true, character_ids: ["c1", "c2"] }), 100);
+    seedChat("group-branch", "c1", "Group — Branch at #2", JSON.stringify({
+      group: true,
+      character_ids: ["c2", "c1"],
+      branched_from: "group-root",
+      branch_at_message: "msg-2",
+    }), 200);
+    seedChat("other-group", "c1", "Other Group", JSON.stringify({ group: true, character_ids: ["c1"] }), 150);
+
+    const result = listRecentChatsGrouped("u1", { limit: 10, offset: 0 });
+
+    expect(result.total).toBe(2);
+    expect(result.data.map((chat) => chat.latest_chat_id)).toEqual(["group-branch", "other-group"]);
+    expect(result.data[0].chat_count).toBe(2);
+    expect(result.data[0].is_group).toBe(true);
+    expect(result.data[0].group_character_ids).toEqual(["c2", "c1"]);
+  });
+
+  test("clusters group chat forks even when membership has diverged from the root", () => {
+    // Parent gained a member after the branch was taken (or the branch dropped
+    // one) — the branch should still cluster with the root rather than spawn a
+    // second landing-page entry.
+    seedChat("group-root", "c1", "Group", JSON.stringify({ group: true, character_ids: ["c1", "c2", "c3"] }), 100);
+    seedChat("group-branch", "c1", "Group — Branch at #2", JSON.stringify({
+      group: true,
+      character_ids: ["c1", "c2"],
+      branched_from: "group-root",
+      branch_at_message: "msg-2",
+    }), 200);
+
+    const result = listRecentChatsGrouped("u1", { limit: 10, offset: 0 });
+
+    expect(result.total).toBe(1);
+    expect(result.data[0].latest_chat_id).toBe("group-branch");
+    expect(result.data[0].chat_count).toBe(2);
+    expect(result.data[0].is_group).toBe(true);
+    // group_character_ids reflects the surviving (latest) row's own members.
+    expect(result.data[0].group_character_ids).toEqual(["c1", "c2"]);
+  });
+
+  test("dedupes group chats whose character_ids contain duplicate entries", () => {
+    seedChat("group-clean", "c1", "Group", JSON.stringify({ group: true, character_ids: ["c1", "c2"] }), 100);
+    seedChat("group-dup", "c1", "Group dup", JSON.stringify({ group: true, character_ids: ["c1", "c1", "c2"] }), 200);
+
+    const result = listRecentChatsGrouped("u1", { limit: 10, offset: 0 });
+
+    expect(result.total).toBe(1);
+    expect(result.data[0].latest_chat_id).toBe("group-dup");
+    expect(result.data[0].chat_count).toBe(2);
+  });
+
   test("keeps reasoning scoped to the swipe it belongs to", () => {
     seedChat("chat-1", "c1", "Swipe chat", "{}", 100);
     seedMessage("msg-1", "chat-1", "first swipe", {
@@ -168,6 +263,44 @@ describe("recent chats", () => {
     expect(restoredSecondSwipe.swipe_id).toBe(1);
     expect(restoredSecondSwipe.extra.reasoning).toBe("second swipe reasoning");
     expect(restoredSecondSwipe.extra.reasoningDuration).toBe(456);
+  });
+
+  test("clears active swipe reasoning with explicit null without clearing other swipes", () => {
+    seedChat("chat-1", "c1", "Swipe chat", "{}", 100);
+    seedMessage("msg-1", "chat-1", "first swipe", {
+      reasoning: "first swipe reasoning",
+      reasoningDuration: 123,
+    });
+
+    const added = addSwipe("u1", "msg-1", "second swipe")!;
+    patchMessageExtra("u1", "msg-1", {
+      ...added.extra,
+      reasoning: "second swipe reasoning",
+      reasoningDuration: 456,
+    });
+
+    const activeBeforeClear = getMessage("u1", "msg-1")!;
+    const cleared = updateMessage("u1", "msg-1", {
+      extra: {
+        ...activeBeforeClear.extra,
+        reasoning: null,
+        reasoningDuration: null,
+      },
+    })!;
+
+    expect(cleared.swipe_id).toBe(1);
+    expect(cleared.extra.reasoning).toBeUndefined();
+    expect(cleared.extra.reasoningDuration).toBeUndefined();
+
+    const firstSwipe = cycleSwipe("u1", "msg-1", "left")!;
+    expect(firstSwipe.swipe_id).toBe(0);
+    expect(firstSwipe.extra.reasoning).toBe("first swipe reasoning");
+    expect(firstSwipe.extra.reasoningDuration).toBe(123);
+
+    const restoredSecondSwipe = cycleSwipe("u1", "msg-1", "right")!;
+    expect(restoredSecondSwipe.swipe_id).toBe(1);
+    expect(restoredSecondSwipe.extra.reasoning).toBeUndefined();
+    expect(restoredSecondSwipe.extra.reasoningDuration).toBeUndefined();
   });
 
   test("keeps generation metadata scoped to the active swipe", () => {
@@ -250,5 +383,64 @@ describe("recent chats", () => {
       },
     ]);
     expect(original.metadata).toEqual({ author_note: "keep me" });
+  });
+});
+
+describe("group member alternate fields", () => {
+  test("merges selections for one member without clobbering other members", () => {
+    const extensions = {
+      alternate_fields: {
+        personality: [{ id: "bold", label: "Bold", content: "Bold personality" }],
+      },
+    };
+    seedCharacterWithExtensions("char1", extensions);
+    seedCharacterWithExtensions("char2", extensions);
+    seedChat("chat1", "char1", "Group", JSON.stringify({
+      group: true,
+      character_ids: ["char1", "char2"],
+      group_alternate_field_selections: { char2: { personality: "bold" } },
+    }), 1);
+
+    const updated = setGroupMemberAlternateFields("u1", "chat1", "char1", { personality: "bold" });
+
+    expect(updated?.metadata.group_alternate_field_selections).toEqual({
+      char1: { personality: "bold" },
+      char2: { personality: "bold" },
+    });
+  });
+
+  test("rejects invalid variants", () => {
+    seedCharacterWithExtensions("char1", {
+      alternate_fields: {
+        personality: [{ id: "known", label: "Known", content: "Known personality" }],
+      },
+    });
+    seedCharacterWithExtensions("char2");
+    seedChat("chat1", "char1", "Group", JSON.stringify({ group: true, character_ids: ["char1", "char2"] }), 1);
+
+    const updated = setGroupMemberAlternateFields("u1", "chat1", "char1", { personality: "missing" });
+
+    expect(updated).toBeNull();
+    expect(getChat("u1", "chat1")?.metadata.group_alternate_field_selections).toBeUndefined();
+  });
+
+  test("removing a member clears stale alternate field selections", () => {
+    seedCharacterWithExtensions("char1");
+    seedCharacterWithExtensions("char2");
+    seedCharacterWithExtensions("char3");
+    seedChat("chat1", "char1", "Group", JSON.stringify({
+      group: true,
+      character_ids: ["char1", "char2", "char3"],
+      group_alternate_field_selections: {
+        char2: { personality: "bold" },
+        char3: { personality: "quiet" },
+      },
+    }), 1);
+
+    const updated = removeGroupMember("u1", "chat1", "char2");
+
+    expect(updated?.metadata.group_alternate_field_selections).toEqual({
+      char3: { personality: "quiet" },
+    });
   });
 });

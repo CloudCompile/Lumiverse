@@ -1,4 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { Trans, useTranslation } from 'react-i18next'
+
 import { Download, Upload, X, Paintbrush, Code2, ChevronDown, ChevronUp, ShieldAlert, Globe, RotateCcw, Package, Trash2, PanelRightOpen, PanelRightClose, Image as ImageIcon } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { themeAssetsApi } from '@/api/theme-assets'
@@ -150,6 +152,9 @@ function base64ToFile(dataBase64: string, filename: string, mimeType: string): F
 }
 
 export default function CustomCSSModal() {
+  const { t } = useTranslation('modals', { keyPrefix: 'customCss' })
+  const { t: tc } = useTranslation('common')
+
   const closeModal = useStore((s) => s.closeModal)
   const customCSS = useStore((s) => s.customCSS)
   const setCustomCSS = useStore((s) => s.setCustomCSS)
@@ -161,6 +166,7 @@ export default function CustomCSSModal() {
   const toggleComponentOverride = useStore((s) => s.toggleComponentOverride)
   const resetAllOverrides = useStore((s) => s.resetAllOverrides)
   const applyThemePack = useStore((s) => s.applyThemePack)
+  const addSavedTheme = useStore((s) => s.addSavedTheme)
   const theme = useStore((s) => s.theme)
   const openModal = useStore((s) => s.openModal)
 
@@ -301,19 +307,19 @@ export default function CustomCSSModal() {
     try {
       const assets = await buildPackAssets()
       const pack = createThemePack(theme, customCSS, componentOverrides, assets, {
-        name: theme?.name || 'Custom Theme',
+        name: theme?.name || t('customThemeName'),
       })
       exportThemePack(pack)
-      toast.success('Theme bundle exported as .lumitheme')
+      toast.success(t('exportSuccess'))
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to export .lumitheme bundle')
+      toast.error(err?.body?.error || err?.message || t('exportFailed'))
     }
   }, [buildPackAssets, theme, customCSS, componentOverrides])
 
   const handleImportPack = useCallback(async () => {
     const result = await importThemePack()
     if (!result) {
-      toast.info('Theme import cancelled')
+      toast.info(t('importCancelled'))
       return
     }
     if (result.error) {
@@ -336,29 +342,30 @@ export default function CustomCSSModal() {
       }
       const summary = packSummary(localizedPack)
       applyThemePack(localizedPack)
+      addSavedTheme({ kind: 'pack', name: pack.name || t('importedThemeName'), pack: localizedPack })
       const disabledNote = imported.disabledCount > 0
-        ? ` TSX overrides were imported disabled for manual review (${imported.disabledCount}).`
+        ? t('tsxDisabledNote', { count: imported.disabledCount })
         : ''
-      toast.success(`Applied "${pack.name}" from theme bundle: ${summary.join(', ')}.${disabledNote}`)
+      toast.success(t('appliedFromBundle', { name: pack.name, summary: summary.join(', ') }) + disabledNote)
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to import bundled theme assets')
+      toast.error(err?.body?.error || err?.message || t('importFailed'))
     }
-  }, [applyThemePack])
+  }, [applyThemePack, addSavedTheme])
 
   const handleResetAll = useCallback(() => {
     openModal('confirm', {
-      title: 'Reset All Overrides',
-      message: 'This will clear all custom CSS and component overrides. Your theme colors will be kept. This cannot be undone.',
-      variant: 'destructive',
-      confirmText: 'Reset All',
+      title: t('resetTitle'),
+      message: t('resetMessage'),
+      variant: 'danger',
+      confirmText: t('resetConfirm'),
       onConfirm: () => {
         resetAllOverrides()
         setSelected(GLOBAL_KEY)
         setActiveTab('css')
-        toast.info('All overrides cleared')
+        toast.info(t('overridesCleared'))
       },
     })
-  }, [openModal, resetAllOverrides])
+  }, [openModal, resetAllOverrides, t])
 
   // ── Template for selected component ──
   const componentTemplate = useMemo(
@@ -418,43 +425,43 @@ export default function CustomCSSModal() {
         {/* ── Unified header ──────────────────────────────────── */}
         <div className={styles.header}>
           <div className={styles.headerLeft}>
-            <span className={styles.headerTitle}>Theme Editor</span>
-            <span className={styles.headerCount}>{CSS_MODULE_REGISTRY.length} components</span>
+            <span className={styles.headerTitle}>{t('title')}</span>
+            <span className={styles.headerCount}>{t('componentCount', { count: CSS_MODULE_REGISTRY.length })}</span>
           </div>
           <div className={styles.headerRight}>
             <div className={styles.toggleRow}>
               <span className={styles.toggleLabel}>
-                {isGlobal ? 'Global' : selected}
+                {isGlobal ? t('global') : selected}
               </span>
               <button
                 type="button"
                 className={clsx(styles.toggleSwitch, isEnabled && styles.toggleSwitchOn)}
                 onClick={handleToggle}
-                aria-label={isEnabled ? 'Disable' : 'Enable'}
+                aria-label={isEnabled ? t('disable') : t('enable')}
               />
             </div>
             {activeTab === 'tsx' && !isGlobal && componentTemplate && (
-              <button type="button" className={styles.actionBtn} onClick={handleInsertTemplate} title="Reset to starter template">
-                <RotateCcw size={12} /> Template
+              <button type="button" className={styles.actionBtn} onClick={handleInsertTemplate} title={t('resetTemplate')}>
+                <RotateCcw size={12} /> {t('template')}
               </button>
             )}
-            <button type="button" className={styles.actionBtn} onClick={handleExport} title="Export current file">
-              <Download size={12} /> Export
+            <button type="button" className={styles.actionBtn} onClick={handleExport} title={t('exportFile')}>
+              <Download size={12} /> {t('export')}
             </button>
-            <button type="button" className={styles.actionBtn} onClick={handleImport} title="Import file">
-              <Upload size={12} /> Import
+            <button type="button" className={styles.actionBtn} onClick={handleImport} title={t('importFile')}>
+              <Upload size={12} /> {t('import')}
             </button>
             <span className={styles.headerDivider} />
-            <button type="button" className={styles.actionBtn} onClick={() => { void handleExportPack() }} title="Export .lumitheme bundle">
-              <Package size={12} /> Export .lumitheme
+            <button type="button" className={styles.actionBtn} onClick={() => { void handleExportPack() }} title={t('exportBundle')}>
+              <Package size={12} /> {t('exportLumitheme')}
             </button>
-            <button type="button" className={styles.actionBtn} onClick={() => { void handleImportPack() }} title="Import .lumitheme bundle or legacy JSON pack">
-              <Package size={12} /> Import Theme
+            <button type="button" className={styles.actionBtn} onClick={() => { void handleImportPack() }} title={t('importBundle')}>
+              <Package size={12} /> {t('importTheme')}
             </button>
-            <button type="button" className={clsx(styles.actionBtn, styles.dangerBtn)} onClick={handleResetAll} title="Reset all overrides">
+            <button type="button" className={clsx(styles.actionBtn, styles.dangerBtn)} onClick={handleResetAll} title={t('resetAll')}>
               <Trash2 size={12} />
             </button>
-            <button type="button" className={styles.closeBtn} onClick={closeModal} aria-label="Close">
+            <button type="button" className={styles.closeBtn} onClick={closeModal} aria-label={tc('actions.close')}>
               <X size={16} />
             </button>
           </div>
@@ -467,7 +474,7 @@ export default function CustomCSSModal() {
           onClick={() => setSidebarOpen(!sidebarOpen)}
         >
           {sidebarOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          {sidebarOpen ? 'Hide components' : `Show components (${CSS_MODULE_REGISTRY.length})`}
+          {sidebarOpen ? t('hideComponents') : t('showComponents', { count: CSS_MODULE_REGISTRY.length })}
         </button>
 
         {/* ── Body ────────────────────────────────────────────── */}
@@ -476,7 +483,7 @@ export default function CustomCSSModal() {
           <div className={clsx(styles.sidebar, !sidebarOpen && styles.sidebarCollapsed)}>
             <input
               className={styles.searchInput}
-              placeholder="Search components..."
+              placeholder={t('searchPlaceholder')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -494,9 +501,9 @@ export default function CustomCSSModal() {
                   <div className={styles.componentLeft}>
                     <span className={styles.componentName}>
                       <Globe size={11} style={{ marginRight: 4, verticalAlign: -1 }} />
-                      Global
+                      {t('global')}
                     </span>
-                    <span className={styles.componentDesc}>Non-component CSS overrides</span>
+                    <span className={styles.componentDesc}>{t('globalDesc')}</span>
                   </div>
                   <div className={styles.pathIndicators}>
                     <span className={styles.pathBadge}>css</span>
@@ -530,7 +537,7 @@ export default function CustomCSSModal() {
                 </div>
               ))}
               {filtered.length === 0 && (
-                <div className={styles.componentDesc} style={{ padding: '12px' }}>No matching components</div>
+                <div className={styles.componentDesc} style={{ padding: '12px' }}>{t('noMatches')}</div>
               )}
             </div>
           </div>
@@ -545,7 +552,7 @@ export default function CustomCSSModal() {
                   onClick={() => setActiveTab('css')}
                 >
                   <Paintbrush size={13} className={styles.tabIcon} />
-                  CSS
+                  {t('cssTab')}
                 </button>
                 {!isGlobal && (
                   <button
@@ -554,7 +561,7 @@ export default function CustomCSSModal() {
                     onClick={() => setActiveTab('tsx')}
                   >
                     <Code2 size={13} className={styles.tabIcon} />
-                    Component
+                    {t('componentTab')}
                   </button>
                 )}
               </div>
@@ -565,7 +572,7 @@ export default function CustomCSSModal() {
                     className={clsx(styles.panelToggleBtn, showAssets && styles.panelToggleBtnActive)}
                     onClick={() => setShowAssets(!showAssets)}
                   >
-                    <ImageIcon size={13} /> Assets
+                    <ImageIcon size={13} /> {t('assets')}
                   </button>
                 )}
                 <button 
@@ -574,7 +581,7 @@ export default function CustomCSSModal() {
                   onClick={() => setShowReference(!showReference)}
                 >
                   {showReference ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
-                  Reference
+                  {t('reference')}
                 </button>
               </div>
             </div>
@@ -583,9 +590,12 @@ export default function CustomCSSModal() {
             {activeTab === 'tsx' && !isGlobal && (
               <div className={styles.tsxNotice}>
                 <ShieldAlert size={14} className={styles.tsxNoticeIcon} />
-                <span>
-                  Editing <span className={styles.tsxComponentLabel}>{selected}</span> — interpreted safe TSX subset; arbitrary JavaScript is not executed.
-                </span>
+                <Trans
+                  i18nKey="customCss.tsxNotice"
+                  ns="modals"
+                  values={{ name: selected }}
+                  components={{ 1: <span className={styles.tsxComponentLabel} /> }}
+                />
               </div>
             )}
 
@@ -619,16 +629,16 @@ export default function CustomCSSModal() {
 
             <div className={styles.statusBar}>
               <span>
-                {validation.status === 'valid' && <span className={styles.statusValid}>Valid {activeTab === 'css' ? 'CSS' : 'TSX'}</span>}
+                {validation.status === 'valid' && <span className={styles.statusValid}>{activeTab === 'css' ? t('validCss') : t('validTsx')}</span>}
                 {validation.status === 'error' && (
-                  <span className={styles.statusError} title={validation.error}>Error: {validation.error}</span>
+                  <span className={styles.statusError} title={validation.error}>{t('errorPrefix')} {validation.error}</span>
                 )}
-                {validation.status === 'empty' && <span className={styles.statusEmpty}>Empty</span>}
+                {validation.status === 'empty' && <span className={styles.statusEmpty}>{t('empty')}</span>}
               </span>
               <div className={styles.statusRight}>
-                {byteCount > 0 && <span>{byteCount.toLocaleString()} bytes</span>}
+                {byteCount > 0 && <span>{t('bytes', { count: byteCount })}</span>}
                 <span>
-                  Emergency disable: <span className={styles.shortcutHint}>Ctrl+Shift+U</span>
+                  {t('emergencyDisable')} <span className={styles.shortcutHint}>Ctrl+Shift+U</span>
                 </span>
               </div>
             </div>

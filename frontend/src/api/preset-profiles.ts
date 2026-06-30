@@ -10,7 +10,7 @@ export interface PresetProfileBinding {
 export interface ResolvedPresetProfile {
   preset_id: string | null
   binding: PresetProfileBinding | null
-  source: 'chat' | 'character' | 'defaults' | 'none'
+  source: 'chat' | 'character' | 'connection' | 'defaults' | 'none'
 }
 
 export const presetProfilesApi = {
@@ -62,8 +62,27 @@ export const presetProfilesApi = {
     return del<void>(`/preset-profiles/chat/${chatId}`)
   },
 
+  // Connection profile bindings
+  getConnectionBinding(connectionId: string) {
+    return get<PresetProfileBinding>(`/preset-profiles/connection/${connectionId}`)
+  },
+
+  setConnectionBinding(connectionId: string, presetId: string, blockStates: Record<string, boolean>) {
+    return put<PresetProfileBinding>(`/preset-profiles/connection/${connectionId}`, {
+      preset_id: presetId,
+      block_states: blockStates,
+    })
+  },
+
+  deleteConnectionBinding(connectionId: string) {
+    return del<void>(`/preset-profiles/connection/${connectionId}`)
+  },
+
   // Resolution
-  resolve(chatId: string, presetId?: string | null) {
-    return get<ResolvedPresetProfile>(`/preset-profiles/resolve/${chatId}`, presetId ? { preset_id: presetId } : undefined)
+  resolve(chatId: string, presetId?: string | null, connectionId?: string | null) {
+    return get<ResolvedPresetProfile>(`/preset-profiles/resolve/${chatId}`, {
+      ...(presetId ? { preset_id: presetId } : {}),
+      ...(connectionId ? { connection_id: connectionId } : {}),
+    })
   },
 }

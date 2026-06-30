@@ -1,10 +1,13 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { KeyRound } from 'lucide-react'
 import { useStore } from '@/store'
 import { Button } from '@/components/shared/FormComponents'
 import styles from './UserManagement.module.css'
 
 export default function AccountSettings() {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
   const user = useStore((s) => s.user)
   const changePassword = useStore((s) => s.changePassword)
 
@@ -26,7 +29,7 @@ export default function AccountSettings() {
     clearMessages()
 
     if (newPw !== confirmPw) {
-      setError('Passwords do not match')
+      setError(t('account.passwordMismatch'))
       return
     }
 
@@ -37,9 +40,9 @@ export default function AccountSettings() {
       setNewPw('')
       setConfirmPw('')
       setShowPasswordForm(false)
-      setSuccess('Password changed successfully')
+      setSuccess(t('account.passwordChanged'))
     } catch (err: any) {
-      setError(err.body?.error || err.message || 'Failed to change password')
+      setError(err.body?.error || err.message || t('account.passwordChangeFailed'))
     } finally {
       setChangingPw(false)
     }
@@ -49,7 +52,7 @@ export default function AccountSettings() {
     <div className={styles.container}>
       <section className={styles.section}>
         <div className={styles.header}>
-          <h3 className={styles.title}>Account</h3>
+          <h3 className={styles.title}>{t('account.title')}</h3>
           <Button
             variant="ghost"
             size="sm"
@@ -59,14 +62,14 @@ export default function AccountSettings() {
               clearMessages()
             }}
           >
-            {showPasswordForm ? 'Cancel' : 'Change Password'}
+            {showPasswordForm ? tc('actions.cancel') : t('account.changePassword')}
           </Button>
         </div>
 
         <div className={styles.form}>
           <div className={styles.userInfo}>
-            <div className={styles.userName}>{user?.username || user?.name || 'Signed in user'}</div>
-            <div className={styles.userEmail}>{user?.email || 'No email available'}</div>
+            <div className={styles.userName}>{user?.username || user?.name || t('account.signedInUser')}</div>
+            <div className={styles.userEmail}>{user?.email || t('account.noEmail')}</div>
           </div>
         </div>
 
@@ -79,7 +82,7 @@ export default function AccountSettings() {
               <input
                 className={styles.input}
                 type="password"
-                placeholder="Current password"
+                placeholder={t('account.currentPassword')}
                 value={currentPw}
                 onChange={(e) => setCurrentPw(e.target.value)}
                 autoFocus
@@ -87,14 +90,14 @@ export default function AccountSettings() {
               <input
                 className={styles.input}
                 type="password"
-                placeholder="New password"
+                placeholder={t('account.newPassword')}
                 value={newPw}
                 onChange={(e) => setNewPw(e.target.value)}
               />
               <input
                 className={styles.input}
                 type="password"
-                placeholder="Confirm new password"
+                placeholder={t('account.confirmPassword')}
                 value={confirmPw}
                 onChange={(e) => setConfirmPw(e.target.value)}
               />
@@ -105,7 +108,7 @@ export default function AccountSettings() {
                 disabled={changingPw || !currentPw || !newPw || !confirmPw}
                 loading={changingPw}
               >
-                {changingPw ? 'Saving...' : 'Save'}
+                {changingPw ? t('account.saving') : tc('actions.save')}
               </Button>
             </div>
           </form>

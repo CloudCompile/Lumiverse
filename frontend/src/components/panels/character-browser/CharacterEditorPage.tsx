@@ -1,34 +1,61 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useVirtualizer } from '@tanstack/react-virtual'
+
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, Plus, ImagePlus, Download, Code2 } from 'lucide-react'
+import { X, Upload, Trash2, Copy, MessageSquare, User, UserPlus, Plus, ImagePlus, Download, Code2, GripVertical } from 'lucide-react'
+import {
+  DndContext,
+  closestCenter,
+  MouseSensor,
+  TouchSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable'
 import { IconNotebook } from '@tabler/icons-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Spinner } from '@/components/shared/Spinner'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
-import { charactersApi } from '@/api/characters'
+import TokenCountButton from '@/components/shared/TokenCountButton'
+import { charactersApi, type CharacterPerspectiveLayerInput } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
 import { imagesApi } from '@/api/images'
+import { personasApi } from '@/api/personas'
 import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
-import { regexApi } from '@/api/regex'
 import { useStore } from '@/store'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
 import { uuidv7 } from '@/lib/uuid'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
-import { getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { useLongPress } from '@/hooks/useLongPress'
-import type { Character, CharacterGalleryItem } from '@/types/api'
+import type { Character, CharacterGalleryItem, WorldBook } from '@/types/api'
 import type { WallpaperRef } from '@/types/store'
-import type { RegexScript } from '@/types/regex'
 import { toast } from '@/lib/toast'
 import { Button } from '@/components/shared/FormComponents'
+import { RangeSlider } from '@/components/shared/RangeSlider'
 import SearchableSelect from '@/components/shared/SearchableSelect'
+import VoicePicker from '@/components/shared/VoicePicker'
+import SpindleCharacterEditorTabContent from '@/components/spindle/SpindleCharacterEditorTabContent'
+import { ttsConnectionsApi } from '@/api/tts-connections'
+import type { VoiceRef } from '@/types/api'
 import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
+import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { setCharacterEditorController, syncCharacterEditorState } from '@/lib/spindle/character-editor-helper'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
 import {
@@ -37,29 +64,19 @@ import {
   setCharacterWorldBookIds,
 } from '@/utils/character-world-books'
 import ExpressionEditorTab from './ExpressionEditorTab'
+import CharacterLoraTab from './CharacterLoraTab'
 import AlternateFieldEditor from './AlternateFieldEditor'
 import AlternateAvatarManager from './AlternateAvatarManager'
 import type { AlternateAvatarEntry } from './AlternateAvatarManager'
-import { VoiceGuidanceEditor } from '@/components/dream-weaver/components/VoiceGuidanceEditor'
-import {
-  EMPTY_DREAM_WEAVER_VOICE_GUIDANCE,
-  getDreamWeaverAppearanceText,
-  getDreamWeaverCharacterMetadata,
-} from '@/lib/dream-weaver-character'
 
 const DEBOUNCE_MS = 2000
+const MAX_PERSPECTIVE_LAYERS = 5
+const GALLERY_MIN_ITEM_WIDTH = 120
+const GALLERY_GAP = 8
+const GALLERY_OVERSCAN = 3
 
-type TabId = 'core' | 'system' | 'greetings' | 'identity' | 'gallery' | 'expressions' | 'advanced'
-
-const TABS: { id: TabId; label: string }[] = [
-  { id: 'core', label: 'Core Prompts' },
-  { id: 'system', label: 'System' },
-  { id: 'greetings', label: 'Greetings' },
-  { id: 'identity', label: 'Identity' },
-  { id: 'gallery', label: 'Gallery' },
-  { id: 'expressions', label: 'Expressions' },
-  { id: 'advanced', label: 'Advanced' },
-]
+type BuiltInTabId = 'core' | 'system' | 'greetings' | 'identity' | 'gallery' | 'expressions' | 'voice' | 'imageLora' | 'advanced'
+type TabId = BuiltInTabId | string
 
 interface GalleryGridItemProps {
   item: CharacterGalleryItem
@@ -68,6 +85,7 @@ interface GalleryGridItemProps {
 }
 
 function GalleryGridItem({ item, onRemove, onOpenMenu }: GalleryGridItemProps) {
+  const { t } = useTranslation('panels')
   const longPress = useLongPress({
     onLongPress: (pos) => onOpenMenu(item, pos),
   })
@@ -76,7 +94,7 @@ function GalleryGridItem({ item, onRemove, onOpenMenu }: GalleryGridItemProps) {
     <div className={styles.galleryItem} {...longPress}>
       <LazyImage
         src={characterGalleryApi.smallUrl(item.image_id)}
-        alt={item.caption || 'Gallery image'}
+        alt={item.caption || t('characterEditor.galleryImage')}
         className={styles.galleryThumb}
         fallback={<div className={styles.galleryThumbPlaceholder} />}
       />
@@ -84,10 +102,86 @@ function GalleryGridItem({ item, onRemove, onOpenMenu }: GalleryGridItemProps) {
         type="button"
         className={styles.galleryRemoveBtn}
         onClick={() => onRemove(item.id)}
-        title="Remove from gallery"
+        title={t('characterEditor.removeFromGallery')}
       >
         <X size={12} />
       </button>
+    </div>
+  )
+}
+
+interface SortablePerspectiveLayerProps {
+  layer: CharacterPerspectiveLayerInput
+  index: number
+  disabled: boolean
+  onLabelChange: (layerId: string, label: string) => void
+  onIntensityChange: (layerId: string, intensity: number) => void
+  onRemove: (layerId: string) => void
+}
+
+function SortablePerspectiveLayer({ layer, index, disabled, onLabelChange, onIntensityChange, onRemove }: SortablePerspectiveLayerProps) {
+  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: layer.id, disabled })
+  const { setNodeRef, style } = useScaledSortableStyle({ setNodeRef: setSortableRef, transform, transition, isDragging })
+  const [liveIntensity, setLiveIntensity] = useState<number | null>(null)
+  const [draftLabel, setDraftLabel] = useState(layer.label || '')
+  const intensity = liveIntensity ?? layer.intensity
+
+  useEffect(() => {
+    setDraftLabel(layer.label || '')
+  }, [layer.label])
+
+  const commitLabel = useCallback(() => {
+    if (draftLabel !== (layer.label || '')) onLabelChange(layer.id, draftLabel)
+  }, [draftLabel, layer.id, layer.label, onLabelChange])
+
+  return (
+    <div ref={setNodeRef} style={style} className={clsx(styles.perspectiveLayerRow, isDragging && styles.perspectiveLayerDragging)}>
+      <button type="button" className={styles.perspectiveLayerDrag} disabled={disabled} {...attributes} {...listeners} title="Drag to reorder">
+        <GripVertical size={16} />
+      </button>
+      <div className={styles.perspectiveLayerRowPreview}>
+        <LazyImage
+          src={imagesApi.smallUrl(layer.image_id)}
+          alt={layer.label || `Layer ${index + 1}`}
+          className={styles.perspectiveLayerRowImg}
+          fallback={<div className={styles.perspectiveLayerEmpty}><ImagePlus size={16} /></div>}
+        />
+      </div>
+      <div className={styles.perspectiveLayerRowBody}>
+        <div className={styles.perspectiveLayerRowTop}>
+          <input
+            type="text"
+            className={styles.perspectiveLayerNameInput}
+            value={draftLabel}
+            placeholder={`Layer ${index + 1}`}
+            onChange={(e) => setDraftLabel(e.target.value)}
+            onBlur={commitLabel}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+            }}
+          />
+          <button type="button" className={styles.perspectiveLayerRemove} onClick={() => onRemove(layer.id)} title="Remove layer">
+            <X size={12} />
+          </button>
+        </div>
+        <div className={styles.perspectiveLayerSliderRow}>
+          <div className={styles.perspectiveLayerSliderHeader}>
+            <span>Parallax strength</span>
+            <span>{intensity.toFixed(2)}x</span>
+          </div>
+          <RangeSlider
+            min={0}
+            max={1.5}
+            step={0.05}
+            value={layer.intensity}
+            onDragValue={setLiveIntensity}
+            onCommit={(value) => {
+              setLiveIntensity(null)
+              onIntensityChange(layer.id, value)
+            }}
+          />
+        </div>
+      </div>
     </div>
   )
 }
@@ -96,9 +190,80 @@ function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function readPerspectiveLayers(raw: unknown): CharacterPerspectiveLayerInput[] {
+  if (Array.isArray(raw)) {
+    return raw
+      .filter((entry): entry is CharacterPerspectiveLayerInput => {
+        return Boolean(entry)
+          && typeof entry === 'object'
+          && typeof (entry as CharacterPerspectiveLayerInput).id === 'string'
+          && typeof (entry as CharacterPerspectiveLayerInput).image_id === 'string'
+      })
+      .slice(0, MAX_PERSPECTIVE_LAYERS)
+      .map((entry) => ({
+        id: entry.id,
+        image_id: entry.image_id,
+        label: typeof entry.label === 'string' ? entry.label : undefined,
+        intensity: typeof entry.intensity === 'number' && Number.isFinite(entry.intensity)
+          ? Math.max(0, Math.min(1.5, entry.intensity))
+          : 0.6,
+      }))
+  }
+
+  if (raw && typeof raw === 'object') {
+    const legacy = raw as Record<string, string | undefined>
+    return [
+      legacy.background ? { id: 'background', image_id: legacy.background, label: 'Background', intensity: 0.15 } : null,
+      legacy.framing ? { id: 'framing', image_id: legacy.framing, label: 'Framing', intensity: 1 } : null,
+      legacy.subject ? { id: 'subject', image_id: legacy.subject, label: 'Subject', intensity: 0.6 } : null,
+    ].filter(Boolean) as CharacterPerspectiveLayerInput[]
+  }
+
+  return []
+}
+
+function clonePerspectiveLayers(layers: CharacterPerspectiveLayerInput[]): CharacterPerspectiveLayerInput[] {
+  return layers.map((layer) => ({ ...layer }))
+}
+
+function arePerspectiveLayersEqual(
+  a: CharacterPerspectiveLayerInput[],
+  b: CharacterPerspectiveLayerInput[],
+): boolean {
+  if (a.length !== b.length) return false
+  return a.every((layer, index) => {
+    const other = b[index]
+    return other != null
+      && layer.id === other.id
+      && layer.image_id === other.image_id
+      && (layer.label ?? '') === (other.label ?? '')
+      && layer.intensity === other.intensity
+  })
+}
+
 export default function CharacterEditorPage() {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
+
+  const builtInTabs = useMemo<{ id: BuiltInTabId; label: string }[]>(() => [
+    { id: 'core', label: t('characterEditor.tabs.core') },
+    { id: 'system', label: t('characterEditor.tabs.system') },
+    { id: 'greetings', label: t('characterEditor.tabs.greetings') },
+    { id: 'identity', label: t('characterEditor.tabs.identity') },
+    { id: 'gallery', label: t('characterEditor.tabs.gallery') },
+    { id: 'expressions', label: t('characterEditor.tabs.expressions') },
+    { id: 'voice', label: t('characterEditor.tabs.voice') },
+    { id: 'imageLora', label: t('characterEditor.tabs.imageLora') },
+    { id: 'advanced', label: t('characterEditor.tabs.advanced') },
+  ], [t])
+
   const editingCharacterId = useStore((s) => s.editingCharacterId)
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
+  const openDrawer = useStore((s) => s.openDrawer)
+  const addPersona = useStore((s) => s.addPersona)
+  const updatePersona = useStore((s) => s.updatePersona)
+  const setSelectedPersonaId = useStore((s) => s.setSelectedPersonaId)
+  const setPendingWorldBookEditId = useStore((s) => s.setPendingWorldBookEditId)
   const allCharacters = useStore((s) => s.characters)
   const activeChatId = useStore((s) => s.activeChatId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -107,10 +272,18 @@ export default function CharacterEditorPage() {
   const setActiveChatWallpaper = useStore((s) => s.setActiveChatWallpaper)
   const setSceneBackground = useStore((s) => s.setSceneBackground)
   const updateCharInStore = useStore((s) => s.updateCharacter)
+  const characterEditorTabs = useStore((s) => s.characterEditorTabs)
+  const regexScripts = useStore((s) => s.regexScripts)
+  const loadRegexScripts = useStore((s) => s.loadRegexScripts)
+  const updateRegexScript = useStore((s) => s.updateRegexScript)
   const browser = useCharacterBrowser()
 
   const character = allCharacters.find((c) => c.id === editingCharacterId) ?? null
   const isOpen = !!editingCharacterId
+  const tabs = useMemo<{ id: TabId; label: string }[]>(() => [
+    ...builtInTabs,
+    ...characterEditorTabs.map((tab) => ({ id: tab.id, label: tab.title })),
+  ], [builtInTabs, characterEditorTabs])
 
   const [activeTab, setActiveTab] = useState<TabId>('core')
   const [name, setName] = useState('')
@@ -127,21 +300,35 @@ export default function CharacterEditorPage() {
   const [lorebookResult, setLorebookResult] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [galleryItems, setGalleryItems] = useState<CharacterGalleryItem[]>([])
-  const [worldBooks, setWorldBooks] = useState<Array<{ id: string; name: string }>>([])
-  const [boundRegexScripts, setBoundRegexScripts] = useState<RegexScript[]>([])
-  const [allRegexScripts, setAllRegexScripts] = useState<RegexScript[]>([])
+  const [worldBooks, setWorldBooks] = useState<Array<Pick<WorldBook, 'id' | 'name' | 'folder' | 'metadata'>>>([])
   const [galleryUploading, setGalleryUploading] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [creatingPersona, setCreatingPersona] = useState(false)
   const [galleryContextMenu, setGalleryContextMenu] = useState<{ pos: ContextMenuPos; item: CharacterGalleryItem } | null>(null)
   const [avatarUploadProgress, setAvatarUploadProgress] = useState<number | null>(null)
   const [altAvatarUploadProgress, setAltAvatarUploadProgress] = useState<number | null>(null)
+  const [perspectiveLayerProgress, setPerspectiveLayerProgress] = useState<number | null>(null)
+  const [localPerspectiveLayers, setLocalPerspectiveLayers] = useState<CharacterPerspectiveLayerInput[]>([])
+  const pendingLayersRef = useRef<CharacterPerspectiveLayerInput[]>([])
+  const syncedPerspectiveLayersRef = useRef<CharacterPerspectiveLayerInput[]>([])
+  const skipPerspectiveLayerFlushRef = useRef(false)
+  const layersSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const layerSaveLockRef = useRef<Promise<void> | null>(null)
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const fileRef = useRef<HTMLInputElement>(null)
+  const perspectiveLayerFileRef = useRef<HTMLInputElement>(null)
   const galleryFileRef = useRef<HTMLInputElement>(null)
+  const galleryScrollRef = useRef<HTMLDivElement>(null)
+  const [galleryGridWidth, setGalleryGridWidth] = useState(0)
   const savingTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const lastSyncedId = useRef<string | null>(null)
 
   const close = useCallback(() => setEditingCharacterId(null), [setEditingCharacterId])
+  const perspectiveLayerSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 180, tolerance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   // Escape to close
   useEffect(() => {
@@ -162,6 +349,11 @@ export default function CharacterEditorPage() {
       setActiveTab('core')
     }
   }, [editingCharacterId])
+
+  useEffect(() => {
+    if (tabs.some((tab) => tab.id === activeTab)) return
+    setActiveTab('core')
+  }, [activeTab, tabs])
 
   // Sync form fields from character data — runs when the character object
   // changes, but the lastSyncedId guard skips redundant syncs for the same
@@ -209,31 +401,91 @@ export default function CharacterEditorPage() {
     fetchGallery()
   }, [fetchGallery])
 
-  // Fetch regex scripts (all + character-bound) when character changes
-  const fetchRegexScripts = useCallback(async () => {
-    if (!editingCharacterId) return
-    try {
-      const [allRes, boundRes] = await Promise.all([
-        regexApi.list({ limit: 500 }),
-        regexApi.list({ limit: 500, scope: 'character', character_id: editingCharacterId }),
-      ])
-      setAllRegexScripts(allRes.data)
-      // Filter to only scripts actually scoped to this character
-      setBoundRegexScripts(boundRes.data.filter((s) => s.scope === 'character' && s.scope_id === editingCharacterId))
-    } catch { /* no-op */ }
-  }, [editingCharacterId])
+  // Gallery virtualization: the grid can grow very large for image-heavy
+  // characters, so render only the viewport rows via TanStack Virtual.
+  const galleryColumns = useMemo(() => {
+    if (galleryGridWidth <= 0) return 3
+    return Math.max(1, Math.floor((galleryGridWidth + GALLERY_GAP) / (GALLERY_MIN_ITEM_WIDTH + GALLERY_GAP)))
+  }, [galleryGridWidth])
+
+  const galleryRowCount = useMemo(() => {
+    const totalCells = galleryItems.length + 1 // +1 for the add button
+    return Math.max(1, Math.ceil(totalCells / galleryColumns))
+  }, [galleryItems.length, galleryColumns])
+
+  const galleryItemWidth = useMemo(() => {
+    if (galleryGridWidth <= 0) return GALLERY_MIN_ITEM_WIDTH
+    return Math.max(1, (galleryGridWidth - GALLERY_GAP * (galleryColumns - 1)) / galleryColumns)
+  }, [galleryGridWidth, galleryColumns])
+
+  const galleryRowEstimate = useMemo(() => galleryItemWidth + GALLERY_GAP, [galleryItemWidth])
+
+  const galleryVirtualizer = useVirtualizer({
+    count: galleryRowCount,
+    getScrollElement: () => galleryScrollRef.current,
+    estimateSize: () => galleryRowEstimate,
+    overscan: GALLERY_OVERSCAN,
+    anchorTo: 'start',
+    useFlushSync: false,
+    getItemKey: (index) => {
+      const start = index * galleryColumns
+      const end = Math.min(start + galleryColumns, galleryItems.length)
+      const keys = galleryItems.slice(start, end).map((item) => item.id)
+      if (index === galleryRowCount - 1) keys.push('__add__')
+      return keys.join('|') || `row-${index}`
+    },
+  })
 
   useEffect(() => {
-    fetchRegexScripts()
-  }, [fetchRegexScripts])
+    if (activeTab !== 'gallery') return
+    const el = galleryScrollRef.current
+    if (!el) return
 
-  const upsertWorldBookOption = useCallback((book: { id: string; name: string }) => {
+    let frame = 0
+    const update = () => {
+      frame = 0
+      setGalleryGridWidth(el.clientWidth)
+    }
+
+    const schedule = () => {
+      if (frame) return
+      frame = requestAnimationFrame(update)
+    }
+
+    update()
+    const observer = new ResizeObserver(schedule)
+    observer.observe(el)
+    window.addEventListener('resize', schedule)
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      observer.disconnect()
+      window.removeEventListener('resize', schedule)
+    }
+  }, [activeTab])
+
+  useEffect(() => {
+    galleryVirtualizer.measure()
+  }, [galleryVirtualizer, galleryColumns, galleryRowEstimate])
+
+  const boundRegexScripts = useMemo(
+    () => regexScripts.filter((s) => s.scope === 'character' && s.scope_id === editingCharacterId),
+    [regexScripts, editingCharacterId]
+  )
+
+  useEffect(() => {
+    if (!editingCharacterId) return
+    loadRegexScripts().catch(() => {})
+  }, [editingCharacterId, loadRegexScripts])
+
+  const upsertWorldBookOption = useCallback((book: { id: string; name: string; folder?: string; metadata?: Record<string, any> }) => {
+    const normalized = { id: book.id, name: book.name, folder: book.folder ?? '', metadata: book.metadata ?? {} }
     setWorldBooks((prev) => {
       const existingIndex = prev.findIndex((item) => item.id === book.id)
-      if (existingIndex === -1) return [book, ...prev]
+      if (existingIndex === -1) return [normalized, ...prev]
 
       const next = [...prev]
-      next[existingIndex] = book
+      next[existingIndex] = normalized
       return next
     })
   }, [])
@@ -243,8 +495,8 @@ export default function CharacterEditorPage() {
     const loadWorldBooks = async () => {
       if (!editingCharacterId) return
       try {
-        const res = await worldBooksApi.list({ limit: 200 })
-        if (!cancelled) setWorldBooks(res.data.map((b) => ({ id: b.id, name: b.name })))
+        const res = await worldBooksApi.list({ limit: 1000 })
+        if (!cancelled) setWorldBooks(res.data.map((b) => ({ id: b.id, name: b.name, folder: b.folder || '', metadata: b.metadata || {} })))
       } catch {
         // no-op
       }
@@ -262,17 +514,27 @@ export default function CharacterEditorPage() {
       e.target.value = ''
       setGalleryUploading(true)
       try {
-        const items = files.length === 1
-          ? [await characterGalleryApi.upload(editingCharacterId, files[0])]
-          : await characterGalleryApi.uploadMany(editingCharacterId, files)
+        let items: CharacterGalleryItem[]
+        let skipped: { name: string; reason: string }[] = []
+        if (files.length === 1) {
+          items = [await characterGalleryApi.upload(editingCharacterId, files[0])]
+        } else {
+          const result = await characterGalleryApi.uploadMany(editingCharacterId, files)
+          items = result.items
+          skipped = result.skipped
+        }
         if (items.length > 0) setGalleryItems((prev) => [...prev, ...items])
-      } catch {
-        // upload failed
+        if (skipped.length > 0) {
+          const names = skipped.map((s) => s.name).join(', ')
+          toast.error(t('characterEditor.gallerySkipped', { count: skipped.length, names }))
+        }
+      } catch (err: any) {
+        toast.error(err?.body?.error || err?.message || t('characterEditor.galleryUploadFailed'))
       } finally {
         setGalleryUploading(false)
       }
     },
-    [editingCharacterId]
+    [editingCharacterId, t]
   )
 
   const handleGalleryRemove = useCallback(
@@ -286,7 +548,7 @@ export default function CharacterEditorPage() {
 
   const setGalleryImageAsChatBackground = useCallback(async (item: CharacterGalleryItem) => {
     if (!activeChatId) {
-      toast.error('Open a chat first to set its background')
+      toast.error(t('characterEditor.openChatForBackground'))
       return
     }
     const wallpaper: WallpaperRef = { image_id: item.image_id, type: 'image' }
@@ -295,16 +557,16 @@ export default function CharacterEditorPage() {
       setActiveChatWallpaper(wallpaper)
       setSceneBackground(null)
       setGalleryContextMenu(null)
-      toast.success('Chat background updated')
+      toast.success(t('characterEditor.chatBackgroundUpdated'))
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to update chat background')
+      toast.error(err?.body?.error || err?.message || t('characterEditor.chatBackgroundFailed'))
     }
-  }, [activeChatId, setActiveChatWallpaper, setSceneBackground])
+  }, [activeChatId, setActiveChatWallpaper, setSceneBackground, t])
 
   const galleryContextMenuItems: ContextMenuEntry[] = galleryContextMenu ? [
     {
       key: 'set-chat-background',
-      label: 'Set as Chat Background',
+      label: t('characterEditor.setAsChatBackground'),
       disabled: !activeChatId,
       onClick: () => setGalleryImageAsChatBackground(galleryContextMenu.item),
     },
@@ -367,15 +629,16 @@ export default function CharacterEditorPage() {
   )
 
   // ── Atomic extensions mutation pipeline ──────────────────────────────
-  // World book attachments, alternate fields, alternate avatars, and the
-  // raw extensions textarea all write to the same `extensions` blob. Without
-  // a single source of truth, an immediate save (e.g. toggling a world book)
-  // and a debounced save (e.g. typing in an alt-field variant) can race and
-  // clobber each other — the debounced save fires last with stale data and
-  // wipes the world book change. The pendingExtensionsRef tracks the latest
-  // mutated extensions so every callsite reads from the freshest value, and
-  // mutateExtensions cancels any pending debounced extensions save when an
-  // immediate save lands so the in-flight changes get persisted together.
+  // World book attachments, alternate fields, alternate avatars, extension-
+  // owned character-editor tabs, and the raw extensions textarea all write to
+  // the same `extensions` blob. Without a single source of truth, an
+  // immediate save (e.g. toggling a world book) and a debounced save (e.g.
+  // typing in an alt-field variant) can race and clobber each other — the
+  // debounced save fires last with stale data and wipes the world book
+  // change. The pendingExtensionsRef tracks the latest mutated extensions so
+  // every callsite reads from the freshest value, and mutateExtensions
+  // cancels any pending debounced extensions save when an immediate save
+  // lands so the in-flight changes get persisted together.
   const pendingExtensionsRef = useRef<Record<string, any> | null>(null)
 
   const workingExtensions = useMemo(() => {
@@ -388,10 +651,6 @@ export default function CharacterEditorPage() {
     return pendingExtensionsRef.current ?? character?.extensions ?? {}
   }, [extensionsJson, character?.extensions])
 
-  const dreamWeaverMetadata = useMemo(
-    () => getDreamWeaverCharacterMetadata({ extensions: workingExtensions } as Pick<Character, 'extensions'>),
-    [workingExtensions],
-  )
 
   const flushExtensionsSave = useCallback(async () => {
     if (!editingCharacterId) return
@@ -427,24 +686,62 @@ export default function CharacterEditorPage() {
     [editingCharacterId, character, flushExtensionsSave]
   )
 
-  const mutateDreamWeaver = useCallback(
-    (mutator: (metadata: Record<string, any>) => Record<string, any>) => {
-      mutateExtensions((ext) => {
-        const next = { ...ext }
-        const currentDreamWeaver = isRecord(ext.dream_weaver) ? { ...ext.dream_weaver } : {}
-        const updatedDreamWeaver = mutator(currentDreamWeaver)
+  const activeTabRef = useRef<TabId>('core')
+  const editingCharacterIdRef = useRef<string | null>(editingCharacterId)
+  const workingExtensionsRef = useRef<Record<string, any>>(workingExtensions)
+  const mutateExtensionsRef = useRef(mutateExtensions)
+  const flushExtensionsSaveRef = useRef(flushExtensionsSave)
 
-        if (Object.keys(updatedDreamWeaver).length > 0) {
-          next.dream_weaver = updatedDreamWeaver
-        } else {
-          delete next.dream_weaver
-        }
+  useEffect(() => {
+    activeTabRef.current = activeTab
+  }, [activeTab])
 
-        return next
-      }, false)
-    },
-    [mutateExtensions],
-  )
+  useEffect(() => {
+    editingCharacterIdRef.current = editingCharacterId
+  }, [editingCharacterId])
+
+  useEffect(() => {
+    workingExtensionsRef.current = workingExtensions
+  }, [workingExtensions])
+
+  useEffect(() => {
+    mutateExtensionsRef.current = mutateExtensions
+  }, [mutateExtensions])
+
+  useEffect(() => {
+    flushExtensionsSaveRef.current = flushExtensionsSave
+  }, [flushExtensionsSave])
+
+  useEffect(() => {
+    setCharacterEditorController({
+      getState: () => ({
+        open: Boolean(editingCharacterIdRef.current),
+        characterId: editingCharacterIdRef.current,
+        activeTabId: editingCharacterIdRef.current ? activeTabRef.current : null,
+        extensions: workingExtensionsRef.current,
+      }),
+      setActiveTab: (tabId) => {
+        setActiveTab(tabId)
+      },
+      updateExtensions: (mutator, immediate) => {
+        mutateExtensionsRef.current(mutator, immediate)
+      },
+      flush: () => flushExtensionsSaveRef.current(),
+    })
+
+    return () => {
+      setCharacterEditorController(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    syncCharacterEditorState({
+      open: isOpen,
+      characterId: editingCharacterId ?? null,
+      activeTabId: isOpen ? activeTab : null,
+      extensions: workingExtensions,
+    })
+  }, [activeTab, editingCharacterId, isOpen, workingExtensions])
 
   const handleNameChange = useCallback(
     (value: string) => {
@@ -460,46 +757,6 @@ export default function CharacterEditorPage() {
       debouncedSave(field, value)
     },
     [debouncedSave]
-  )
-
-  const handleDreamWeaverAppearanceChange = useCallback(
-    (value: string) => {
-      mutateDreamWeaver((metadata) => {
-        const next = { ...metadata }
-        if (value.trim()) next.appearance = value
-        else delete next.appearance
-        return next
-      })
-    },
-    [mutateDreamWeaver],
-  )
-
-  const handleDreamWeaverVoiceChange = useCallback(
-    (voiceGuidance: typeof EMPTY_DREAM_WEAVER_VOICE_GUIDANCE) => {
-      mutateDreamWeaver((metadata) => {
-        const hasStructuredRules = Object.values(voiceGuidance.rules).some((items) => items.length > 0)
-        const hasVoiceContent = hasStructuredRules || Boolean(voiceGuidance.compiled.trim())
-        const next = { ...metadata }
-
-        if (hasVoiceContent) {
-          next.voice_guidance = {
-            compiled: voiceGuidance.compiled,
-            rules: {
-              baseline: [...voiceGuidance.rules.baseline],
-              rhythm: [...voiceGuidance.rules.rhythm],
-              diction: [...voiceGuidance.rules.diction],
-              quirks: [...voiceGuidance.rules.quirks],
-              hard_nos: [...voiceGuidance.rules.hard_nos],
-            },
-          }
-        } else {
-          delete next.voice_guidance
-        }
-
-        return next
-      })
-    },
-    [mutateDreamWeaver],
   )
 
   const handleAlternatesChange = useCallback(
@@ -623,43 +880,51 @@ export default function CharacterEditorPage() {
           void flushExtensionsSave()
         }, DEBOUNCE_MS)
       } catch {
-        setJsonError('Invalid JSON')
+        setJsonError(t('characterEditor.invalidJson'))
       }
     },
-    [flushExtensionsSave]
+    [flushExtensionsSave, t]
   )
 
   const handleBindRegex = useCallback(
     async (scriptId: string) => {
       if (!editingCharacterId) return
       try {
-        await regexApi.update(scriptId, { scope: 'character', scope_id: editingCharacterId })
-        fetchRegexScripts()
+        await updateRegexScript(scriptId, { scope: 'character', scope_id: editingCharacterId })
       } catch (err: any) {
-        toast.error(err.body?.error || err.message || 'Failed to bind regex')
+        toast.error(err.body?.error || err.message || t('characterEditor.bindRegexFailed'))
       }
     },
-    [editingCharacterId, fetchRegexScripts]
+    [editingCharacterId, updateRegexScript, t]
   )
 
   const handleUnbindRegex = useCallback(
     async (scriptId: string) => {
       try {
-        await regexApi.update(scriptId, { scope: 'global', scope_id: null })
-        fetchRegexScripts()
+        await updateRegexScript(scriptId, { scope: 'global', scope_id: null })
       } catch (err: any) {
-        toast.error(err.body?.error || err.message || 'Failed to unbind regex')
+        toast.error(err.body?.error || err.message || t('characterEditor.unbindRegexFailed'))
       }
     },
-    [fetchRegexScripts]
+    [updateRegexScript]
   )
 
   const clearActivatedWorldInfo = useStore((s) => s.clearActivatedWorldInfo)
 
   const attachedWorldBookIds = useMemo(
-    () => getCharacterWorldBookIds(character?.extensions),
-    [character?.extensions]
+    () => getCharacterWorldBookIds(workingExtensions),
+    [workingExtensions]
   )
+
+  const embeddedWorldBook = useMemo(() => {
+    if (!editingCharacterId) return null
+    const attachedIdSet = new Set(attachedWorldBookIds)
+    return worldBooks.find((book) =>
+      attachedIdSet.has(book.id)
+      && book.metadata?.source === 'character'
+      && book.metadata?.source_character_id === editingCharacterId,
+    ) ?? null
+  }, [attachedWorldBookIds, editingCharacterId, worldBooks])
 
   const handleRemoveWorldBook = useCallback(
     (worldBookId: string) => {
@@ -691,11 +956,11 @@ export default function CharacterEditorPage() {
 
   // Avatar
   const handleCropComplete = useCallback(
-    async (croppedFile: File, _originalFile: File) => {
+    async (croppedFile: File, originalFile: File) => {
       if (!editingCharacterId) return
       setAvatarUploadProgress(0)
       try {
-        const updated = await charactersApi.uploadAvatar(editingCharacterId, croppedFile, (p) => setAvatarUploadProgress(p))
+        const updated = await charactersApi.uploadAvatar(editingCharacterId, croppedFile, (p) => setAvatarUploadProgress(p), originalFile)
         updateCharInStore(editingCharacterId, updated)
         setAvatarKey((k) => k + 1)
       } catch (err) {
@@ -724,7 +989,7 @@ export default function CharacterEditorPage() {
           id: newId,
           image_id: image.id,
           original_image_id: originalImage.id,
-          label: 'New Avatar',
+          label: t('characterEditor.newAvatar'),
         }
         mutateExtensions((ext) => {
           const currentAlts = (ext.alternate_avatars || []) as AlternateAvatarEntry[]
@@ -760,12 +1025,158 @@ export default function CharacterEditorPage() {
     [openCropFlow]
   )
 
+  const perspectiveLayers = useMemo<CharacterPerspectiveLayerInput[]>(() => {
+    return readPerspectiveLayers(character?.extensions?.landing_perspective_layers)
+  }, [character?.extensions?.landing_perspective_layers])
+
+  // Keep the in-editor perspective layer list in sync with the store character
+  // when the edited character changes, without clobbering local in-flight edits.
+  useEffect(() => {
+    if (!character) return
+    const nextLayers = clonePerspectiveLayers(perspectiveLayers)
+    setLocalPerspectiveLayers(nextLayers)
+    pendingLayersRef.current = clonePerspectiveLayers(nextLayers)
+    syncedPerspectiveLayersRef.current = clonePerspectiveLayers(nextLayers)
+  }, [character?.id])
+
+  const flushPerspectiveLayersSave = useCallback(async () => {
+    if (!editingCharacterId) return
+    // Chain saves so rapid edits never race or overwrite each other.
+    const run = async () => {
+      layersSaveTimerRef.current = null
+      if (skipPerspectiveLayerFlushRef.current) return
+
+      const toSave = clonePerspectiveLayers(pendingLayersRef.current)
+      if (arePerspectiveLayersEqual(toSave, syncedPerspectiveLayersRef.current)) return
+      if (!useStore.getState().characters.some((entry) => entry.id === editingCharacterId)) return
+
+      try {
+        showSaving()
+        const updated = await charactersApi.updatePerspectiveLayers(editingCharacterId, toSave)
+        const savedLayers = readPerspectiveLayers(updated.extensions?.landing_perspective_layers)
+        syncedPerspectiveLayersRef.current = clonePerspectiveLayers(savedLayers)
+        // Only adopt the server response if local state hasn't moved on since the save started.
+        if (arePerspectiveLayersEqual(pendingLayersRef.current, toSave)) {
+          updateCharInStore(editingCharacterId, updated)
+        }
+      } catch (err) {
+        console.error('[Editor] Perspective layer save failed:', err)
+        toast.error('Could not save perspective layers')
+      }
+    }
+    layerSaveLockRef.current = (layerSaveLockRef.current ?? Promise.resolve()).then(run, run)
+    await layerSaveLockRef.current
+  }, [editingCharacterId, updateCharInStore, showSaving])
+
+  const requestPerspectiveLayersSave = useCallback(() => {
+    if (layersSaveTimerRef.current) clearTimeout(layersSaveTimerRef.current)
+    layersSaveTimerRef.current = setTimeout(() => {
+      void flushPerspectiveLayersSave()
+    }, 400)
+  }, [flushPerspectiveLayersSave])
+
+  // Flush any pending layer edits when the editor closes or the character changes.
+  useEffect(() => () => {
+    if (layersSaveTimerRef.current) clearTimeout(layersSaveTimerRef.current)
+    if (skipPerspectiveLayerFlushRef.current) {
+      skipPerspectiveLayerFlushRef.current = false
+      return
+    }
+    void flushPerspectiveLayersSave()
+  }, [flushPerspectiveLayersSave])
+
+  const handlePerspectiveLayerSelected = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ''
+      if (!file || !editingCharacterId) return
+      if (localPerspectiveLayers.length >= MAX_PERSPECTIVE_LAYERS) {
+        toast.error(`Maximum ${MAX_PERSPECTIVE_LAYERS} landing layers`)
+        return
+      }
+      // Persist any pending layer edits before uploading so the new layer is appended to the latest stack.
+      if (layersSaveTimerRef.current) clearTimeout(layersSaveTimerRef.current)
+      await flushPerspectiveLayersSave()
+      setPerspectiveLayerProgress(0)
+      try {
+        const updated = await charactersApi.addPerspectiveLayer(
+          editingCharacterId,
+          file,
+          { label: `Layer ${localPerspectiveLayers.length + 1}`, intensity: localPerspectiveLayers.length === 0 ? 0.2 : 0.7 },
+          setPerspectiveLayerProgress,
+        )
+        const next = readPerspectiveLayers(updated.extensions?.landing_perspective_layers)
+        setLocalPerspectiveLayers(next)
+        pendingLayersRef.current = clonePerspectiveLayers(next)
+        syncedPerspectiveLayersRef.current = clonePerspectiveLayers(next)
+        updateCharInStore(editingCharacterId, updated)
+      } catch (err) {
+        console.error('[Editor] Perspective layer upload failed:', err)
+        toast.error(err instanceof Error ? err.message : 'Perspective layer upload failed')
+      } finally {
+        setPerspectiveLayerProgress(null)
+      }
+    },
+    [editingCharacterId, localPerspectiveLayers.length, updateCharInStore, flushPerspectiveLayersSave]
+  )
+
+  const handleRemovePerspectiveLayer = useCallback(
+    (layerId: string) => {
+      const next = localPerspectiveLayers.filter((layer) => layer.id !== layerId)
+      setLocalPerspectiveLayers(next)
+      pendingLayersRef.current = next
+      requestPerspectiveLayersSave()
+    },
+    [localPerspectiveLayers, requestPerspectiveLayersSave]
+  )
+
+  const handlePerspectiveLayerDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event
+      if (!over || active.id === over.id) return
+      const oldIndex = localPerspectiveLayers.findIndex((layer) => layer.id === active.id)
+      const newIndex = localPerspectiveLayers.findIndex((layer) => layer.id === over.id)
+      if (oldIndex < 0 || newIndex < 0) return
+      const next = arrayMove(localPerspectiveLayers, oldIndex, newIndex)
+      setLocalPerspectiveLayers(next)
+      pendingLayersRef.current = next
+      requestPerspectiveLayersSave()
+    },
+    [localPerspectiveLayers, requestPerspectiveLayersSave]
+  )
+
+  const handlePerspectiveLayerLabelChange = useCallback(
+    (layerId: string, label: string) => {
+      const next = localPerspectiveLayers.map((layer) => layer.id === layerId ? { ...layer, label } : layer)
+      setLocalPerspectiveLayers(next)
+      pendingLayersRef.current = next
+      requestPerspectiveLayersSave()
+    },
+    [localPerspectiveLayers, requestPerspectiveLayersSave]
+  )
+
+  const handlePerspectiveLayerIntensityChange = useCallback(
+    (layerId: string, intensity: number) => {
+      const next = localPerspectiveLayers.map((layer) => layer.id === layerId ? { ...layer, intensity } : layer)
+      setLocalPerspectiveLayers(next)
+      pendingLayersRef.current = next
+      requestPerspectiveLayersSave()
+    },
+    [localPerspectiveLayers, requestPerspectiveLayersSave]
+  )
+
   // Actions
   const handleDelete = useCallback(async () => {
     if (!editingCharacterId) return
-    await browser.deleteCharacter(editingCharacterId)
-    close()
-    setShowDeleteConfirm(false)
+    skipPerspectiveLayerFlushRef.current = true
+    try {
+      await browser.deleteCharacter(editingCharacterId)
+      close()
+      setShowDeleteConfirm(false)
+    } catch (err) {
+      skipPerspectiveLayerFlushRef.current = false
+      throw err
+    }
   }, [editingCharacterId, browser.deleteCharacter, close])
 
   const handleDuplicate = useCallback(async () => {
@@ -780,6 +1191,47 @@ export default function CharacterEditorPage() {
     browser.openChat(character)
   }, [character, browser.openChat, close])
 
+  const handleCreatePersonaFromCharacter = useCallback(async () => {
+    if (!character || creatingPersona) return
+
+    const description = (fields.description || '').trim()
+    const personality = (fields.personality || '').trim()
+    const personaDescription = [description, personality].filter(Boolean).join('\n\n')
+    if (!personaDescription) {
+      toast.error(t('characterEditor.personaCreateNoContent'))
+      return
+    }
+
+    setCreatingPersona(true)
+    try {
+      let persona = await personasApi.create({
+        name: (name || character.name).trim() || character.name,
+        description: personaDescription,
+      })
+      addPersona(persona)
+      if (character.image_id || character.avatar_path) {
+        try {
+          const avatarBlob = await charactersApi.getAvatarBlob(character.id)
+          const avatarFile = new File([avatarBlob], `avatar.${avatarExtension(avatarBlob.type)}`, {
+            type: avatarBlob.type || 'image/png',
+          })
+          persona = await personasApi.uploadAvatar(persona.id, avatarFile)
+          updatePersona(persona.id, persona)
+        } catch {
+          toast.warning(t('characterEditor.personaAvatarCopyFailed'))
+        }
+      }
+      setSelectedPersonaId(persona.id)
+      toast.success(t('characterEditor.personaCreateSuccess', { name: persona.name }))
+      close()
+      openDrawer('personas')
+    } catch (err: any) {
+      toast.error(err?.body?.error || err?.message || t('characterEditor.personaCreateFailed'))
+    } finally {
+      setCreatingPersona(false)
+    }
+  }, [addPersona, character, close, creatingPersona, fields.description, fields.personality, name, openDrawer, setSelectedPersonaId, t, updatePersona])
+
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [exporting, setExporting] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
@@ -789,19 +1241,19 @@ export default function CharacterEditorPage() {
     setExporting(true)
     setShowExportMenu(false)
     const formatLabel = format === 'charx' ? 'CHARX' : format === 'png' ? 'PNG' : 'JSON'
-    const toastId = toast.info(`Preparing ${formatLabel} export\u2026`, { title: 'Exporting', duration: 60_000, dismissible: false })
+    const toastId = toast.info(t('characterEditor.preparingExport', { format: formatLabel }), { title: t('characterEditor.exporting'), duration: 60_000, dismissible: false })
     try {
       await charactersApi.exportCharacter(editingCharacterId, format, character.name)
       toast.dismiss(toastId)
-      toast.success(`${character.name} exported as ${formatLabel}`)
+      toast.success(t('characterEditor.exportSuccess', { name: character.name, format: formatLabel }))
     } catch (err) {
       console.error('[Export] Failed:', err)
       toast.dismiss(toastId)
-      toast.error(`Export failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      toast.error(t('characterEditor.exportFailed', { error: err instanceof Error ? err.message : t('characterEditor.unknownError') }))
     } finally {
       setExporting(false)
     }
-  }, [editingCharacterId, character])
+  }, [editingCharacterId, character, t])
 
   // Close export menu on outside click
   useEffect(() => {
@@ -829,6 +1281,8 @@ export default function CharacterEditorPage() {
     [close]
   )
 
+  const activeExtensionTab = characterEditorTabs.find((tab) => tab.id === activeTab) ?? null
+
   return createPortal(
     <>
     <AnimatePresence>
@@ -851,7 +1305,7 @@ export default function CharacterEditorPage() {
           >
             {!character ? (
               <div className={styles.header}>
-                <span className={styles.creatorText}>Character not found</span>
+                <span className={styles.creatorText}>{t('characterEditor.notFound')}</span>
                 <CloseButton onClick={close} variant="solid" />
               </div>
             ) : (
@@ -863,11 +1317,11 @@ export default function CharacterEditorPage() {
                     onClick={() => { if (avatarUploadProgress === null) fileRef.current?.click() }}
                     onDrop={handleAvatarDrop}
                     onDragOver={(e) => e.preventDefault()}
-                    title="Click or drop to change avatar"
+                    title={t('characterEditor.changeAvatar')}
                   >
                     <LazyImage
                       key={avatarKey}
-                      src={getCharacterAvatarLargeUrl(character) ?? ''}
+                      src={getCharacterAvatarThumbUrl(character) ?? ''}
                       alt={character.name}
                       className={styles.avatarImg}
                       fallback={
@@ -898,23 +1352,34 @@ export default function CharacterEditorPage() {
                       className={styles.nameInput}
                       value={name}
                       onChange={(e) => handleNameChange(e.target.value)}
-                      placeholder="Character name"
+                      placeholder={t('characterEditor.characterName')}
                     />
-                    {character.creator && <span className={styles.creatorText}>by {character.creator}</span>}
+                    {character.creator && <span className={styles.creatorText}>{t('characterEditor.byCreator', { name: character.creator })}</span>}
                   </div>
 
-                  {saving && <span className={styles.savingIndicator}>Saving...</span>}
+                  {saving && <span className={styles.savingIndicator}>{t('characterEditor.saving')}</span>}
 
                   <div className={styles.headerActions}>
-                    <Button size="icon" variant="ghost" onClick={handleOpenChat} title="Open Chat">
+                    <Button size="icon" variant="ghost" onClick={handleOpenChat} title={t('characterEditor.openChat')}>
                       <MessageSquare size={14} />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={handleCreatePersonaFromCharacter}
+                      title={t('characterEditor.createPersona')}
+                      disabled={creatingPersona}
+                    >
+                      {creatingPersona
+                        ? <Spinner size={14} fast />
+                        : <UserPlus size={14} />}
                     </Button>
                     <div className={styles.exportWrapper} ref={exportMenuRef}>
                       <Button
                         size="icon"
                         variant="ghost"
                         onClick={() => !exporting && setShowExportMenu((v) => !v)}
-                        title="Export"
+                        title={tc('actions.export')}
                         disabled={exporting}
                       >
                         {exporting
@@ -923,20 +1388,20 @@ export default function CharacterEditorPage() {
                       </Button>
                       {showExportMenu && (
                         <div className={styles.exportDropdown}>
-                          <button onClick={() => handleExport('json')}>Export as JSON (CCSv3)</button>
-                          <button onClick={() => handleExport('png')}>Export as PNG (Embedded)</button>
-                          <button onClick={() => handleExport('charx')}>Export as CHARX (Lumiverse)</button>
+                          <button onClick={() => handleExport('json')}>{t('characterEditor.exportJson')}</button>
+                          <button onClick={() => handleExport('png')}>{t('characterEditor.exportPng')}</button>
+                          <button onClick={() => handleExport('charx')}>{t('characterEditor.exportCharx')}</button>
                         </div>
                       )}
                     </div>
-                    <Button size="icon" variant="ghost" onClick={handleDuplicate} title="Duplicate">
+                    <Button size="icon" variant="ghost" onClick={handleDuplicate} title={t('characterEditor.duplicate')}>
                       <Copy size={14} />
                     </Button>
                     <Button
                       size="icon"
                       variant="danger-ghost"
                       onClick={() => setShowDeleteConfirm(true)}
-                      title="Delete"
+                      title={tc('actions.delete')}
                     >
                       <Trash2 size={14} />
                     </Button>
@@ -947,7 +1412,7 @@ export default function CharacterEditorPage() {
 
                 {/* Tab bar */}
                 <div className={styles.tabBar}>
-                  {TABS.map((tab) => (
+                  {tabs.map((tab) => (
                     <button
                       key={tab.id}
                       type="button"
@@ -963,18 +1428,9 @@ export default function CharacterEditorPage() {
                 <div className={styles.tabContent}>
                   {activeTab === 'core' && (
                     <>
-                      {dreamWeaverMetadata && (
-                        <Field
-                          label="Appearance"
-                          helper="Appearance data for Dream Weaver characters."
-                          value={getDreamWeaverAppearanceText(dreamWeaverMetadata)}
-                          onChange={handleDreamWeaverAppearanceChange}
-                          rows={4}
-                        />
-                      )}
                       <AlternateFieldEditor
-                        label="Description"
-                        helper="The character's physical appearance, backstory, and other details."
+                        label={t('characterEditor.description')}
+                        helper={t('characterEditor.descriptionHelper')}
                         value={fields.description || ''}
                         alternates={character?.extensions?.alternate_fields?.description}
                         onChange={(v) => handleFieldChange('description', v)}
@@ -982,8 +1438,8 @@ export default function CharacterEditorPage() {
                         rows={5}
                       />
                       <AlternateFieldEditor
-                        label="Personality"
-                        helper="Key personality traits and behavioral patterns."
+                        label={t('characterEditor.personality')}
+                        helper={t('characterEditor.personalityHelper')}
                         value={fields.personality || ''}
                         alternates={character?.extensions?.alternate_fields?.personality}
                         onChange={(v) => handleFieldChange('personality', v)}
@@ -991,8 +1447,8 @@ export default function CharacterEditorPage() {
                         rows={4}
                       />
                       <AlternateFieldEditor
-                        label="Scenario"
-                        helper="The setting or situation for the roleplay."
+                        label={t('characterEditor.scenario')}
+                        helper={t('characterEditor.scenarioHelper')}
                         value={fields.scenario || ''}
                         alternates={character?.extensions?.alternate_fields?.scenario}
                         onChange={(v) => handleFieldChange('scenario', v)}
@@ -1004,31 +1460,21 @@ export default function CharacterEditorPage() {
 
                   {activeTab === 'system' && (
                     <>
-                      {dreamWeaverMetadata && (
-                        <div className={styles.fieldGroup}>
-                          <span className={styles.fieldLabel}>Voice Guidance</span>
-                          <span className={styles.fieldHelper}>
-                            Structured voice rules are used at runtime first, compiled guidance remains the fallback.
-                          </span>
-                          <VoiceGuidanceEditor
-                            voice={dreamWeaverMetadata.voiceGuidance || EMPTY_DREAM_WEAVER_VOICE_GUIDANCE}
-                            onChange={handleDreamWeaverVoiceChange}
-                          />
-                        </div>
-                      )}
                       <Field
-                        label="System Prompt"
-                        helper="Instructions injected at the start of every conversation."
+                        label={t('characterEditor.systemPrompt')}
+                        helper={t('characterEditor.systemPromptHelper')}
                         value={fields.system_prompt || ''}
                         onChange={(v) => handleFieldChange('system_prompt', v)}
                         rows={6}
+                        showTokenCount
                       />
                       <Field
-                        label="Post-History Instructions"
-                        helper="Instructions injected after the chat history (jailbreak position)."
+                        label={t('characterEditor.postHistory')}
+                        helper={t('characterEditor.postHistoryHelper')}
                         value={fields.post_history_instructions || ''}
                         onChange={(v) => handleFieldChange('post_history_instructions', v)}
                         rows={4}
+                        showTokenCount
                       />
                     </>
                   )}
@@ -1036,49 +1482,54 @@ export default function CharacterEditorPage() {
                   {activeTab === 'greetings' && (
                     <>
                       <Field
-                        label="First Message"
-                        helper="The opening message the character sends when starting a new chat."
+                        label={t('characterEditor.firstMessage')}
+                        helper={t('characterEditor.firstMessageHelper')}
                         value={fields.first_mes || ''}
                         onChange={(v) => handleFieldChange('first_mes', v)}
                         rows={5}
+                        showTokenCount
                       />
                       <Field
-                        label="Message Examples"
-                        helper="Example dialogues showing how the character speaks (use <START> to separate)."
+                        label={t('characterEditor.messageExamples')}
+                        helper={t('characterEditor.messageExamplesHelper')}
                         value={fields.mes_example || ''}
                         onChange={(v) => handleFieldChange('mes_example', v)}
                         rows={5}
+                        showTokenCount
                       />
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>Alternate Greetings</span>
+                        <span className={styles.fieldLabel}>{t('characterEditor.alternateGreetings')}</span>
                         <span className={styles.fieldHelper}>
-                          Alternative first messages that can be randomly selected.
+                          {t('characterEditor.alternateGreetingsHelper')}
                         </span>
                         {alternateGreetings.map((greeting, i) => (
                           <div key={i} className={styles.greetingItem}>
                             <div className={styles.greetingHeader}>
-                              <span className={styles.greetingLabel}>Greeting #{i + 1}</span>
-                              <button
-                                type="button"
-                                className={styles.removeBtn}
-                                onClick={() => handleRemoveGreeting(i)}
-                                title="Remove"
-                              >
-                                <X size={12} />
-                              </button>
+                              <span className={styles.greetingLabel}>{t('characterEditor.greetingNumber', { n: i + 1 })}</span>
+                              <div className={styles.greetingActions}>
+                                <TokenCountButton text={greeting} />
+                                <button
+                                  type="button"
+                                  className={styles.removeBtn}
+                                  onClick={() => handleRemoveGreeting(i)}
+                                  title={t('characterEditor.remove')}
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
                             </div>
                             <ExpandableTextarea
                               className={styles.fieldTextarea}
                               value={greeting}
                               onChange={(v) => handleGreetingChange(i, v)}
                               rows={3}
-                              title={`Greeting #${i + 1}`}
-                              placeholder="Alternate greeting..."
+                              title={t('characterEditor.greetingNumber', { n: i + 1 })}
+                              placeholder={t('characterEditor.alternateGreetingPlaceholder')}
                             />
                           </div>
                         ))}
                         <button type="button" className={styles.addBtn} onClick={handleAddGreeting}>
-                          <Plus size={12} /> Add Greeting
+                          <Plus size={12} /> {t('characterEditor.addGreeting')}
                         </button>
                       </div>
                     </>
@@ -1087,29 +1538,84 @@ export default function CharacterEditorPage() {
                   {activeTab === 'identity' && (
                     <>
                       <Field
-                        label="Alternate Character Name"
-                        helper="Used as {{char}} in prompts and as the chat display name. Leaves the card's title untouched."
+                        label={t('characterEditor.alternateName')}
+                        helper={t('characterEditor.alternateNameHelper')}
                         value={alternateCharacterName}
                         onChange={handleAlternateCharacterNameChange}
                         multiline={false}
                       />
                       <Field
-                        label="Creator"
-                        helper="Who created this character."
+                        label={t('characterEditor.creator')}
+                        helper={t('characterEditor.creatorHelper')}
                         value={fields.creator || ''}
                         onChange={(v) => handleFieldChange('creator', v)}
                         multiline={false}
                       />
                       <Field
-                        label="Creator Notes"
-                        helper="Notes from the creator about how to use the character."
+                        label={t('characterEditor.creatorNotes')}
+                        helper={t('characterEditor.creatorNotesHelper')}
                         value={fields.creator_notes || ''}
                         onChange={(v) => handleFieldChange('creator_notes', v)}
                         rows={4}
                       />
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>Tags</span>
-                        <span className={styles.fieldHelper}>Categories and labels for organization.</span>
+                        <span className={styles.fieldLabel}>Landing perspective stack</span>
+                        <span className={styles.fieldHelper}>
+                          Add up to five WebP-optimized layers. Drag to reorder from back to front; each layer controls its own parallax strength on landing-page cards only.
+                        </span>
+                        <div className={styles.perspectiveStackEditor}>
+                          {localPerspectiveLayers.length > 0 ? (
+                            <DndContext sensors={perspectiveLayerSensors} collisionDetection={closestCenter} onDragEnd={handlePerspectiveLayerDragEnd}>
+                              <SortableContext items={localPerspectiveLayers.map((layer) => layer.id)} strategy={verticalListSortingStrategy}>
+                                <div className={styles.perspectiveLayerList}>
+                                  {localPerspectiveLayers.map((layer, index) => (
+                                    <SortablePerspectiveLayer
+                                      key={layer.id}
+                                      layer={layer}
+                                      index={index}
+                                      disabled={localPerspectiveLayers.length < 2}
+                                      onLabelChange={handlePerspectiveLayerLabelChange}
+                                      onIntensityChange={handlePerspectiveLayerIntensityChange}
+                                      onRemove={handleRemovePerspectiveLayer}
+                                    />
+                                  ))}
+                                </div>
+                              </SortableContext>
+                            </DndContext>
+                          ) : (
+                            <div className={styles.perspectiveLayerEmptyState}>
+                              <ImagePlus size={18} />
+                              <span>No landing layers yet.</span>
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            className={styles.perspectiveLayerAdd}
+                            disabled={localPerspectiveLayers.length >= MAX_PERSPECTIVE_LAYERS || perspectiveLayerProgress !== null}
+                            onClick={() => perspectiveLayerFileRef.current?.click()}
+                          >
+                            {perspectiveLayerProgress !== null ? (
+                              <span>{perspectiveLayerProgress}%</span>
+                            ) : (
+                              <>
+                                <Upload size={13} />
+                                Add layer ({localPerspectiveLayers.length}/{MAX_PERSPECTIVE_LAYERS})
+                              </>
+                            )}
+                          </button>
+                          <input
+                            ref={perspectiveLayerFileRef}
+                            type="file"
+                            accept="image/*"
+                            className={styles.hiddenInput}
+                            onChange={handlePerspectiveLayerSelected}
+                          />
+                        </div>
+                      </div>
+                      <div className={styles.fieldGroup}>
+                        <span className={styles.fieldLabel}>{t('characterEditor.tags')}</span>
+                        <span className={styles.fieldHelper}>{t('characterEditor.tagsHelper')}</span>
                         <div className={styles.tagsList}>
                           {tags.map((tag) => (
                             <span key={tag} className={styles.tag}>
@@ -1130,7 +1636,7 @@ export default function CharacterEditorPage() {
                               value={newTag}
                               onChange={(e) => setNewTag(e.target.value)}
                               onKeyDown={(e) => e.key === 'Enter' && handleAddTag()}
-                              placeholder="Add tag..."
+                              placeholder={t('characterEditor.addTag')}
                             />
                             <button
                               type="button"
@@ -1158,31 +1664,73 @@ export default function CharacterEditorPage() {
                   {activeTab === 'gallery' && (
                     <div className={styles.galleryTab}>
                       <div className={styles.galleryHeader}>
-                        <span className={styles.fieldLabel}>Image Gallery</span>
+                        <span className={styles.fieldLabel}>{t('characterEditor.imageGallery')}</span>
                         <span className={styles.fieldHelper}>
-                          Upload images for this character. These are personal to your account.
+                          {t('characterEditor.imageGalleryHelper')}
                         </span>
                       </div>
 
-                      <div className={styles.galleryGrid}>
-                        {galleryItems.map((item) => (
-                          <GalleryGridItem
-                            key={item.id}
-                            item={item}
-                            onRemove={handleGalleryRemove}
-                            onOpenMenu={(menuItem, pos) => setGalleryContextMenu({ item: menuItem, pos })}
-                          />
-                        ))}
-
-                        <button
-                          type="button"
-                          className={styles.galleryAddBtn}
-                          onClick={() => galleryFileRef.current?.click()}
-                          disabled={galleryUploading}
+                      <div className={styles.galleryScrollArea} ref={galleryScrollRef}>
+                        <div
+                          className={styles.galleryVirtualContainer}
+                          style={{ height: galleryVirtualizer.getTotalSize() }}
                         >
-                          <ImagePlus size={20} />
-                          <span>{galleryUploading ? 'Uploading...' : 'Add Images'}</span>
-                        </button>
+                          {galleryVirtualizer.getVirtualItems().map((virtualRow) => {
+                            const rowStart = virtualRow.index * galleryColumns
+                            const rowEnd = rowStart + galleryColumns
+                            const cells: Array<{ type: 'item'; item: CharacterGalleryItem } | { type: 'add' }> = []
+                            for (let g = rowStart; g < rowEnd; g++) {
+                              if (g < galleryItems.length) {
+                                cells.push({ type: 'item', item: galleryItems[g] })
+                              } else if (g === galleryItems.length) {
+                                cells.push({ type: 'add' })
+                              }
+                            }
+
+                            return (
+                              <div
+                                key={virtualRow.key}
+                                ref={galleryVirtualizer.measureElement}
+                                data-index={virtualRow.index}
+                                className={styles.galleryGridRow}
+                                style={{
+                                  position: 'absolute',
+                                  top: virtualRow.start,
+                                  left: 0,
+                                  width: '100%',
+                                  gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))`,
+                                  gap: GALLERY_GAP,
+                                  paddingBottom: GALLERY_GAP,
+                                }}
+                              >
+                                {cells.map((cell) => {
+                                  if (cell.type === 'add') {
+                                    return (
+                                      <button
+                                        key="__add__"
+                                        type="button"
+                                        className={styles.galleryAddBtn}
+                                        onClick={() => galleryFileRef.current?.click()}
+                                        disabled={galleryUploading}
+                                      >
+                                        <ImagePlus size={20} />
+                                        <span>{galleryUploading ? t('characterEditor.uploading') : t('characterEditor.addImages')}</span>
+                                      </button>
+                                    )
+                                  }
+                                  return (
+                                    <GalleryGridItem
+                                      key={cell.item.id}
+                                      item={cell.item}
+                                      onRemove={handleGalleryRemove}
+                                      onOpenMenu={(menuItem, pos) => setGalleryContextMenu({ item: menuItem, pos })}
+                                    />
+                                  )
+                                })}
+                              </div>
+                            )
+                          })}
+                        </div>
                       </div>
 
                       <input
@@ -1198,9 +1746,9 @@ export default function CharacterEditorPage() {
                         <div className={styles.galleryExtract}>
                           <Download size={14} />
                           <div className={styles.galleryExtractInfo}>
-                            <span className={styles.fieldLabel}>Embedded Images</span>
+                            <span className={styles.fieldLabel}>{t('characterEditor.embeddedImages')}</span>
                             <span className={styles.fieldHelper}>
-                              {embeddedImageCount} image{embeddedImageCount !== 1 ? 's' : ''} found in character data
+                              {t('characterEditor.embeddedImagesFound', { count: embeddedImageCount })}
                             </span>
                           </div>
                           <button
@@ -1209,7 +1757,7 @@ export default function CharacterEditorPage() {
                             disabled={extracting}
                             onClick={handleGalleryExtract}
                           >
-                            {extracting ? 'Importing...' : 'Import All'}
+                            {extracting ? t('characterEditor.importing') : t('characterEditor.importAll')}
                           </button>
                         </div>
                       )}
@@ -1220,22 +1768,40 @@ export default function CharacterEditorPage() {
                     <ExpressionEditorTab characterId={character.id} />
                   )}
 
+                  {activeTab === 'voice' && (
+                    <CharacterVoiceTab
+                      value={readVoiceRef(workingExtensions.ttsVoice)}
+                      onChange={(next) => {
+                        mutateExtensions((ext) => {
+                          const out = { ...ext }
+                          if (next) out.ttsVoice = next
+                          else delete out.ttsVoice
+                          return out
+                        }, true)
+                      }}
+                    />
+                  )}
+
+                  {activeTab === 'imageLora' && character && (
+                    <CharacterLoraTab characterId={character.id} />
+                  )}
+
                   {activeTab === 'advanced' && (
                     <>
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>Attached World Books</span>
-                        <span className={styles.fieldHelper}>Used by prompt assembly for world info activation. Attach multiple for richer lore.</span>
+                        <span className={styles.fieldLabel}>{t('characterEditor.attachedWorldBooks')}</span>
+                        <span className={styles.fieldHelper}>{t('characterEditor.attachedWorldBooksHelper')}</span>
                         <div className={styles.charWbHeader}>
                           <SearchableSelect
                             multi
                             value={attachedWorldBookIds}
                             onChange={(ids) => { void handleWorldBookIdsChange(ids) }}
-                            options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name }))}
-                            placeholder="Add world books…"
-                            triggerLabel="Add"
+                            options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name, group: wb.folder || undefined }))}
+                            placeholder={t('characterEditor.addWorldBooks')}
+                            triggerLabel={t('characterEditor.add')}
                             triggerIcon={<Plus size={11} />}
-                            searchPlaceholder="Search world books…"
-                            emptyMessage="No world books available"
+                            searchPlaceholder={t('characterEditor.searchWorldBooks')}
+                            emptyMessage={t('characterEditor.noWorldBooks')}
                             className={styles.charWbSelect}
                             portal
                             minWidth={260}
@@ -1247,12 +1813,25 @@ export default function CharacterEditorPage() {
                               const wb = worldBooks.find((b) => b.id === id)
                               return (
                                 <span key={id} className={styles.charWbPill}>
-                                  <span className={styles.charWbPillName}>{wb?.name || 'Unknown'}</span>
+                                  <button
+                                    type="button"
+                                    className={styles.charWbPillName}
+                                    disabled={!wb}
+                                    onClick={() => {
+                                      if (!wb) return
+                                      setPendingWorldBookEditId(wb.id)
+                                      close()
+                                      openDrawer('lorebook')
+                                    }}
+                                    title={wb ? t('characterEditor.openInLorebook') : undefined}
+                                  >
+                                    {wb?.name || t('characterEditor.unknown')}
+                                  </button>
                                   <button
                                     type="button"
                                     className={styles.charWbPillRemove}
                                     onClick={() => handleRemoveWorldBook(id)}
-                                    title="Remove world book"
+                                    title={t('characterEditor.removeWorldBook')}
                                   >
                                     <X size={10} />
                                   </button>
@@ -1261,7 +1840,7 @@ export default function CharacterEditorPage() {
                             })}
                           </div>
                         ) : (
-                          <span className={styles.charWbHint}>No world books attached</span>
+                          <span className={styles.charWbHint}>{t('characterEditor.noWorldBooksAttached')}</span>
                         )}
                       </div>
 
@@ -1269,13 +1848,25 @@ export default function CharacterEditorPage() {
                         <div className={styles.lorebookImportSection}>
                           <IconNotebook size={14} />
                           <div className={styles.lorebookImportInfo}>
-                            <span className={styles.fieldLabel}>Embedded Lorebook</span>
+                            <span className={styles.fieldLabel}>{t('characterEditor.embeddedLorebook')}</span>
                             <span className={styles.fieldHelper}>
-                              {getEmbeddedCharacterBookEntryCount(character.extensions)} entries found in character card
+                              {t('characterEditor.embeddedLorebookEntries', { count: getEmbeddedCharacterBookEntryCount(character.extensions) })}
                             </span>
                           </div>
                           {lorebookResult ? (
                             <span className={styles.lorebookSuccess}>{lorebookResult}</span>
+                          ) : embeddedWorldBook ? (
+                            <button
+                              type="button"
+                              className={styles.addBtn}
+                              onClick={() => {
+                                setPendingWorldBookEditId(embeddedWorldBook.id)
+                                close()
+                                openDrawer('lorebook')
+                              }}
+                            >
+                              {t('characterEditor.openInLorebook')}
+                            </button>
                           ) : (
                             <button
                               type="button"
@@ -1286,26 +1877,33 @@ export default function CharacterEditorPage() {
                                 setLorebookImporting(true)
                                 try {
                                   const res = await worldBooksApi.importCharacterBook(editingCharacterId)
-                                  upsertWorldBookOption({ id: res.world_book.id, name: res.world_book.name })
+                                  upsertWorldBookOption({
+                                    id: res.world_book.id,
+                                    name: res.world_book.name,
+                                    folder: res.world_book.folder,
+                                    metadata: res.world_book.metadata,
+                                  })
                                   mutateExtensions((ext) => {
                                     const currentIds = getCharacterWorldBookIds(ext)
-                                    return setCharacterWorldBookIds(ext, [...currentIds, res.world_book.id])
+                                    return currentIds.includes(res.world_book.id)
+                                      ? setCharacterWorldBookIds(ext, currentIds)
+                                      : setCharacterWorldBookIds(ext, [...currentIds, res.world_book.id])
                                   }, true)
-                                  setLorebookResult(`Imported ${res.entry_count} entries into "${res.world_book.name}" and attached it`)
+                                  setLorebookResult(t('characterEditor.lorebookImported', { count: res.entry_count, name: res.world_book.name }))
                                 } catch {
                                   setLorebookImporting(false)
                                 }
                               }}
                             >
-                              {lorebookImporting ? 'Importing...' : 'Import Lorebook'}
+                              {lorebookImporting ? t('characterEditor.importing') : t('characterEditor.importLorebook')}
                             </button>
                           )}
                         </div>
                       )}
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>Character-Bound Regex Scripts</span>
+                        <span className={styles.fieldLabel}>{t('characterEditor.characterRegexScripts')}</span>
                         <span className={styles.fieldHelper}>
-                          Regex scripts attached to this character. These will be bundled with .charx exports.
+                          {t('characterEditor.characterRegexScriptsHelper')}
                         </span>
 
                         {boundRegexScripts.length > 0 && (
@@ -1320,7 +1918,7 @@ export default function CharacterEditorPage() {
                                 <button
                                   type="button"
                                   className={styles.regexUnbindBtn}
-                                  title="Unbind from character (make global)"
+                                  title={t('characterEditor.unbindRegex')}
                                   onClick={() => handleUnbindRegex(s.id)}
                                 >
                                   <X size={12} />
@@ -1331,13 +1929,13 @@ export default function CharacterEditorPage() {
                         )}
 
                         {(() => {
-                          const unboundGlobals = allRegexScripts.filter(
+                          const unboundGlobals = regexScripts.filter(
                             (s) => s.scope === 'global' && !boundRegexScripts.some((b) => b.id === s.id)
                           )
                           if (unboundGlobals.length === 0 && boundRegexScripts.length === 0) {
                             return (
                               <span className={styles.fieldHelper}>
-                                No regex scripts found. Create one in the Regex panel first.
+                                {t('characterEditor.noRegexScripts')}
                               </span>
                             )
                           }
@@ -1349,20 +1947,20 @@ export default function CharacterEditorPage() {
                               options={unboundGlobals.map((s) => ({
                                 value: s.id,
                                 label: s.name,
-                                sublabel: s.target,
+                                sublabel: s.target.join(', '),
                               }))}
-                              placeholder="Bind a global regex to this character…"
-                              searchPlaceholder="Search regex scripts…"
-                              emptyMessage="No unbound global regex scripts"
+                              placeholder={t('characterEditor.bindRegexPlaceholder')}
+                              searchPlaceholder={t('characterEditor.searchRegexScripts')}
+                              emptyMessage={t('characterEditor.noUnboundRegex')}
                             />
                           )
                         })()}
                       </div>
 
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>Extensions (JSON)</span>
+                        <span className={styles.fieldLabel}>{t('characterEditor.extensionsJson')}</span>
                         <span className={styles.fieldHelper}>
-                          Raw JSON data for character extensions and custom fields.
+                          {t('characterEditor.extensionsJsonHelper')}
                         </span>
                         <textarea
                           className={styles.jsonTextarea}
@@ -1373,6 +1971,10 @@ export default function CharacterEditorPage() {
                         {jsonError && <span className={styles.jsonError}>{jsonError}</span>}
                       </div>
                     </>
+                  )}
+
+                  {activeExtensionTab && (
+                    <SpindleCharacterEditorTabContent tab={activeExtensionTab} />
                   )}
                 </div>
               </>
@@ -1393,10 +1995,10 @@ export default function CharacterEditorPage() {
     {showDeleteConfirm && (
       <ConfirmationModal
         isOpen={true}
-        title="Delete Character"
-        message={`Delete "${character?.name || 'this character'}" permanently? This cannot be undone.`}
+        title={t('characterEditor.deleteCharacterTitle')}
+        message={t('characterEditor.deleteCharacterMessage', { name: character?.name || t('characterEditor.thisCharacter') })}
         variant="danger"
-        confirmText="Delete"
+        confirmText={t('characterEditor.delete')}
         onConfirm={handleDelete}
         onCancel={() => setShowDeleteConfirm(false)}
       />
@@ -1413,6 +2015,7 @@ function Field({
   onChange,
   rows = 4,
   multiline = true,
+  showTokenCount = false,
 }: {
   label: string
   helper: string
@@ -1420,10 +2023,16 @@ function Field({
   onChange: (v: string) => void
   rows?: number
   multiline?: boolean
+  showTokenCount?: boolean
 }) {
   return (
     <div className={styles.fieldGroup}>
-      <span className={styles.fieldLabel}>{label}</span>
+      <div className={styles.fieldLabelRow}>
+        <span className={styles.fieldLabel}>{label}</span>
+        {multiline && showTokenCount && (
+          <TokenCountButton text={value} />
+        )}
+      </div>
       <span className={styles.fieldHelper}>{helper}</span>
       {multiline ? (
         <ExpandableTextarea
@@ -1442,6 +2051,90 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           placeholder={`${label}...`}
         />
+      )}
+    </div>
+  )
+}
+
+function avatarExtension(mimeType: string): string {
+  if (mimeType === 'image/jpeg') return 'jpg'
+  if (mimeType === 'image/webp') return 'webp'
+  if (mimeType === 'image/gif') return 'gif'
+  if (mimeType === 'image/svg+xml') return 'svg'
+  return 'png'
+}
+
+/**
+ * Parse a free-form extensions blob into a VoiceRef. Returns null when the
+ * shape doesn't match — `extensions` is untyped JSON so we trust nothing.
+ */
+function readVoiceRef(value: unknown): VoiceRef | null {
+  if (!value || typeof value !== 'object') return null
+  const v = value as Record<string, unknown>
+  if (typeof v.connectionId !== 'string' || !v.connectionId) return null
+  const voice = typeof v.voice === 'string' ? v.voice : ''
+  const parameters =
+    v.parameters && typeof v.parameters === 'object'
+      ? { speed: typeof (v.parameters as any).speed === 'number' ? (v.parameters as any).speed : undefined }
+      : undefined
+  return { connectionId: v.connectionId, voice, parameters }
+}
+
+/**
+ * Character editor "Voice" tab. Owns the per-character default voice stored
+ * at `character.extensions.ttsVoice`. The picker lazy-loads the TTS profile
+ * list on mount so users who arrive here without having visited the global
+ * Voice settings still see their connections.
+ */
+function CharacterVoiceTab({
+  value,
+  onChange,
+}: {
+  value: VoiceRef | null
+  onChange: (next: VoiceRef | null) => void
+}) {
+  const { t } = useTranslation('panels')
+  const ttsProfiles = useStore((s) => s.ttsProfiles)
+  const setTtsProfiles = useStore((s) => s.setTtsProfiles)
+  const setTtsProviders = useStore((s) => s.setTtsProviders)
+  const openDrawer = useStore((s) => s.openDrawer)
+
+  useEffect(() => {
+    if (ttsProfiles.length === 0) {
+      ttsConnectionsApi.list().then((res) => setTtsProfiles(res.data || [])).catch(() => {})
+    }
+    ttsConnectionsApi.providers().then((res) => setTtsProviders(res.providers || [])).catch(() => {})
+  }, [ttsProfiles.length, setTtsProfiles, setTtsProviders])
+
+  return (
+    <div className={styles.fieldGroup}>
+      <span className={styles.fieldLabel}>{t('characterEditor.characterVoice')}</span>
+      <span className={styles.fieldHelper}>
+        {t('characterEditor.characterVoiceHelper')}
+      </span>
+
+      {ttsProfiles.length === 0 ? (
+        <div className={styles.fieldHelper} style={{ marginTop: 8 }}>
+          {t('characterEditor.noTtsConnections')}{' '}
+          <button
+            type="button"
+            onClick={() => openDrawer?.('connections')}
+            style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent, #6aa3ff)', cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            {t('characterEditor.addTtsInConnections')}
+          </button>
+          .
+        </div>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          <VoicePicker
+            value={value}
+            onChange={onChange}
+            ariaLabel={t('characterEditor.characterVoiceAria')}
+            clearLabel={t('characterEditor.useGlobalVoice')}
+            portal
+          />
+        </div>
       )}
     </div>
   )

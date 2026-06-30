@@ -41,7 +41,11 @@ export function registerRegexRefMacros(): void {
         return ctx.isScoped ? ctx.body : (ctx.args[1] ?? "");
       }
 
-      const script = getRegexScriptByScriptId(userId, scriptId);
+      const script = getRegexScriptByScriptId(userId, scriptId, {
+        characterId: typeof ctx.env.extra.characterId === "string" ? ctx.env.extra.characterId : null,
+        chatId: typeof ctx.env.chat?.id === "string" ? ctx.env.chat.id : null,
+        presetId: typeof ctx.env.extra.presetId === "string" ? ctx.env.extra.presetId : null,
+      });
 
       // No text argument — check mode: return "true"/"false"
       const text = ctx.isScoped ? ctx.body : (ctx.args[1] ?? "");
@@ -93,6 +97,17 @@ export function registerRegexRefMacros(): void {
           } else {
             result = text;
           }
+        } else if (script.substitute_macros === "after") {
+          const substituted = await regexReplaceSandboxed(
+            findRegex,
+            script.flags,
+            text,
+            script.replace_string,
+            REGEX_REF_TIMEOUT_MS,
+          );
+          result = substituted !== text
+            ? (await evaluate(substituted, ctx.env, registry)).text
+            : substituted;
         } else {
           // "none" or "escaped" mode
           let replaceString = script.replace_string;

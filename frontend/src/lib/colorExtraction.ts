@@ -98,7 +98,13 @@ export function rgbToHsl(r: number, g: number, b: number): { h: number; s: numbe
   const l = (max + min) / 2
   if (max === min) return { h: 0, s: 0, l: Math.round(l * 100) }
   const d = max - min
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max - min)
+  // Standard HSL: saturation = d / (max + min) on the dark side, d / (2 - max - min) on the light.
+  // The previous expression used d / (max - min) which is just d/d = 1, so every color with
+  // lightness ≤ 50% was reported as 100% saturated. That falsely-saturated reading then drove
+  // tuneAccentForSurface / deriveSecondaryTone / ensureContrast / constrainLuminance to walk
+  // lightness on a pure-saturation hue — producing the neon-blue / neon-orange / cyan blow-outs
+  // we see on dark cards.
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
   let h = 0
   if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
   else if (max === g) h = ((b - r) / d + 2) / 6
@@ -136,6 +142,80 @@ export function contrastRatio(rgb1: RGB, rgb2: RGB): number {
   const lighter = Math.max(l1, l2)
   const darker = Math.min(l1, l2)
   return (lighter + 0.05) / (darker + 0.05)
+}
+
+// ── Perceptual colour space helpers (CIELAB D65) ──
+
+function srgbToLinear(c: number): number {
+  c /= 255
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+}
+
+function linearToSrgbByte(c: number): number {
+  c = c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055
+  return Math.round(clamp(c * 255, 0, 255))
+}
+
+interface LabColor { L: number; a: number; b: number }
+
+function rgbToLab({ r, g, b }: RGB): LabColor {
+  const rl = srgbToLinear(r)
+  const gl = srgbToLinear(g)
+  const bl = srgbToLinear(b)
+
+  const x = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375
+  const y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750
+  const z = rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041
+
+  const xp = x / 0.95047
+  const yp = y / 1.0
+  const zp = z / 1.08883
+
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116)
+
+  const L = 116 * f(yp) - 16
+  const a = 500 * (f(xp) - f(yp))
+  const cb = 200 * (f(yp) - f(zp))
+  return { L, a, b: cb }
+}
+
+function labToRgb({ L, a, b }: LabColor): RGB {
+  const fy = (L + 16) / 116
+  const fx = a / 500 + fy
+  const fz = fy - b / 200
+
+  const finv = (t: number) => {
+    const t3 = Math.pow(t, 3)
+    return t3 > 0.008856 ? t3 : (t - 16 / 116) / 7.787
+  }
+
+  const x = finv(fx) * 0.95047
+  const y = finv(fy) * 1.0
+  const z = finv(fz) * 1.08883
+
+  let r = x * 3.2404542 + y * -1.5371385 + z * -0.4985314
+  let g2 = x * -0.9692660 + y * 1.8760108 + z * 0.0415560
+  let b2 = x * 0.0556434 + y * -0.2040259 + z * 1.0572252
+
+  return {
+    r: linearToSrgbByte(r),
+    g: linearToSrgbByte(g2),
+    b: linearToSrgbByte(b2),
+  }
+}
+
+/** CIE76 perceptual distance in CIELAB (good enough for palette diversity). */
+function deltaE(lab1: LabColor, lab2: LabColor): number {
+  const dL = lab1.L - lab2.L
+  const da = lab1.a - lab2.a
+  const db = lab1.b - lab2.b
+  return Math.sqrt(dL * dL + da * da + db * db)
+}
+
+/** CSS-like hue angle from CIELAB a*b* (0–360). */
+function labHue(lab: LabColor): number {
+  const deg = (Math.atan2(lab.b, lab.a) * 180) / Math.PI
+  return deg < 0 ? deg + 360 : deg
 }
 
 /**
@@ -284,9 +364,28 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.crossOrigin = 'anonymous'
+    // `decoding = 'async'` lets the browser defer pixel decoding past onload,
+    // which can leave drawImage/getImageData reading transparent pixels and
+    // collapsing extractPalette into its grey/purple fallback. Await decode()
+    // explicitly so the canvas sample only runs once pixels are guaranteed.
     img.decoding = 'async'
-    img.onload = () => resolve(img)
-    img.onerror = reject
+    img.onerror = () => reject(new Error(`Failed to load image: ${src}`))
+    img.onload = () => {
+      const finish = () => {
+        if (img.naturalWidth === 0 || img.naturalHeight === 0) {
+          reject(new Error(`Image decoded with zero dimensions: ${src}`))
+          return
+        }
+        resolve(img)
+      }
+      // decode() is well-supported (Chrome 64+, FF 63+, Safari 11.1+) but
+      // fall back gracefully if it isn't available or rejects spuriously.
+      if (typeof img.decode === 'function') {
+        img.decode().then(finish).catch(finish)
+      } else {
+        finish()
+      }
+    }
     img.src = src
   })
 }
@@ -317,17 +416,14 @@ function chooseQuantizationStep(avgDeviation: number): number {
 }
 
 function colorDistance(a: RGB, b: RGB): number {
-  const dr = a.r - b.r
-  const dg = a.g - b.g
-  const db = a.b - b.b
-  const dl = luminance(a.r, a.g, a.b) - luminance(b.r, b.g, b.b)
-  return Math.sqrt((dr * dr * 0.35) + (dg * dg * 0.45) + (db * db * 0.2) + (dl * dl * 0.6))
+  return deltaE(rgbToLab(a), rgbToLab(b))
 }
 
 function scoreCandidate(color: RGB, weight: number): number {
-  const hsl = rgbToHsl(color.r, color.g, color.b)
-  const satWeight = 0.45 + (hsl.s / 100) * 0.95
-  const lightPenalty = hsl.l < 12 || hsl.l > 92 ? 0.45 : hsl.l < 20 || hsl.l > 84 ? 0.72 : 1
+  const lab = rgbToLab(color)
+  const chroma = Math.sqrt(lab.a * lab.a + lab.b * lab.b)
+  const satWeight = 0.38 + clamp(chroma / 100, 0, 1) * 0.92
+  const lightPenalty = lab.L < 8 || lab.L > 96 ? 0.45 : lab.L < 16 || lab.L > 90 ? 0.75 : 1
   return Math.sqrt(Math.max(1, weight)) * satWeight * lightPenalty
 }
 
@@ -456,25 +552,98 @@ function dominantFromData(data: Uint8ClampedArray): DominantResult {
   return analyzePixels(data).dominant
 }
 
-function selectDistinctColors(candidates: CandidateColor[], desiredCount: number, diversityScore: number): RGB[] {
-  const chosen: RGB[] = []
-  const thresholds = [
-    diversityScore > 0.28 ? 68 : diversityScore > 0.16 ? 54 : diversityScore > 0.08 ? 40 : 28,
-    diversityScore > 0.28 ? 54 : diversityScore > 0.16 ? 42 : diversityScore > 0.08 ? 30 : 22,
-    14,
-  ]
+const HUE_BINS = 12
+const LUM_BINS = 5
 
-  for (const threshold of thresholds) {
-    for (const candidate of candidates) {
-      if (chosen.length >= desiredCount) return chosen
-      if (chosen.some((selected) => colorDistance(selected, candidate.color) < 8)) continue
-      if (chosen.length === 0 || chosen.every((selected) => colorDistance(selected, candidate.color) >= threshold)) {
-        chosen.push(candidate.color)
-      }
-    }
+function selectDistinctColors(candidates: CandidateColor[], desiredCount: number, diversityScore: number): RGB[] {
+  if (candidates.length === 0) return []
+
+  const baseThreshold =
+    diversityScore > 0.32 ? 24 :
+    diversityScore > 0.18 ? 18 :
+    diversityScore > 0.08 ? 13 :
+    8
+
+  const scored = candidates
+    .map((c) => {
+      const lab = rgbToLab(c.color)
+      const hue = labHue(lab)
+      const lumBin = Math.min(LUM_BINS - 1, Math.max(0, Math.floor(lab.L / (100 / LUM_BINS))))
+      const hueBin = Math.min(HUE_BINS - 1, Math.floor((hue / 360) * HUE_BINS))
+      return { ...c, lab, hue, lumBin, hueBin }
+    })
+    .sort((a, b) => b.score - a.score)
+
+  type Item = (typeof scored)[number]
+  const chosen: Item[] = []
+
+  function tooClose(item: Item): boolean {
+    return chosen.some((sel) => deltaE(sel.lab, item.lab) < 8)
   }
 
-  return chosen
+  function passesMinDistance(item: Item, minDist: number): boolean {
+    if (chosen.length === 0) return true
+    return chosen.every((sel) => deltaE(sel.lab, item.lab) >= minDist)
+  }
+
+  while (chosen.length < desiredCount) {
+    const minDist = Math.max(6, baseThreshold - chosen.length * 3)
+
+    const hueCounts = new Array(HUE_BINS).fill(0)
+    const lumCounts = new Array(LUM_BINS).fill(0)
+    for (const c of chosen) {
+      hueCounts[c.hueBin]++
+      lumCounts[c.lumBin]++
+    }
+
+    let best: Item | null = null
+    let bestPriority = -Infinity
+
+    for (const item of scored) {
+      if (tooClose(item)) continue
+      if (!passesMinDistance(item, minDist)) continue
+
+      let priority = item.score
+      if (hueCounts[item.hueBin] === 0) priority += 85
+      else if (hueCounts[item.hueBin] === 1) priority += 35
+      if (lumCounts[item.lumBin] === 0) priority += 65
+      else if (lumCounts[item.lumBin] === 1) priority += 20
+
+      if (priority > bestPriority) {
+        bestPriority = priority
+        best = item
+      }
+    }
+
+    if (best) {
+      chosen.push(best)
+      continue
+    }
+
+    let relaxedAdded: Item | null = null
+    const relaxed = Math.max(4, minDist * 0.55)
+    for (const item of scored) {
+      if (tooClose(item)) continue
+      if (chosen.length === 0 || chosen.every((sel) => deltaE(sel.lab, item.lab) >= relaxed)) {
+        relaxedAdded = item
+        break
+      }
+    }
+
+    if (relaxedAdded) {
+      chosen.push(relaxedAdded)
+      continue
+    }
+
+    if (chosen.length === 0) {
+      chosen.push(scored[0])
+      continue
+    }
+
+    break
+  }
+
+  return chosen.map((c) => c.color)
 }
 
 function pickFallbackHue(dominant: RGB, average: RGB): number {
@@ -488,11 +657,11 @@ function pickFallbackHue(dominant: RGB, average: RGB): number {
 function buildFallbackPalette(dominant: RGB, average: RGB): RGB[] {
   const hue = pickFallbackHue(dominant, average)
   return [
-    hslToRgb(hue, 68, 58),
-    hslToRgb((hue + 18) % 360, 46, 42),
-    hslToRgb((hue + 340) % 360, 34, 72),
-    hslToRgb((hue + 160) % 360, 28, 38),
-    hslToRgb((hue + 205) % 360, 16, 84),
+    hslToRgb(hue, 72, 55),
+    hslToRgb((hue + 30) % 360, 52, 42),
+    hslToRgb((hue + 90) % 360, 58, 62),
+    hslToRgb((hue + 180) % 360, 42, 38),
+    hslToRgb((hue + 270) % 360, 36, 72),
   ]
 }
 
@@ -522,8 +691,8 @@ function tuneAccentForSurface(accentBase: RGB, surface: RGB, mode: 'dark' | 'lig
   const accentHsl = rgbToHsl(accentBase.r, accentBase.g, accentBase.b)
   let tuned = hslToRgb(
     accentHsl.h,
-    clamp(accentHsl.s, 44, 80),
-    mode === 'dark' ? clamp(accentHsl.l, 56, 70) : clamp(accentHsl.l, 34, 48)
+    clamp(accentHsl.s, 32, 88),
+    mode === 'dark' ? clamp(accentHsl.l, 42, 74) : clamp(accentHsl.l, 26, 40),
   )
 
   tuned = mode === 'dark'
@@ -539,7 +708,7 @@ function tuneAccentForSurface(accentBase: RGB, surface: RGB, mode: 'dark' | 'lig
 function dedupeColors(colors: RGB[]): RGB[] {
   const unique: RGB[] = []
   for (const color of colors) {
-    if (unique.some((existing) => colorDistance(existing, color) < 12)) continue
+    if (unique.some((existing) => colorDistance(existing, color) < 9)) continue
     unique.push(color)
   }
   return unique
@@ -573,7 +742,7 @@ function pickSurfaceBase(colors: RGB[], average: RGB, mode: 'dark' | 'light'): R
     }
   }
 
-  return mixColors(best, average, mode === 'dark' ? 0.14 : 0.18)
+  return mixColors(best, average, mode === 'dark' ? 0.08 : 0.12)
 }
 
 function pickAccentBase(colors: RGB[], surface: RGB): RGB {
@@ -581,12 +750,18 @@ function pickAccentBase(colors: RGB[], surface: RGB): RGB {
   let best = candidates[0] ?? surface
   let bestScore = -1
 
+  const surfaceLab = rgbToLab(surface)
+  const surfaceHsl = rgbToHsl(surface.r, surface.g, surface.b)
+
   for (const candidate of candidates) {
     const hsl = rgbToHsl(candidate.r, candidate.g, candidate.b)
-    const vibrancy = 0.4 + (hsl.s / 100) * 0.95
-    const separation = clamp(colorDistance(candidate, surface) / 120, 0, 1)
+    const vibrancy = 0.35 + (hsl.s / 100) * 0.95
+    const rawHueDiff = Math.abs(hsl.h - surfaceHsl.h)
+    const hueDiff = Math.min(rawHueDiff, 360 - rawHueDiff)
+    const hueSep = hueDiff / 180
+    const separation = clamp(deltaE(rgbToLab(candidate), surfaceLab) / 140, 0, 1)
     const lightPenalty = hsl.l < 10 || hsl.l > 92 ? 0.35 : hsl.l < 18 || hsl.l > 84 ? 0.68 : 1
-    const score = vibrancy * (0.42 + separation * 0.9) * lightPenalty
+    const score = vibrancy * (0.2 + separation * 0.7 + hueSep * 0.55) * lightPenalty
     if (score > bestScore) {
       best = candidate
       bestScore = score
@@ -602,8 +777,8 @@ function deriveReadableScheme(
   mode: 'dark' | 'light',
   luminanceProfile: LuminanceProfile
 ): ReadableColorScheme {
-  const darkMixWeight = luminanceProfile.mostlyTooDark ? 0.9 : 0.84
-  const lightMixWeight = luminanceProfile.mostlyTooLight ? 0.94 : 0.9
+  const darkMixWeight = luminanceProfile.mostlyTooDark ? 0.78 : 0.66
+  const lightMixWeight = luminanceProfile.mostlyTooLight ? 0.86 : 0.74
   let surface = mode === 'dark'
     ? mixColors(surfaceBase, { r: 18, g: 22, b: 30 }, darkMixWeight)
     : mixColors(surfaceBase, { r: 248, g: 250, b: 252 }, lightMixWeight)
@@ -613,8 +788,10 @@ function deriveReadableScheme(
     : constrainLuminance(surface, LIGHT_SURFACE_MIN_LUM, LIGHT_SURFACE_MAX_LUM)
 
   const accent = tuneAccentForSurface(accentBase, surface, mode)
-  const accentText = pickReadableTextColor(accent, surface, MIN_TEXT_CONTRAST)
-  const text = pickReadableTextColor(surface, accentBase, MIN_TEXT_CONTRAST)
+  let accentText = pickReadableTextColor(accent, surface, MIN_TEXT_CONTRAST)
+  accentText = ensureContrast(accentText, accent, MIN_TEXT_CONTRAST)
+  let text = pickReadableTextColor(surface, accentBase, MIN_TEXT_CONTRAST)
+  text = ensureContrast(text, surface, MIN_TEXT_CONTRAST)
   const mutedSeed = mixColors(text, surface, 0.28)
   const mutedText = ensureContrast(mutedSeed, surface, 3.6)
 
@@ -658,6 +835,56 @@ function getRegions(w: number, h: number): Record<string, Region> {
 
 // ── Main extraction ──
 
+/** Count opaque pixels in a raw RGBA buffer using the same alpha cutoff as analyzePixels. */
+function countOpaquePixels(data: Uint8ClampedArray): number {
+  let count = 0
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] >= 48) count++
+  }
+  return count
+}
+
+/**
+ * Draw `img` into `canvas` and return the full RGBA buffer, retrying across
+ * animation frames if the read comes back fully transparent.
+ *
+ * Even after `img.decode()` resolves, some browsers will paint the next
+ * `drawImage`/`getImageData` as fully transparent if the texture hasn't been
+ * uploaded yet (cache miss after eviction, slow GPU upload, hidden tab waking,
+ * etc.). When that happens analyzePixels falls through to grey, which makes
+ * `extractPalette` treat the result as a "uniform" image, which triggers the
+ * `DEFAULT_FALLBACK_HUE` (263 — a vivid blue/violet). That cascade is what
+ * causes character-aware themes to randomly flip the whole UI super blue.
+ *
+ * We retry a few times with a frame yield in between, then give up and throw
+ * — the caller treats throws as "do not apply overlay", which preserves the
+ * user's existing theme instead of poisoning it with the fallback hue.
+ */
+async function sampleImageData(
+  img: HTMLImageElement,
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  src: string
+): Promise<Uint8ClampedArray> {
+  const maxAttempts = 3
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise<void>((resolve) => {
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => resolve())
+        } else {
+          setTimeout(resolve, 16)
+        }
+      })
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    if (countOpaquePixels(data) > 0) return data
+  }
+  throw new Error(`Image rendered with no opaque pixels after ${maxAttempts} attempts: ${src}`)
+}
+
 export async function extractPalette(src: string): Promise<ImagePalette> {
   const img = await loadImage(src)
   const canvas = document.createElement('canvas')
@@ -680,10 +907,11 @@ export async function extractPalette(src: string): Promise<ImagePalette> {
 
   canvas.width = SAMPLE_SIZE
   canvas.height = SAMPLE_SIZE
-  ctx.drawImage(img, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE)
 
-  // Full-image analysis
-  const fullData = ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data
+  // Full-image analysis. sampleImageData verifies we actually painted opaque
+  // pixels before we derive anything — otherwise we'd silently fall into the
+  // blue/violet fallback hue and stamp it onto the UI.
+  const fullData = await sampleImageData(img, canvas, ctx, src)
   const fullAnalysis = analyzePixels(fullData)
 
   // Per-region analysis
@@ -712,7 +940,7 @@ export async function extractPalette(src: string): Promise<ImagePalette> {
     fullAnalysis.diversityScore,
   )
 
-  const isUniform = fullAnalysis.diversityScore < 0.16 || flatness.full > 0.56 || diversePalette.length < 3
+  const isUniform = fullAnalysis.diversityScore < 0.16 || flatness.full > 0.72 || diversePalette.length < 3
   const palette = isUniform
     ? buildFallbackPalette(fullAnalysis.dominant.color, fullAnalysis.average)
     : diversePalette

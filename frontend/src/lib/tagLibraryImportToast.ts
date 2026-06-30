@@ -1,17 +1,15 @@
+import type { TFunction } from 'i18next'
 import type { TagLibraryImportResult } from '@/types/api'
 
-function pluralize(value: number, singular: string, plural = `${singular}s`) {
-  return `${value} ${value === 1 ? singular : plural}`
-}
-
-export function formatTagLibraryImportToastMessage(result: TagLibraryImportResult): string {
-  const lines = [
-    `Matched: ${pluralize(result.matchedCharacters, 'character')}`,
-    `- Source filename: ${result.matchedBy.source_filename}`,
-    `- Avatar filename: ${result.matchedBy.image_original_filename}`,
-    `- Name fallback: ${result.matchedBy.normalized_name}`,
-    `Unmatched: ${pluralize(result.unmatchedMappings, 'mapping')}`,
-  ]
-
-  return lines.join('\n')
+export function formatTagLibraryImportToastMessage(
+  t: TFunction<'settings'>,
+  result: TagLibraryImportResult,
+): string {
+  return [
+    t('migration.tagLibraryToastMatched', { count: result.matchedCharacters }),
+    t('migration.tagLibraryToastBySource', { count: result.matchedBy.source_filename }),
+    t('migration.tagLibraryToastByAvatar', { count: result.matchedBy.image_original_filename }),
+    t('migration.tagLibraryToastByName', { count: result.matchedBy.normalized_name }),
+    t('migration.tagLibraryToastUnmatched', { count: result.unmatchedMappings }),
+  ].join('\n')
 }

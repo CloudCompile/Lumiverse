@@ -1,24 +1,26 @@
 import { useStore } from '@/store'
+import { useTranslation } from 'react-i18next'
 import { Toggle } from '@/components/shared/Toggle'
 import { FormField, Select } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import type { OOCStyleType } from '@/types/store'
 import styles from './OOCPanel.module.css'
 
-const STYLE_OPTIONS = [
-  { value: 'social', label: 'Social Card' },
-  { value: 'margin', label: 'Margin Note' },
-  { value: 'whisper', label: 'Whisper Bubble' },
-  { value: 'raw', label: 'Raw Text' },
-  { value: 'irc', label: 'IRC Chat Room' },
-]
-
 export default function OOCPanel() {
+  const { t } = useTranslation('panels')
   const oocEnabled = useStore((s) => s.oocEnabled)
   const lumiaOOCStyle = useStore((s) => s.lumiaOOCStyle)
   const lumiaOOCInterval = useStore((s) => s.lumiaOOCInterval)
   const ircUseLeetHandles = useStore((s) => s.ircUseLeetHandles)
   const setSetting = useStore((s) => s.setSetting)
+
+  const styleOptions = [
+    { value: 'social', label: t('oocPanel.styles.social') },
+    { value: 'margin', label: t('oocPanel.styles.margin') },
+    { value: 'whisper', label: t('oocPanel.styles.whisper') },
+    { value: 'raw', label: t('oocPanel.styles.raw') },
+    { value: 'irc', label: t('oocPanel.styles.irc') },
+  ]
 
   return (
     <div className={styles.panel}>
@@ -26,17 +28,17 @@ export default function OOCPanel() {
       <Toggle.Checkbox
         checked={oocEnabled}
         onChange={(checked) => setSetting('oocEnabled', checked)}
-        label="Enable OOC comments"
+        label={t('oocPanel.enable')}
       />
 
       {oocEnabled && (
         <>
           {/* Style selector */}
-          <FormField label="Display Style" hint="How OOC comments appear in chat">
+          <FormField label={t('oocPanel.displayStyle')} hint={t('oocPanel.displayStyleHint')}>
             <Select
               value={lumiaOOCStyle}
               onChange={(v) => setSetting('lumiaOOCStyle', v as OOCStyleType)}
-              options={STYLE_OPTIONS}
+              options={styleOptions}
             />
           </FormField>
 
@@ -45,12 +47,12 @@ export default function OOCPanel() {
             <Toggle.Checkbox
               checked={ircUseLeetHandles}
               onChange={(checked) => setSetting('ircUseLeetHandles', checked)}
-              label="L33tspeak Handles"
+              label={t('oocPanel.leetHandles')}
             />
           )}
 
           {/* Interval */}
-          <FormField label="OOC Interval" hint="Messages between OOC comments (empty = automatic)">
+          <FormField label={t('oocPanel.interval')} hint={t('oocPanel.intervalHint')}>
             <NumberStepper
               value={lumiaOOCInterval}
               onChange={(v) => setSetting('lumiaOOCInterval', v)}

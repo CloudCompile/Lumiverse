@@ -77,15 +77,59 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--lumiverse-border);
   border-radius: 14px;
   background: color-mix(in srgb, var(--lumiverse-bg-panel, var(--lumiverse-bg)) 92%, white 8%);
+  touch-action: manipulation;
 }
 
 .rowLocked {
   background: color-mix(in srgb, var(--lumiverse-primary) 6%, var(--lumiverse-bg-panel, var(--lumiverse-bg)));
+}
+
+.rowHidden {
+  opacity: 0.6;
+}
+
+.rowDragging {
+  z-index: 5;
+  box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.45),
+    0 0 0 1px var(--lumiverse-primary-040, var(--lumiverse-primary));
+  background: color-mix(in srgb, var(--lumiverse-primary) 8%, var(--lumiverse-bg-panel, var(--lumiverse-bg)));
+}
+
+.dragHandle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  border-radius: 6px;
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.dragHandle:hover {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-primary-015);
+}
+
+.dragHandle:active {
+  cursor: grabbing;
+}
+
+.badgeMuted {
+  background: color-mix(in srgb, var(--lumiverse-text-dim) 18%, transparent);
+  color: var(--lumiverse-text-secondary);
 }
 
 .rowInfo {
@@ -93,6 +137,7 @@
   align-items: flex-start;
   gap: 12px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .iconWrap {

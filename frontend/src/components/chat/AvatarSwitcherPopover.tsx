@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { motion } from 'motion/react'
 import { ChevronUp } from 'lucide-react'
 import { useStore } from '@/store'
@@ -23,6 +24,7 @@ const THUMBS_PER_ROW = 4
 const MAX_VISIBLE_COLLAPSED = THUMBS_PER_ROW * 2
 
 export default function AvatarSwitcherPopover({ chatId, children }: Props) {
+  const { t } = useTranslation('chat')
   const [activeAvatarId, setActiveAvatarId] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
 
@@ -36,13 +38,13 @@ export default function AvatarSwitcherPopover({ chatId, children }: Props) {
   const allAvatars = useMemo(() => {
     const list: { key: string; imageId: string | null; label: string }[] = []
     if (character?.image_id) {
-      list.push({ key: 'primary', imageId: null, label: 'Primary' })
+      list.push({ key: 'primary', imageId: null, label: t('avatarSwitcher.primary') })
     }
     for (const entry of alternates) {
       list.push({ key: entry.id, imageId: entry.image_id, label: entry.label })
     }
     return list
-  }, [character?.image_id, alternates])
+  }, [character?.image_id, alternates, t])
 
   const needsOverflow = allAvatars.length > MAX_VISIBLE_COLLAPSED
   const visibleAvatars = expanded
@@ -128,8 +130,8 @@ export default function AvatarSwitcherPopover({ chatId, children }: Props) {
               type="button"
               className={styles.moreBtn}
               onClick={() => setExpanded(true)}
-              aria-label={`Show ${overflowCount} more avatars`}
-              title={`${overflowCount} more`}
+              aria-label={t('avatarSwitcher.showMoreAvatars', { count: overflowCount })}
+              title={t('avatarSwitcher.moreCount', { count: overflowCount })}
             >
               +{overflowCount}
             </button>
@@ -141,7 +143,7 @@ export default function AvatarSwitcherPopover({ chatId, children }: Props) {
             type="button"
             className={styles.collapseBtn}
             onClick={() => setExpanded(false)}
-            aria-label="Show fewer"
+            aria-label={t('avatarSwitcher.showFewer')}
           >
             <ChevronUp size={11} />
           </button>

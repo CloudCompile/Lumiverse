@@ -1,3 +1,7 @@
+---
+title: Long-Term Memory
+---
+
 # Long-Term Memory
 
 Long-term memory gives the AI the ability to recall relevant moments from earlier in the conversation — even if those moments have long since scrolled out of the context window. It works by chunking your chat history into vectors and retrieving the most relevant pieces on each generation.
@@ -86,7 +90,13 @@ Retrieved memories are available in your preset through macros:
 | `{{memoriesActive}}` | `"yes"` or `"no"` — for conditional blocks |
 | `{{memoriesCount}}` | Number of chunks retrieved |
 
-Include `{{memories}}` in a preset block to inject retrieved context into the prompt.
+!!! important "The macro controls *placement*, not *whether* memory injects"
+    Long-term memory injects automatically whenever it is enabled under **Settings → Embeddings → Vectorise chat messages**. The `{{memories}}` macro only controls **where** the retrieved context appears:
+
+    - **With** `{{memories}}` in an enabled preset block → memories render at that exact spot, formatted by your templates.
+    - **Without** the macro → memories are still injected, as a system message inserted just before the chat history (a built-in fallback).
+
+    Removing the macro therefore does **not** stop injection — it only changes the placement. To stop memories from being injected at all, **disable "Vectorise chat messages"** (or turn off [Memory Cortex](memory-cortex.md) if that's your source). You can confirm which path is active in the prompt breakdown / dry-run, which reports the injection method as `macro`, `fallback`, or `disabled`.
 
 ---
 

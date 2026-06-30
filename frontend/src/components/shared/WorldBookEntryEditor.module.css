@@ -56,35 +56,6 @@
   justify-content: space-between;
 }
 
-.tokenCountBtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: none;
-  background: var(--lumiverse-fill-subtle);
-  color: var(--lumiverse-text-dim);
-  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
-  cursor: pointer;
-  transition: all var(--lumiverse-transition-fast);
-}
-
-.tokenCountBtn:hover:not(:disabled) {
-  background: var(--lumiverse-fill);
-  color: var(--lumiverse-text-muted);
-}
-
-.tokenCountBtn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.tokenCountValue {
-  color: var(--lumiverse-primary-text, var(--lumiverse-primary));
-  font-variant-numeric: tabular-nums;
-}
-
 .entryInput {
   background: var(--lumiverse-bg);
   border: 1px solid var(--lumiverse-border);
@@ -182,6 +153,16 @@
   line-height: 1.45;
   flex: 1;
   min-width: 180px;
+}
+
+.inactiveNote {
+  padding: 8px 10px;
+  border: 1px solid var(--lumiverse-primary-020);
+  border-radius: 6px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text-muted);
+  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+  line-height: 1.45;
 }
 
 /* ── Collapsible group ── */

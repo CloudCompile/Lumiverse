@@ -1,3 +1,7 @@
+---
+title: Keywords & Activation
+---
+
 # Keywords & Activation
 
 Understanding how entries activate is the key to making world books work well. This guide covers keyword matching, selective logic, and scan behavior.

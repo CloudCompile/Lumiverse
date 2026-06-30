@@ -15,6 +15,7 @@
  */
 
 import { getDb } from "../../db/connection";
+import { stripNonProseTags } from "../../utils/content-sanitizer";
 import type {
   MemoryConsolidation,
   MemoryConsolidationRow,
@@ -99,6 +100,13 @@ export async function maybeConsolidate(
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
   sidecarTimeoutMs?: number,
+  /** Sampling parameters forwarded to the underlying LLM call. Caller supplies
+   *  the user-configured sidecar temperature/top_p; max_tokens is set per call
+   *  from config.maxTokensPerSummary. */
+  samplingParameters?: Record<string, unknown>,
+  /** Additional scaffold tag names to strip from raw chunk content before
+   *  feeding it to the consolidation LLM or extractive scorer. */
+  extraScaffoldTags?: string[],
 ): Promise<void> {
   if (!config.enabled) return;
 
@@ -149,7 +157,7 @@ export async function maybeConsolidate(
     let result: { summary: string; title: string | null } | null;
     try {
       result = await generateConsolidationSummary(
-        batch, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary,
+        batch, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary, samplingParameters, extraScaffoldTags,
       );
     } catch (err: any) {
       if (err?.name === "AbortError" || ac?.signal.aborted) {
@@ -166,11 +174,11 @@ export async function maybeConsolidate(
       summary = result.summary;
       title = result.title;
     } else {
-      summary = extractiveConsolidation(batch);
+      summary = extractiveConsolidation(batch, extraScaffoldTags);
       title = inferTitle(batch);
     }
   } else {
-    summary = extractiveConsolidation(batch);
+    summary = extractiveConsolidation(batch, extraScaffoldTags);
     title = inferTitle(batch);
   }
 
@@ -228,7 +236,7 @@ export async function maybeConsolidate(
   );
 
   // Check for arc-level consolidation
-  await maybeConsolidateArcs(userId, chatId, config, generateRawFn, sidecarConnectionId, sidecarTimeoutMs);
+  await maybeConsolidateArcs(userId, chatId, config, generateRawFn, sidecarConnectionId, sidecarTimeoutMs, samplingParameters, extraScaffoldTags);
 }
 
 /**
@@ -247,6 +255,8 @@ async function maybeConsolidateArcs(
   }) => Promise<{ content: string }>,
   sidecarConnectionId?: string,
   sidecarTimeoutMs?: number,
+  samplingParameters?: Record<string, unknown>,
+  extraScaffoldTags?: string[],
 ): Promise<void> {
   const db = getDb();
 
@@ -299,7 +309,7 @@ async function maybeConsolidateArcs(
     let result: { summary: string; title: string | null } | null;
     try {
       result = await generateArcSummary(
-        combined, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary,
+        combined, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary, samplingParameters,
       );
     } catch (err: any) {
       if (err?.name === "AbortError" || ac?.signal.aborted) {
@@ -370,11 +380,11 @@ async function maybeConsolidateArcs(
  * Selects the highest-salience sentences from source chunks,
  * preserving chronological order with diversity across chunks.
  */
-function extractiveConsolidation(chunks: any[]): string {
+function extractiveConsolidation(chunks: any[], extraScaffoldTags?: string[]): string {
   const sentences: Array<{ text: string; salience: number; chunkIdx: number; sentIdx: number }> = [];
 
   for (let i = 0; i < chunks.length; i++) {
-    let content = chunks[i].content || "";
+    let content = stripNonProseTags(chunks[i].content || "", { extraScaffoldTags });
     // Strip chunk format prefix: [CHARACTER | Name]: or [USER | Name]:
     content = content.replace(/^\[(?:CHARACTER|USER)\s*\|\s*[^\]]*\]\s*:\s*/gi, "").trim();
     const chunkSalience = chunks[i].salience_score ?? 0.3;
@@ -458,34 +468,43 @@ async function generateConsolidationSummary(
   generateRawFn: (opts: any) => Promise<{ content: string }>,
   connectionId: string,
   maxTokens: number,
+  samplingParameters?: Record<string, unknown>,
+  extraScaffoldTags?: string[],
 ): Promise<{ summary: string; title: string | null }> {
   try {
-    const content = chunks.map((c: any) => c.content || "").join("\n\n---\n\n");
+    const content = chunks
+      .map((c: any) => stripNonProseTags(c.content || "", { extraScaffoldTags }))
+      .join("\n\n---\n\n");
     const prompt = CONSOLIDATION_PROMPT
       .replace("{{CONTENT}}", content)
       .replace("{{MAX_TOKENS}}", String(maxTokens));
 
+    // Caller-supplied temperature/top_p are honored; max_tokens is always set
+    // here from config.maxTokensPerSummary regardless of what the caller passed.
+    const userParams = samplingParameters ?? { temperature: 0.1 };
     const response = await generateRawFn({
       connectionId,
       messages: [
         { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the source passages." },
         { role: "user", content: prompt },
       ],
-      parameters: { temperature: 0.1, max_tokens: maxTokens + 100 },
+      parameters: { ...userParams, max_tokens: maxTokens + 100 },
     });
 
     const json = extractJson(response.content);
     if (json) {
+      const parsedSummary = typeof json.summary === "string" ? json.summary.trim() : "";
+      const parsedTitle = typeof json.title === "string" ? json.title.trim() : "";
       return {
-        summary: json.summary || extractiveConsolidation(chunks),
-        title: json.title || null,
+        summary: parsedSummary || extractiveConsolidation(chunks, extraScaffoldTags),
+        title: parsedTitle || null,
       };
     }
   } catch (err) {
     console.warn("[memory-cortex] Generative consolidation failed, using extractive:", err);
   }
 
-  return { summary: extractiveConsolidation(chunks), title: inferTitle(chunks) };
+  return { summary: extractiveConsolidation(chunks, extraScaffoldTags), title: inferTitle(chunks) };
 }
 
 const ARC_PROMPT = `These are sequential scene summaries from a long roleplay. Compress them into ONE arc-level summary that tracks what changed across the sequence.
@@ -510,26 +529,30 @@ async function generateArcSummary(
   generateRawFn: (opts: any) => Promise<{ content: string }>,
   connectionId: string,
   maxTokens: number,
+  samplingParameters?: Record<string, unknown>,
 ): Promise<{ summary: string; title: string | null }> {
   try {
     const prompt = ARC_PROMPT
       .replace("{{CONTENT}}", combinedSummaries)
       .replace("{{MAX_TOKENS}}", String(maxTokens));
 
+    const userParams = samplingParameters ?? { temperature: 0.1 };
     const response = await generateRawFn({
       connectionId,
       messages: [
         { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the supplied summaries." },
         { role: "user", content: prompt },
       ],
-      parameters: { temperature: 0.1, max_tokens: maxTokens + 100 },
+      parameters: { ...userParams, max_tokens: maxTokens + 100 },
     });
 
     const json = extractJson(response.content);
     if (json) {
+      const parsedSummary = typeof json.summary === "string" ? json.summary.trim() : "";
+      const parsedTitle = typeof json.title === "string" ? json.title.trim() : "";
       return {
-        summary: json.summary || combinedSummaries,
-        title: json.title || null,
+        summary: parsedSummary || combinedSummaries,
+        title: parsedTitle || null,
       };
     }
   } catch (err) {

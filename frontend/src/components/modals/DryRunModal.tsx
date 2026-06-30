@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ChevronLeft, ChevronRight, Check, Code, Copy } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
@@ -9,6 +10,9 @@ import { useStore } from '@/store'
 import type { DryRunResponse, DryRunMessage } from '@/api/generate'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { dryRunToRawPromptInput, formatRawPrompt, type RawPromptView } from '@/lib/formatRawPrompt'
+import i18n from '@/i18n'
+import { getAnthropicBreakdownCacheHints, getAnthropicCacheUsageSummary } from '@/lib/anthropic-breakdown-cache'
+import { getNanoGptCacheUsageSummary } from '@/lib/nanogpt-breakdown-cache'
 import styles from './DryRunModal.module.css'
 import clsx from 'clsx'
 
@@ -26,9 +30,20 @@ const MESSAGE_PREVIEW_CAP = 220
 // Memory chunk previews are clipped to this many characters by default.
 const CHUNK_PREVIEW_CAP = 500
 
-function summarizeMessage(content: string): string {
-  const normalized = content.replace(/\s+/g, ' ').trim()
-  if (!normalized) return '(empty message)'
+function normalizePreviewText(text?: string): string {
+  if (!text) return ''
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function getContentPartBadges(message: DryRunMessage): string[] {
+  return (message.contentParts ?? [])
+    .filter((part) => part.count > 0)
+    .map((part) => `${part.type} x${part.count}`)
+}
+
+function summarizeMessage(message: DryRunMessage): string {
+  const normalized = normalizePreviewText(message.content) || normalizePreviewText(message.reasoning)
+  if (!normalized) return i18n.t('shared.emptyMessage', { ns: 'modals' })
   return normalized.length > MESSAGE_PREVIEW_CAP
     ? `${normalized.slice(0, MESSAGE_PREVIEW_CAP - 1)}…`
     : normalized
@@ -43,17 +58,27 @@ interface MessageListItemProps {
   msg: DryRunMessage
   index: number
   selected: boolean
+  clipBoundary: boolean
+  clipBoundaryLabel?: string
   onSelect: () => void
 }
 
-function MessageListItem({ msg, index, selected, onSelect }: MessageListItemProps) {
-  const preview = summarizeMessage(msg.content)
+function MessageListItem({ msg, index, selected, clipBoundary, clipBoundaryLabel, onSelect }: MessageListItemProps) {
+  const { t: ts } = useTranslation('modals', { keyPrefix: 'shared' })
+  const { t } = useTranslation('modals', { keyPrefix: 'dryRun' })
+  const preview = summarizeMessage(msg)
   const lineCount = countLines(msg.content)
+  const hasReasoning = normalizePreviewText(msg.reasoning).length > 0
+  const contentPartBadges = getContentPartBadges(msg)
 
   return (
     <button
       type="button"
-      className={clsx(styles.messageRow, selected && styles.messageRowActive)}
+      className={clsx(
+        styles.messageRow,
+        clipBoundary && styles.messageRowClipBoundary,
+        selected && styles.messageRowActive,
+      )}
       onClick={onSelect}
     >
       <div className={styles.messageRowHeader}>
@@ -61,9 +86,18 @@ function MessageListItem({ msg, index, selected, onSelect }: MessageListItemProp
           {msg.role}
         </Badge>
         <span className={styles.messageIndex}>#{index + 1}</span>
+        {clipBoundary && clipBoundaryLabel && (
+          <span className={styles.messageClipBadge}>{clipBoundaryLabel}</span>
+        )}
+        {hasReasoning && (
+          <span className={styles.messageReasoningBadge}>{t('reasoning')}</span>
+        )}
+        {contentPartBadges.map((badge) => (
+          <span key={badge} className={styles.messagePartBadge}>{badge}</span>
+        ))}
         <span className={styles.messageMeta}>
-          {msg.content.length.toLocaleString()} chars
-          {lineCount > 0 && ` • ${lineCount.toLocaleString()} lines`}
+          {ts('chars', { count: msg.content.length })}
+          {lineCount > 0 && ` • ${ts('lines', { count: lineCount })}`}
         </span>
       </div>
       <div className={styles.messagePreview}>{preview}</div>
@@ -76,6 +110,7 @@ interface ChunkPreviewProps {
 }
 
 function ChunkPreview({ text }: ChunkPreviewProps) {
+  const { t: ts } = useTranslation('modals', { keyPrefix: 'shared' })
   const [expanded, setExpanded] = useState(false)
   const needsToggle = text.length > CHUNK_PREVIEW_CAP
   const display = expanded || !needsToggle ? text : text.slice(0, CHUNK_PREVIEW_CAP) + '…'
@@ -88,7 +123,7 @@ function ChunkPreview({ text }: ChunkPreviewProps) {
           className={styles.inlineExpandButton}
           onClick={() => setExpanded((e) => !e)}
         >
-          {expanded ? 'Show less' : `Show full (${text.length.toLocaleString()} chars)`}
+          {expanded ? ts('showLess') : ts('showFull', { count: text.length })}
         </button>
       )}
     </>
@@ -98,10 +133,12 @@ function ChunkPreview({ text }: ChunkPreviewProps) {
 interface VirtualizedMessagesProps {
   messages: DryRunMessage[]
   selectedIndex: number
+  clipBoundaryIndex: number
+  clipBoundaryLabel?: string
   onSelect: (index: number) => void
 }
 
-function VirtualizedMessages({ messages, selectedIndex, onSelect }: VirtualizedMessagesProps) {
+function VirtualizedMessages({ messages, selectedIndex, clipBoundaryIndex, clipBoundaryLabel, onSelect }: VirtualizedMessagesProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
   const virtualizer = useVirtualizer({
@@ -138,6 +175,8 @@ function VirtualizedMessages({ messages, selectedIndex, onSelect }: VirtualizedM
                 msg={msg}
                 index={virtualRow.index}
                 selected={selectedIndex === virtualRow.index}
+                clipBoundary={virtualRow.index === clipBoundaryIndex}
+                clipBoundaryLabel={clipBoundaryLabel}
                 onSelect={() => onSelect(virtualRow.index)}
               />
             </div>
@@ -149,10 +188,12 @@ function VirtualizedMessages({ messages, selectedIndex, onSelect }: VirtualizedM
 }
 
 export default function DryRunModal() {
+  const { t } = useTranslation('modals', { keyPrefix: 'dryRun' })
+  const { t: ts } = useTranslation('modals', { keyPrefix: 'shared' })
   const modalProps = useStore((s) => s.modalProps) as DryRunResponse
   const closeModal = useStore((s) => s.closeModal)
 
-  const { messages, breakdown, parameters, assistantPrefill, model, provider, tokenCount, worldInfoStats, memoryStats, databankStats, contextClipStats } = modalProps
+  const { messages, breakdown, parameters, assistantPrefill, model, provider, tokenCount, chatHistoryTokens, worldInfoStats, memoryStats, databankStats, contextClipStats } = modalProps
 
   const [messagesOpen, setMessagesOpen] = useState(
     messages.length <= MESSAGES_AUTO_COLLAPSE_THRESHOLD,
@@ -200,13 +241,25 @@ export default function DryRunModal() {
     setRawView((v) => (v === 'off' ? 'text' : v === 'text' ? 'json' : 'off'))
   }
 
-  const rawButtonLabel = rawView === 'off' ? 'Raw' : rawView === 'text' ? 'JSON' : 'Visual'
+  const rawButtonLabel = rawView === 'off' ? ts('raw') : rawView === 'text' ? ts('json') : ts('visual')
 
   // Memoise derived values so toggling a sibling section doesn't re-serialise
   // potentially large payloads on every render.
   const tokenBreakdown = useMemo(
     () => tokenCount?.breakdown || [],
     [tokenCount],
+  )
+  const breakdownCacheHints = useMemo(
+    () => getAnthropicBreakdownCacheHints({ provider, parameters, breakdown }),
+    [provider, parameters, breakdown],
+  )
+  const anthropicCacheUsage = useMemo(
+    () => getAnthropicCacheUsageSummary(provider, modalProps.usage),
+    [provider, modalProps.usage],
+  )
+  const nanoGptCacheUsage = useMemo(
+    () => getNanoGptCacheUsageSummary(provider, modalProps.usage),
+    [provider, modalProps.usage],
   )
 
   const parametersJson = useMemo(
@@ -215,18 +268,31 @@ export default function DryRunModal() {
   )
 
   const databankRetrievalStateLabel = useMemo(() => {
-    switch (databankStats?.retrievalState) {
-      case 'cache_hit': return 'cache hit'
-      case 'awaited_prefetch': return 'awaited prefetch'
-      case 'awaited_direct': return 'direct fetch'
-      case 'skipped_embeddings_disabled': return 'embeddings disabled'
-      case 'skipped_no_active_banks': return 'no active banks'
-      default: return null
-    }
-  }, [databankStats?.retrievalState])
+    const state = databankStats?.retrievalState
+    if (!state) return null
+    return t(`retrieval.${state}`)
+  }, [databankStats?.retrievalState, t])
 
   const selectedMessage = messages[selectedMessageIndex] ?? null
   const selectedMessageLineCount = selectedMessage ? countLines(selectedMessage.content) : 0
+  const selectedMessageHasReasoning =
+    normalizePreviewText(selectedMessage?.reasoning).length > 0
+  const selectedMessageContentPartBadges = selectedMessage
+    ? getContentPartBadges(selectedMessage)
+    : []
+  const clippedMessagesText = contextClipStats?.enabled && contextClipStats.messagesDropped > 0
+    ? t('clipped', { count: contextClipStats.messagesDropped }).trim()
+    : ''
+  const clippedMessagesSeparator = clippedMessagesText.match(/^[,，、]\s*/)?.[0] ?? ', '
+  const clippedMessagesLabel = clippedMessagesText.replace(/^[,，、]\s*/, '').trim()
+  const clipBoundaryIndex = useMemo(() => {
+    if (!contextClipStats?.enabled || contextClipStats.messagesDropped <= 0 || messages.length === 0) return -1
+    const firstKeptHistoryIndex = messages.findIndex((msg) => msg.__chatHistorySource)
+    return firstKeptHistoryIndex >= 0 ? firstKeptHistoryIndex : 0
+  }, [contextClipStats?.enabled, contextClipStats?.messagesDropped, messages])
+  const clipBoundaryLabel = clipBoundaryIndex >= 0
+    ? t('clipBoundaryMarker', { defaultValue: 'first kept after clip' })
+    : undefined
 
   const handleSelectMessage = (index: number) => {
     setSelectedMessageIndex(index)
@@ -237,7 +303,7 @@ export default function DryRunModal() {
     <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 94vw, min(1100px, var(--lumiverse-content-max-width, 1100px)))" className={styles.modal}>
           {/* Header */}
           <div className={styles.header}>
-            <h3 className={styles.headerTitle}>Prompt Dry Run</h3>
+            <h3 className={styles.headerTitle}>{t('title')}</h3>
             <Badge color="primary">
               {provider} / {model}
             </Badge>
@@ -261,13 +327,16 @@ export default function DryRunModal() {
                   size={14}
                   className={clsx(styles.chevron, messagesOpen && styles.chevronOpen)}
                 />
-                Messages ({messages.length}
-                {contextClipStats?.enabled && contextClipStats.messagesDropped > 0 && (
-                  <span style={{ color: '#ffab00', marginLeft: 6 }}>
-                    , {contextClipStats.messagesDropped} clipped
-                  </span>
-                )}
-                )
+                <span className={styles.collapsibleTitleText}>
+                  {t('messages')} ({messages.length}
+                  {clippedMessagesLabel && (
+                    <>
+                      {clippedMessagesSeparator}
+                      <span className={styles.clippedInlineLabel}>{clippedMessagesLabel}</span>
+                    </>
+                  )}
+                  )
+                </span>
               </button>
               {messagesOpen && messages.length > 0 && (
                 <div
@@ -279,6 +348,8 @@ export default function DryRunModal() {
                   <VirtualizedMessages
                     messages={messages}
                     selectedIndex={selectedMessageIndex}
+                    clipBoundaryIndex={clipBoundaryIndex}
+                    clipBoundaryLabel={clipBoundaryLabel}
                     onSelect={handleSelectMessage}
                   />
                   <div className={styles.messageInspector}>
@@ -292,19 +363,37 @@ export default function DryRunModal() {
                               onClick={() => setMobileInspectorOpen(false)}
                             >
                               <ChevronLeft size={14} />
-                              Messages
+                              {t('messages')}
                             </button>
                             <Badge color={ROLE_COLOR[selectedMessage.role] ?? 'neutral'} size="sm" className={styles.roleBadge}>
                               {selectedMessage.role}
                             </Badge>
                             <span className={styles.messageIndex}>#{selectedMessageIndex + 1}</span>
+                            {selectedMessageContentPartBadges.map((badge) => (
+                              <span key={badge} className={styles.messagePartBadge}>{badge}</span>
+                            ))}
                           </div>
                           <span className={styles.messageInspectorMeta}>
-                            {selectedMessage.content.length.toLocaleString()} chars
-                            {selectedMessageLineCount > 0 && ` • ${selectedMessageLineCount.toLocaleString()} lines`}
+                            {ts('chars', { count: selectedMessage.content.length })}
+                            {selectedMessageLineCount > 0 && ` • ${ts('lines', { count: selectedMessageLineCount })}`}
                           </span>
                         </div>
-                        <pre className={styles.messageInspectorContent}>{selectedMessage.content}</pre>
+                        <div className={styles.messageInspectorContent}>
+                          <div className={styles.messageInspectorSection}>
+                            <p className={styles.messageInspectorLabel}>{t('content')}</p>
+                            <pre className={styles.messageInspectorText}>
+                              {selectedMessage.content || ts('emptyMessage')}
+                            </pre>
+                          </div>
+                          {selectedMessageHasReasoning && (
+                            <div className={styles.messageInspectorSection}>
+                              <p className={styles.messageInspectorLabel}>{t('reasoning')}</p>
+                              <pre className={styles.messageInspectorText}>
+                                {selectedMessage.reasoning}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
                       </>
                     )}
                   </div>
@@ -315,7 +404,7 @@ export default function DryRunModal() {
             {/* Assistant prefill */}
             {assistantPrefill && (
               <div className={styles.prefillSection}>
-                <p className={styles.prefillLabel}>Assistant Prefill</p>
+                <p className={styles.prefillLabel}>{t('assistantPrefill')}</p>
                 <div className={styles.prefillContent}>{assistantPrefill}</div>
               </div>
             )}
@@ -332,21 +421,44 @@ export default function DryRunModal() {
                     size={14}
                     className={clsx(styles.chevron, breakdownOpen && styles.chevronOpen)}
                   />
-                  Assembly Breakdown ({breakdown.length})
+                  {t('assemblyBreakdown', { count: breakdown.length })}
                 </button>
                 {breakdownOpen && (
                   <div className={styles.collapsibleBody}>
                     {tokenCount && (
                       <div className={styles.breakdownSummary}>
-                        <span>{tokenCount.total_tokens.toLocaleString()} total tokens</span>
+                        <span>{t('totalTokens', { count: tokenCount.total_tokens })}</span>
+                        {chatHistoryTokens != null && chatHistoryTokens > 0 && (
+                          <span className={styles.breakdownSource}>{t('chatHistoryTokens', { count: chatHistoryTokens })}</span>
+                        )}
                         {tokenCount.tokenizer_name && (
-                          <span className={styles.breakdownSource}>via {tokenCount.tokenizer_name}</span>
+                          <span className={styles.breakdownSource}>{t('viaTokenizer', { name: tokenCount.tokenizer_name })}</span>
+                        )}
+                        {anthropicCacheUsage && (
+                          <span className={styles.breakdownSource}>
+                            {t('cacheReadWrite', {
+                              read: anthropicCacheUsage.cacheReadInputTokens.toLocaleString(),
+                              write: anthropicCacheUsage.cacheCreationInputTokens.toLocaleString(),
+                            })}
+                            {anthropicCacheUsage.cacheCreation5mInputTokens > 0 && t('cache5m', { count: anthropicCacheUsage.cacheCreation5mInputTokens })}
+                            {anthropicCacheUsage.cacheCreation1hInputTokens > 0 && t('cache1h', { count: anthropicCacheUsage.cacheCreation1hInputTokens })}
+                          </span>
+                        )}
+                        {nanoGptCacheUsage && (
+                          <span className={styles.breakdownSource}>
+                            {[
+                              nanoGptCacheUsage.cacheReadInputTokens > 0 && `read ${nanoGptCacheUsage.cacheReadInputTokens.toLocaleString()}`,
+                              nanoGptCacheUsage.cacheCreationInputTokens > 0 && `write ${nanoGptCacheUsage.cacheCreationInputTokens.toLocaleString()}`,
+                              nanoGptCacheUsage.cachedTokensOpenAiStyle > 0 && `cached ${nanoGptCacheUsage.cachedTokensOpenAiStyle.toLocaleString()}`,
+                            ].filter(Boolean).join(' • ')}
+                          </span>
                         )}
                       </div>
                     )}
                       <div className={styles.breakdownList}>
                         {breakdown.map((entry, i) => {
                           const tokens = tokenBreakdown[i]?.tokens
+                          const cacheHint = breakdownCacheHints[i]
                           return (
                             <div key={i} className={styles.breakdownEntry}>
                               <span className={styles.breakdownLabel}>{entry.name}</span>
@@ -356,11 +468,24 @@ export default function DryRunModal() {
                               <span className={styles.breakdownSource}>{entry.type}</span>
                               {entry.role && (
                                 <span className={styles.breakdownRole}>{entry.role}</span>
-                            )}
-                            {tokens != null && (
-                              <span className={styles.breakdownTokens}>
-                                {tokens.toLocaleString()} tokens
-                              </span>
+                             )}
+                              {cacheHint && (
+                                <span
+                                  className={clsx(
+                                    styles.breakdownCacheHint,
+                                    cacheHint.kind === 'cached'
+                                      ? styles.breakdownCacheHintCached
+                                      : styles.breakdownCacheHintMiss,
+                                  )}
+                                  title={cacheHint.label}
+                                >
+                                  {cacheHint.kind === 'cached' ? t('cached') : t('uncached')}
+                                </span>
+                              )}
+                             {tokens != null && (
+                               <span className={styles.breakdownTokens}>
+                                 {ts('tokens', { count: tokens })}
+                               </span>
                             )}
                           </div>
                         )
@@ -383,39 +508,43 @@ export default function DryRunModal() {
                     size={14}
                     className={clsx(styles.chevron, wiStatsOpen && styles.chevronOpen)}
                   />
-                  World Info ({worldInfoStats.totalActivated} activated
-                  {worldInfoStats.evictedByBudget > 0 && `, ${worldInfoStats.evictedByBudget} evicted`})
+                  {t('worldInfoSection', {
+                    activated: worldInfoStats.totalActivated,
+                    evicted: worldInfoStats.evictedByBudget > 0
+                      ? t('worldInfoEvicted', { count: worldInfoStats.evictedByBudget })
+                      : '',
+                  })}
                 </button>
                 {wiStatsOpen && (
                   <div className={styles.collapsibleBody}>
                     <div className={styles.breakdownList}>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Total candidates</span>
+                        <span className={styles.breakdownLabel}>{t('wi.totalCandidates')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.totalCandidates}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Keyword activated</span>
+                        <span className={styles.breakdownLabel}>{t('wi.keywordActivated')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.keywordActivated}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Vector activated</span>
+                        <span className={styles.breakdownLabel}>{t('wi.vectorActivated')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.vectorActivated}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Activated (final)</span>
+                        <span className={styles.breakdownLabel}>{t('wi.activatedFinal')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.totalActivated}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Activated (before budget)</span>
+                        <span className={styles.breakdownLabel}>{t('wi.activatedBeforeBudget')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.activatedBeforeBudget}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Activated (after budget)</span>
+                        <span className={styles.breakdownLabel}>{t('wi.activatedAfterBudget')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.activatedAfterBudget}</span>
                       </div>
                       {worldInfoStats.evictedByBudget > 0 && (
                         <div className={styles.breakdownEntry}>
-                          <span className={styles.breakdownLabel}>Evicted by budget</span>
+                          <span className={styles.breakdownLabel}>{t('wi.evictedByBudget')}</span>
                           <span className={styles.breakdownTokens} style={{ color: '#ffab00' }}>
                             {worldInfoStats.evictedByBudget}
                           </span>
@@ -423,23 +552,23 @@ export default function DryRunModal() {
                       )}
                       {worldInfoStats.evictedByMinPriority > 0 && (
                         <div className={styles.breakdownEntry}>
-                          <span className={styles.breakdownLabel}>Below min priority</span>
+                          <span className={styles.breakdownLabel}>{t('wi.belowMinPriority')}</span>
                           <span className={styles.breakdownTokens} style={{ color: '#ffab00' }}>
                             {worldInfoStats.evictedByMinPriority}
                           </span>
                         </div>
                       )}
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Estimated tokens</span>
+                        <span className={styles.breakdownLabel}>{t('wi.estimatedTokens')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.estimatedTokens.toLocaleString()}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Recursion passes used</span>
+                        <span className={styles.breakdownLabel}>{t('wi.recursionPasses')}</span>
                         <span className={styles.breakdownTokens}>{worldInfoStats.recursionPassesUsed}</span>
                       </div>
                       {worldInfoStats.queryPreview && (
                         <div className={styles.breakdownEntry} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                          <span className={styles.breakdownLabel}>Vector query preview</span>
+                          <span className={styles.breakdownLabel}>{t('wi.vectorQueryPreview')}</span>
                           <span className={styles.breakdownSource} style={{ whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'auto', fontSize: 11 }}>
                             {worldInfoStats.queryPreview}
                           </span>
@@ -463,33 +592,51 @@ export default function DryRunModal() {
                     size={14}
                     className={clsx(styles.chevron, memStatsOpen && styles.chevronOpen)}
                   />
-                  Long-Term Memory ({memoryStats.chunksRetrieved} retrieved
-                  {memoryStats.chunksPending > 0 && `, ${memoryStats.chunksPending} pending`})
+                  {t('memorySection', {
+                    retrieved: memoryStats.chunksRetrieved,
+                    pending: memoryStats.chunksPending > 0
+                      ? t('memoryPending', { count: memoryStats.chunksPending })
+                      : '',
+                  })}
                 </button>
                 {memStatsOpen && (
                   <div className={styles.collapsibleBody}>
                     <div className={styles.breakdownList}>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Injection method</span>
+                        <span className={styles.breakdownLabel}>{t('memory.injectionMethod')}</span>
                         <span className={styles.breakdownTokens}>{memoryStats.injectionMethod}</span>
                       </div>
+                      {memoryStats.retrievalMode && (
+                        <div className={styles.breakdownEntry}>
+                          <span className={styles.breakdownLabel}>Retrieval mode</span>
+                          <span
+                            className={styles.breakdownTokens}
+                            style={memoryStats.retrievalMode === 'recency' ? { color: '#ffab00' } : undefined}
+                            title={memoryStats.retrievalMode === 'recency'
+                              ? 'Vector search was unavailable (e.g. the query embedding failed); chunks were chosen by recency and have no similarity score.'
+                              : undefined}
+                          >
+                            {memoryStats.retrievalMode === 'recency' ? 'recency fallback' : memoryStats.retrievalMode}
+                          </span>
+                        </div>
+                      )}
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Chunks available</span>
+                        <span className={styles.breakdownLabel}>{t('memory.chunksAvailable')}</span>
                         <span className={styles.breakdownTokens}>{memoryStats.chunksAvailable}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Chunks pending vectorization</span>
+                        <span className={styles.breakdownLabel}>{t('memory.chunksPending')}</span>
                         <span className={styles.breakdownTokens} style={memoryStats.chunksPending > 0 ? { color: '#ffab00' } : undefined}>
                           {memoryStats.chunksPending}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Settings source</span>
+                        <span className={styles.breakdownLabel}>{t('memory.settingsSource')}</span>
                         <span className={styles.breakdownTokens}>{memoryStats.settingsSource}</span>
                       </div>
                       {memoryStats.queryPreview && (
                         <div className={styles.breakdownEntry} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                          <span className={styles.breakdownLabel}>Query preview</span>
+                          <span className={styles.breakdownLabel}>{t('memory.queryPreview')}</span>
                           <span className={styles.breakdownSource} style={{ whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'auto', fontSize: 11 }}>
                             {memoryStats.queryPreview}
                           </span>
@@ -498,12 +645,12 @@ export default function DryRunModal() {
                       {memoryStats.retrievedChunks.length > 0 && (
                         <>
                           <div className={styles.breakdownEntry} style={{ marginTop: 8 }}>
-                            <span className={styles.breakdownLabel} style={{ fontWeight: 600 }}>Retrieved Chunks</span>
+                            <span className={styles.breakdownLabel} style={{ fontWeight: 600 }}>{t('memory.retrievedChunks')}</span>
                           </div>
                           {memoryStats.retrievedChunks.map((chunk, i) => (
                             <div key={i} className={styles.breakdownEntry} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4, paddingLeft: 8 }}>
                               <span className={styles.breakdownLabel}>
-                                #{i + 1} — score: {chunk.score.toFixed(4)}, ~{chunk.tokenEstimate} tokens
+                                {t('memory.chunkLine', { index: i + 1, score: chunk.score != null ? chunk.score.toFixed(4) : 'n/a', tokens: chunk.tokenEstimate })}
                               </span>
                               <ChunkPreview text={chunk.preview} />
                             </div>
@@ -528,30 +675,33 @@ export default function DryRunModal() {
                     size={14}
                     className={clsx(styles.chevron, databankStatsOpen && styles.chevronOpen)}
                   />
-                  Databanks ({databankStats.activeBankCount} active, {databankStats.chunksRetrieved} retrieved)
+                  {t('databankSection', {
+                    banks: databankStats.activeBankCount,
+                    retrieved: databankStats.chunksRetrieved,
+                  })}
                 </button>
                 {databankStatsOpen && (
                   <div className={styles.collapsibleBody}>
                     <div className={styles.breakdownList}>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Embeddings enabled</span>
-                        <span className={styles.breakdownTokens}>{databankStats.embeddingsEnabled ? 'Yes' : 'No'}</span>
+                        <span className={styles.breakdownLabel}>{t('databank.embeddingsEnabled')}</span>
+                        <span className={styles.breakdownTokens}>{databankStats.embeddingsEnabled ? t('yes') : t('no')}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Injection method</span>
+                        <span className={styles.breakdownLabel}>{t('databank.injectionMethod')}</span>
                         <span className={styles.breakdownTokens}>{databankStats.injectionMethod}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Retrieval state</span>
+                        <span className={styles.breakdownLabel}>{t('databank.retrievalState')}</span>
                         <span className={styles.breakdownTokens}>{databankRetrievalStateLabel ?? databankStats.retrievalState}</span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Active databanks</span>
+                        <span className={styles.breakdownLabel}>{t('databank.activeBanks')}</span>
                         <span className={styles.breakdownTokens}>{databankStats.activeBankCount}</span>
                       </div>
                       {databankStats.activeDatabankIds.length > 0 && (
                         <div className={styles.breakdownEntry} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                          <span className={styles.breakdownLabel}>Active databank IDs</span>
+                          <span className={styles.breakdownLabel}>{t('databank.activeBankIds')}</span>
                           <span className={styles.breakdownSource} style={{ whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'auto', fontSize: 11 }}>
                             {databankStats.activeDatabankIds.join('\n')}
                           </span>
@@ -559,7 +709,7 @@ export default function DryRunModal() {
                       )}
                       {databankStats.queryPreview && (
                         <div className={styles.breakdownEntry} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                          <span className={styles.breakdownLabel}>Query preview</span>
+                          <span className={styles.breakdownLabel}>{t('databank.queryPreview')}</span>
                           <span className={styles.breakdownSource} style={{ whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'auto', fontSize: 11 }}>
                             {databankStats.queryPreview}
                           </span>
@@ -568,12 +718,17 @@ export default function DryRunModal() {
                       {databankStats.retrievedChunks.length > 0 && (
                         <>
                           <div className={styles.breakdownEntry} style={{ marginTop: 8 }}>
-                            <span className={styles.breakdownLabel} style={{ fontWeight: 600 }}>Retrieved Chunks</span>
+                            <span className={styles.breakdownLabel} style={{ fontWeight: 600 }}>{t('databank.retrievedChunks')}</span>
                           </div>
                           {databankStats.retrievedChunks.map((chunk, i) => (
                             <div key={i} className={styles.breakdownEntry} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4, paddingLeft: 8 }}>
                               <span className={styles.breakdownLabel}>
-                                #{i + 1} — {chunk.documentName}, score: {chunk.score.toFixed(4)}, ~{chunk.tokenEstimate} tokens
+                                {t('databank.chunkLine', {
+                                  index: i + 1,
+                                  document: chunk.documentName,
+                                  score: chunk.score.toFixed(4),
+                                  tokens: chunk.tokenEstimate,
+                                })}
                               </span>
                               <ChunkPreview text={chunk.preview} />
                             </div>
@@ -599,25 +754,29 @@ export default function DryRunModal() {
                     size={14}
                     className={clsx(styles.chevron, budgetOpen && styles.chevronOpen)}
                   />
-                  Context Budget
+                  {t('contextBudget')}
                   {!contextClipStats.enabled && (
                     <span className={styles.breakdownSource} style={{ marginLeft: 6 }}>
-                      (no max_context_length set — clipping disabled)
+                      {t('clippingDisabled')}
                     </span>
                   )}
                   {contextClipStats.enabled && contextClipStats.budgetInvalid && (
                     <span style={{ color: '#ff5470', marginLeft: 6 }}>
-                      (budget invalid — context size ≤ reserved response tokens)
+                      {t('budgetInvalid')}
                     </span>
                   )}
                   {contextClipStats.enabled && !contextClipStats.budgetInvalid && contextClipStats.messagesDropped > 0 && (
                     <span style={{ color: '#ffab00', marginLeft: 6 }}>
-                      ({contextClipStats.messagesDropped} message{contextClipStats.messagesDropped === 1 ? '' : 's'} clipped, {contextClipStats.tokensDropped.toLocaleString()} tokens)
+                      {t('messagesClipped', {
+                        count: contextClipStats.messagesDropped,
+                        messages: contextClipStats.messagesDropped,
+                        tokens: contextClipStats.tokensDropped.toLocaleString(),
+                      })}
                     </span>
                   )}
                   {contextClipStats.enabled && !contextClipStats.budgetInvalid && contextClipStats.messagesDropped === 0 && (
                     <span className={styles.breakdownSource} style={{ marginLeft: 6 }}>
-                      (fits within budget)
+                      {t('fitsBudget')}
                     </span>
                   )}
                 </button>
@@ -636,14 +795,15 @@ export default function DryRunModal() {
                         }}
                       >
                         <span className={styles.breakdownLabel} style={{ color: '#ff5470' }}>
-                          Budget cannot fit any chat history
+                          {t('budgetNoHistory')}
                         </span>
                         <span className={styles.breakdownSource}>
-                          input budget = max_context ({contextClipStats.maxContext.toLocaleString()})
-                          {' − '}max_tokens ({contextClipStats.maxResponseTokens.toLocaleString()})
-                          {' − '}safety ({contextClipStats.safetyMargin.toLocaleString()}) ={' '}
-                          {contextClipStats.inputBudget.toLocaleString()}. Raise Context Size or
-                          lower Max Tokens.
+                          {t('budgetNoHistoryDetail', {
+                            max: contextClipStats.maxContext.toLocaleString(),
+                            reserved: contextClipStats.maxResponseTokens.toLocaleString(),
+                            safety: contextClipStats.safetyMargin.toLocaleString(),
+                            input: contextClipStats.inputBudget.toLocaleString(),
+                          })}
                         </span>
                       </div>
                     )}
@@ -663,81 +823,80 @@ export default function DryRunModal() {
                           className={styles.breakdownLabel}
                           style={{ color: contextClipStats.fixedOverBudget ? '#ff5470' : '#ffab00' }}
                         >
-                          {contextClipStats.fixedOverBudget
-                            ? 'Fixed prompt overhead already exceeds the budget'
-                            : 'Fixed prompt overhead leaves no room for chat history'}
+                          {contextClipStats.fixedOverBudget ? t('fixedOverBudget') : t('fixedNoHistoryRoom')}
                         </span>
                         <span className={styles.breakdownSource}>
-                          Chat history is the only clip-eligible section. System prompt, WI, persona, and other fixed blocks stay in the prompt, leaving{' '}
-                          {Math.max(0, contextClipStats.remainingHistoryBudget).toLocaleString()} tokens for history.
+                          {t('fixedNoHistoryDetail', {
+                            remaining: Math.max(0, contextClipStats.remainingHistoryBudget).toLocaleString(),
+                          })}
                           {contextClipStats.fixedOverBudget && (
-                            <> Fixed overhead is over budget by {Math.abs(contextClipStats.remainingHistoryBudget).toLocaleString()} tokens.</>
+                            <> {t('fixedOverBy', { count: Math.abs(contextClipStats.remainingHistoryBudget).toLocaleString() })}</>
                           )}
                         </span>
                       </div>
                     )}
                     <div className={styles.breakdownList}>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Max context length</span>
+                        <span className={styles.breakdownLabel}>{t('budget.maxContext')}</span>
                         <span className={styles.breakdownTokens}>
                           {contextClipStats.maxContext > 0
-                            ? `${contextClipStats.maxContext.toLocaleString()} tokens`
-                            : '— (unset)'}
+                            ? t('budget.tokens', { count: contextClipStats.maxContext })
+                            : t('budget.unset')}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Reserved for response</span>
+                        <span className={styles.breakdownLabel}>{t('budget.reservedResponse')}</span>
                         <span className={styles.breakdownTokens}>
-                          {contextClipStats.maxResponseTokens.toLocaleString()} tokens
+                          {t('budget.tokens', { count: contextClipStats.maxResponseTokens })}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Safety margin</span>
+                        <span className={styles.breakdownLabel}>{t('budget.safetyMargin')}</span>
                         <span className={styles.breakdownTokens}>
-                          {contextClipStats.safetyMargin.toLocaleString()} tokens
+                          {t('budget.tokens', { count: contextClipStats.safetyMargin })}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Input budget before fixed overhead</span>
+                        <span className={styles.breakdownLabel}>{t('budget.inputBeforeFixed')}</span>
                         <span
                           className={styles.breakdownTokens}
                           style={contextClipStats.budgetInvalid ? { color: '#ff5470' } : undefined}
                         >
-                          {contextClipStats.inputBudget.toLocaleString()} tokens
+                          {t('budget.tokens', { count: contextClipStats.inputBudget })}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Fixed overhead (system / WI / persona / etc.)</span>
+                        <span className={styles.breakdownLabel}>{t('budget.fixedOverhead')}</span>
                         <span className={styles.breakdownTokens}>
-                          {contextClipStats.fixedTokens.toLocaleString()} tokens
+                          {t('budget.tokens', { count: contextClipStats.fixedTokens })}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Remaining room for chat history</span>
+                        <span className={styles.breakdownLabel}>{t('budget.remainingHistory')}</span>
                         <span
                           className={styles.breakdownTokens}
                           style={contextClipStats.remainingHistoryBudget < 0 ? { color: '#ff5470' } : contextClipStats.remainingHistoryBudget === 0 ? { color: '#ffab00' } : undefined}
                         >
-                          {Math.max(0, contextClipStats.remainingHistoryBudget).toLocaleString()} tokens
+                          {t('budget.tokens', { count: Math.max(0, contextClipStats.remainingHistoryBudget) })}
                           {contextClipStats.remainingHistoryBudget < 0
-                            ? ` (${Math.abs(contextClipStats.remainingHistoryBudget).toLocaleString()} over)`
+                            ? t('budget.overBudget', { count: Math.abs(contextClipStats.remainingHistoryBudget) })
                             : ''}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Chat history before clip</span>
+                        <span className={styles.breakdownLabel}>{t('budget.historyBefore')}</span>
                         <span className={styles.breakdownTokens}>
-                          {contextClipStats.chatHistoryTokensBefore.toLocaleString()} tokens
+                          {t('budget.tokens', { count: contextClipStats.chatHistoryTokensBefore })}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Chat history after clip</span>
+                        <span className={styles.breakdownLabel}>{t('budget.historyAfter')}</span>
                         <span className={styles.breakdownTokens}>
-                          {contextClipStats.chatHistoryTokensAfter.toLocaleString()} tokens
+                          {t('budget.tokens', { count: contextClipStats.chatHistoryTokensAfter })}
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Messages dropped</span>
+                        <span className={styles.breakdownLabel}>{t('budget.messagesDropped')}</span>
                         <span
                           className={styles.breakdownTokens}
                           style={contextClipStats.messagesDropped > 0 ? { color: '#ffab00' } : undefined}
@@ -746,7 +905,7 @@ export default function DryRunModal() {
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Tokens dropped</span>
+                        <span className={styles.breakdownLabel}>{t('budget.tokensDropped')}</span>
                         <span
                           className={styles.breakdownTokens}
                           style={contextClipStats.tokensDropped > 0 ? { color: '#ffab00' } : undefined}
@@ -755,7 +914,7 @@ export default function DryRunModal() {
                         </span>
                       </div>
                       <div className={styles.breakdownEntry}>
-                        <span className={styles.breakdownLabel}>Tokenizer used</span>
+                        <span className={styles.breakdownLabel}>{t('budget.tokenizerUsed')}</span>
                         <span className={styles.breakdownSource}>{contextClipStats.tokenizerUsed}</span>
                       </div>
                     </div>
@@ -776,7 +935,7 @@ export default function DryRunModal() {
                     size={14}
                     className={clsx(styles.chevron, paramsOpen && styles.chevronOpen)}
                   />
-                  Parameters
+                  {t('parameters')}
                 </button>
                 {paramsOpen && (
                   <div className={styles.collapsibleBody}>
@@ -793,11 +952,16 @@ export default function DryRunModal() {
 
           <div className={styles.footer}>
             <span className={styles.footerTotal}>
-              {messages.length} message{messages.length === 1 ? '' : 's'}
+              {t('footerMessages', { count: messages.length })}
             </span>
             {tokenCount && (
               <span className={styles.footerMax}>
-                {tokenCount.total_tokens.toLocaleString()} tokens
+                {ts('tokens', { count: tokenCount.total_tokens })}
+              </span>
+            )}
+            {chatHistoryTokens != null && chatHistoryTokens > 0 && (
+              <span className={styles.footerMax}>
+                {t('footerChatHistory', { count: chatHistoryTokens })}
               </span>
             )}
             <div className={styles.footerSpacer} />
@@ -810,7 +974,7 @@ export default function DryRunModal() {
               icon={copied ? <Check size={12} /> : <Copy size={12} />}
               onClick={handleCopy}
             >
-              {copied ? 'Copied' : 'Copy'}
+              {copied ? ts('copied') : ts('copy')}
             </Button>
           </div>
     </ModalShell>

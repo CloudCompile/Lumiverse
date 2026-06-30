@@ -179,6 +179,8 @@
   border-radius: var(--lumiverse-radius);
   background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border);
+  container-type: inline-size;
+  container-name: extCard;
 }
 
 .extensionHeader {
@@ -297,6 +299,59 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.permissionsBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.permissionsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.permissionsLabel {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--lumiverse-text-dim);
+}
+
+.enableAllBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-muted);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--lumiverse-transition-fast),
+    color var(--lumiverse-transition-fast),
+    border-color var(--lumiverse-transition-fast);
+}
+
+.enableAllBtn:hover:not(:disabled) {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-border-hover);
+}
+
+.enableAllBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .permPill {
@@ -472,4 +527,138 @@
 .permPillToggling {
   opacity: 0.65;
   cursor: wait;
+}
+
+/* ─── Action row: labeled primaries + small secondary icons ─── */
+.actionRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.primaryActions {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+@container extCard (min-width: 440px) {
+  .primaryActions {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.labeledBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 10px;
+  height: 32px;
+  border-radius: var(--lumiverse-radius);
+  background: transparent;
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-muted);
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  font-weight: 500;
+  font-family: inherit;
+  letter-spacing: 0.005em;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  transition:
+    background var(--lumiverse-transition-fast),
+    color var(--lumiverse-transition-fast),
+    border-color var(--lumiverse-transition-fast),
+    transform var(--lumiverse-transition-fast);
+}
+
+.labeledBtn > svg {
+  flex-shrink: 0;
+}
+
+.labeledBtn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.labeledBtn:hover:not(:disabled) {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-border-hover);
+}
+
+.labeledBtn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.labeledBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.labeledBtnActive,
+.labeledBtnActive:hover:not(:disabled) {
+  background: var(--lumiverse-primary-015);
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-020);
+}
+
+.secondaryActions {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 4px;
+  position: relative;
+}
+
+.secondaryActions::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--lumiverse-border);
+  opacity: 0.7;
+}
+
+.iconBtnSmall {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  text-decoration: none;
+  font-family: inherit;
+  transition:
+    background var(--lumiverse-transition-fast),
+    color var(--lumiverse-transition-fast);
+}
+
+.iconBtnSmall:hover:not(:disabled) {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-hover);
+}
+
+.iconBtnSmall:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.iconBtnDanger:hover:not(:disabled) {
+  color: var(--lumiverse-danger);
+  background: var(--lumiverse-danger-015);
 }

@@ -1,5 +1,6 @@
 import type {
   AstNode,
+  TextNode,
   MacroNode,
   ScopedMacroNode,
   MacroEnv,
@@ -34,12 +35,12 @@ export async function evaluate(
   registry: MacroRegistry,
   options?: EvaluateOptions,
 ): Promise<EvaluateResult> {
-  if (!input) return { text: "", diagnostics: [] };
+  if (!input) return { text: "", diagnostics: [], touchedVars: EMPTY_TOUCHED_VARS, cacheable: true };
 
   // Fast-path: skip the entire lex/parse/evaluate pipeline when there are
   // no macro markers in the input (the vast majority of stored chat messages).
   if (!HAS_MACRO_RE.test(input)) {
-    return { text: input, diagnostics: [] };
+    return { text: input, diagnostics: [], touchedVars: EMPTY_TOUCHED_VARS, cacheable: true };
   }
 
   // Pre-process: legacy syntax conversion
@@ -53,6 +54,11 @@ export async function evaluate(
   const phase = options?.phase ?? "other";
   const sourceHint = options?.sourceHint;
 
+  // Fingerprint accumulator. Wrapped env records var reads via
+  // env.variables.*.get/has; volatile macros flip cacheable=false.
+  const fingerprint = { touched: new Set<string>(), cacheable: true };
+  const recordingEnv = wrapEnvForFingerprint(env, fingerprint);
+
   // Iterative evaluation: most macros are now recursively expanded inline
   // (see evaluateMacroNode). The outer loop acts as a safety net for the
   // rare case where a macro result depends on state mutated by a later macro
@@ -62,7 +68,7 @@ export async function evaluate(
     if (env.signal?.aborted) throw env.signal.reason ?? new DOMException("Aborted", "AbortError");
 
     if (runInterceptors) {
-      text = await macroInterceptorChain.run({
+      const interceptorResult = await macroInterceptorChain.run({
         template: text,
         env: snapshotEnvForInterceptor(env),
         commit: env.commit !== false,
@@ -70,11 +76,16 @@ export async function evaluate(
         ...(sourceHint ? { sourceHint } : {}),
         ...(userId !== undefined ? { userId } : {}),
       });
+      text = interceptorResult.text;
+      for (const v of interceptorResult.touchedVars) fingerprint.touched.add(v);
+      if (interceptorResult.volatile || interceptorResult.opaque) {
+        fingerprint.cacheable = false;
+      }
       if (!text.includes("{{")) break;
     }
 
     const ast = parse(text);
-    const result = await evaluateNodes(ast, env, registry, 0, 0, diagnostics);
+    const result = await evaluateNodes(ast, recordingEnv, registry, 0, 0, diagnostics);
     if (result === text) break; // No change — converged
     text = result;
     if (!text.includes("{{")) break; // No more macros to resolve
@@ -83,7 +94,56 @@ export async function evaluate(
   // Post-process: unescape remaining escaped braces
   const final = postprocess(text);
 
-  return { text: final, diagnostics };
+  return { text: final, diagnostics, touchedVars: fingerprint.touched, cacheable: fingerprint.cacheable };
+}
+
+const EMPTY_TOUCHED_VARS: ReadonlySet<string> = new Set<string>();
+
+function wrapEnvForFingerprint(
+  env: MacroEnv,
+  fingerprint: { touched: Set<string>; cacheable: boolean },
+): MacroEnv {
+  const wrappedVars = {
+    local: makeRecordingMap(env.variables.local, "local", fingerprint.touched),
+    global: makeRecordingMap(env.variables.global, "global", fingerprint.touched),
+    chat: makeRecordingMap(env.variables.chat, "chat", fingerprint.touched),
+  };
+  return new Proxy(env, {
+    get(target, prop, receiver) {
+      if (prop === "variables") return wrappedVars;
+      if (prop === "_fingerprint") return fingerprint;
+      return Reflect.get(target, prop, receiver);
+    },
+    set(target, prop, value, receiver) {
+      if (prop === "variables" || prop === "_fingerprint") return true;
+      return Reflect.set(target, prop, value, receiver);
+    },
+  }) as MacroEnv;
+}
+
+function makeRecordingMap(
+  source: Map<string, string>,
+  scope: "local" | "global" | "chat",
+  sink: Set<string>,
+): Map<string, string> {
+  return new Proxy(source, {
+    get(target, prop, receiver) {
+      if (prop === "get") {
+        return (key: string) => {
+          sink.add(`${scope}:${key}`);
+          return target.get(key);
+        };
+      }
+      if (prop === "has") {
+        return (key: string) => {
+          sink.add(`${scope}:${key}`);
+          return target.has(key);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 function preprocessLegacy(input: string): string {
@@ -133,6 +193,81 @@ async function evaluateNodes(
   return result;
 }
 
+/**
+ * Strip "structural" leading/trailing whitespace from a macro argument — the
+ * newline + indentation a template author types when laying a nested macro out
+ * across multiple lines for readability, e.g.
+ *
+ *   {{setvar::cotexpand::
+ *     {{join::{{newline}}::...}}
+ *   }}
+ *
+ * Without this, the `\n  ` after `::` and the `\n` before the closing `}}` are
+ * captured as part of the argument and leak into the stored value (and then
+ * accumulate across rounds). We only strip whitespace runs that CONTAIN A
+ * NEWLINE, and only from the first/last nodes when they are literal text. That
+ * deliberately preserves:
+ *   - whitespace produced by a macro — {{join::{{newline}}::...}} keeps its
+ *     "\n" separator, because {{newline}} is a macro node, never a boundary
+ *     text node;
+ *   - inline padding the author typed on one line — {{join:: | ::a::b}} keeps
+ *     " | " and {{setvar::x:: - }} keeps " - ", since those runs have no newline.
+ *
+ * Returns the original array unchanged (no allocation) when nothing is trimmed,
+ * which is the common case. Never mutates the input (the AST is cached).
+ */
+function stripArgFraming(nodes: AstNode[]): AstNode[] {
+  if (nodes.length === 0) return nodes;
+
+  // Single text node: strip both ends.
+  if (nodes.length === 1) {
+    const only = nodes[0];
+    if (only.type !== "text") return nodes;
+    const stripped = stripTrailingLineWs(stripLeadingLineWs(only.value));
+    if (stripped === only.value) return nodes;
+    return stripped === "" ? [] : [{ type: "text", value: stripped }];
+  }
+
+  let out: AstNode[] | null = null;
+
+  const first = nodes[0];
+  if (first.type === "text") {
+    const stripped = stripLeadingLineWs(first.value);
+    if (stripped !== first.value) {
+      out = nodes.slice();
+      if (stripped === "") out.shift();
+      else out[0] = { type: "text", value: stripped } satisfies TextNode;
+    }
+  }
+
+  const arr = out ?? nodes;
+  const lastIdx = arr.length - 1;
+  const last = arr[lastIdx];
+  if (lastIdx >= 0 && last.type === "text") {
+    const stripped = stripTrailingLineWs(last.value);
+    if (stripped !== last.value) {
+      if (!out) out = nodes.slice();
+      const i = out.length - 1;
+      if (stripped === "") out.pop();
+      else out[i] = { type: "text", value: stripped } satisfies TextNode;
+    }
+  }
+
+  return out ?? nodes;
+}
+
+/** Remove a leading whitespace run only when it spans a line break. */
+function stripLeadingLineWs(value: string): string {
+  const m = /^\s+/.exec(value);
+  return m && m[0].includes("\n") ? value.slice(m[0].length) : value;
+}
+
+/** Remove a trailing whitespace run only when it spans a line break. */
+function stripTrailingLineWs(value: string): string {
+  const m = /\s+$/.exec(value);
+  return m && m[0].includes("\n") ? value.slice(0, value.length - m[0].length) : value;
+}
+
 async function evaluateMacroNode(
   node: MacroNode,
   env: MacroEnv,
@@ -147,6 +282,7 @@ async function evaluateMacroNode(
   const dynamicKey = node.name.toLowerCase();
   const dynamicLookup = env._dynamicMacrosLower;
   if (!def && dynamicLookup && dynamicLookup.has(dynamicKey)) {
+    if (env._fingerprint) env._fingerprint.cacheable = false;
     const dynamic = dynamicLookup.get(dynamicKey)!;
     let rawResult: string;
     if (typeof dynamic === "string") {
@@ -176,6 +312,8 @@ async function evaluateMacroNode(
     return reconstructMacro(node);
   }
 
+  if (def.volatile && env._fingerprint) env._fingerprint.cacheable = false;
+
   // Resolve arguments (unless handler wants raw AST)
   let resolvedArgs: string[];
   if (def.delayArgResolution) {
@@ -184,7 +322,7 @@ async function evaluateMacroNode(
     resolvedArgs = [];
     for (const argNodes of node.args) {
       resolvedArgs.push(
-        await evaluateNodes(argNodes, env, registry, globalOffset, depth + 1, diagnostics)
+        await evaluateNodes(stripArgFraming(argNodes), env, registry, globalOffset, depth + 1, diagnostics)
       );
     }
   }
@@ -260,7 +398,7 @@ async function evaluateScopedMacroNode(
     resolvedArgs = [];
     for (const argNodes of node.args) {
       resolvedArgs.push(
-        await evaluateNodes(argNodes, env, registry, globalOffset, depth + 1, diagnostics)
+        await evaluateNodes(stripArgFraming(argNodes), env, registry, globalOffset, depth + 1, diagnostics)
       );
     }
   }

@@ -1,6 +1,7 @@
 import * as settingsSvc from "./settings.service";
 import * as chatsSvc from "./chats.service";
 import * as charactersSvc from "./characters.service";
+import * as connectionsSvc from "./connections.service";
 import * as presetsSvc from "./presets.service";
 import type { PresetProfileBinding, ResolvedPresetProfile } from "../types/preset-profile";
 import type { PromptBlock } from "../types/preset";
@@ -18,6 +19,9 @@ function characterKey(characterId: string): string {
 }
 function chatKey(chatId: string): string {
   return `presetProfile:chat:${chatId}`;
+}
+function connectionKey(connectionId: string): string {
+  return `presetProfile:connection:${connectionId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +80,7 @@ function getValidBinding(
 
 function resolveSpecificBinding(
   userId: string,
-  source: "chat" | "character",
+  source: "chat" | "character" | "connection",
   binding: PresetProfileBinding
 ): ResolvedPresetProfile {
   if (binding.linked_to_defaults) {
@@ -185,6 +189,39 @@ export function deleteChatBinding(
 }
 
 // ---------------------------------------------------------------------------
+// Connection profile bindings
+// ---------------------------------------------------------------------------
+
+export function getConnectionBinding(
+  userId: string,
+  connectionId: string
+): PresetProfileBinding | null {
+  return getValidBinding(userId, connectionKey(connectionId));
+}
+
+export function setConnectionBinding(
+  userId: string,
+  connectionId: string,
+  presetId: string,
+  blockStates: Record<string, boolean>
+): PresetProfileBinding {
+  const connection = connectionsSvc.getConnection(userId, connectionId);
+  if (!connection) throw new Error("Connection not found");
+  assertPresetExists(userId, presetId);
+
+  const binding = createBinding(presetId, blockStates);
+  settingsSvc.putSetting(userId, connectionKey(connectionId), binding);
+  return binding;
+}
+
+export function deleteConnectionBinding(
+  userId: string,
+  connectionId: string
+): boolean {
+  return settingsSvc.deleteSetting(userId, connectionKey(connectionId));
+}
+
+// ---------------------------------------------------------------------------
 // Resolution — determines which binding to apply for a given context
 // ---------------------------------------------------------------------------
 
@@ -192,8 +229,8 @@ export function resolveProfile(
   userId: string,
   fallbackPresetId: string | null,
   chatId: string,
-  characterId: string,
-  options: { isGroup?: boolean } = {}
+  characterId: string | null,
+  options: { isGroup?: boolean; connectionId?: string | null } = {}
 ): ResolvedPresetProfile {
   // 1. Chat-level binding (most specific)
   const chatBinding = getChatBinding(userId, chatId);
@@ -203,15 +240,24 @@ export function resolveProfile(
 
   // 2. Character-level binding — skipped in group chats. Per-member bindings
   //    would be ambiguous (which member wins?), so group chats are chat-only.
-  if (!options.isGroup) {
+  if (!options.isGroup && characterId) {
     const charBinding = getCharacterBinding(userId, characterId);
     if (charBinding) {
       return resolveSpecificBinding(userId, "character", charBinding);
     }
   }
 
-  // 3. Default snapshot — defaults are stored per preset, so they only apply
-  //    when there isn't a more specific chat/character binding.
+  // 3. Connection-level binding — applies across chats for the active model
+  //    environment when there isn't a more specific chat/character binding.
+  if (options.connectionId) {
+    const connectionBinding = getConnectionBinding(userId, options.connectionId);
+    if (connectionBinding) {
+      return resolveSpecificBinding(userId, "connection", connectionBinding);
+    }
+  }
+
+  // 4. Default snapshot — defaults are stored per preset, so they only apply
+  //    when there isn't a more specific chat/character/connection binding.
   if (fallbackPresetId) {
     const defaults = getDefaults(userId, fallbackPresetId);
     if (defaults) {
@@ -219,7 +265,7 @@ export function resolveProfile(
     }
   }
 
-  // 4. No matching binding — use raw preset block states
+  // 5. No matching binding — use raw preset block states
   return { preset_id: fallbackPresetId, binding: null, source: "none" };
 }
 

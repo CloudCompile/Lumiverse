@@ -1,6 +1,8 @@
 import { useMemo, useRef, useLayoutEffect, useState, useEffect, useCallback, useSyncExternalStore, useDeferredValue } from 'react'
+import { useTranslation } from 'react-i18next'
 import { marked } from 'marked'
 import { highlightCode } from '@/lib/codeHighlight'
+import { processMarkdownInHtmlIsland } from './htmlIslandMarkdown'
 import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
@@ -16,6 +18,7 @@ import {
 } from '@/lib/spindle/message-interceptors'
 import { SpindleMessageWidgets } from '@/lib/spindle/message-widgets'
 import { useStore } from '@/store'
+import i18n from '@/i18n'
 import { useDisplayRegex } from '@/hooks/useDisplayRegex'
 import { OOCBlock as OOCBlockComponent, OOCIrcChatRoom } from './ooc'
 import type { IrcEntry } from './ooc'
@@ -28,10 +31,12 @@ interface MessageContentProps {
   isUser: boolean
   userName: string
   isStreaming?: boolean
-  lockStreamingHeight?: boolean
   messageId?: string
   chatId?: string
   depth?: number
+  characterNameOverride?: string
+  risuAssetMapOverride?: Record<string, string> | null
+  disableInterceptors?: boolean
 }
 
 // Custom renderer for sheld prose classes
@@ -42,14 +47,16 @@ const renderer = createEmphasisAwareRenderer({
 })
 
 renderer.code = ({ text, lang }) => {
+  const copyTitle = i18n.t('messageContent.copyCode', { ns: 'chat' })
+  const copyLabel = i18n.t('messageContent.copy', { ns: 'chat' })
+  const copyBtn = `<button type="button" class="${styles.codeCopy}" data-code-copy title="${escapeHtml(copyTitle)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>${escapeHtml(copyLabel)}</span></button>`
   if (lang) {
     const highlighted = highlightCode(text, lang)
-    return `<div class="${styles.codeBlock}"><div class="${styles.codeHeader}"><span class="${styles.codeLang}">${escapeHtml(lang)}</span><button type="button" class="${styles.codeCopy}" data-code-copy title="Copy code"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy</span></button></div><pre><code class="hljs">${highlighted}</code></pre></div>`
+    return `<div class="${styles.codeBlock}"><div class="${styles.codeHeader}"><span class="${styles.codeLang}">${escapeHtml(lang)}</span>${copyBtn}</div><pre><code class="hljs">${highlighted}</code></pre></div>`
   }
-  // Fenced block with no lang — still render as block
   if (text.includes('\n')) {
     const highlighted = highlightCode(text)
-    return `<div class="${styles.codeBlock}"><div class="${styles.codeHeader}"><span class="${styles.codeLang}">text</span><button type="button" class="${styles.codeCopy}" data-code-copy title="Copy code"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy</span></button></div><pre><code class="hljs">${highlighted}</code></pre></div>`
+    return `<div class="${styles.codeBlock}"><div class="${styles.codeHeader}"><span class="${styles.codeLang}">text</span>${copyBtn}</div><pre><code class="hljs">${highlighted}</code></pre></div>`
   }
   return `<code>${escapeHtml(text)}</code>`
 }
@@ -344,7 +351,9 @@ const VOID_HTML_TAGS = new Set([
 
 const ISLAND_BASE_CSS = `
   :host {
-    display: block;
+    display: flow-root;
+    position: relative;
+    max-width: 100%;
     font-size: calc(14px * var(--lumiverse-font-scale, 1));
     line-height: 1.65;
     color: var(--lumiverse-text);
@@ -871,6 +880,19 @@ function renderIslandMarkdownText(markdown: string): string {
   return `${leadingWhitespace}${html}${trailingWhitespace}`
 }
 
+function renderIslandInlineMarkdownText(markdown: string): string {
+  const leadingWhitespace = markdown.match(/^\s*/)?.[0] ?? ''
+  const trailingWhitespace = markdown.match(/\s*$/)?.[0] ?? ''
+  const core = markdown.trim()
+
+  if (!core) return markdown
+
+  let html = marked.parseInline(core, { async: false }) as string
+  html = normalizeQuotesInHTML(html)
+
+  return `${leadingWhitespace}${html}${trailingWhitespace}`
+}
+
 function extractHtmlIslands(
   raw: string,
   isStreaming: boolean,
@@ -933,49 +955,12 @@ function extractHtmlIslands(
   return { content, islands }
 }
 
-/**
- * Convert markdown within HTML island text content to rendered HTML.
- * Preserves <style> blocks and HTML tag structure while running text nodes
- * through the full markdown parser, then unwraps single-paragraph results so
- * inline content inside HTML tags stays inline in Shadow DOM.
- */
 function processMarkdownInIsland(html: string): string {
-  // Protect <style> blocks — CSS selectors can contain '>' which breaks tag splitting
-  const styleBlocks: string[] = []
-  const shielded = html.replace(/<style[\s>][\s\S]*?<\/style\s*>/gi, (m) => {
-    styleBlocks.push(m)
-    return `<!--ISLAND_STYLE_${styleBlocks.length - 1}-->`
+  return processMarkdownInHtmlIsland(html, {
+    renderBlockText: renderIslandMarkdownText,
+    renderInlineText: renderIslandInlineMarkdownText,
+    normalizeHtml: normalizeLegacyFontTags,
   })
-
-  // Split into HTML tags (odd indices) and text content (even indices)
-  const parts = shielded.split(/(<[^>]*>)/)
-  let skipDepth = 0
-
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i]
-
-    // HTML tags — track elements whose content should not be processed
-    if (i % 2 === 1) {
-      if (/^<(pre|code|script)\b/i.test(part)) skipDepth++
-      else if (/^<\/(pre|code|script)\b/i.test(part)) skipDepth = Math.max(0, skipDepth - 1)
-      continue
-    }
-
-    // Text content — skip if empty, inside skip element, or a style placeholder
-    if (!part.trim() || skipDepth > 0) continue
-    if (/^<!--ISLAND_STYLE_\d+-->$/.test(part.trim())) continue
-
-    parts[i] = renderIslandMarkdownText(part)
-  }
-
-  let result = parts.join('')
-
-  // Restore <style> blocks
-  for (let i = 0; i < styleBlocks.length; i++) {
-    result = result.replace(`<!--ISLAND_STYLE_${i}-->`, styleBlocks[i])
-  }
-
-  return normalizeLegacyFontTags(result)
 }
 
 interface TrustedYouTubeEmbed {
@@ -1030,7 +1015,7 @@ function extractTrustedYouTubeEmbed(iframeHtml: string): TrustedYouTubeEmbed | n
   if (!src) return null
 
   const rawTitle = (iframe.getAttribute('title') || '').trim()
-  const title = rawTitle.slice(0, 120) || 'YouTube video'
+  const title = rawTitle.slice(0, 120) || i18n.t('messageContent.youtubeVideo', { ns: 'chat' })
   return { src, title }
 }
 
@@ -1047,6 +1032,39 @@ function extractTrustedYouTubeEmbeds(raw: string): { content: string; embeds: Tr
   })
 
   return { content, embeds }
+}
+
+// While streaming, an unclosed <details>/<summary> tag makes the markdown +
+// sanitize pipeline emit a structure where the in-progress block briefly takes
+// up real vertical space. Pre-closing any unbalanced tags keeps the rendered
+// tree stable and avoids a visible height spike followed by a snap back.
+const STREAMING_DETAILS_TAG_RE = /<\/?(details|summary)\b[^>]*>/gi
+
+function balanceStreamingDetails(raw: string): string {
+  if (!raw.includes('<')) return raw
+  const fences = getMarkdownFenceRanges(raw)
+  let openDetails = 0
+  let openSummary = 0
+  let fenceIdx = 0
+  STREAMING_DETAILS_TAG_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = STREAMING_DETAILS_TAG_RE.exec(raw)) !== null) {
+    const pos = match.index
+    while (fenceIdx < fences.length && fences[fenceIdx][1] <= pos) fenceIdx++
+    if (fenceIdx < fences.length && pos >= fences[fenceIdx][0] && pos < fences[fenceIdx][1]) continue
+
+    const isClose = match[0].startsWith('</')
+    const tag = match[1].toLowerCase()
+    if (tag === 'details') openDetails += isClose ? -1 : 1
+    else openSummary += isClose ? -1 : 1
+  }
+
+  if (openDetails <= 0 && openSummary <= 0) return raw
+
+  let suffix = ''
+  if (openSummary > 0) suffix += '</summary>'.repeat(openSummary)
+  if (openDetails > 0) suffix += '</details>'.repeat(openDetails)
+  return raw + suffix
 }
 
 function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] {
@@ -1100,10 +1118,10 @@ function attachCodeCopyHandler(root: HTMLElement | ShadowRoot): () => void {
     copyTextToClipboard(text).then(() => {
       const label = btn.querySelector('span')
       if (label) {
-        label.textContent = 'Copied!'
+        label.textContent = i18n.t('messageContent.copied', { ns: 'chat' })
         btn.classList.add(styles.codeCopied)
         setTimeout(() => {
-          label.textContent = 'Copy'
+          label.textContent = i18n.t('messageContent.copy', { ns: 'chat' })
           btn.classList.remove(styles.codeCopied)
         }, 2000)
       }
@@ -1117,18 +1135,14 @@ function attachCodeCopyHandler(root: HTMLElement | ShadowRoot): () => void {
 }
 
 function notifyMessageContentLayout(el: HTMLElement): void {
-  const dispatch = () => {
-    el.dispatchEvent(new CustomEvent(MESSAGE_CONTENT_LAYOUT_EVENT, { bubbles: true }))
-  }
-
-  dispatch()
-  requestAnimationFrame(() => {
-    dispatch()
-    requestAnimationFrame(dispatch)
-  })
+  // One dispatch is enough. TanStack's ResizeObserver (on the row) plus the
+  // load/error listeners below already catch later size changes. The previous
+  // immediate + 2x rAF triple dispatch fired ~3 events for every shadow-DOM
+  // mutation/row mount and caused a measurement storm during scroll/streaming.
+  el.dispatchEvent(new CustomEvent(MESSAGE_CONTENT_LAYOUT_EVENT, { bubbles: true }))
 }
 
-function IsolatedHtml({ html }: { html: string }) {
+function IsolatedHtml({ html, isStreaming }: { html: string; isStreaming: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
@@ -1144,7 +1158,38 @@ function IsolatedHtml({ html }: { html: string }) {
       shadow.querySelector('style[data-lumi-island-base]')?.remove()
     }
     notifyMessageContentLayout(el)
-    return attachCodeCopyHandler(shadow)
+
+    let pendingRaf = 0
+    const scheduleLayoutNotify = () => {
+      if (pendingRaf) return
+      pendingRaf = requestAnimationFrame(() => {
+        pendingRaf = 0
+        notifyMessageContentLayout(el)
+      })
+    }
+
+    let resizeObserver: ResizeObserver | null = null
+    let mutationObserver: MutationObserver | null = null
+    if (isStreaming) {
+      resizeObserver = new ResizeObserver(scheduleLayoutNotify)
+      resizeObserver.observe(el)
+
+      mutationObserver = new MutationObserver(scheduleLayoutNotify)
+      mutationObserver.observe(shadow, { childList: true, subtree: true, attributes: true, characterData: true })
+    }
+
+    shadow.addEventListener('load', scheduleLayoutNotify, true)
+    shadow.addEventListener('error', scheduleLayoutNotify, true)
+
+    const cleanupCodeCopy = attachCodeCopyHandler(shadow)
+    return () => {
+      cleanupCodeCopy()
+      resizeObserver?.disconnect()
+      mutationObserver?.disconnect()
+      shadow.removeEventListener('load', scheduleLayoutNotify, true)
+      shadow.removeEventListener('error', scheduleLayoutNotify, true)
+      if (pendingRaf) cancelAnimationFrame(pendingRaf)
+    }
   }, [html])
 
   return <div ref={ref} className={styles.htmlIsland} />
@@ -1284,23 +1329,29 @@ export default function MessageContent({
   isUser,
   userName,
   isStreaming = false,
-  lockStreamingHeight = true,
   messageId,
   chatId,
   depth = 0,
+  characterNameOverride,
+  risuAssetMapOverride,
+  disableInterceptors = false,
 }: MessageContentProps) {
+  const { t } = useTranslation('chat')
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const isGroupChat = useStore((s) => s.isGroupChat)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
 
-  const charName = useMemo(
-    () => characters.find((c) => c.id === activeCharacterId)?.name ?? 'Assistant',
-    [characters, activeCharacterId],
+  const fallbackCharName = useMemo(
+    () => characters.find((c) => c.id === activeCharacterId)?.name ?? t('assistantFallback'),
+    [characters, activeCharacterId, t],
   )
+  const charName = characterNameOverride?.trim() || fallbackCharName
 
   // Merge Risu asset maps from active character (and all group members in group chats)
   const risuAssetMap = useMemo(() => {
+    if (risuAssetMapOverride !== undefined) return risuAssetMapOverride
+
     const charIds = isGroupChat && groupCharacterIds.length > 0
       ? groupCharacterIds
       : activeCharacterId ? [activeCharacterId] : []
@@ -1313,21 +1364,25 @@ export default function MessageContent({
       }
     }
     return merged
-  }, [characters, activeCharacterId, isGroupChat, groupCharacterIds])
+  }, [risuAssetMapOverride, characters, activeCharacterId, isGroupChat, groupCharacterIds])
 
   const interceptorRegistryVersion = useSyncExternalStore(
     subscribeTagInterceptorRegistry,
     getTagInterceptorRegistryVersion,
     getTagInterceptorRegistryVersion,
   )
+  const deliveredTagInterceptsRef = useRef(new Set<string>())
   const interceptedMessageTags = useMemo(
-    () => stripMessageTags(content, { messageId, chatId, isUser, isStreaming }),
-    [content, messageId, chatId, isUser, isStreaming, interceptorRegistryVersion],
+    () => disableInterceptors
+      ? { content, intercepts: [] }
+      : stripMessageTags(content, { messageId, chatId, isUser, isStreaming }),
+    [content, messageId, chatId, isUser, isStreaming, interceptorRegistryVersion, disableInterceptors],
   )
 
   useLayoutEffect(() => {
-    dispatchMessageTagIntercepts(interceptedMessageTags.intercepts)
-  }, [interceptedMessageTags.intercepts])
+    if (disableInterceptors || interceptedMessageTags.intercepts.length === 0) return
+    dispatchMessageTagIntercepts(interceptedMessageTags.intercepts, deliveredTagInterceptsRef.current)
+  }, [interceptedMessageTags.intercepts, disableInterceptors])
 
   const interceptorCleanedContent = interceptedMessageTags.content
 
@@ -1356,15 +1411,13 @@ export default function MessageContent({
     [risuResolvedContent, charName, userName],
   )
   const deferredResolvedContent = useDeferredValue(resolvedContent)
-  const renderContent = isStreaming ? deferredResolvedContent : resolvedContent
+  const renderContent = isStreaming ? balanceStreamingDetails(deferredResolvedContent) : resolvedContent
   const blocks = useMemo(() => parseOOC(renderContent), [renderContent])
   const oocEnabled = useStore((s) => s.oocEnabled)
   const lumiaOOCStyle = useStore((s) => s.lumiaOOCStyle)
   const containerRef = useRef<HTMLDivElement>(null)
   const prevTextLenRef = useRef(0)
-  const maxStreamingHeightRef = useRef(0)
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
-  const [streamingMinHeight, setStreamingMinHeight] = useState<number | null>(null)
 
   const handleLightboxClose = useCallback(() => setLightboxSrc(null), [])
 
@@ -1388,32 +1441,101 @@ export default function MessageContent({
   }, [])
 
   useLayoutEffect(() => {
-    if (!isStreaming || !lockStreamingHeight) {
-      maxStreamingHeightRef.current = 0
-      setStreamingMinHeight(null)
-      return
-    }
-
     const container = containerRef.current
     if (!container) return
 
-    const updateMinHeight = () => {
-      const nextHeight = Math.ceil(container.getBoundingClientRect().height)
-      if (nextHeight <= maxStreamingHeightRef.current) return
-      maxStreamingHeightRef.current = nextHeight
-      setStreamingMinHeight(nextHeight)
+    let cancelled = false
+    let pendingRaf = 0
+    const settleTimers: number[] = []
+
+    const scheduleLayoutNotify = () => {
+      if (cancelled || pendingRaf) return
+      pendingRaf = window.requestAnimationFrame(() => {
+        pendingRaf = 0
+        if (cancelled) return
+        notifyMessageContentLayout(container)
+      })
     }
 
-    updateMinHeight()
+    const handleChildLayoutNotify = (event: Event) => {
+      if (event.target === container) return
+      scheduleLayoutNotify()
+    }
 
-    const observer = new ResizeObserver(() => {
-      updateMinHeight()
-    })
+    // MutationObserver and ResizeObserver are only needed while the message
+    // content is actively changing (streaming). For finalized messages they
+    // fire on incidental DOM mutations (hover states, lazy image decode
+    // attribute flips, etc.) and cascade into measureElement calls that are
+    // pure overhead during scroll.
+    let mutationObserver: MutationObserver | null = null
+    let observer: ResizeObserver | null = null
+    if (isStreaming) {
+      observer = new ResizeObserver(scheduleLayoutNotify)
+      observer.observe(container)
 
+      mutationObserver = new MutationObserver(scheduleLayoutNotify)
+      mutationObserver.observe(container, { childList: true, subtree: true, attributes: true, characterData: true })
+    }
+
+    container.addEventListener(MESSAGE_CONTENT_LAYOUT_EVENT, handleChildLayoutNotify)
+    container.addEventListener('load', scheduleLayoutNotify, true)
+    container.addEventListener('error', scheduleLayoutNotify, true)
+
+    scheduleLayoutNotify()
+    for (const delay of [80, 180, 420, 900]) {
+      settleTimers.push(window.setTimeout(scheduleLayoutNotify, delay))
+    }
+    document.fonts?.ready.then(scheduleLayoutNotify).catch(() => {})
+
+    return () => {
+      cancelled = true
+      observer?.disconnect()
+      mutationObserver?.disconnect()
+      container.removeEventListener(MESSAGE_CONTENT_LAYOUT_EVENT, handleChildLayoutNotify)
+      container.removeEventListener('load', scheduleLayoutNotify, true)
+      container.removeEventListener('error', scheduleLayoutNotify, true)
+      if (pendingRaf) window.cancelAnimationFrame(pendingRaf)
+      for (const timer of settleTimers) window.clearTimeout(timer)
+    }
+    // Observers are set up once per mount. DOM mutations, resizes, and child
+    // layout events already notify MessageList via scheduleLayoutNotify(), so
+    // re-creating observers on every renderContent change is unnecessary and
+    // causes observer churn during fast streaming.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // While streaming, ratchet the content container's min-height upward so that
+  // transient DOM shrinkage (unclosed tags snapping shut, image placeholders
+  // collapsing, etc.) cannot make the virtualized row height oscillate. The
+  // lock is applied directly to the DOM to avoid React re-render thrash.
+  useLayoutEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    if (!isStreaming) {
+      container.style.minHeight = ''
+      return
+    }
+
+    // offsetHeight is zoom-invariant under Lumiverse's body-level CSS zoom,
+    // whereas getBoundingClientRect() would return scaled pixels and the lock
+    // would be applied twice.
+    let maxHeight = container.offsetHeight
+    container.style.minHeight = `${maxHeight}px`
+
+    const updateMinHeight = () => {
+      const h = container.offsetHeight
+      if (h > maxHeight) {
+        maxHeight = h
+        container.style.minHeight = `${h}px`
+      }
+    }
+
+    const observer = new ResizeObserver(updateMinHeight)
     observer.observe(container)
-    return () => observer.disconnect()
-  }, [isStreaming, lockStreamingHeight])
 
+    return () => observer.disconnect()
+  }, [isStreaming])
 
   const renderedBlocks = useMemo(() => {
     const elements: React.ReactNode[] = []
@@ -1450,7 +1572,7 @@ export default function MessageContent({
             const piece = pieces[p]
             elements.push(
               piece.type === 'island'
-                ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} />
+                ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} isStreaming={isStreaming} />
                 : piece.type === 'youtubeEmbed'
                   ? <TrustedYouTubeEmbed key={`${i}-youtube-${p}`} embed={piece.embed} />
                 : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} />
@@ -1473,7 +1595,7 @@ export default function MessageContent({
             const piece = pieces[p]
             elements.push(
               piece.type === 'island'
-                ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} />
+                ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} isStreaming={isStreaming} />
                 : piece.type === 'youtubeEmbed'
                   ? <TrustedYouTubeEmbed key={`${i}-youtube-${p}`} embed={piece.embed} />
                 : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} />
@@ -1547,7 +1669,6 @@ export default function MessageContent({
         data-component="MessageContent"
         ref={containerRef}
         className={clsx(styles.content, isUser ? styles.contentUser : styles.contentChar)}
-        style={streamingMinHeight ? { minHeight: `${streamingMinHeight}px` } : undefined}
       >
         {renderedBlocks}
         <SpindleMessageWidgets messageId={messageId} />

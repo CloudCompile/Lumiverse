@@ -189,6 +189,80 @@
   cursor: pointer;
 }
 
+.selectionModeBtn {
+  padding: 4px 9px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.selectionModeBtn:hover,
+.selectionModeBtnActive {
+  border-color: color-mix(in srgb, var(--lumiverse-primary) 35%, var(--lumiverse-border));
+  background: color-mix(in srgb, var(--lumiverse-primary) 10%, transparent);
+  color: var(--lumiverse-primary);
+}
+
+.selectionToolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--lumiverse-border);
+  background: color-mix(in srgb, var(--lumiverse-fill-subtle) 75%, transparent);
+  flex-shrink: 0;
+}
+
+.selectionCount {
+  margin-right: auto;
+  color: var(--lumiverse-text-muted);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+}
+
+.selectionToolbarBtn,
+.selectionToolbarDanger {
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.selectionToolbarBtn {
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text-muted);
+}
+
+.selectionToolbarBtn:hover:not(:disabled) {
+  color: var(--lumiverse-text);
+  border-color: color-mix(in srgb, var(--lumiverse-primary) 25%, var(--lumiverse-border));
+}
+
+.selectionToolbarDanger {
+  border: 1px solid color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 35%, transparent);
+  background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 8%, transparent);
+  color: var(--lumiverse-danger, #e53e3e);
+}
+
+.selectionToolbarDanger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 14%, transparent);
+}
+
+.selectionToolbarBtn:disabled,
+.selectionToolbarDanger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ── Entity list ────────────────────────────────────────────── */
 
 .entityList {
@@ -214,6 +288,11 @@
   border-color: color-mix(in srgb, var(--lumiverse-primary) 30%, var(--lumiverse-border));
 }
 
+.entityCardSelected {
+  border-color: color-mix(in srgb, var(--lumiverse-primary) 52%, var(--lumiverse-border));
+  background: color-mix(in srgb, var(--lumiverse-primary) 6%, transparent);
+}
+
 .entityCardArchived {
   opacity: 0.55;
 }
@@ -230,6 +309,15 @@
 
 .entityHeader:hover {
   background: var(--lumiverse-fill-subtle);
+}
+
+.entitySelectCheckbox {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--lumiverse-primary);
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 /* When card is collapsed (no body), round all corners on header */
@@ -372,6 +460,7 @@
 .entityActions {
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
   padding-top: 4px;
 }
 
@@ -385,10 +474,118 @@
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .dangerBtn:hover {
   background: color-mix(in srgb, var(--lumiverse-danger, #e53e3e) 10%, transparent);
+}
+
+.editBtn {
+  padding: 4px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.editBtn:hover {
+  background: var(--lumiverse-fill-subtle);
+  border-color: var(--lumiverse-text-muted);
+}
+
+.curatedBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: calc(9.5px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--lumiverse-primary) 14%, transparent);
+  color: var(--lumiverse-primary);
+}
+
+.relationActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--lumiverse-border) 50%, transparent);
+}
+
+.addRelationBtn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.addRelationBtn:hover {
+  background: var(--lumiverse-fill-subtle);
+  border-color: var(--lumiverse-text-muted);
+}
+
+.colorEditBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.colorEditBtn:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+}
+
+.colorReattributeSelect {
+  flex: 1;
+  min-width: 0;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  color: var(--lumiverse-text);
+  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.colorReattributeSelect:hover:not(:disabled) {
+  border-color: var(--lumiverse-text-muted);
+}
+
+.colorReattributeSelect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ── Archived section ───────────────────────────────────────── */
@@ -428,10 +625,32 @@
 
 .colorRow {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--lumiverse-border);
+}
+
+.colorRowMain {
+  display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
-  border-top: 1px solid var(--lumiverse-border);
+}
+
+.colorRowReassign {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 24px;
+}
+
+.colorRowReassignLabel {
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  flex-shrink: 0;
 }
 
 .colorSwatch {
@@ -625,6 +844,9 @@
   color: var(--lumiverse-text);
   border-bottom: 1px solid var(--lumiverse-border);
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .drillList {
@@ -1085,6 +1307,10 @@
 
 .salienceBarGraph {
   background: #06b6d4;
+}
+
+.salienceBarFloor {
+  background: #f59e0b;
 }
 
 .salienceBarTooltip {

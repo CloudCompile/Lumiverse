@@ -11,6 +11,7 @@ import {
 import { createPortal } from 'react-dom'
 import { ChevronDown, Search } from 'lucide-react'
 import clsx from 'clsx'
+import { useTranslation } from 'react-i18next'
 import styles from './SearchableSelect.module.css'
 
 export interface SearchableSelectOption {
@@ -20,6 +21,15 @@ export interface SearchableSelectOption {
   /** Optional leading node (avatar, icon, swatch) rendered before the label in both the trigger and the option row. */
   leading?: ReactNode
   disabled?: boolean
+  /** Optional grouping key. Options sharing a group render under a shared header. Empty/undefined folds into "Uncategorized". Headers auto-hide when no option in the group matches the current search. */
+  group?: string
+}
+
+const UNCATEGORIZED_KEY = '__uncategorized__'
+
+function getGroupKey(opt: SearchableSelectOption): string {
+  const trimmed = (opt.group ?? '').trim()
+  return trimmed || UNCATEGORIZED_KEY
 }
 
 type SingleModeProps = {
@@ -51,6 +61,10 @@ type CommonProps = {
   triggerIcon?: ReactNode
   /** Force a specific trigger label (e.g. "+ Add"), ignoring current selection. */
   triggerLabel?: string
+  /** Show the selected option's sublabel as a second line in the trigger (single-select). */
+  showSelectedSublabel?: boolean
+  /** Extra class on the leading slot (trigger + rows). */
+  leadingClassName?: string
   ariaLabel?: string
   /** Render the popover inside document.body (useful for overflow-hidden containers). */
   portal?: boolean
@@ -65,18 +79,22 @@ type CommonProps = {
 type SearchableSelectProps = CommonProps & (SingleModeProps | MultiModeProps)
 
 export default function SearchableSelect(props: SearchableSelectProps) {
+  const { t } = useTranslation('shared', { keyPrefix: 'searchableSelect' })
+
   const {
     options,
-    placeholder = 'Select…',
-    searchPlaceholder = 'Search…',
+    placeholder = t('placeholder'),
+    searchPlaceholder = t('searchPlaceholder'),
     searchThreshold = 8,
-    emptyMessage = 'No options available',
-    noResultsMessage = 'No matches',
+    emptyMessage = t('emptyMessage'),
+    noResultsMessage = t('noResultsMessage'),
     disabled,
     className,
     triggerClassName,
     triggerIcon,
     triggerLabel,
+    showSelectedSublabel,
+    leadingClassName,
     ariaLabel,
     portal = false,
     align = 'left',
@@ -89,21 +107,42 @@ export default function SearchableSelect(props: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
-  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null)
+  const [pos, setPos] = useState<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight: number } | null>(null)
 
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const needle = search.trim().toLowerCase()
+  const hasGroups = useMemo(
+    () => options.some((o) => (o.group ?? '').trim().length > 0),
+    [options],
+  )
   const filtered = useMemo(() => {
-    if (!needle) return options
-    return options.filter(
-      (o) =>
-        o.label.toLowerCase().includes(needle) ||
-        (o.sublabel && o.sublabel.toLowerCase().includes(needle)),
-    )
-  }, [options, needle])
+    const base = needle
+      ? options.filter(
+          (o) =>
+            o.label.toLowerCase().includes(needle) ||
+            (o.sublabel && o.sublabel.toLowerCase().includes(needle)),
+        )
+      : options
+    if (!hasGroups) return base
+    // Group-sort: alphabetize buckets, Uncategorized last. Preserve input order inside each bucket.
+    const buckets = new Map<string, SearchableSelectOption[]>()
+    for (const opt of base) {
+      const key = getGroupKey(opt)
+      const bucket = buckets.get(key)
+      if (bucket) bucket.push(opt)
+      else buckets.set(key, [opt])
+    }
+    const namedKeys = Array.from(buckets.keys())
+      .filter((k) => k !== UNCATEGORIZED_KEY)
+      .sort((a, b) => a.localeCompare(b))
+    const orderedKeys = buckets.has(UNCATEGORIZED_KEY)
+      ? [...namedKeys, UNCATEGORIZED_KEY]
+      : namedKeys
+    return orderedKeys.flatMap((k) => buckets.get(k)!)
+  }, [options, needle, hasGroups])
 
   const isSelected = useCallback(
     (v: string) =>
@@ -119,7 +158,8 @@ export default function SearchableSelect(props: SearchableSelectProps) {
         const next = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v]
         ;(props.onChange as (value: string[]) => void)(next)
       } else {
-        ;(props.onChange as (value: string) => void)(v)
+        // Match native <select>: re-picking the selected option is not a change.
+        if (v !== props.value) (props.onChange as (value: string) => void)(v)
         setOpen(false)
         setSearch('')
       }
@@ -185,14 +225,50 @@ export default function SearchableSelect(props: SearchableSelectProps) {
 
   const reposition = useCallback(() => {
     if (!triggerRef.current) return
+    // `body > *` carries `zoom: var(--lumiverse-ui-scale)` (see theme/reset.css), so
+    // any portaled popover is rendered inside a zoomed layout context. getBoundingClientRect
+    // returns post-zoom (rendered) coords, but the inline `top/left` we set are interpreted
+    // in pre-zoom (layout) space — without compensating, the popover drifts off the trigger
+    // and can slide partly off the viewport at scales >= 1.10.
+    const uiScale = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale'),
+    ) || 1
     const r = triggerRef.current.getBoundingClientRect()
-    const width = Math.max(r.width, minWidth ?? 240)
+    // r.width is rendered; minWidth is specified in design units (pre-zoom).
+    const layoutWidth = Math.max(r.width / uiScale, minWidth ?? 240)
+    const renderedWidth = layoutWidth * uiScale
+    let renderedLeft = align === 'right' ? r.right - renderedWidth : r.left
+    // Clamp horizontally so the popover stays on screen at any UI scale.
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const margin = 8
+    const gap = 4
+    if (renderedLeft + renderedWidth > vw - margin) {
+      renderedLeft = vw - margin - renderedWidth
+    }
+    if (renderedLeft < margin) {
+      renderedLeft = margin
+    }
+    // Flip above when there's more room there, capping height to the available
+    // space. Flipped popovers anchor via `bottom` so a short list hugs the trigger.
+    const desired = maxHeight * uiScale
+    const spaceBelow = vh - r.bottom - margin - gap
+    const spaceAbove = r.top - margin - gap
+    const placeAbove = spaceBelow < desired && spaceAbove > spaceBelow
+    const renderedMaxHeight = Math.max(120, Math.min(desired, placeAbove ? spaceAbove : spaceBelow))
+    // On tiny viewports the 120px floor can exceed spaceAbove; lower the anchor
+    // so the focused search input stays on-screen.
+    const renderedBottom = placeAbove
+      ? Math.min(vh - r.top + gap, Math.max(margin, vh - margin - renderedMaxHeight))
+      : null
     setPos({
-      top: r.bottom + 4,
-      left: align === 'right' ? r.right - width : r.left,
-      width,
+      top: placeAbove ? null : (r.bottom + gap) / uiScale,
+      bottom: renderedBottom === null ? null : renderedBottom / uiScale,
+      left: renderedLeft / uiScale,
+      width: layoutWidth,
+      maxHeight: renderedMaxHeight / uiScale,
     })
-  }, [align, minWidth])
+  }, [align, minWidth, maxHeight])
 
   // Reposition rather than close on scroll/resize: focusing the search input
   // (mobile keyboard opens → viewport resize) or scrollIntoView inside the
@@ -311,9 +387,9 @@ export default function SearchableSelect(props: SearchableSelectProps) {
       role="listbox"
       aria-multiselectable={isMulti || undefined}
       style={{
-        maxHeight,
+        maxHeight: portal && pos ? pos.maxHeight : maxHeight,
         ...(portal && pos
-          ? { top: pos.top, left: pos.left, width: pos.width }
+          ? { top: pos.top ?? 'auto', bottom: pos.bottom ?? 'auto', left: pos.left, width: pos.width }
           : {}),
       }}
     >
@@ -344,7 +420,7 @@ export default function SearchableSelect(props: SearchableSelectProps) {
             onClick={clearValue}
           >
             <span className={styles.optionCheck}>{props.value === '' ? '✓' : ''}</span>
-            <span className={styles.optionLabel}>{props.clearLabel ?? 'None'}</span>
+            <span className={styles.optionLabel}>{props.clearLabel ?? t('clear')}</span>
           </button>
         )}
         {filtered.length === 0 ? (
@@ -352,40 +428,64 @@ export default function SearchableSelect(props: SearchableSelectProps) {
             {options.length === 0 ? emptyMessage : noResultsMessage}
           </div>
         ) : (
-          filtered.map((opt, i) => {
-            const selected = isSelected(opt.value)
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                data-opt-idx={i}
-                disabled={opt.disabled}
-                className={clsx(
-                  styles.option,
-                  selected && styles.optionActive,
-                  i === activeIdx && styles.optionHover,
-                  opt.disabled && styles.optionDisabled,
-                )}
-                onClick={() => !opt.disabled && toggleValue(opt.value)}
-                onMouseEnter={() => setActiveIdx(i)}
-                role="option"
-                aria-selected={selected}
-              >
-                <span className={styles.optionCheck}>{selected ? '✓' : ''}</span>
-                {opt.leading && (
-                  <span className={styles.optionLeading} aria-hidden>
-                    {opt.leading}
-                  </span>
-                )}
-                <span className={styles.optionTextWrap}>
-                  <span className={styles.optionLabel}>{opt.label}</span>
-                  {opt.sublabel && (
-                    <span className={styles.optionSublabel}>{opt.sublabel}</span>
+          (() => {
+            let lastGroupKey: string | null = null
+            const nodes: ReactNode[] = []
+            filtered.forEach((opt, i) => {
+              if (hasGroups) {
+                const key = getGroupKey(opt)
+                if (key !== lastGroupKey) {
+                  const headerLabel = key === UNCATEGORIZED_KEY
+                    ? t('uncategorized')
+                    : (opt.group ?? '').trim()
+                  nodes.push(
+                    <div
+                      key={`__group__${key}`}
+                      className={styles.optionGroupHeader}
+                      role="presentation"
+                      aria-hidden
+                    >
+                      {headerLabel}
+                    </div>,
+                  )
+                  lastGroupKey = key
+                }
+              }
+              const selected = isSelected(opt.value)
+              nodes.push(
+                <button
+                  key={opt.value}
+                  type="button"
+                  data-opt-idx={i}
+                  disabled={opt.disabled}
+                  className={clsx(
+                    styles.option,
+                    selected && styles.optionActive,
+                    i === activeIdx && styles.optionHover,
+                    opt.disabled && styles.optionDisabled,
                   )}
-                </span>
-              </button>
-            )
-          })
+                  onClick={() => !opt.disabled && toggleValue(opt.value)}
+                  onMouseEnter={() => setActiveIdx(i)}
+                  role="option"
+                  aria-selected={selected}
+                >
+                  <span className={styles.optionCheck}>{selected ? '✓' : ''}</span>
+                  {opt.leading && (
+                    <span className={clsx(styles.optionLeading, leadingClassName)} aria-hidden>
+                      {opt.leading}
+                    </span>
+                  )}
+                  <span className={styles.optionTextWrap}>
+                    <span className={styles.optionLabel}>{opt.label}</span>
+                    {opt.sublabel && (
+                      <span className={styles.optionSublabel}>{opt.sublabel}</span>
+                    )}
+                  </span>
+                </button>,
+              )
+            })
+            return nodes
+          })()
         )}
       </div>
     </div>
@@ -411,18 +511,25 @@ export default function SearchableSelect(props: SearchableSelectProps) {
       >
         {triggerIcon && <span className={styles.triggerIcon}>{triggerIcon}</span>}
         {selectedOption?.leading && triggerLabel === undefined && (
-          <span className={styles.triggerLeading} aria-hidden>
+          <span className={clsx(styles.triggerLeading, leadingClassName)} aria-hidden>
             {selectedOption.leading}
           </span>
         )}
-        <span
-          className={clsx(
-            styles.triggerLabel,
-            label.isPlaceholder && styles.triggerPlaceholder,
-          )}
-        >
-          {label.text}
-        </span>
+        {showSelectedSublabel && !isMulti && triggerLabel === undefined && selectedOption?.sublabel && !label.isPlaceholder ? (
+          <span className={styles.triggerTextWrap}>
+            <span className={styles.triggerName}>{label.text}</span>
+            <span className={styles.triggerSublabel}>{selectedOption.sublabel}</span>
+          </span>
+        ) : (
+          <span
+            className={clsx(
+              styles.triggerLabel,
+              label.isPlaceholder && styles.triggerPlaceholder,
+            )}
+          >
+            {label.text}
+          </span>
+        )}
         <ChevronDown
           size={12}
           className={clsx(styles.chevron, open && styles.chevronOpen)}

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChevronDown, Plus, Package } from 'lucide-react'
 import type { Pack } from '@/types/api'
 import clsx from 'clsx'
@@ -12,6 +13,7 @@ interface PackDropdownProps {
 }
 
 export default function PackDropdown({ packs, selectedPackId, onSelect, onCreateNew }: PackDropdownProps) {
+  const { t } = useTranslation('panels')
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -38,7 +40,7 @@ export default function PackDropdown({ packs, selectedPackId, onSelect, onCreate
       >
         <Package size={12} />
         <span className={clsx(styles.triggerLabel, !selectedPack && styles.triggerPlaceholder)}>
-          {selectedPack?.name || 'Select pack...'}
+          {selectedPack?.name || t('creatorWorkshop.packDropdown.selectPack')}
         </span>
         <span className={clsx(styles.triggerChevron, open && styles.triggerChevronOpen)}>
           <ChevronDown size={12} />
@@ -50,7 +52,7 @@ export default function PackDropdown({ packs, selectedPackId, onSelect, onCreate
           {packs.length > 5 && (
             <input
               className={styles.searchInput}
-              placeholder="Search packs..."
+              placeholder={t('creatorWorkshop.packDropdown.searchPacks')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               autoFocus
@@ -79,7 +81,7 @@ export default function PackDropdown({ packs, selectedPackId, onSelect, onCreate
               setSearch('')
             }}
           >
-            <Plus size={12} /> Create new pack...
+            <Plus size={12} /> {t('creatorWorkshop.packDropdown.createNewPack')}
           </button>
         </div>
       )}

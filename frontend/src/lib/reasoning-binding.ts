@@ -39,7 +39,7 @@ const ANTHROPIC_EFFORTS: EffortOption[] = [
   { value: 'max', label: 'Max' },
 ]
 
-const ANTHROPIC_OPUS_47_EFFORTS: EffortOption[] = [
+const ANTHROPIC_OPUS_XHIGH_EFFORTS: EffortOption[] = [
   { value: 'auto', label: 'Auto' },
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
@@ -49,6 +49,19 @@ const ANTHROPIC_OPUS_47_EFFORTS: EffortOption[] = [
 ]
 
 const NANOGPT_EFFORTS: EffortOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'none', label: 'None (disabled)' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+]
+
+// Amazon Bedrock's OpenAI-compatible endpoint exposes a single `reasoning_effort`
+// string (none/minimal/low/medium/high) that it maps to each model family's
+// native mechanism — gpt-oss reasoning, Claude thinking.budget_tokens / adaptive
+// thinking, etc. — so one flat list covers every Bedrock model.
+const BEDROCK_EFFORTS: EffortOption[] = [
   { value: 'auto', label: 'Auto' },
   { value: 'none', label: 'None (disabled)' },
   { value: 'minimal', label: 'Minimal' },
@@ -85,9 +98,11 @@ export function getEffortOptions(provider: string | null | undefined, model: str
     case 'google_vertex':
       return GOOGLE_EFFORTS
     case 'anthropic':
-      return model && /claude-opus-4[-.]7/i.test(model) ? ANTHROPIC_OPUS_47_EFFORTS : ANTHROPIC_EFFORTS
+      return model && /claude-opus-4[-.](7|8)/i.test(model) ? ANTHROPIC_OPUS_XHIGH_EFFORTS : ANTHROPIC_EFFORTS
     case 'nanogpt':
       return NANOGPT_EFFORTS
+    case 'bedrock':
+      return BEDROCK_EFFORTS
     case 'moonshot':
     case 'zai':
       return TOGGLE_ONLY_EFFORTS
@@ -164,7 +179,7 @@ export function getReasoningPresetLabel(settings: ReasoningSettings): string | n
   ))?.label ?? null
 }
 
-export function getReasoningBindingSummary(settings: ReasoningSettings): string {
+export function getReasoningBindingSummary(settings: ReasoningSettings, promptBias?: string | null): string {
   const parts: string[] = []
   const presetLabel = getReasoningPresetLabel(settings)
 
@@ -176,25 +191,33 @@ export function getReasoningBindingSummary(settings: ReasoningSettings): string 
   }
 
   if (settings.keepInHistory === -1) {
-    parts.push('keep all history')
+    parts.push('keep all prompt history')
   } else if (settings.keepInHistory === 0) {
-    parts.push('strip history')
+    parts.push('strip prompt history')
   } else {
-    parts.push(`keep ${settings.keepInHistory} history`)
+    parts.push(`keep ${settings.keepInHistory} prompt blocks`)
   }
 
   if (!settings.autoParse) parts.push('manual parse')
   if (settings.thinkingDisplay !== 'auto') parts.push(`display ${settings.thinkingDisplay}`)
 
+  if (typeof promptBias === 'string') {
+    parts.push(promptBias.trim() ? `prefill ${formatTagValue(promptBias)}` : 'no prefill')
+  }
+
   return parts.join(' · ')
 }
 
-export function getReasoningBindingTitle(settings: ReasoningSettings): string {
-  return [
-    getReasoningBindingSummary(settings),
+export function getReasoningBindingTitle(settings: ReasoningSettings, promptBias?: string | null): string {
+  const lines = [
+    getReasoningBindingSummary(settings, promptBias),
     `Prefix: ${formatTagValue(settings.prefix)}`,
     `Suffix: ${formatTagValue(settings.suffix)}`,
-  ].join('\n')
+  ]
+  if (typeof promptBias === 'string') {
+    lines.push(`Start Reply With: ${formatTagValue(promptBias)}`)
+  }
+  return lines.join('\n')
 }
 
 export function areReasoningSettingsEqual(a: ReasoningSettings, b: ReasoningSettings): boolean {

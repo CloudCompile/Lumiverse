@@ -1,18 +1,25 @@
 .content {
+  position: relative;
   font-size: calc(14px * var(--lumiverse-font-scale, 1));
   line-height: 1.65;
   color: var(--lumiverse-text);
   word-wrap: break-word;
   overflow-wrap: break-word;
+  display: flow-root;
 }
 
 .contentUser {
-  opacity: 0.9;
 }
 
 .contentChar {}
 
 /* Prevent browser-generated quote marks on <q> wrappers */
+.prose {
+  display: flow-root;
+  position: relative;
+  max-width: 100%;
+}
+
 .prose q {
   quotes: none;
 }
@@ -371,8 +378,11 @@
 
 .proseImageWrap:hover {
   border-color: var(--lumiverse-primary-040, rgba(140, 130, 255, 0.4));
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
   transform: scale(1.02);
+}
+
+:global([data-glass]) .proseImageWrap:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
 }
 
 .proseImage,
@@ -474,7 +484,9 @@
 
 /* ── HTML Islands (Shadow DOM isolated content) ── */
 .htmlIsland {
-  display: block;
+  display: flow-root;
+  position: relative;
+  max-width: 100%;
   margin: 8px 0;
   border-radius: var(--lcs-radius-sm);
   overflow: hidden;
@@ -500,4 +512,19 @@
 /* ── Chunk fade for streaming ── */
 .chunkFade {
   animation: lcs-chunk-fade 180ms ease-out both;
+}
+
+/* ── Scroll-time CSS suppression ── */
+:global([data-scrolling]) .codeBlock {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+:global([data-component='ChatView'][data-streaming]) .codeBlock {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+:global([data-scrolling]) .proseImageWrap {
+  transition: none !important;
 }

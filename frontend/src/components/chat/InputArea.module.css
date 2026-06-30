@@ -9,22 +9,16 @@
   left: 12px;
   right: 12px;
   z-index: 20;
-  background: var(--lumiverse-bg, rgba(28, 24, 38, 0.95));
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--lcs-glass-bg) 78%, var(--lumiverse-bg-elevated) 22%),
-    color-mix(in srgb, var(--lcs-glass-bg) 70%, var(--lumiverse-bg) 30%)
-  );
-  border: 1px solid var(--lcs-glass-border);
+  background: var(--lumiverse-bg-elevated, rgba(28, 24, 38, 0.95));
+  border: 1px solid var(--lumiverse-border);
   border-radius: var(--lcs-radius, 14px);
   overflow: hidden;
   isolation: isolate;
   contain: layout style paint;
-  box-shadow:
-    0 14px 34px var(--lumiverse-fill-heavy),
-    var(--lumiverse-highlight-inset),
-    inset 0 -1px 0 var(--lcs-glass-border);
+  box-shadow: 0 4px 16px var(--lumiverse-fill-heavy);
   transition:
+    opacity 180ms ease,
+    transform 180ms ease,
     background var(--lcs-transition, 220ms cubic-bezier(0.4, 0, 0.2, 1)),
     border-color var(--lcs-transition, 220ms cubic-bezier(0.4, 0, 0.2, 1)),
     box-shadow var(--lcs-transition, 220ms cubic-bezier(0.4, 0, 0.2, 1)),
@@ -41,9 +35,30 @@
   padding-bottom: calc(10px + max(0px, env(safe-area-inset-bottom, 0px) - var(--app-keyboard-inset-bottom, 0px)));
 }
 
+:global(html[data-pwa]:not([data-ios-pwa])) .container {
+  /* Chromium/Android PWA: .app is now edge-to-edge (no bottom padding), so
+     pin the bar's glass to the screen edge and lift only its content above
+     the gesture nav bar. Unlike iOS, Android sets
+     interactive-widget=resizes-content (see main.tsx), so the dvh-sized
+     shell shrinks above the keyboard and the bar rides up on its own — no
+     --app-keyboard-inset-bottom lift needed. env(safe-area-inset-bottom)
+     collapses to 0 when the keyboard hides the nav bar. */
+  bottom: 0;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+}
+
 :global([data-glass]) .container {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--lcs-glass-bg) 78%, var(--lumiverse-bg-elevated) 22%),
+    color-mix(in srgb, var(--lcs-glass-bg) 70%, var(--lumiverse-bg) 30%)
+  );
+  border-color: var(--lcs-glass-border);
   backdrop-filter: blur(var(--lcs-glass-blur));
-  will-change: backdrop-filter;
+  box-shadow:
+    0 14px 34px var(--lumiverse-fill-heavy),
+    var(--lumiverse-highlight-inset),
+    inset 0 -1px 0 var(--lcs-glass-border);
 }
 
 .container::before {
@@ -75,6 +90,26 @@
 .container > * {
   position: relative;
   z-index: 1;
+}
+
+/* ── Drag-and-drop overlay ── */
+.dropOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+  border-radius: inherit;
+  border: 1.5px dashed var(--lumiverse-primary, rgba(140, 120, 240, 0.9));
+  background: color-mix(in srgb, var(--lumiverse-primary-020, rgba(140, 120, 240, 0.2)) 60%, var(--lumiverse-bg, rgba(28, 24, 38, 0.95)) 40%);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  font-size: 13px;
+  font-weight: 600;
+  backdrop-filter: blur(2px);
 }
 
 /* ── Action bar — regenerate / continue / stop ── */
@@ -147,23 +182,6 @@
   color: var(--lumiverse-primary-contrast, #fff);
   margin-left: 2px;
 }
-
-.guidePills {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.guidePill {
-  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
-  border-radius: 999px;
-  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04));
-  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.65));
-  font-size: calc(11px * var(--lumiverse-font-scale, 1));
-  padding: 2px 8px;
-  cursor: pointer;
-}
-
 
 .popoverSlot {
   display: grid;
@@ -492,6 +510,30 @@
   cursor: default;
 }
 
+.sttBtnActive {
+  color: var(--lumiverse-primary-contrast, #fff);
+  background: color-mix(in srgb, var(--lumiverse-danger, #ef4444) 82%, transparent);
+}
+
+.sttBtnActive:hover {
+  color: var(--lumiverse-primary-contrast, #fff);
+  background: color-mix(in srgb, var(--lumiverse-danger-hover, #dc2626) 88%, transparent);
+}
+
+.sttSpinner {
+  animation: stt-spin 1s linear infinite;
+}
+
+@keyframes stt-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ── Input row — textarea + send button ── */
 .inputRow {
   display: flex;
@@ -514,6 +556,114 @@
     box-shadow var(--lcs-transition, 220ms cubic-bezier(0.4, 0, 0.2, 1));
   overflow: hidden;
   position: relative;
+}
+
+.sttRecordingPanel {
+  width: 100%;
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: minmax(96px, 0.72fr) minmax(120px, 1.3fr) minmax(112px, 0.72fr);
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--lumiverse-danger, #ef4444) 24%, transparent);
+  border-radius: var(--lcs-radius, 14px);
+  background:
+    radial-gradient(circle at var(--stt-glow-x, 14%) 50%, color-mix(in srgb, var(--lumiverse-danger, #ef4444) 30%, transparent), transparent 46%),
+    linear-gradient(135deg, color-mix(in srgb, var(--lumiverse-danger, #ef4444) 16%, var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04))), color-mix(in srgb, var(--lumiverse-primary, #8c82ff) 9%, var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.04))));
+  color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 10%, transparent),
+    0 0 var(--stt-glow-size, 11px) color-mix(in srgb, var(--lumiverse-danger, #ef4444) 16%, transparent);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease,
+    background 120ms ease;
+}
+
+.sttRecordingPanel:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--lumiverse-danger, #ef4444) 34%, transparent);
+  transform: translateY(-1px);
+}
+
+.sttRecordingPanel:disabled {
+  cursor: progress;
+}
+
+.sttIndicatorProcessing {
+  opacity: 0.82;
+}
+
+.sttRecordingStatus,
+.sttRecordingHint {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  line-height: 1.2;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.sttRecordingStatus {
+  justify-content: flex-start;
+}
+
+.sttRecordingHint {
+  justify-content: flex-end;
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.55));
+  font-weight: 600;
+}
+
+.sttRecordingWave {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  height: 44px;
+  min-width: 0;
+}
+
+.sttIndicatorBar {
+  flex: 1 1 0;
+  max-width: 7px;
+  min-width: 3px;
+  height: var(--stt-bar-height, 5px);
+  min-height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 34%, var(--lumiverse-danger, #ef4444) 66%),
+    color-mix(in srgb, var(--lumiverse-danger, #ef4444) 74%, var(--lumiverse-primary, #8c82ff) 26%)
+  );
+  box-shadow: 0 0 8px color-mix(in srgb, var(--lumiverse-danger, #ef4444) 30%, transparent);
+  transform-origin: center bottom;
+  animation: stt-wave 1100ms ease-in-out infinite;
+  animation-delay: var(--stt-bar-delay, 0ms);
+  transition: height 80ms linear, opacity 80ms linear, filter 80ms linear;
+}
+
+.sttIndicatorReactive .sttIndicatorBar {
+  animation: none;
+  opacity: var(--stt-bar-opacity, 0.55);
+  filter: saturate(var(--stt-bar-saturate, 1));
+}
+
+@keyframes stt-wave {
+  0%, 100% {
+    transform: scaleY(0.55);
+    opacity: 0.48;
+  }
+
+  50% {
+    transform: scaleY(1.05);
+    opacity: 1;
+  }
 }
 
 /* Mirror layer that renders @mention pills behind the (transparent) textarea.
@@ -672,6 +822,17 @@
 }
 
 /* ── Send / Stop button ── */
+.sendBtnShell {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  width: 40px;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .sendBtn {
   display: flex;
   align-items: center;
@@ -684,12 +845,19 @@
   color: var(--lumiverse-primary-contrast, #fff);
   cursor: pointer;
   flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
   transition:
     background var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1)),
     transform var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1)),
-    opacity var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1));
+    opacity var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1)),
+    box-shadow var(--lcs-transition-fast, 120ms cubic-bezier(0.4, 0, 0.2, 1));
   font-size: calc(16px * var(--lumiverse-font-scale, 1));
   padding: 0;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
 }
 
 .sendBtn:hover {
@@ -707,12 +875,128 @@
   transform: none;
 }
 
+.sendBtnIcon {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sendBtnSpinner {
+  animation: stt-spin 0.9s linear infinite;
+}
+
+.sendBtnHoldTracking {
+  background: color-mix(in srgb, var(--lumiverse-primary, rgba(140, 130, 255, 0.9)) 82%, var(--lumiverse-info, #42a5f5) 18%);
+}
+
+.sendBtnHoldTracking::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, white 24%, transparent),
+    color-mix(in srgb, var(--lumiverse-info, #42a5f5) 68%, transparent)
+  );
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: send-btn-hold-fill var(--send-btn-hold-duration, 900ms) linear forwards;
+  opacity: 0.28;
+  z-index: 0;
+}
+
+.sendBtnHoldReady {
+  background: color-mix(in srgb, var(--lumiverse-success, #22c55e) 78%, var(--lumiverse-primary, rgba(140, 130, 255, 0.9)) 22%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lumiverse-success, #22c55e) 38%, transparent);
+  animation: send-btn-ready-pulse 1050ms ease-in-out infinite;
+}
+
+.sendBtnQueueing {
+  background: color-mix(in srgb, var(--lumiverse-success, #22c55e) 84%, black 16%);
+}
+
 .sendBtnStop {
   background: var(--lumiverse-danger, #ef4444);
 }
 
 .sendBtnStop:hover {
   background: var(--lumiverse-danger-hover, #dc2626);
+}
+
+.mobileQueueHint {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: max-content;
+  max-width: min(210px, calc(100vw - 40px));
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lumiverse-fill, rgba(15, 23, 42, 0.94)) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lumiverse-border, rgba(255, 255, 255, 0.12)) 82%, transparent);
+  color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 color-mix(in srgb, white 10%, transparent);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-align: center;
+  line-height: 1.15;
+  white-space: normal;
+  pointer-events: none;
+  z-index: 2;
+  animation: mobile-queue-hint-enter 160ms ease;
+}
+
+.mobileQueueHintHolding {
+  border-color: color-mix(in srgb, var(--lumiverse-primary, rgba(140, 130, 255, 0.9)) 42%, transparent);
+}
+
+.mobileQueueHintReady {
+  border-color: color-mix(in srgb, var(--lumiverse-success, #22c55e) 55%, transparent);
+  color: color-mix(in srgb, var(--lumiverse-success, #22c55e) 88%, white 12%);
+}
+
+.mobileQueueHintQueueing {
+  border-color: color-mix(in srgb, var(--lumiverse-success, #22c55e) 46%, transparent);
+  color: color-mix(in srgb, var(--lumiverse-success, #22c55e) 82%, white 18%);
+}
+
+@keyframes send-btn-hold-fill {
+  from {
+    transform: scaleX(0);
+  }
+
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes send-btn-ready-pulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.04);
+  }
+}
+
+@keyframes mobile-queue-hint-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* ── Extras popover ── */
@@ -786,9 +1070,23 @@
     padding: 6px 10px 8px;
   }
 
+  .actionBar {
+    gap: 1px;
+    padding: 0;
+  }
+
+  .actionBtn {
+    width: 28px;
+  }
+
   :global(html[data-ios-pwa]) .container {
     bottom: var(--app-keyboard-inset-bottom, 0px);
     padding-bottom: calc(8px + max(0px, env(safe-area-inset-bottom, 0px) - var(--app-keyboard-inset-bottom, 0px)));
+  }
+
+  :global(html[data-pwa]:not([data-ios-pwa])) .container {
+    bottom: 0;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   }
 
   /* Prevent iOS Safari auto-zoom on input focus (triggers when font-size < 16px).
@@ -802,5 +1100,25 @@
 
   .inputRow {
     gap: 4px;
+  }
+
+  .sttRecordingPanel {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    min-height: 86px;
+    padding: 10px 12px;
+  }
+
+  .sttRecordingStatus,
+  .sttRecordingHint {
+    justify-content: center;
+  }
+
+  .sttRecordingHint {
+    font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  }
+
+  .sttRecordingWave {
+    height: 38px;
   }
 }

@@ -1,11 +1,13 @@
 import type { StateCreator } from 'zustand'
 import type { SpindlePlacementSlice } from '@/types/store'
 import type { SpindleDockEdge } from 'lumiverse-spindle-types'
+import type { TabLocation } from '@/lib/spindle/tab-mobility-types'
 
 // ── Capacity limits ──
 
 const PLACEMENT_LIMITS = {
   drawerTabs: { perExtension: 4, global: 8 },
+  characterEditorTabs: { perExtension: 4, global: 8 },
   floatWidgets: { perExtension: 2, global: 8 },
   dockPanels: { perExtensionPerEdge: 1, globalPerEdge: 2 },
   appMounts: { perExtension: 1, global: 4 },
@@ -29,6 +31,13 @@ export interface DrawerTabState {
   iconUrl?: string
   iconSvg?: string
   badge: string | null
+  root: HTMLElement
+}
+
+export interface CharacterEditorTabState {
+  id: string
+  extensionId: string
+  title: string
   root: HTMLElement
 }
 
@@ -72,7 +81,7 @@ export interface AppMountState {
   extensionId: string
   root: HTMLElement
   className?: string
-  position: 'start' | 'end'
+  position: 'start' | 'end' | 'app-overlay'
   visible: boolean
 }
 
@@ -121,12 +130,17 @@ function saveHiddenPlacements(ids: string[]) {
 
 export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = (set, get) => ({
   drawerTabs: [],
+  characterEditorTabs: [],
   floatWidgets: [],
   dockPanels: [],
   appMounts: [],
   inputBarActions: [],
   extensionCommands: [],
   hiddenPlacements: loadHiddenPlacements(),
+
+  // ── Tab Mobility ──
+  tabLocations: {},
+  pendingActiveTabReset: null,
 
   // ── Drawer Tabs ──
 
@@ -151,6 +165,34 @@ export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = 
   updateDrawerTab: (tabId: string, updates: Partial<Pick<DrawerTabState, 'title' | 'shortName' | 'badge'>>) => {
     set((state) => ({
       drawerTabs: state.drawerTabs.map((t) =>
+        t.id === tabId ? { ...t, ...updates } : t
+      ),
+    }))
+  },
+
+  // ── Character Editor Tabs ──
+
+  registerCharacterEditorTab: (tab: CharacterEditorTabState) => {
+    const state = get()
+    const extCount = state.characterEditorTabs.filter((t) => t.extensionId === tab.extensionId).length
+    if (extCount >= PLACEMENT_LIMITS.characterEditorTabs.perExtension) {
+      throw new Error(`Character editor tab limit reached (max ${PLACEMENT_LIMITS.characterEditorTabs.perExtension} per extension)`)
+    }
+    if (state.characterEditorTabs.length >= PLACEMENT_LIMITS.characterEditorTabs.global) {
+      throw new Error(`Global character editor tab limit reached (max ${PLACEMENT_LIMITS.characterEditorTabs.global})`)
+    }
+    set({ characterEditorTabs: [...state.characterEditorTabs, tab] })
+  },
+
+  unregisterCharacterEditorTab: (tabId: string) => {
+    set((state) => ({
+      characterEditorTabs: state.characterEditorTabs.filter((t) => t.id !== tabId),
+    }))
+  },
+
+  updateCharacterEditorTab: (tabId: string, updates: Partial<Pick<CharacterEditorTabState, 'title'>>) => {
+    set((state) => ({
+      characterEditorTabs: state.characterEditorTabs.map((t) =>
         t.id === tabId ? { ...t, ...updates } : t
       ),
     }))
@@ -294,6 +336,7 @@ export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = 
   removeAllByExtension: (extensionId: string) => {
     set((state) => ({
       drawerTabs: state.drawerTabs.filter((t) => t.extensionId !== extensionId),
+      characterEditorTabs: state.characterEditorTabs.filter((t) => t.extensionId !== extensionId),
       floatWidgets: state.floatWidgets.filter((w) => w.extensionId !== extensionId),
       dockPanels: state.dockPanels.filter((p) => p.extensionId !== extensionId),
       appMounts: state.appMounts.filter((m) => m.extensionId !== extensionId),
@@ -332,6 +375,7 @@ export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = 
   hideAllPlacements: () => {
     const state = get()
     const allIds = [
+      ...state.drawerTabs.map((t) => t.id),
       ...state.floatWidgets.map((w) => w.id),
       ...state.dockPanels.map((p) => p.id),
       ...state.appMounts.map((m) => m.id),
@@ -339,4 +383,22 @@ export const createSpindlePlacementSlice: StateCreator<SpindlePlacementSlice> = 
     saveHiddenPlacements(allIds)
     set({ hiddenPlacements: allIds })
   },
+
+  // ── Tab Mobility Actions ──
+
+  moveTabTo: (tabId: string, location: TabLocation) => {
+    set((state) => {
+      const next = { ...state.tabLocations, [tabId]: location }
+
+      // Signal ViewportDrawer to reset active tab when the moved tab leaves main-drawer
+      let pendingActiveTabReset = state.pendingActiveTabReset
+      if (location.kind !== 'main-drawer') {
+        pendingActiveTabReset = tabId
+      }
+
+      return { tabLocations: next, pendingActiveTabReset }
+    })
+  },
+
+  clearPendingActiveTabReset: () => set({ pendingActiveTabReset: null }),
 })

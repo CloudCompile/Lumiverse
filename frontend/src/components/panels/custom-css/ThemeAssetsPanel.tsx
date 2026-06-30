@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, Copy, FileImage, Link2, Loader2, Save, Trash2, Upload } from 'lucide-react'
 import LazyImage from '@/components/shared/LazyImage'
+import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { themeAssetsApi } from '@/api/theme-assets'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { toThemeAssetRelativePath } from '@/lib/themeAssetCss'
 import { toast } from '@/lib/toast'
+import i18n from '@/i18n'
 import type { ThemeAsset } from '@/types/api'
 import styles from './ThemeAssetsPanel.module.css'
 import clsx from 'clsx'
@@ -34,7 +37,7 @@ function guessFontFormat(asset: ThemeAsset): string {
 }
 
 function guessFontFamily(asset: ThemeAsset): string {
-  const stem = asset.original_filename.replace(/\.[^.]+$/, '') || 'Theme Font'
+  const stem = asset.original_filename.replace(/\.[^.]+$/, '') || i18n.t('panels:customCssPanel.themeAssets.themeFontFallback')
   return stem
     .replace(/[_-]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -58,10 +61,12 @@ function ThemeAssetRow({
   onDeleted: (id: string) => void
   onInsertReference: (text: string) => void
 }) {
+  const { t } = useTranslation('panels', { keyPrefix: 'customCssPanel.themeAssets' })
   const [slug, setSlug] = useState(asset.slug)
   const [tags, setTags] = useState(asset.tags.join(', '))
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [optimizing, setOptimizing] = useState(false)
 
   useEffect(() => {
@@ -83,39 +88,40 @@ function ThemeAssetRow({
         tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
       })
       onChanged(updated)
-      toast.success('Theme asset updated')
+      toast.success(t('toast.updated'))
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to update theme asset')
+      toast.error(err?.body?.error || err?.message || t('toast.updateFailed'))
     } finally {
       setSaving(false)
     }
-  }, [asset.id, onChanged, slug, tags])
+  }, [asset.id, onChanged, slug, tags, t])
 
   const handleDelete = useCallback(async () => {
+    setConfirmDelete(false)
     setDeleting(true)
     try {
       await themeAssetsApi.delete(asset.id)
       onDeleted(asset.id)
-      toast.info('Theme asset deleted')
+      toast.info(t('toast.deleted'))
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to delete theme asset')
+      toast.error(err?.body?.error || err?.message || t('toast.deleteFailed'))
     } finally {
       setDeleting(false)
     }
-  }, [asset.id, onDeleted])
+  }, [asset.id, onDeleted, t])
 
   const handleOptimizeWebp = useCallback(async () => {
     setOptimizing(true)
     try {
       const updated = await themeAssetsApi.optimizeWebp(asset.id)
       onChanged(updated)
-      toast.success('Theme asset optimized to WebP')
+      toast.success(t('toast.optimized'))
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to optimize theme asset')
+      toast.error(err?.body?.error || err?.message || t('toast.optimizeFailed'))
     } finally {
       setOptimizing(false)
     }
-  }, [asset.id, onChanged])
+  }, [asset.id, onChanged, t])
 
   return (
     <div className={styles.assetCard}>
@@ -146,22 +152,22 @@ function ThemeAssetRow({
           />
           <div className={styles.assetMeta}>
             <label className={styles.assetLabel}>
-              Slug
+              {t('slug')}
               <input className={styles.assetInput} value={slug} onChange={(e) => setSlug(e.target.value)} />
             </label>
             <label className={styles.assetLabel}>
-              Tags
-              <input className={styles.assetInput} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="bg, icon, texture" />
+              {t('tags')}
+              <input className={styles.assetInput} value={tags} onChange={(e) => setTags(e.target.value)} placeholder={t('tagsPlaceholder')} />
             </label>
             <div className={styles.assetActions}>
-              <button type="button" className={styles.assetBtn} onClick={() => copyTextToClipboard(relativePath).then(() => toast.success('Relative path copied')).catch(() => toast.error('Failed to copy relative path'))}>
-                <Copy size={12} /> Path
+              <button type="button" className={styles.assetBtn} onClick={() => copyTextToClipboard(relativePath).then(() => toast.success(t('toast.pathCopied'))).catch(() => toast.error(t('toast.pathCopyFailed')))}>
+                <Copy size={12} /> {t('path')}
               </button>
-              <button type="button" className={styles.assetBtn} onClick={() => copyTextToClipboard(previewUrl).then(() => toast.success('Resolved URL copied')).catch(() => toast.error('Failed to copy URL'))}>
-                <Link2 size={12} /> URL
+              <button type="button" className={styles.assetBtn} onClick={() => copyTextToClipboard(previewUrl).then(() => toast.success(t('toast.urlCopied'))).catch(() => toast.error(t('toast.urlCopyFailed')))}>
+                <Link2 size={12} /> {t('url')}
               </button>
               <button type="button" className={styles.assetBtn} onClick={() => onInsertReference(`url("${relativePath}")`)}>
-                <FileImage size={12} /> Insert
+                <FileImage size={12} /> {t('insert')}
               </button>
               {canInsertFontFace && (
                 <button
@@ -169,29 +175,42 @@ function ThemeAssetRow({
                   className={styles.assetBtn}
                   onClick={() => onInsertReference(`@font-face {\n  font-family: "${guessFontFamily(asset)}";\n  src: url("${relativePath}") format("${guessFontFormat(asset)}");\n  font-display: swap;\n}\n`)}
                 >
-                  <FileImage size={12} /> @font-face
+                  <FileImage size={12} /> {t('fontFace')}
                 </button>
               )}
               {canOptimizeToWebp && (
                 <button type="button" className={clsx(styles.assetBtn, styles.assetBtnAccent)} onClick={handleOptimizeWebp} disabled={saving || deleting || optimizing}>
-                  {optimizing ? <Loader2 size={12} className={styles.spin} /> : <FileImage size={12} />} WebP
+                  {optimizing ? <Loader2 size={12} className={styles.spin} /> : <FileImage size={12} />} {t('webp')}
                 </button>
               )}
               <button type="button" className={clsx(styles.assetBtn, styles.assetBtnPrimary)} onClick={handleSave} disabled={!hasChanges || saving || deleting || optimizing}>
-                {saving ? <Loader2 size={12} className={styles.spin} /> : <Save size={12} />} Save
+                {saving ? <Loader2 size={12} className={styles.spin} /> : <Save size={12} />} {t('save')}
               </button>
-              <button type="button" className={clsx(styles.assetBtn, styles.assetBtnDanger)} onClick={handleDelete} disabled={saving || deleting || optimizing}>
-                {deleting ? <Loader2 size={12} className={styles.spin} /> : <Trash2 size={12} />} Delete
+              <button type="button" className={clsx(styles.assetBtn, styles.assetBtnDanger)} onClick={() => setConfirmDelete(true)} disabled={saving || deleting || optimizing}>
+                {deleting ? <Loader2 size={12} className={styles.spin} /> : <Trash2 size={12} />} {t('delete')}
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {confirmDelete && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('deleteConfirmTitle')}
+          message={t('deleteConfirmMessage', { name: asset.original_filename })}
+          variant="danger"
+          confirmText={t('delete')}
+          onConfirm={() => { void handleDelete() }}
+          onCancel={() => setConfirmDelete(false)}
+        />
       )}
     </div>
   )
 }
 
 export default function ThemeAssetsPanel({ bundleId, onInsertReference }: Props) {
+  const { t } = useTranslation('panels', { keyPrefix: 'customCssPanel.themeAssets' })
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [assets, setAssets] = useState<ThemeAsset[]>([])
   const [loading, setLoading] = useState(true)
@@ -204,11 +223,11 @@ export default function ThemeAssetsPanel({ bundleId, onInsertReference }: Props)
       const nextAssets = await themeAssetsApi.list(bundleId)
       setAssets(nextAssets)
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to load theme assets')
+      toast.error(err?.body?.error || err?.message || t('toast.loadFailed'))
     } finally {
       setLoading(false)
     }
-  }, [bundleId])
+  }, [bundleId, t])
 
   useEffect(() => {
     void loadAssets()
@@ -242,38 +261,38 @@ export default function ThemeAssetsPanel({ bundleId, onInsertReference }: Props)
     try {
       const asset = await themeAssetsApi.upload(file, { bundleId })
       setAssets((current) => [...current, asset])
-      toast.success(`Uploaded ${asset.original_filename}`)
+      toast.success(t('toast.uploaded', { name: asset.original_filename }))
     } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || 'Failed to upload theme asset')
+      toast.error(err?.body?.error || err?.message || t('toast.uploadFailed'))
     } finally {
       setUploading(false)
     }
-  }, [bundleId])
+  }, [bundleId, t])
 
   return (
     <section className={styles.panel}>
       <div className={styles.panelHeader}>
         <div>
-          <h4 className={styles.panelTitle}>Theme Assets</h4>
-          <p className={styles.panelHint}>Upload SVGs, images, and web fonts, then reference them with relative paths like <code>url("./assets/bg.png")</code> or <code>url("./assets/my-font.woff2")</code> inside <code>@font-face</code>.</p>
+          <h4 className={styles.panelTitle}>{t('title')}</h4>
+          <p className={styles.panelHint}>{t('hint')}</p>
         </div>
         <div className={styles.panelActions}>
           {sortedAssets.length > 0 && (
             <button type="button" className={styles.panelBtn} onClick={toggleAllExpanded}>
-              {allExpanded ? 'Collapse all' : 'Expand all'}
+              {allExpanded ? t('collapseAll') : t('expandAll')}
             </button>
           )}
           <button type="button" className={styles.panelBtn} onClick={() => fileInputRef.current?.click()} disabled={uploading}>
-            {uploading ? <Loader2 size={13} className={styles.spin} /> : <Upload size={13} />} Upload
+            {uploading ? <Loader2 size={13} className={styles.spin} /> : <Upload size={13} />} {t('upload')}
           </button>
           <input ref={fileInputRef} className={styles.hiddenInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/svg+xml,font/woff,font/woff2,font/ttf,font/otf,.svg,.woff,.woff2,.ttf,.otf,.eot" onChange={handleFilePick} />
         </div>
       </div>
 
       {loading ? (
-        <div className={styles.emptyState}><Loader2 size={15} className={styles.spin} /> Loading assets...</div>
+        <div className={styles.emptyState}><Loader2 size={15} className={styles.spin} /> {t('loading')}</div>
       ) : sortedAssets.length === 0 ? (
-        <div className={styles.emptyState}>No assets yet. Upload a background, texture, SVG icon, or custom font to start building relative CSS references.</div>
+        <div className={styles.emptyState}>{t('empty')}</div>
       ) : (
         <div className={styles.assetList}>
           {sortedAssets.map((asset) => (

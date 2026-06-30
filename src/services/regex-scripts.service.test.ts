@@ -4,7 +4,11 @@ import {
   activatePresetBoundRegexScripts,
   createRegexScript,
   exportRegexScripts,
+  getCharacterBoundScripts,
   getRegexScript,
+  getRegexScriptByScriptId,
+  importCharacterBoundRegexScripts,
+  reportRegexScriptPerformance,
   switchPresetBoundRegexScripts,
   toggleRegexScript,
   updateRegexScript,
@@ -59,6 +63,10 @@ beforeAll(() => {
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`);
+
+  db.run(`CREATE UNIQUE INDEX idx_regex_scripts_script_id
+    ON regex_scripts(user_id, script_id)
+    WHERE script_id != ''`);
 });
 
 beforeEach(() => {
@@ -224,5 +232,188 @@ describe("preset-bound regex activation", () => {
     switchPresetBoundRegexScripts(USER_ID, { previousPresetId: "preset-1", presetId: "preset-2" });
     expect(mustGetScript(presetOneEnabledId).disabled).toBe(true);
     expect(mustGetScript(presetTwoEnabledId).disabled).toBe(false);
+  });
+});
+
+describe("regex scope binding", () => {
+  test("rejects changing to character scope without a scope id", () => {
+    const created = createRegexScript(USER_ID, {
+      name: "Needs Character",
+      find_regex: "one",
+    });
+    expect(typeof created).not.toBe("string");
+
+    const script = created as Exclude<typeof created, string>;
+    const result = updateRegexScript(USER_ID, script.id, { scope: "character" });
+
+    expect(typeof result).toBe("string");
+    expect(mustGetScript(script.id).scope).toBe("global");
+    expect(mustGetScript(script.id).scope_id).toBeNull();
+  });
+
+  test("clears scope id when changing back to global scope", () => {
+    const created = createRegexScript(USER_ID, {
+      name: "Character Bound",
+      find_regex: "one",
+      scope: "character",
+      scope_id: "char-1",
+    });
+    expect(typeof created).not.toBe("string");
+
+    const script = created as Exclude<typeof created, string>;
+    const updated = updateRegexScript(USER_ID, script.id, { scope: "global" });
+
+    expect(updated && typeof updated !== "string" ? updated.scope : null).toBe("global");
+    expect(updated && typeof updated !== "string" ? updated.scope_id : "missing").toBeNull();
+  });
+});
+
+describe("character-bound regex imports", () => {
+  test("duplicate character imports do not collide on embedded script_id", () => {
+    const extensions = {
+      regex_scripts: [
+        {
+          name: "Strip OOC",
+          script_id: "strip_ooc",
+          find_regex: "\\(\\(.*?\\)\\)",
+          replace_string: "",
+          flags: "g",
+          placement: ["ai_output"],
+          target: ["response"],
+          disabled: false,
+        },
+        {
+          name: "Fix Quotes",
+          script_id: "fix_quotes",
+          find_regex: "\"([^\"]+)\"",
+          replace_string: "[$1]",
+          flags: "g",
+          placement: ["ai_output"],
+          target: ["response"],
+          disabled: false,
+        },
+      ],
+    };
+
+    expect(importCharacterBoundRegexScripts(USER_ID, "char-1", extensions)).toBe(2);
+    expect(importCharacterBoundRegexScripts(USER_ID, "char-2", extensions)).toBe(2);
+
+    const firstCharacterScripts = getCharacterBoundScripts(USER_ID, "char-1");
+    const secondCharacterScripts = getCharacterBoundScripts(USER_ID, "char-2");
+
+    expect(firstCharacterScripts).toHaveLength(2);
+    expect(secondCharacterScripts).toHaveLength(2);
+    expect(firstCharacterScripts.map((script) => script.script_id)).toEqual(["", ""]);
+    expect(secondCharacterScripts.map((script) => script.script_id)).toEqual(["", ""]);
+    expect(firstCharacterScripts.map((script) => script.metadata.imported_script_id)).toEqual(["strip_ooc", "fix_quotes"]);
+    expect(secondCharacterScripts.map((script) => script.metadata.imported_script_id)).toEqual(["strip_ooc", "fix_quotes"]);
+  });
+
+  test("original imported script_id still resolves inside the matching character context", () => {
+    const extensions = {
+      regex_scripts: [
+        {
+          name: "Scoped Regex",
+          script_id: "scoped_regex",
+          find_regex: "alpha",
+          replace_string: "beta",
+          flags: "g",
+          placement: ["ai_output"],
+          target: ["response"],
+          disabled: false,
+        },
+      ],
+    };
+
+    expect(importCharacterBoundRegexScripts(USER_ID, "char-1", extensions)).toBe(1);
+    expect(importCharacterBoundRegexScripts(USER_ID, "char-2", extensions)).toBe(1);
+
+    expect(getRegexScriptByScriptId(USER_ID, "scoped_regex", { characterId: "char-1" })?.scope_id).toBe("char-1");
+    expect(getRegexScriptByScriptId(USER_ID, "scoped_regex", { characterId: "char-2" })?.scope_id).toBe("char-2");
+  });
+});
+
+describe("regex performance reporting", () => {
+  test("duplicate script_id returns a validation error instead of throwing", () => {
+    const first = createRegexScript(USER_ID, {
+      name: "One",
+      find_regex: "one",
+      script_id: "shared_id",
+    });
+    expect(typeof first).not.toBe("string");
+
+    const second = createRegexScript(USER_ID, {
+      name: "Two",
+      find_regex: "two",
+      script_id: "shared_id",
+    });
+    expect(second).toBe("script_id already exists");
+  });
+
+  test("flags a slow regex script in metadata", () => {
+    const created = createRegexScript(USER_ID, {
+      name: "Slow Script",
+      find_regex: "one",
+    });
+    expect(typeof created).not.toBe("string");
+
+    const script = created as Exclude<typeof created, string>;
+    const result = reportRegexScriptPerformance(USER_ID, script.id, {
+      elapsedMs: 5200,
+      source: "display_client",
+    });
+
+    expect(result.newlyFlagged).toBe(true);
+    expect(result.script?.metadata?.regex_performance?.slow).toBe(true);
+    expect(result.script?.metadata?.regex_performance?.source).toBe("display_client");
+    expect(result.script?.metadata?.regex_performance?.version).toBe(script.updated_at);
+  });
+
+  test("clears performance warning metadata when regex definition changes", () => {
+    const created = createRegexScript(USER_ID, {
+      name: "Editable Slow Script",
+      find_regex: "one",
+    });
+    expect(typeof created).not.toBe("string");
+
+    const script = created as Exclude<typeof created, string>;
+    reportRegexScriptPerformance(USER_ID, script.id, {
+      elapsedMs: 5200,
+      source: "display_client",
+    });
+
+    const updated = updateRegexScript(USER_ID, script.id, { find_regex: "two" });
+    expect(updated && typeof updated !== "string" ? updated.metadata.regex_performance : undefined).toBeUndefined();
+  });
+
+  test("accepts the full JS regex flag set d/g/i/m/s/u/v/y", () => {
+    for (const flag of ["d", "g", "i", "m", "s", "u", "v", "y"]) {
+      const created = createRegexScript(USER_ID, {
+        name: `Flag ${flag}`,
+        find_regex: "abc",
+        flags: flag,
+      });
+      expect(typeof created).not.toBe("string");
+    }
+  });
+
+  test("rejects flags outside d/g/i/m/s/u/v/y", () => {
+    for (const bad of ["x", "z", "a", "gx", "gd!"]) {
+      const result = createRegexScript(USER_ID, {
+        name: `Bad ${bad}`,
+        find_regex: "abc",
+        flags: bad,
+      });
+      expect(typeof result).toBe("string");
+    }
+  });
+
+  test("rejects duplicate flag chars", () => {
+    const result = createRegexScript(USER_ID, {
+      name: "Dup",
+      find_regex: "abc",
+      flags: "gg",
+    });
+    expect(typeof result).toBe("string");
   });
 });

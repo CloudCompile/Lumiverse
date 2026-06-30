@@ -141,12 +141,12 @@ Council invocations also deliver the assembled chat context as a structured `con
 ```ts
 interface LlmMessageDTO {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | LlmMessagePartDTO[]
   name?: string
 }
 ```
 
-Multi-part message content (multimodal text+image/audio parts) is flattened to its text portion before being forwarded — non-text parts are dropped.
+Multi-part content (text, image, audio, `tool_use`, `tool_result`) is flattened to its text portion before being forwarded to Council tool handlers — non-text parts are dropped here. See [Interceptors › LlmMessageDTO](interceptors.md#llmmessagedto) for the full part union, and [Generation › Tool calling](generation.md#tool-calling) for the wire shapes per provider.
 
 Like `councilMember`, `contextMessages` is delivered as a separate top-level payload field so it cannot collide with or be spoofed by user-space `args`. It is `undefined` for any non-council invocation path — guard on presence before reading.
 

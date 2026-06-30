@@ -1,6 +1,13 @@
 import { safeFetch } from "../utils/safe-fetch";
+import { mapWithConcurrency } from "../utils/concurrency";
 import { scrapeUrl, type ScrapedContent } from "./databank";
 import { getWebSearchApiKey, getWebSearchSettings, type WebSearchSettings } from "./web-search-settings.service";
+
+// Pages are scraped through a small worker pool rather than serially: each
+// scrapeUrl can take up to ~15s, so summing them on an interactive Council/
+// Spindle path is the bottleneck. A pool of 4 overlaps them without fanning
+// out an unbounded number of outbound requests.
+const WEB_SEARCH_SCRAPE_CONCURRENCY = 4;
 
 export interface WebSearchResult {
   title: string;
@@ -25,6 +32,11 @@ export interface WebSearchResponse {
   results: WebSearchResult[];
   documents: WebSearchDocument[];
   context: string;
+}
+
+export interface WebSearchOptions {
+  /** When false, skip page scraping. `documents` is returned empty and `context` is "". Defaults to true. */
+  scrape?: boolean;
 }
 
 interface SearxngResult {
@@ -143,10 +155,11 @@ export async function searchWeb(
   userId: string,
   query: string,
   requestedCount?: number,
+  options?: WebSearchOptions,
 ): Promise<WebSearchResponse> {
   const settings = await getWebSearchSettings(userId);
   const apiKey = await getWebSearchApiKey(userId);
-  return searchWebWithConfig(query, requestedCount, settings, apiKey);
+  return searchWebWithConfig(query, requestedCount, settings, apiKey, options);
 }
 
 export async function searchWebWithConfig(
@@ -154,6 +167,7 @@ export async function searchWebWithConfig(
   requestedCount: number | undefined,
   settings: WebSearchSettings,
   apiKey: string | null,
+  options?: WebSearchOptions,
 ): Promise<WebSearchResponse> {
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
@@ -167,28 +181,42 @@ export async function searchWebWithConfig(
   const count = Math.max(1, Math.min(requestedCount ?? settings.defaultResultCount, settings.maxResultCount));
   const results = await fetchSearxngResults(trimmedQuery, count, settings, apiKey);
 
-  const documents: WebSearchDocument[] = [];
-  const scrapeCount = Math.min(results.length, settings.maxPagesToScrape);
-  for (const result of results.slice(0, scrapeCount)) {
-    try {
-      const scraped = await scrapeUrl(result.url);
-      documents.push({
-        title: scraped.title || result.title,
-        url: result.url,
-        snippet: result.snippet,
-        sourceType: scraped.sourceType,
-        content: clipText(scraped.content, settings.maxCharsPerPage),
-        contentLength: scraped.contentLength,
-      });
-    } catch (err) {
-      documents.push({
-        title: result.title,
-        url: result.url,
-        snippet: result.snippet,
-        error: err instanceof Error ? err.message : "Failed to extract page content",
-      });
-    }
+  if (options?.scrape === false) {
+    return {
+      query: trimmedQuery,
+      results,
+      documents: [],
+      context: "",
+    };
   }
+
+  const scrapeCount = Math.min(results.length, settings.maxPagesToScrape);
+  // Order is preserved by mapWithConcurrency, so documents stay aligned with
+  // the ranked results. Per-page errors are captured per item (not thrown).
+  const documents: WebSearchDocument[] = await mapWithConcurrency(
+    results.slice(0, scrapeCount),
+    WEB_SEARCH_SCRAPE_CONCURRENCY,
+    async (result) => {
+      try {
+        const scraped = await scrapeUrl(result.url);
+        return {
+          title: scraped.title || result.title,
+          url: result.url,
+          snippet: result.snippet,
+          sourceType: scraped.sourceType,
+          content: clipText(scraped.content, settings.maxCharsPerPage),
+          contentLength: scraped.contentLength,
+        };
+      } catch (err) {
+        return {
+          title: result.title,
+          url: result.url,
+          snippet: result.snippet,
+          error: err instanceof Error ? err.message : "Failed to extract page content",
+        };
+      }
+    },
+  );
 
   return {
     query: trimmedQuery,

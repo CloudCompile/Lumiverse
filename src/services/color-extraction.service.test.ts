@@ -141,4 +141,31 @@ describe("extractColorsFromRawPixels", () => {
     expect(contrastRatio(result.ui.light.accent, result.ui.light.surface)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(result.ui.light.text, result.ui.light.surface)).toBeGreaterThanOrEqual(4.5);
   });
+
+  test("preserves perceptually distinct hues instead of collapsing into a single mid-tone family", () => {
+    const red = { r: 210, g: 60, b: 60 };
+    const green = { r: 60, g: 180, b: 80 };
+    const blue = { r: 60, g: 80, b: 210 };
+    const gold = { r: 230, g: 180, b: 50 };
+
+    const data = makeImage(16, 16, (x, y) => {
+      if (x < 8 && y < 8) return red;
+      if (x >= 8 && y < 8) return green;
+      if (x < 8 && y >= 8) return blue;
+      return gold;
+    });
+
+    const result = extractColorsFromRawPixels(data, 16, 16, 4);
+
+    // The palette should contain a member of each distinct hue family.
+    const hasRedLike = result.palette.some((c) => c.r > c.g && c.r > c.b && c.r > 120);
+    const hasGreenLike = result.palette.some((c) => c.g > c.r && c.g > c.b && c.g > 120);
+    const hasBlueLike = result.palette.some((c) => c.b > c.r && c.b > c.g && c.b > 120);
+    const hasGoldLike = result.palette.some((c) => c.r > c.b && c.g > c.b && c.r > 160);
+
+    expect(result.diversity.isUniform).toBe(false);
+    expect(hasRedLike || hasGoldLike).toBe(true);
+    expect(hasGreenLike).toBe(true);
+    expect(hasBlueLike).toBe(true);
+  });
 });

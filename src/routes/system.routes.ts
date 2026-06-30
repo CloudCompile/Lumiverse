@@ -1,9 +1,15 @@
 import { Hono } from "hono";
 import { cpus, totalmem, freemem, platform, arch, release, hostname } from "os";
-import { execSync } from "child_process";
 import { join } from "path";
+import { requireOwner } from "../auth/middleware";
+import { getGitMetadata } from "../utils/git-metadata";
 
 const app = new Hono();
+
+// H-24: Restrict access to owner/admin — system info contains sensitive
+// internal details (hostname, OS, CPU, git history) that should not be
+// exposed to regular users.
+app.use("*", requireOwner);
 
 async function getBackendVersion(): Promise<string> {
   try {
@@ -16,14 +22,8 @@ async function getBackendVersion(): Promise<string> {
 }
 
 function getGitInfo(): { branch: string; commit: string } {
-  const projectRoot = join(import.meta.dir, "../..");
-  try {
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: projectRoot, encoding: "utf-8" }).trim();
-    const commit = execSync("git rev-parse --short HEAD", { cwd: projectRoot, encoding: "utf-8" }).trim();
-    return { branch, commit };
-  } catch {
-    return { branch: "unknown", commit: "unknown" };
-  }
+  const { branch, commit } = getGitMetadata();
+  return { branch, commit };
 }
 
 function getDiskUsage(): { total: number; used: number } | null {
@@ -47,7 +47,8 @@ app.get("/info", async (c) => {
       platform: platform(),
       arch: arch(),
       release: release(),
-      hostname: hostname(),
+      // H-24: hostname omitted — exposes internal server identity and is not
+      // needed by the UI for any functional purpose.
     },
     cpu: {
       model: cpu[0]?.model ?? "unknown",
@@ -62,7 +63,7 @@ app.get("/info", async (c) => {
       version: await getBackendVersion(),
       runtime: `Bun ${Bun.version}`,
     },
-    git: getGitInfo(),
+    git: await getGitInfo(),
   });
 });
 

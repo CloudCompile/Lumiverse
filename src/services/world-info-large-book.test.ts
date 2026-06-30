@@ -151,13 +151,53 @@ describe("finalizeActivatedWorldInfoEntries", () => {
 });
 
 describe("activateWorldInfo recursion settings", () => {
+  test("activation cache invalidates on same-length keyword and message content changes", () => {
+    const entryId = crypto.randomUUID();
+    const uid = crypto.randomUUID();
+    const messageId = crypto.randomUUID();
+
+    const first = makeEntry({
+      id: entryId,
+      uid,
+      key: ["alpha"],
+      content: "first",
+      vectorized: false,
+    });
+    const second = makeEntry({
+      id: entryId,
+      uid,
+      key: ["bravo"],
+      content: "reply",
+      vectorized: false,
+    });
+
+    const firstResult = activateWorldInfo({
+      entries: [first],
+      messages: [{ ...makeMessage("alpha"), id: messageId }],
+      chatTurn: 1,
+      wiState: {},
+      settings: {},
+    });
+    expect(firstResult.activatedEntries.map((entry) => entry.content)).toEqual(["first"]);
+
+    const secondResult = activateWorldInfo({
+      entries: [second],
+      messages: [{ ...makeMessage("bravo"), id: messageId }],
+      chatTurn: 1,
+      wiState: {},
+      settings: {},
+    });
+    expect(secondResult.activatedEntries.map((entry) => entry.content)).toEqual(["reply"]);
+  });
+
   test("maxRecursionPasses=0 only performs the base keyword scan", () => {
     const first = makeEntry({
       key: ["alpha"],
       content: "recursive beta content",
       prevent_recursion: false,
+      vectorized: false,
     });
-    const second = makeEntry({ key: ["beta"], content: "second entry" });
+    const second = makeEntry({ key: ["beta"], content: "second entry", vectorized: false });
 
     const result = activateWorldInfo({
       entries: [first, second],
@@ -176,8 +216,9 @@ describe("activateWorldInfo recursion settings", () => {
       key: ["alpha"],
       content: "recursive beta content",
       prevent_recursion: false,
+      vectorized: false,
     });
-    const second = makeEntry({ key: ["beta"], content: "second entry" });
+    const second = makeEntry({ key: ["beta"], content: "second entry", vectorized: false });
 
     const result = activateWorldInfo({
       entries: [first, second],
@@ -191,14 +232,63 @@ describe("activateWorldInfo recursion settings", () => {
     expect(result.stats.recursionPassesUsed).toBe(1);
   });
 
+  test("vectorized entries do not feed recursive keyword chaining", () => {
+    const first = makeEntry({
+      key: ["alpha"],
+      content: "recursive beta content",
+      prevent_recursion: false,
+      vectorized: true,
+      vector_index_status: "indexed",
+    });
+    const second = makeEntry({ key: ["beta"], content: "second entry", vectorized: false });
+
+    const result = activateWorldInfo({
+      entries: [first, second],
+      messages: [makeMessage("alpha")],
+      chatTurn: 1,
+      wiState: {},
+      settings: { maxRecursionPasses: 1 },
+    });
+
+    expect(result.activatedEntries.map((entry) => entry.id)).toEqual([first.id]);
+    expect(result.stats.recursionPassesUsed).toBe(0);
+  });
+
+  test("vectorized entries are not activated by recursive keyword chaining", () => {
+    const first = makeEntry({
+      key: ["alpha"],
+      content: "recursive beta content",
+      prevent_recursion: false,
+      vectorized: false,
+    });
+    const second = makeEntry({
+      key: ["beta"],
+      content: "second entry",
+      vectorized: true,
+      vector_index_status: "indexed",
+    });
+
+    const result = activateWorldInfo({
+      entries: [first, second],
+      messages: [makeMessage("alpha")],
+      chatTurn: 1,
+      wiState: {},
+      settings: { maxRecursionPasses: 1 },
+    });
+
+    expect(result.activatedEntries.map((entry) => entry.id)).toEqual([first.id]);
+    expect(result.stats.recursionPassesUsed).toBe(0);
+  });
+
   test("constant content does not recursively activate entries when recursion is disabled", () => {
     const constant = makeEntry({
       key: [],
       constant: true,
       content: "constant beta content",
       prevent_recursion: false,
+      vectorized: false,
     });
-    const conditional = makeEntry({ key: ["beta"], content: "conditional entry" });
+    const conditional = makeEntry({ key: ["beta"], content: "conditional entry", vectorized: false });
 
     const result = activateWorldInfo({
       entries: [constant, conditional],

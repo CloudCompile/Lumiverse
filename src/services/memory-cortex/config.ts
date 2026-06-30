@@ -49,6 +49,44 @@ export interface ConsolidationConfig {
   maxTokensPerSummary: number;
 }
 
+export interface SidecarReliabilityConfig {
+  /** What to do when the sidecar fails after exhausting retries.
+   *  - "heuristic": persist heuristic output for this chunk (legacy behavior).
+   *    Heuristic salience/entities/relations leak into the graph even though the
+   *    user asked for sidecar-quality results.
+   *  - "skip": do not persist anything for this chunk and do not mark its
+   *    warmup signature. The next cortex warmup re-processes it. Equivalent to
+   *    the "AI Only" mode users have asked for. */
+  fallback: "heuristic" | "skip";
+  /** Additional sidecar attempts after the first call (0 = no retry, legacy). */
+  maxRetries: number;
+  /** Base backoff in ms between sidecar attempts. Doubled per retry. */
+  retryDelayMs: number;
+  /** When true and the sidecar succeeded, the sidecar judges heuristic entities
+   *  and relationships extracted for this chunk: rejected heuristics are
+   *  dropped, transformed ones are renamed to the sidecar's canonical form
+   *  before merging. */
+  arbitratesHeuristics: boolean;
+  /** When true and the sidecar marks an *existing* graph entity as invalid for
+   *  this chunk's context, that entity is removed from the graph (mentions and
+   *  relations included). User-edited entities are preserved regardless of
+   *  sidecar grading. */
+  gradesExistingRecords: boolean;
+}
+
+export interface FactManagementConfig {
+  /** Minimum chunk importance (0–10) required for facts to be persisted.
+   *  Chunks scoring below this threshold contribute no facts. Default: 3. */
+  importanceThreshold: number;
+  /** Maximum facts stored per entity. When exceeded, lowest-importance facts
+   *  are trimmed first. Default: 30. */
+  maxFactsPerEntity: number;
+  /** When true and the sidecar is active, exceeding maxFactsPerEntity triggers
+   *  an LLM call to curate which facts to keep/merge/discard instead of
+   *  purely score-based trimming. ("Fact Auto-Pilot") Default: false. */
+  autopilot: boolean;
+}
+
 export interface ThoughtMarkerConfig {
   /** Prefix marking a character thought block, e.g. <thinking> */
   prefix: string;
@@ -104,6 +142,8 @@ export interface MemoryCortexConfig {
 
   /** How cortex data is formatted for LLM injection */
   formatterMode: "shadow" | "attributed" | "clinical" | "minimal";
+  /** Render the Long-Term Memory block with the user's chat memory templates */
+  useChatMemoryFormatting: boolean;
   /** Max tokens for all cortex-injected content */
   contextTokenBudget: number;
 
@@ -116,6 +156,14 @@ export interface MemoryCortexConfig {
    *  Set higher for thinking/reasoning models that need extended processing time.
    *  0 = no timeout. Default: 60000 (60s). */
   sidecarTimeoutMs: number;
+
+  /** Sidecar reliability + arbitration policy. Controls what happens when the
+   *  sidecar fails, and how its output relates to heuristic candidates and
+   *  existing graph records on success.
+   *
+   *  See SidecarReliabilityConfig for field-level docs.
+   */
+  sidecarReliability: SidecarReliabilityConfig;
 
   /** Retrieval pipeline tuning */
   retrieval: {
@@ -149,6 +197,9 @@ export interface MemoryCortexConfig {
     coreMemoryFlags: string[];
   };
 
+  /** Fact persistence and curation policy */
+  factManagement: FactManagementConfig;
+
   /** Entity lifecycle management */
   entityPruning: {
     /** Auto-archive entities with 1 mention and no recent activity */
@@ -161,6 +212,14 @@ export interface MemoryCortexConfig {
 
   /** Custom proper noun whitelist (fantasy terms that shouldn't be filtered) */
   entityWhitelist: string[];
+
+  /** Additional XML/HTML-style tag names (beyond the curated default set)
+   *  whose inner content is structured scaffolding — HUD blocks, status
+   *  lines, dice rolls, custom embed wrappers, etc. — and must be removed
+   *  wholesale before any cortex evaluator sees the chunk. Lowercase, no
+   *  angle brackets, no leading slashes. Example values: "rpgstats",
+   *  "encounter", "questlog". */
+  nonProseScaffoldTags: string[];
 
   /** Per-entity-type heuristics controls for header noise and guided extraction */
   entityExtractionFilters: MemoryEntityExtractionFilters;
@@ -200,9 +259,17 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
     requestsPerMinute: 0,
   },
   formatterMode: "shadow",
+  useChatMemoryFormatting: true,
   contextTokenBudget: 600,
   retrievalTimeoutMs: 60000,
   sidecarTimeoutMs: 60000,
+  sidecarReliability: {
+    fallback: "heuristic",
+    maxRetries: 0,
+    retryDelayMs: 500,
+    arbitratesHeuristics: false,
+    gradesExistingRecords: false,
+  },
   consolidation: { ...DEFAULT_CONSOLIDATION_CONFIG },
   retrieval: {
     useFusedScoring: true,
@@ -220,12 +287,18 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
     coreMemoryThreshold: 0.7,
     coreMemoryFlags: ["death", "promise", "first_meeting", "transformation", "confession"],
   },
+  factManagement: {
+    importanceThreshold: 3,
+    maxFactsPerEntity: 30,
+    autopilot: false,
+  },
   entityPruning: {
     enabled: true,
     staleAfterMessages: 200,
     minConfidence: 0.4,
   },
   entityWhitelist: [],
+  nonProseScaffoldTags: [],
   entityExtractionFilters: getDefaultEntityExtractionFilters(),
 };
 
@@ -281,16 +354,31 @@ function applyStandardPreset(config: MemoryCortexConfig): MemoryCortexConfig {
 
 // ─── Settings Resolution ───────────────────────────────────────
 
+// Per-user cortex config cache. Resolving the config requires a settings-table
+// read + normalize on every call; the cortex warmup hot path hits this on
+// every chat open. Cache entries are invalidated by every write path
+// (putCortexConfig, applyCortexPreset). Values are deep-cloned on read so
+// callers can't mutate the cached instance.
+const cortexConfigCache = new Map<string, MemoryCortexConfig>();
+
+function invalidateCortexConfigCache(userId: string): void {
+  cortexConfigCache.delete(userId);
+}
+
 /**
  * Load the cortex configuration for a user.
  * Returns defaults if no config has been saved.
  */
 export function getCortexConfig(userId: string): MemoryCortexConfig {
-  const row = settingsSvc.getSetting(userId, SETTINGS_KEY);
-  if (!row?.value) return { ...DEFAULT_CORTEX_CONFIG };
+  const cached = cortexConfigCache.get(userId);
+  if (cached) return structuredClone(cached);
 
-  const saved = row.value as Partial<MemoryCortexConfig>;
-  return normalizeCortexConfig(saved);
+  const row = settingsSvc.getSetting(userId, SETTINGS_KEY);
+  const resolved = !row?.value
+    ? { ...DEFAULT_CORTEX_CONFIG }
+    : normalizeCortexConfig(row.value as Partial<MemoryCortexConfig>);
+  cortexConfigCache.set(userId, structuredClone(resolved));
+  return resolved;
 }
 
 /**
@@ -303,6 +391,7 @@ export function putCortexConfig(
   const current = getCortexConfig(userId);
   const merged = normalizeCortexConfig({ ...current, ...update });
   settingsSvc.putSetting(userId, SETTINGS_KEY, merged);
+  invalidateCortexConfigCache(userId);
   return merged;
 }
 
@@ -333,6 +422,7 @@ export function applyCortexPreset(
   }
 
   settingsSvc.putSetting(userId, SETTINGS_KEY, config);
+  invalidateCortexConfigCache(userId);
   return config;
 }
 
@@ -391,9 +481,27 @@ export function normalizeCortexConfig(
       ),
     },
     formatterMode: input.formatterMode ?? defaults.formatterMode,
+    useChatMemoryFormatting: typeof input.useChatMemoryFormatting === "boolean"
+      ? input.useChatMemoryFormatting
+      : defaults.useChatMemoryFormatting,
     contextTokenBudget: input.contextTokenBudget ?? defaults.contextTokenBudget,
     retrievalTimeoutMs: input.retrievalTimeoutMs ?? defaults.retrievalTimeoutMs,
     sidecarTimeoutMs: input.sidecarTimeoutMs ?? defaults.sidecarTimeoutMs,
+    sidecarReliability: {
+      fallback: input.sidecarReliability?.fallback === "skip" ? "skip" : defaults.sidecarReliability.fallback,
+      maxRetries: normalizeNonNegativeInt(
+        input.sidecarReliability?.maxRetries,
+        defaults.sidecarReliability.maxRetries,
+      ),
+      retryDelayMs: normalizeNonNegativeInt(
+        input.sidecarReliability?.retryDelayMs,
+        defaults.sidecarReliability.retryDelayMs,
+      ),
+      arbitratesHeuristics: input.sidecarReliability?.arbitratesHeuristics
+        ?? defaults.sidecarReliability.arbitratesHeuristics,
+      gradesExistingRecords: input.sidecarReliability?.gradesExistingRecords
+        ?? defaults.sidecarReliability.gradesExistingRecords,
+    },
     consolidation: {
       enabled: input.consolidation?.enabled ?? defaults.consolidation.enabled,
       chunkThreshold: input.consolidation?.chunkThreshold ?? defaults.consolidation.chunkThreshold,
@@ -418,17 +526,40 @@ export function normalizeCortexConfig(
       coreMemoryThreshold: input.decay?.coreMemoryThreshold ?? defaults.decay.coreMemoryThreshold,
       coreMemoryFlags: input.decay?.coreMemoryFlags ?? defaults.decay.coreMemoryFlags,
     },
+    factManagement: {
+      importanceThreshold: Math.max(0, Math.min(10,
+        typeof input.factManagement?.importanceThreshold === "number"
+          ? Math.floor(input.factManagement.importanceThreshold)
+          : defaults.factManagement.importanceThreshold,
+      )),
+      maxFactsPerEntity: Math.max(5, Math.min(100,
+        typeof input.factManagement?.maxFactsPerEntity === "number"
+          ? Math.floor(input.factManagement.maxFactsPerEntity)
+          : defaults.factManagement.maxFactsPerEntity,
+      )),
+      autopilot: input.factManagement?.autopilot ?? defaults.factManagement.autopilot,
+    },
     entityPruning: {
       enabled: input.entityPruning?.enabled ?? defaults.entityPruning.enabled,
       staleAfterMessages: input.entityPruning?.staleAfterMessages ?? defaults.entityPruning.staleAfterMessages,
       minConfidence: input.entityPruning?.minConfidence ?? defaults.entityPruning.minConfidence,
     },
     entityWhitelist: input.entityWhitelist ?? defaults.entityWhitelist,
+    nonProseScaffoldTags: Array.isArray(input.nonProseScaffoldTags)
+      ? input.nonProseScaffoldTags
+          .map((s) => (typeof s === "string" ? s.trim().toLowerCase() : ""))
+          .filter((s) => s.length > 0 && /^[a-z0-9_]+$/.test(s))
+      : defaults.nonProseScaffoldTags,
     entityExtractionFilters: normalizeEntityExtractionFilters(input.entityExtractionFilters),
   };
 }
 
 function normalizeRequestsPerMinute(value: number | null | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizeNonNegativeInt(value: number | null | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(0, Math.floor(value));
 }

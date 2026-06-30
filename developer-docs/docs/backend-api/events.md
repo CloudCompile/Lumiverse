@@ -167,6 +167,7 @@ No `action` discriminator is provided — if you need add/update/delete/navigate
 | Event | Payload |
 |-------|---------|
 | `SPINDLE_THEME_OVERRIDES` | `{ extensionId, extensionName, overrides }` — `overrides` is `{ variables: Record<string, string> }` or `null` when cleared |
+| `SPINDLE_CHAT_STYLE_MODE` | `{ extensionId, extensionName, chatId, mode }`. `chatId` is `null` with `mode: 'bounded'` when an extension's worker stops, signalling that all of its claims should be dropped. See [Chat Mutation](chat-mutation.md#per-chat-style-mode). |
 | `SPINDLE_EXTENSION_LOADED` | `{ extensionId }` |
 | `SPINDLE_EXTENSION_UNLOADED` | `{ extensionId }` |
 | `SPINDLE_EXTENSION_ERROR` | `{ extensionId, error }` |
@@ -176,4 +177,7 @@ No `action` discriminator is provided — if you need add/update/delete/navigate
 
 | Event | Payload |
 |-------|---------|
-| `PERMISSION_CHANGED` | `{ permission, granted, allGranted }` — fired when a permission is granted or revoked at runtime. See [Permissions](../getting-started/permissions.md#reacting-to-permission-changes) for usage. |
+| `PERMISSION_CHANGED` | `{ extensionId, permission, granted, allGranted }` — local backend-worker event fired when this extension's permission is granted or revoked at runtime. It is scoped to the receiving extension handler; other extensions do not receive the event. See [Permissions](../getting-started/permissions.md#reacting-to-permission-changes) for usage. |
+
+!!! note "Scoped runtime event"
+    Use `spindle.permissions.onChanged()` or `spindle.on('PERMISSION_CHANGED', ...)` inside an extension backend. `PERMISSION_CHANGED` is delivered directly by the worker host and is not the same as subscribing to the global `SPINDLE_PERMISSION_CHANGED` WebSocket/EventBus event.

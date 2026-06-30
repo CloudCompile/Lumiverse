@@ -19,6 +19,7 @@ import {
   getDefaultEntityExtractionFilters,
   type MemoryEntityExtractionFilters,
 } from "./entity-extraction-filters";
+import { isPlausibleAlias, sanitizeAlias } from "./alias-validation";
 
 // ─── Common Words Filter ───────────────────────────────────────
 // Words that appear capitalized at sentence starts but aren't entities
@@ -604,20 +605,41 @@ export function extractEntitiesHeuristic(
   // likely adjectives, not entities: "Sandy fur", "Golden hair", "Dark eyes"
   const ADJECTIVE_FOLLOWERS = /\b(fur|hair|skin|eyes?|face|cloth|cloak|mane|pelt|scales?|feathers?|wings?|tail|ears?|nose|lips?|teeth|claws?|paws?|muzzle|coat|hide|wool|beard|brow|lashes|complexion)\b/i;
 
-  // Count occurrences of standard proper nouns
+  // Build sentence-start position index for filtering sentence-position capitalization
+  const sentenceStartPositions = new Set<number>();
+  sentenceStartPositions.add(0);
+  const sentenceStartRe = /[.!?"'”’]\s+/g;
+  let ssMatch;
+  while ((ssMatch = sentenceStartRe.exec(content)) !== null) {
+    sentenceStartPositions.add(ssMatch.index + ssMatch[0].length);
+  }
+
+  // Count occurrences of standard proper nouns (mid-sentence only)
   const nounCounts = new Map<string, number>();
   for (const noun of matches) {
     const normalized = noun.trim();
     const key = normalized.toLowerCase();
-    // Skip if already found, common word, suppressed by multi-word capture, or adjective usage
     if (found.has(key) || effectiveCommon.has(key) || suppressedSubstrings.has(key)) continue;
     // Adjective check: "Sandy fur" — word followed by physical noun
     const afterNoun = content.slice(content.indexOf(normalized) + normalized.length).match(/^\s+(\w+)/);
     if (afterNoun && ADJECTIVE_FOLLOWERS.test(afterNoun[1])) continue;
-    nounCounts.set(normalized, (nounCounts.get(normalized) || 0) + 1);
+    // Lowercase-elsewhere check: if same word appears in lowercase, it's not a proper noun
+    if (content.includes(` ${key} `) || content.includes(` ${key},`) || content.includes(` ${key}.`)) continue;
+
+    // Count mid-sentence vs sentence-start occurrences
+    let midSentenceCount = 0;
+    let searchFrom = 0;
+    while (true) {
+      const idx = content.indexOf(normalized, searchFrom);
+      if (idx === -1) break;
+      if (!sentenceStartPositions.has(idx)) midSentenceCount++;
+      searchFrom = idx + normalized.length;
+    }
+    if (midSentenceCount === 0) continue;
+    nounCounts.set(normalized, (nounCounts.get(normalized) || 0) + midSentenceCount);
   }
 
-  // Require 2+ occurrences for STANDARD proper nouns
+  // Require 2+ mid-sentence occurrences for STANDARD proper nouns
   for (const [noun, count] of nounCounts) {
     if (count >= 2) {
       const key = noun.toLowerCase();
@@ -847,7 +869,7 @@ export function detectNicknameIntroductions(
     while ((match = pattern.exec(content)) !== null) {
       if (!match.groups) continue;
 
-      const aliasRaw = match.groups.alias?.trim();
+      const aliasRaw = match.groups.alias ? sanitizeAlias(match.groups.alias) : null;
       if (!aliasRaw || aliasRaw.length < 2) continue;
 
       if (knownNameSet.has(aliasRaw.toLowerCase())) continue;
@@ -868,6 +890,7 @@ export function detectNicknameIntroductions(
       seenAliases.add(key);
 
       if (canonical.toLowerCase() === aliasRaw.toLowerCase()) continue;
+      if (!isPlausibleAlias(aliasRaw, canonical)) continue;
 
       results.push({ canonicalName: canonical, alias: aliasRaw });
     }

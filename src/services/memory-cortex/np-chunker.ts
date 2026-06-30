@@ -144,6 +144,18 @@ const COMMON_ENGLISH = new Set([
   "fuck", "shit", "damn", "hell", "crap", "bloody", "bastard", "bitch",
   "god", "christ", "jesus", "ugh", "hmm", "huh", "wow", "oh", "ah",
   "okay", "ok", "yeah", "yes", "yep", "nah", "nope", "no",
+  // ── Onomatopoeia / sound effects / non-word vocalizations ──
+  "squelch", "squish", "crunch", "thud", "clang", "whoosh", "splash",
+  "crack", "snap", "pop", "buzz", "hiss", "sizzle", "gulp", "slurp",
+  "thump", "clunk", "clatter", "rumble", "rustle", "whimper", "purr",
+  "growl", "grunt", "groan", "sigh", "gasp", "huff", "puff",
+  "wheeze", "cough", "sneeze", "hiccup", "burp", "gurgle", "splat",
+  "plop", "drip", "click", "clap", "bang", "boom", "crash",
+  "screech", "creak", "squeak", "whine", "moan", "wail",
+  "chirp", "tweet", "hoot", "howl", "bark", "meow", "roar",
+  "mmm", "mmn", "hmph", "tsk", "pfft", "shh", "psst", "mhm",
+  "oof", "eek", "yikes", "oops", "ouch", "oww", "ahh", "ohh",
+  "heh", "tch", "tsk", "grr", "brr", "eww", "shh",
   // ── Adjectives ──
   "able", "actual", "afraid", "alive", "alone", "angry", "aware",
   "bad", "bare", "basic", "big", "bitter", "blind", "bold", "brave",
@@ -301,6 +313,26 @@ const COMMON_ENGLISH = new Set([
   "view", "violence", "vision", "visit", "voice", "volume", "walk",
   "wall", "watch", "wave", "way", "wealth", "weight", "wish",
   "wonder", "wood", "word", "work", "world", "wound",
+  // ── Abstract nouns / concepts common in roleplay ──
+  "darkness", "shadow", "beauty", "chaos", "destiny", "fate", "honor",
+  "glory", "vengeance", "magic", "betrayal", "redemption", "salvation",
+  "destruction", "creation", "oblivion", "eternity", "infinity",
+  "mortality", "divinity", "prophecy", "legacy", "heritage", "bloodline",
+  "lineage", "corruption", "innocence", "madness", "sanity", "despair",
+  "sorrow", "rage", "fury", "wrath", "grief", "agony", "ecstasy",
+  "torment", "bliss", "serenity", "tranquility", "abyss", "void",
+  "realm", "domain", "hunger", "mercy", "justice", "cruelty", "pity",
+  "devotion", "damnation", "ruin", "decay", "rebirth", "awakening",
+  // ── Roleplay class/archetype nouns (not proper names) ──
+  "warrior", "sorcerer", "witch", "wizard", "healer", "assassin",
+  "thief", "rogue", "hunter", "soldier", "mercenary", "maiden",
+  "beast", "creature", "monster", "demon", "angel", "ghost",
+  "phantom", "wraith", "specter", "undead", "vampire", "werewolf",
+  // ── Conjunctions / transition words capitalized at sentence start ──
+  "however", "although", "therefore", "meanwhile", "furthermore",
+  "nevertheless", "nonetheless", "regardless", "afterwards", "beforehand",
+  "nothing", "everything", "something", "someone", "anyone", "nobody",
+  "everybody", "anywhere", "somewhere", "nowhere",
 ]);
 
 // ─── Title / Rank / Honorific Prefixes ────────────────────────
@@ -526,8 +558,12 @@ export function extractNPCandidates(tokens: string[]): string[] {
       const nextCleaned = peekNextCleaned(tokens, i);
       const nextLower = nextCleaned.toLowerCase();
 
-      // Pattern 1: Title prefix + proper noun
-      if (TITLE_PREFIXES.has(lower) && /^[A-Z][a-z]/.test(nextCleaned)) {
+      // Pattern 1: Title prefix + proper noun. But NOT if the next word is a
+      // common English word — that's a false title-name pair like "Master Literally".
+      if (TITLE_PREFIXES.has(lower)
+        && /^[A-Z][a-z]/.test(nextCleaned)
+        && !COMMON_ENGLISH.has(nextLower)
+        && !lowercaseWords.has(nextLower)) {
         current.push(cleaned);
         forceIncludeNext = true;
         continue;
@@ -584,6 +620,20 @@ function isValidNPCandidate(candidate: string, lowercaseWords: Set<string>): boo
   const words = candidate.split(/\s+/);
   if (words.length > 5) return false;
 
+  // ── Multi-word validation ──
+  if (words.length >= 2) {
+    const lowerWords = words.map((w) => w.toLowerCase());
+
+    // Reject if every word in the candidate is a common English word — the
+    // whole phrase is likely a capitalized action, UI label, or description.
+    if (lowerWords.every((w) => COMMON_ENGLISH.has(w) || lowercaseWords.has(w))) return false;
+
+    // Reject title-prefix + common-English-word pairs — a known title followed
+    // by an adverb, adjective, or common noun isn't a real name.
+    if (words.length === 2 && TITLE_PREFIXES.has(lowerWords[0])
+      && (COMMON_ENGLISH.has(lowerWords[1]) || lowercaseWords.has(lowerWords[1]))) return false;
+  }
+
   // ── Single-word validation (most false positives are single words) ──
   if (words.length === 1) {
     // Must be ≥3 characters
@@ -595,8 +645,12 @@ function isValidNPCandidate(candidate: string, lowercaseWords: Set<string>): boo
     // chunk, it's a common English word. Proper nouns are ALWAYS capitalized.
     if (lowercaseWords.has(lower)) return false;
 
-    // Comprehensive dictionary check
+    // Comprehensive dictionary check (includes onomatopoeia, interjections)
     if (COMMON_ENGLISH.has(lower)) return false;
+
+    // Very short words with no standard vowel are almost always sound effects
+    // or interjections (Mmn, Tsk, Pfft), not proper nouns.
+    if (candidate.length <= 4 && !/[aeiouAEIOU]/.test(candidate)) return false;
 
     // Suffix-based backup for words not in the dictionary
     // Only for words ≥6 chars to avoid rejecting short names (e.g., "Lily" = 4 chars)

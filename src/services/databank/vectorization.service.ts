@@ -13,8 +13,6 @@ import { chunkDocument } from "./document-chunker.service";
 import { loadDatabankSettings } from "./databank-settings.service";
 import type { DatabankDocument } from "./types";
 
-const BATCH_SIZE = 50;
-
 class DocumentProcessingAbortedError extends Error {
   constructor(docId: string) {
     super(`Document ${docId} processing aborted`);
@@ -95,10 +93,15 @@ export async function processDocument(userId: string, docId: string): Promise<vo
       return;
     }
 
-    // 3. Delete old chunks (for reprocessing)
+    // 3. Delete old Lance vectors before SQLite chunk IDs are replaced.
+    // Reprocessing generates new chunk IDs, so deleting SQLite rows first would
+    // orphan the previous Lance rows and make disk usage grow without bound.
+    await deleteDocumentVectors(userId, docId);
+
+    // 4. Delete old chunks (for reprocessing)
     crud.deleteChunksForDocument(docId);
 
-    // 4. Insert chunk rows into SQLite
+    // 5. Insert chunk rows into SQLite
     const chunkRows = chunkResults.map((c) => ({
       id: crypto.randomUUID(),
       documentId: docId,
@@ -122,7 +125,7 @@ export async function processDocument(userId: string, docId: string): Promise<vo
 
     crud.updateDocumentStatus(docId, "processing", { totalChunks: chunkRows.length });
 
-    // 5. Vectorize chunks
+    // 6. Vectorize chunks
     const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
     if (isProcessingAborted(docId, controller.signal)) return;
 
@@ -136,7 +139,7 @@ export async function processDocument(userId: string, docId: string): Promise<vo
     await vectorizeChunks(userId, doc, chunkRows, cfg, controller.signal);
     if (isProcessingAborted(docId, controller.signal)) return;
 
-    // 6. Mark as ready
+    // 7. Mark as ready
     crud.updateDocumentStatus(docId, "ready", { totalChunks: chunkRows.length });
     emitStatus(userId, doc, "ready", undefined, chunkRows.length);
 
@@ -216,14 +219,16 @@ async function vectorizeChunks(
   userId: string,
   doc: DatabankDocument,
   chunks: Array<{ id: string; content: string; chunkIndex: number }>,
-  cfg: { model: string },
+  cfg: { model: string; batch_size: number },
   signal: AbortSignal,
 ): Promise<void> {
   const failures: Error[] = [];
   await embeddingsSvc.embedWithAdaptiveBatching(
     userId,
     chunks,
-    BATCH_SIZE,
+    // Respect the user's configured embedding batch size (clamped) instead of a
+    // hardcoded 50, matching the other vectorization call sites.
+    Math.max(1, Math.min(cfg.batch_size, 200)),
     (c) => c.content,
     async (batch, _texts, vectors) => {
       if (signal.aborted || !crud.getDocument(userId, doc.id)) {
