@@ -28,21 +28,33 @@ nav = [
     { "Expressions" = "characters/expressions.md" },
     { "Alternate Fields & Avatars" = "characters/alternate-fields.md" },
   ] },
+  { "Dream Weaver" = [
+    { "Overview" = "weaver/index.md" },
+    { "Studio Workflow" = "weaver/studio-workflow.md" },
+    { "Worlds" = "weaver/worlds.md" },
+    { "People" = "weaver/people.md" },
+    { "Imports" = "weaver/imports.md" },
+    { "Visual Studio" = "weaver/visual-studio.md" },
+    { "Settings" = "weaver/settings.md" },
+  ] },
   { "Chatting" = [
     { "Overview" = "chatting/index.md" },
     { "Starting a Chat" = "chatting/starting-a-chat.md" },
     { "Messages & Swipes" = "chatting/messages-and-swipes.md" },
     { "Group Chats" = "chatting/group-chats.md" },
-    { "Branching" = "chatting/branching.md" },
+    { "Branch Tree" = "chatting/branching.md" },
     { "Author's Note" = "chatting/authors-note.md" },
     { "Attachments" = "chatting/attachments.md" },
-    { "OOC Comments" = "chatting/ooc.md" },
-    { "Loom Summary" = "chatting/loom-summary.md" },
+    { "Speech-to-Text" = "chatting/speech-to-text.md" },
+    { "Text-to-Speech" = "chatting/text-to-speech.md" },
+    { "OOC" = "chatting/ooc.md" },
+    { "Summary" = "chatting/loom-summary.md" },
     { "Long-Term Memory" = "chatting/memory.md" },
     { "Memory Cortex" = "chatting/memory-cortex.md" },
+    { "Databank" = "chatting/databank.md" },
     { "Guided Generation" = "chatting/guided-generation.md" },
     { "Quick Replies" = "chatting/quick-replies.md" },
-    { "Regen Feedback" = "chatting/regen-feedback.md" },
+    { "Regeneration Feedback" = "chatting/regen-feedback.md" },
   ] },
   { "Personas" = [
     { "Overview" = "personas/index.md" },
@@ -54,7 +66,7 @@ nav = [
     { "Setting Up a Connection" = "connections/setting-up.md" },
     { "Supported Providers" = "connections/providers.md" },
   ] },
-  { "Presets" = [
+  { "Reasoning" = [
     { "Overview" = "presets/index.md" },
     { "Understanding Presets" = "presets/understanding-presets.md" },
     { "Prompt Blocks" = "presets/prompt-blocks.md" },
@@ -65,7 +77,7 @@ nav = [
     { "Context Filters" = "presets/context-filters.md" },
     { "Sovereign Hand" = "presets/sovereign-hand.md" },
   ] },
-  { "World Books" = [
+  { "Lorebook" = [
     { "Overview" = "world-books/index.md" },
     { "Creating Entries" = "world-books/creating-entries.md" },
     { "Keywords & Activation" = "world-books/keywords-and-activation.md" },
@@ -73,31 +85,41 @@ nav = [
     { "Advanced Features" = "world-books/advanced-features.md" },
     { "Import & Export" = "world-books/importing-exporting.md" },
   ] },
-  { "Council & Lumia" = [
+  { "Council" = [
     { "Overview" = "council/index.md" },
     { "Setting Up Council" = "council/setting-up-council.md" },
     { "Council Tools" = "council/council-tools.md" },
   ] },
-  { "Packs" = [
+  { "Pack Browser" = [
     { "Overview" = "packs/index.md" },
     { "Managing Packs" = "packs/managing-packs.md" },
   ] },
   { "Image Generation" = [
     { "Overview" = "image-generation/index.md" },
     { "Setup & Providers" = "image-generation/setup.md" },
+    { "Prompts & Presets" = "image-generation/prompts-and-presets.md" },
+    { "Scene, Output & Timeouts" = "image-generation/scene-and-output.md" },
   ] },
   { "Customization" = [
-    { "Themes" = "customization/themes.md" },
-    { "Wallpapers" = "customization/wallpapers.md" },
+    { "Theme" = "customization/themes.md" },
+    { "Wallpaper" = "customization/wallpapers.md" },
     { "Regex Scripts" = "customization/regex-scripts.md" },
     { "Macros" = "customization/macros.md" },
     { "Display Modes" = "customization/display-modes.md" },
   ] },
   { "Settings" = [
     { "Embeddings" = "settings/embeddings.md" },
-    { "Push Notifications" = "settings/push-notifications.md" },
+    { "Web Search" = "settings/web-search.md" },
+    { "Notifications" = "settings/push-notifications.md" },
     { "LumiHub" = "settings/lumihub.md" },
-    { "Users & Auth" = "settings/users.md" },
+    { "Single Sign-On" = "settings/sso.md" },
+    { "User Management" = "settings/users.md" },
+  ] },
+  { "Data Portability" = [
+    { "Overview" = "data-portability/index.md" },
+    { "Exporting Your Data" = "data-portability/exporting.md" },
+    { "Importing an Archive" = "data-portability/importing.md" },
+    { "API Keys & Tickets" = "data-portability/api-keys-and-tickets.md" },
   ] },
   { "Extensions" = [
     { "Overview" = "extensions/index.md" },

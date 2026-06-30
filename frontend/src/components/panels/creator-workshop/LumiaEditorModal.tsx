@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
@@ -8,13 +9,8 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { LumiaItem, CreateLumiaItemInput } from '@/types/api'
 import styles from './LumiaEditorModal.module.css'
 
-const GENDER_OPTIONS = [
-  { value: '0', label: 'Neutral' },
-  { value: '1', label: 'Feminine' },
-  { value: '2', label: 'Masculine' },
-]
-
 export default function LumiaEditorModal() {
+  const { t } = useTranslation('panels')
   const modalProps = useStore((s) => s.modalProps)
   const closeModal = useStore((s) => s.closeModal)
 
@@ -22,10 +18,17 @@ export default function LumiaEditorModal() {
   const editingItem = modalProps.editingItem as LumiaItem | undefined
   const onSaved = modalProps.onSaved as (() => void) | undefined
 
+  const genderOptions = useMemo(() => [
+    { value: '0', label: t('creatorWorkshop.shared.gender.feminine') },
+    { value: '1', label: t('creatorWorkshop.shared.gender.masculine') },
+    { value: '2', label: t('creatorWorkshop.shared.gender.neutral') },
+    { value: '3', label: t('creatorWorkshop.shared.gender.any') },
+  ], [t])
+
   const [name, setName] = useState(editingItem?.name || '')
   const [avatarUrl, setAvatarUrl] = useState(editingItem?.avatar_url || '')
   const [authorName, setAuthorName] = useState(editingItem?.author_name || '')
-  const [genderIdentity, setGenderIdentity] = useState(String(editingItem?.gender_identity ?? 0))
+  const [genderIdentity, setGenderIdentity] = useState(String(editingItem?.gender_identity ?? 3))
   const [definition, setDefinition] = useState(editingItem?.definition || '')
   const [personality, setPersonality] = useState(editingItem?.personality || '')
   const [behavior, setBehavior] = useState(editingItem?.behavior || '')
@@ -36,7 +39,7 @@ export default function LumiaEditorModal() {
     name: editingItem?.name || '',
     avatarUrl: editingItem?.avatar_url || '',
     authorName: editingItem?.author_name || '',
-    genderIdentity: String(editingItem?.gender_identity ?? 0),
+    genderIdentity: String(editingItem?.gender_identity ?? 3),
     definition: editingItem?.definition || '',
     personality: editingItem?.personality || '',
     behavior: editingItem?.behavior || '',
@@ -79,7 +82,7 @@ export default function LumiaEditorModal() {
         name: name.trim(),
         avatar_url: avatarUrl.trim() || undefined,
         author_name: authorName.trim() || undefined,
-        gender_identity: Number(genderIdentity) as 0 | 1 | 2,
+        gender_identity: Number(genderIdentity) as 0 | 1 | 2 | 3,
         definition: definition.trim() || undefined,
         personality: personality.trim() || undefined,
         behavior: behavior.trim() || undefined,
@@ -102,49 +105,55 @@ export default function LumiaEditorModal() {
     <>
       <ModalShell isOpen onClose={handleClose} maxWidth={640} maxHeight="90vh" closeOnEscape={false} className={styles.modal}>
         <div className={styles.header}>
-          <h3 className={styles.title}>{editingItem ? 'Edit Lumia' : 'Create Lumia'}</h3>
+          <h3 className={styles.title}>
+            {editingItem ? t('creatorWorkshop.lumiaEditor.editTitle') : t('creatorWorkshop.lumiaEditor.createTitle')}
+          </h3>
           <CloseButton onClick={handleClose} />
         </div>
 
         <div className={styles.body}>
-          <FormField label="Name" required>
-            <TextInput value={name} onChange={setName} placeholder="Character name" autoFocus />
+          <FormField label={t('creatorWorkshop.shared.name')} required>
+            <TextInput value={name} onChange={setName} placeholder={t('creatorWorkshop.lumiaEditor.characterNamePlaceholder')} autoFocus />
           </FormField>
 
-          <FormField label="Avatar URL">
-            <ImageInput value={avatarUrl} onChange={setAvatarUrl} placeholder="https://..." />
+          <FormField label={t('creatorWorkshop.lumiaEditor.avatarUrl')}>
+            <ImageInput value={avatarUrl} onChange={setAvatarUrl} placeholder={t('creatorWorkshop.lumiaEditor.avatarPlaceholder')} />
           </FormField>
 
           <div className={styles.row}>
             <div className={styles.rowHalf}>
-              <FormField label="Author">
-                <TextInput value={authorName} onChange={setAuthorName} placeholder="Author name" />
+              <FormField label={t('creatorWorkshop.shared.author')}>
+                <TextInput value={authorName} onChange={setAuthorName} placeholder={t('creatorWorkshop.lumiaEditor.authorPlaceholder')} />
               </FormField>
             </div>
             <div className={styles.rowHalf}>
-              <FormField label="Gender Identity">
-                <Select value={genderIdentity} onChange={setGenderIdentity} options={GENDER_OPTIONS} />
+              <FormField label={t('creatorWorkshop.lumiaEditor.genderIdentity')}>
+                <Select value={genderIdentity} onChange={setGenderIdentity} options={genderOptions} />
               </FormField>
             </div>
           </div>
 
-          <FormField label="Definition" hint="Physical description, appearance, backstory">
-            <TextArea value={definition} onChange={setDefinition} placeholder="Describe the character's physical traits, appearance, and background..." rows={4} />
+          <FormField label={t('creatorWorkshop.lumiaEditor.definition')} hint={t('creatorWorkshop.lumiaEditor.definitionHint')}>
+            <TextArea value={definition} onChange={setDefinition} placeholder={t('creatorWorkshop.lumiaEditor.definitionPlaceholder')} rows={4} />
           </FormField>
 
-          <FormField label="Personality" hint="Core personality traits and temperament">
-            <TextArea value={personality} onChange={setPersonality} placeholder="Describe the character's personality..." rows={3} />
+          <FormField label={t('creatorWorkshop.lumiaEditor.personality')} hint={t('creatorWorkshop.lumiaEditor.personalityHint')}>
+            <TextArea value={personality} onChange={setPersonality} placeholder={t('creatorWorkshop.lumiaEditor.personalityPlaceholder')} rows={3} />
           </FormField>
 
-          <FormField label="Behavior" hint="How the character acts and speaks">
-            <TextArea value={behavior} onChange={setBehavior} placeholder="Describe the character's behavior patterns and speech style..." rows={3} />
+          <FormField label={t('creatorWorkshop.lumiaEditor.behavior')} hint={t('creatorWorkshop.lumiaEditor.behaviorHint')}>
+            <TextArea value={behavior} onChange={setBehavior} placeholder={t('creatorWorkshop.lumiaEditor.behaviorPlaceholder')} rows={3} />
           </FormField>
         </div>
 
         <div className={styles.footer}>
-          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="ghost" onClick={handleClose}>{t('creatorWorkshop.shared.cancel')}</Button>
           <Button variant="primary" onClick={handleSave} disabled={!name.trim() || saving}>
-            {saving ? 'Saving...' : editingItem ? 'Save Changes' : 'Create'}
+            {saving
+              ? t('creatorWorkshop.shared.saving')
+              : editingItem
+                ? t('creatorWorkshop.shared.saveChanges')
+                : t('creatorWorkshop.shared.create')}
           </Button>
         </div>
       </ModalShell>
@@ -152,11 +161,11 @@ export default function LumiaEditorModal() {
       {showDiscard && (
         <ConfirmationModal
           isOpen
-          title="Discard changes?"
-          message="You have unsaved changes. Are you sure you want to discard them?"
+          title={t('creatorWorkshop.shared.discardTitle')}
+          message={t('creatorWorkshop.shared.discardMessage')}
           variant="warning"
-          confirmText="Discard"
-          cancelText="Keep editing"
+          confirmText={t('creatorWorkshop.shared.discard')}
+          cancelText={t('creatorWorkshop.shared.keepEditing')}
           onConfirm={() => {
             setShowDiscard(false)
             closeModal()

@@ -1,7 +1,9 @@
 import React, { useMemo, useRef } from 'react'
 import { useStore } from '@/store'
 import { transpileComponent } from '@/lib/componentTranspiler'
+import { HOST_SLOTS_PROP } from '@/lib/componentOverrideCapabilities'
 import { toast } from '@/lib/toast'
+import i18n from '@/i18n'
 
 /**
  * ErrorBoundary that falls back to the default component on crash.
@@ -21,7 +23,7 @@ class OverrideErrorBoundary extends React.Component<
 
   componentDidCatch(error: Error) {
     console.error(`[ComponentOverride] ${this.props.componentName} crashed:`, error)
-    toast.error(`Custom ${this.props.componentName} crashed — falling back to default`)
+    toast.error(i18n.t('common.toast.componentCrashed', { name: this.props.componentName }))
   }
 
   // Reset error state when the override source changes
@@ -75,6 +77,12 @@ export function useComponentOverride<P extends Record<string, any>>(
   DefaultComponent: React.ComponentType<P>,
   overrideProps: any,
   defaultProps: P,
+  /**
+   * Host-trusted React elements keyed by slot tag name (e.g. `{ Content: <…/> }`).
+   * The override author renders these by placing the matching slot tag
+   * (`<Content />`) — they cannot read or forge this object from their source.
+   */
+  hostSlots?: Record<string, React.ReactNode>,
 ): React.ReactElement {
   const override = useStore((s) => s.componentOverrides?.[componentName])
   const prevErrorRef = useRef<string | null>(null)
@@ -87,15 +95,17 @@ export function useComponentOverride<P extends Record<string, any>>(
   // Show transpile errors once (not on every render)
   if (compiled?.error && compiled.error !== prevErrorRef.current) {
     prevErrorRef.current = compiled.error
-    toast.error(`${componentName} override: ${compiled.error}`)
+    toast.error(i18n.t('common.toast.overrideError', { name: componentName, error: compiled.error }))
   } else if (!compiled?.error) {
     prevErrorRef.current = null
   }
 
   if (compiled?.component) {
     const UserComponent = compiled.component
-    // Freeze top-level props so user code can't reassign action callbacks
-    const frozenProps = Object.freeze({ ...overrideProps })
+    // Freeze top-level props so user code can't reassign action callbacks.
+    // Host slots ride along under a reserved key the interpreter reads directly
+    // and never exposes to user scope (see FORBIDDEN_PROPERTY_NAMES).
+    const frozenProps = Object.freeze({ ...overrideProps, [HOST_SLOTS_PROP]: hostSlots })
     return (
       <OverrideErrorBoundary
         componentName={componentName}
@@ -138,7 +148,7 @@ export function useOverrideRender(
 
   if (compiled?.error && compiled.error !== prevErrorRef.current) {
     prevErrorRef.current = compiled.error
-    toast.error(`${componentName} override: ${compiled.error}`)
+    toast.error(i18n.t('common.toast.overrideError', { name: componentName, error: compiled.error }))
   } else if (!compiled?.error) {
     prevErrorRef.current = null
   }
@@ -175,7 +185,7 @@ class OverrideFallbackBoundary extends React.Component<
 
   componentDidCatch(error: Error) {
     console.error(`[ComponentOverride] ${this.props.componentName} crashed:`, error)
-    toast.error(`Custom ${this.props.componentName} crashed — falling back to default`)
+    toast.error(i18n.t('common.toast.componentCrashed', { name: this.props.componentName }))
   }
 
   componentDidUpdate(prevProps: any) {

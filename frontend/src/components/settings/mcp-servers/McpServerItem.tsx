@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import {
   Plug, PlugZap, Unplug, RefreshCw, Trash2, Pencil,
   ChevronDown, ChevronRight, TestTube, Terminal, Globe, Radio,
@@ -32,6 +34,8 @@ export default function McpServerItem({
   onDisconnect,
   onTest,
 }: McpServerItemProps) {
+  const { t } = useTranslation('settings')
+  const { t: tc } = useTranslation('common')
   const [editing, setEditing] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -50,7 +54,7 @@ export default function McpServerItem({
       setTestResult(result)
       setTimeout(() => setTestResult(null), 5000)
     } catch {
-      setTestResult({ success: false, message: 'Test request failed', tools: [] })
+      setTestResult({ success: false, message: t('mcp.testRequestFailed'), tools: [] })
       setTimeout(() => setTestResult(null), 5000)
     } finally {
       setTesting(false)
@@ -110,25 +114,25 @@ export default function McpServerItem({
           </span>
           {isConnected && hasTools && (
             <span className={styles.toolBadge}>
-              {status!.tool_count} tool{status!.tool_count !== 1 ? 's' : ''}
+              {t('mcp.toolCount', { count: status!.tool_count })}
             </span>
           )}
           {!server.is_enabled && (
-            <span className={styles.disabledBadge}>Disabled</span>
+            <span className={styles.disabledBadge}>{t('mcp.disabled')}</span>
           )}
         </div>
 
         <div className={styles.actions}>
           {testResult && (
             <span className={styles.testResult} data-success={testResult.success}>
-              {testResult.success ? 'Pass' : 'Fail'}
+              {testResult.success ? t('mcp.testPass') : t('mcp.testFail')}
             </span>
           )}
           <button
             className={styles.actionBtn}
             onClick={handleTest}
             disabled={testing}
-            title="Test connection"
+            title={t('mcp.testConnection')}
           >
             <TestTube size={14} />
           </button>
@@ -137,7 +141,7 @@ export default function McpServerItem({
               className={styles.actionBtn}
               onClick={handleDisconnect}
               disabled={connecting}
-              title="Disconnect"
+              title={t('mcp.disconnect')}
             >
               <Unplug size={14} />
             </button>
@@ -146,7 +150,7 @@ export default function McpServerItem({
               className={styles.actionBtn}
               onClick={handleConnect}
               disabled={connecting}
-              title="Connect"
+              title={t('mcp.connect')}
             >
               <PlugZap size={14} />
             </button>
@@ -154,14 +158,14 @@ export default function McpServerItem({
           <button
             className={styles.actionBtn}
             onClick={() => setEditing(true)}
-            title="Edit"
+            title={tc('actions.edit')}
           >
             <Pencil size={14} />
           </button>
           <button
             className={styles.actionBtn}
             onClick={onDelete}
-            title="Delete"
+            title={tc('actions.delete')}
             data-danger
           >
             <Trash2 size={14} />
@@ -180,7 +184,7 @@ export default function McpServerItem({
             onClick={() => setExpanded(!expanded)}
           >
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            Discovered tools
+            {t('mcp.discoveredTools')}
           </button>
           {expanded && (
             <div className={styles.toolsList}>

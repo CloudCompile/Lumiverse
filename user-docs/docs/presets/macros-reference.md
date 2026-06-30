@@ -1,12 +1,16 @@
+---
+title: Macros Reference
+---
+
 # Macros Reference
 
-Macros are template variables written as `{{macro_name}}` that get replaced with dynamic content when your preset is assembled into a prompt. This is the complete reference of every built-in macro in Lumiverse.
+Macros are template variables written as `{{macro_name}}` that get replaced with dynamic content when your preset is assembled into a prompt. This is the complete reference of the built-in macros available in Lumiverse.
 
 ---
 
 ## How to Use Macros
 
-Place macros anywhere in your preset blocks, world book entries, or other text fields:
+Place macros anywhere in preset blocks, chat-facing prompt fields, and other prompt content that goes through macro evaluation:
 
 ```
 You are {{char}}, a character described as: {{description}}
@@ -77,15 +81,19 @@ This is a private conversation.
 {{/if}}
 ```
 
-### Flags
+### Prefixes & Scoped Tags
 
-Macros support prefix flags for advanced control:
+Lumiverse parses SillyTavern-style macro prefixes. The currently user-relevant ones are:
 
-| Flag | Syntax | Effect |
-|------|--------|--------|
-| Immediate | `{{~immediate macro}}` | Resolve before other macros |
-| Delayed | `{{~delayed macro}}` | Resolve after recursion passes |
-| Preserve | `{{~preserve macro}}` | Keep surrounding whitespace |
+| Prefix | Syntax | Effect |
+|--------|--------|--------|
+| `!` | `{{!macro}}` | Parsed for immediate/compatibility-prefixed macros |
+| `?` | `{{?macro}}` | Parsed for delayed/compatibility-prefixed macros |
+| `~` | `{{~macro}}` | Parsed for reevaluate-style compatibility |
+| `>` | `{{>macro}}` | Parsed for filter-style compatibility |
+| `#` | `{{#trim}}...{{/trim}}` | Preserve whitespace for macros that support it (`trim` is the main built-in example) |
+
+Closing scoped macros use `/`, like `{{/if}}`, `{{/trim}}`, or `{{/numbered}}`.
 
 ---
 
@@ -100,10 +108,10 @@ Utility macros for text manipulation and flow control.
 | `{{noop}}` | — | No operation — resolves to nothing |
 | `{{trim}}...{{/trim}}` | — | Trims whitespace from the enclosed content |
 | `{{comment::...}}` | `{{note::...}}` | Comment — content is discarded, produces no output |
-| `{{//::...}}` | — | Inline comment shorthand |
+| `{{// comment text}}` | — | Inline comment shorthand |
 | `{{input}}` | — | The raw text of the last user message |
 | `{{reverse::text}}` | — | Reverses the given text |
-| `{{outlet}}` | — | Placeholder for extension injection points |
+| `{{outlet::name}}` | — | Resolves the content exported by an active world-info entry outlet |
 | `{{banned}}` | — | Placeholder for banned token lists |
 
 ### Conditional Logic
@@ -117,6 +125,8 @@ Utility macros for text manipulation and flow control.
 ```
 
 The condition can be any value — it's truthy unless it's empty, `"0"`, `"false"`, `"null"`, or `"undefined"`.
+
+Only the selected branch is resolved. Side-effect macros in the unselected branch do not run.
 
 **Negation** — prefix with `!` to invert:
 
@@ -132,12 +142,207 @@ The condition can be any value — it's truthy unless it's empty, `"0"`, `"false
 {{if::{{.score}} == 100}}perfect!{{/if}}
 ```
 
-**Variable shorthand** — `.var` and `$var` resolve automatically in conditions:
+**Variable shorthand** — `.var`, `$var`, and `@var` resolve automatically in conditions:
 
 ```
 {{if .myVar}}has a value{{/if}}
 {{if .x > .y}}x is bigger{{/if}}
 {{if !.gameOver}}still playing{{/if}}
+{{if @hp > 0}}still alive{{/if}}
+```
+
+---
+
+## Iteration
+
+### `{{foreach}}`
+
+Repeat a block of content once for each item in a list — the macro equivalent of a JavaScript `forEach`. The list is a single string that is split on a delimiter (`,` by default); each item is trimmed and blank items are dropped.
+
+```
+{{foreach::apple, banana, cherry}}
+- {{.item}}
+{{/foreach}}
+```
+
+produces:
+
+```
+- apple
+- banana
+- cherry
+```
+
+**Custom loop variable** — the second argument renames the loop variable (default `item`):
+
+```
+{{foreach::Alice,Bob::name}}{{.name}} is here. {{/foreach}}
+```
+
+**Custom delimiter** — the third argument changes the split character. Pass an empty delimiter (`::`) to treat the whole string as a single item:
+
+```
+{{foreach::a|b|c::item::|}}{{.item}} {{/foreach}}    — splits on "|"
+```
+
+Inside the body, these loop variables are available (replace `item` with your variable name):
+
+| Variable | Value |
+|----------|-------|
+| `{{.item}}` | The current item |
+| `{{.item_index}}` | 0-based position (`0`, `1`, `2`, …) |
+| `{{.item_number}}` | 1-based position (`1`, `2`, `3`, …) |
+| `{{.item_count}}` | Total number of items |
+| `{{.item_first}}` | `"true"` on the first item, otherwise empty |
+| `{{.item_last}}` | `"true"` on the last item, otherwise empty |
+
+**Numbered list:**
+
+```
+{{foreach::Sword,Shield,Potion::loot}}{{.loot_number}}. {{.loot}}{{newline}}{{/foreach}}
+```
+
+**Comma-joined list** — use `{{.x_last}}` to skip the trailing separator:
+
+```
+{{foreach::a,b,c::x}}{{.x}}{{if::!{{.x_last}}}}, {{/if}}{{/foreach}}    — "a, b, c"
+```
+
+`{{foreach}}` pairs naturally with any macro that returns a delimited list, such as `{{players}}` or `{{group}}`:
+
+```
+{{foreach::{{players}}}}- {{.item}}{{newline}}{{/foreach}}
+```
+
+!!! note "Good to know"
+    - The loop variable is scoped to the loop: its previous value (if any) is restored when the loop ends, so it never clobbers a variable of the same name used elsewhere.
+    - Loops can be nested — give the inner loop a different variable name.
+    - Iteration is capped at 1000 items.
+
+### `{{range}}`
+
+Generate a numeric sequence as a comma-separated list — ideal for counted loops.
+
+```
+{{range::5}}              — "1, 2, 3, 4, 5"   (1..n inclusive)
+{{range::3::6}}           — "3, 4, 5, 6"      (start..end inclusive)
+{{range::1::10::2}}       — "1, 3, 5, 7, 9"   (with a step)
+{{range::5::1}}           — "5, 4, 3, 2, 1"   (counts down)
+```
+
+Feed it into `{{foreach}}` for indexed repetition:
+
+```
+{{foreach::{{range::1::{{playerCount}}}}::n}}Round {{.n}}…{{newline}}{{/foreach}}
+```
+
+### `{{filter}}`
+
+Keep only the list items whose body — an `{{if}}`-style condition — is truthy, returning a comma-separated list. The body sees the same loop variables as `{{foreach}}` (`{{.item}}`, `{{.item_index}}`, …).
+
+```
+{{filter::1,2,3,4::n}}{{gt::{{.n}}::2}}{{/filter}}                  — "3, 4"
+{{filter::{{players}}::p}}{{ne::{{.p}}::{{hostName}}}}{{/filter}}    — everyone but the host
+```
+
+### `{{some}}` / `{{every}}`
+
+Test whether **any** (`{{some}}`) or **all** (`{{every}}`) items satisfy a predicate. Both return `"true"` / `""`, are usable as conditions, and short-circuit. `{{every}}` is vacuously `"true"` for an empty list.
+
+```
+{{if::{{some::{{players}}::p}}{{eq::{{.p}}::Bob}}{{/some}}}}Bob is here.{{/if}}
+{{if::{{every::{{range::1::5}}::n}}{{gt::{{.n}}::0}}{{/every}}}}all positive{{/if}}
+```
+
+### `{{foreachMessage}}`
+
+Loop over the chat history, resolving the body once per message — for custom transcripts, pulling out a speaker's lines, or scanning recent turns.
+
+```
+{{foreachMessage}}{{.msg_name}}: {{.msg}}{{newline}}{{/foreachMessage}}
+{{foreachMessage::5}}…{{/foreachMessage}}            — only the last 5 messages
+{{foreachMessage::5::m}}…{{.m}}…{{/foreachMessage}}  — last 5, body variable "m"
+```
+
+A **numeric** first argument iterates the last N messages (oldest-first); a **non-numeric** first argument is the loop variable name (default `msg`). Body bindings (replace `msg`):
+
+| Variable | Value |
+|----------|-------|
+| `{{.msg}}` | Message content |
+| `{{.msg_name}}` | Author name |
+| `{{.msg_is_user}}` | `"true"` for a user message, otherwise empty |
+| `{{.msg_index}}` / `{{.msg_number}}` / `{{.msg_count}}` | Position and total |
+| `{{.msg_first}}` / `{{.msg_last}}` | Edge flags (`"true"` / `""`) |
+
+```
+{{foreachMessage::10::m}}{{if::{{.m_is_user}}}}> {{.m}}{{newline}}{{/if}}{{/foreachMessage}}    — the user's recent lines
+```
+
+### `{{foreachVar}}` / `{{foreachChatVar}}` / `{{foreachGlobalVar}}`
+
+Loop over the variables in a scope whose name starts with a prefix — the way to render a **dynamic state table** when you don't know the keys ahead of time. `{{foreachVar}}` reads local (`.`) variables, `{{foreachChatVar}}` reads chat-persisted (`@`) variables, and `{{foreachGlobalVar}}` reads global (`$`) variables. Items are visited in alphabetical key order.
+
+```
+{{@hp_Alice = 100}}{{@hp_Bob = 80}}
+{{foreachChatVar::hp_::p}}{{.p}}: {{.p_value}} HP{{newline}}{{/foreachChatVar}}
+```
+
+produces:
+
+```
+Alice: 100 HP
+Bob: 80 HP
+```
+
+Body bindings (replace `item`): `{{.item}}` is the name **after** the prefix, `{{.item_key}}` is the full variable name, `{{.item_value}}` is its value, plus the usual `{{.item_index}}` / `{{.item_number}}` / `{{.item_count}}` / `{{.item_first}}` / `{{.item_last}}`.
+
+---
+
+## Lists
+
+Query and transform comma-separated lists. These compose with the iteration macros and with anything that returns a list (`{{players}}`, `{{group}}`, `{{range}}`). Input is split on commas (items trimmed, blanks dropped); list-returning macros emit a clean `, `-separated list, so the family round-trips.
+
+| Macro | Aliases | Returns |
+|-------|---------|---------|
+| `{{count::list}}` | `{{listLength}}` | Number of items |
+| `{{includes::list::item}}` | `{{contains}}`, `{{inList}}` | `"true"` / `""` — whole-item membership (condition-compatible) |
+| `{{nth::list::i}}` | `{{at}}` | Item at index `i` (0-based; negative counts from the end) |
+| `{{first::list}}` | — | First item |
+| `{{last::list}}` | — | Last item |
+| `{{slice::list::start::end}}` | — | Sublist (`end` exclusive and optional; negatives allowed). `{{slice::list::-3}}` → last 3 |
+| `{{take::list::n}}` | — | First `n` items (negative `n` → last `|n|`) |
+| `{{sort::list::dir}}` | — | Sorted; numeric when every item is a number, else alphabetical. `dir` = `asc` (default) or `desc` |
+| `{{unique::list}}` | `{{dedupe}}`, `{{distinct}}` | Duplicates removed (first occurrence kept) |
+| `{{reverseList::list}}` | — | Items in reverse order |
+| `{{shuffle::list}}` | — | Items in random order |
+
+**Examples:**
+
+```
+{{count::{{players}}}}                        — how many players
+{{if::{{includes::{{group}}::Bob}}}}…{{/if}}   — gate on membership
+{{first::{{sort::10,2,30}}}}                   — "2" (numeric sort → smallest)
+{{slice::{{players}}::-2}}                      — the last two players
+{{unique::{{sort::b,a,b,c}}}}                   — "a, b, c"
+```
+
+!!! note "Delimiters"
+    The Lists macros operate on **comma-separated** lists — the form every list-producing macro emits. To bring in data with another delimiter, parse it through `{{foreach}}`'s delimiter argument or normalise it first with `{{replace}}`.
+
+### Numeric reductions
+
+Reduce a list of numbers to a single value (non-numeric items are ignored).
+
+| Macro | Aliases | Returns |
+|-------|---------|---------|
+| `{{sum::list}}` | — | Total (`0` for an empty list) |
+| `{{avg::list}}` | `{{mean}}`, `{{average}}` | Mean (empty when there are no numbers) |
+| `{{listMax::list}}` | `{{list_max}}` | Largest number |
+| `{{listMin::list}}` | `{{list_min}}` | Smallest number |
+
+```
+{{sum::{{range::1::10}}}}                                            — "55"
+{{avg::{{foreachChatVar::hp_::p}}{{.p_value}},{{/foreachChatVar}}}}   — average party HP
 ```
 
 ---
@@ -155,9 +360,43 @@ Macros for character and user identity.
 | `{{notChar}}` | `{{not_char}}` | The non-character party (usually the user) |
 | `{{charGroupFocused}}` | `{{charFocused}}`, `{{char_group_focused}}` | The targeted character in a group chat |
 | `{{isGroupChat}}` | `{{is_group_chat}}` | `"yes"` or `"no"` — usable as a condition |
+| `{{isNarrator}}` | `{{is_narrator}}` | `"yes"` or `"no"` — whether the active persona is a narrator (not a self-insert) |
 | `{{groupOthers}}` | `{{group_others}}` | Group members excluding the focused character |
 | `{{groupMemberCount}}` | `{{group_member_count}}` | Number of characters in the group |
 | `{{groupLastSpeaker}}` | `{{group_last_speaker}}` | Last character who spoke |
+| `{{groupCardMode}}` | `{{group_card_mode}}` | Card composition mode: `"solo"`, `"swap"`, `"merge"`, or `"merge_ignore_muted"` |
+
+---
+
+## Multiplayer
+
+State about the current multiplayer room. Outside a room every macro returns a safe "not multiplayer" value (`{{isMultiplayer}}` → `"no"`, counts → `0`, names → empty), so presets can reference them unconditionally. Names match what you see on messages: a player's persona name if they set one, otherwise their display name.
+
+| Macro | Aliases | Returns |
+|-------|---------|---------|
+| `{{isMultiplayer}}` | `{{is_multiplayer}}`, `{{is_multiplayer_room}}` | `"yes"` or `"no"` — usable as a condition |
+| `{{playerCount}}` | `{{player_count}}`, `{{players_count}}` | Number of active players (host + peers) |
+| `{{players}}` | `{{player_names}}` | Comma-separated names of all active players (host first) |
+| `{{hostName}}` | `{{host_name}}` | Display name of the room's host |
+| `{{currentPlayer}}` | `{{current_player}}`, `{{current_turn}}` | Name of the player whose turn it is (round-robin rooms; empty in freeform) |
+
+**Gate room-only content** so it costs nothing in solo chats:
+
+```
+{{if::{{isMultiplayer}}}}
+This is a group session with {{playerCount}} players: {{players}}.
+It is currently {{currentPlayer}}'s turn.
+{{/if}}
+```
+
+**Enumerate the roster** with `{{foreach}}`:
+
+```
+{{if::{{isMultiplayer}}}}
+Players in the room:
+{{foreach::{{players}}::player}}{{.player_number}}. {{.player}}{{newline}}{{/foreach}}
+{{/if}}
+```
 
 ---
 
@@ -171,6 +410,9 @@ Macros that pull from the character card fields. These respect [alternate field]
 | `{{personality}}` | `{{charPersonality}}` | Character's personality |
 | `{{scenario}}` | `{{charScenario}}` | Character's scenario |
 | `{{persona}}` | `{{userPersona}}` | Your persona's description (includes enabled add-ons) |
+| `{{sub}}` | `{{subjectivePronoun}}`, `{{personaSubjectivePronoun}}` | Your persona's subjective pronoun |
+| `{{obj}}` | `{{objectivePronoun}}`, `{{personaObjectivePronoun}}` | Your persona's objective pronoun |
+| `{{poss}}` | `{{possessivePronoun}}`, `{{personaPossessivePronoun}}` | Your persona's possessive pronoun |
 | `{{mesExamples}}` | `{{mes_examples}}`, `{{exampleMessages}}` | Character's example dialogue |
 | `{{mesExamplesRaw}}` | — | Raw example dialogue (unprocessed) |
 | `{{system}}` | `{{charPrompt}}`, `{{charSystem}}` | Character's system prompt |
@@ -201,6 +443,7 @@ Macros for the current chat state.
 | `{{firstDisplayedMessageId}}` | — | Index of the first displayed message |
 | `{{lastSwipeId}}` | — | Index of the last swipe on the final message |
 | `{{currentSwipeId}}` | — | Index of the active swipe |
+| `{{rejectedSwipe}}` | `{{rejectedGeneration}}`, `{{regeneratedMessage}}` | Content of the regenerate/swipe target before the new swipe was staged; empty otherwise |
 
 ---
 
@@ -400,6 +643,7 @@ Access individual messages, track state, and query character metadata.
 | `{{toggle::name}}` | — | Flipped boolean (`"true"` ↔ `"false"`) | Toggle name (stored as local variable) |
 | `{{charTags}}` | `{{char_tags}}`, `{{characterTags}}` | Comma-separated list of the character's tags | — |
 | `{{charTag::tag}}` | `{{char_tag}}`, `{{hasTag}}`, `{{has_tag}}` | `"true"` / `"false"` — whether character has this tag | Tag name (case-insensitive) |
+| `{{rcounter::name}}` | — | Render-scoped counter (resets each prompt build, never persisted) | Counter name; optional second arg `reset` to zero it |
 
 **Examples:**
 
@@ -565,6 +809,47 @@ Rolled {{.roll}} damage. {{char}}'s HP: {{@hp}}/{{@maxHp}}
 
 Here `.roll` is a temporary local variable (used for the current evaluation only), while `@hp` and `@maxHp` are chat-persisted and carry over to the next generation.
 
+### Prompt Variables (Preset Inputs)
+
+Prompt variables are preset-defined inputs that are seeded into local scope before block evaluation. That means `{{var::tone}}`, `{{getvar::tone}}`, and `{{.tone}}` can all resolve to the same runtime value.
+
+Variables come in seven types — **Text**, **Text Area**, **Number**, **Slider**, **Dropdown**, **On/Off**, and **Multi-select** — and each resolves to its **rendered value** when read:
+
+- **Dropdown** → the selected option's value string (the long, expanded text the creator wrote).
+- **On/Off** → `1` when on, `0` when off. Use directly in `{{if::...}}` gates.
+- **Multi-select** → the selected options' values, joined by the variable's separator (default `\n\n`).
+
+| Macro | Aliases | Description | Args |
+|-------|---------|-------------|------|
+| `{{var::name}}` | `{{promptVar}}`, `{{presetVar}}` | Read the runtime prompt-variable value, then the user override, then the creator default | Variable name |
+| `{{var::name::ison::keyA,keyB,...}}` | — | **Multi-select only.** Returns `"true"` if every listed option key is currently selected (AND match), `"false"` otherwise. Empty key list is vacuously `"true"`. | Variable name, the literal `ison`, comma-separated option keys |
+| `{{hasVar::name}}` | `{{hasPromptVar}}`, `{{hasPresetVar}}` | Check whether a prompt variable is resolvable | Variable name |
+| `{{varDefault::name}}` | `{{promptVarDefault}}`, `{{presetVarDefault}}` | Read the creator-declared default only | Variable name |
+
+**Examples:**
+
+```
+Tone: {{default::{{var::tone}}::neutral}}
+
+{{if::{{hasPromptVar::violence}}}}
+Violence level: {{var::violence}}
+{{/if}}
+
+// On/Off switches resolve to 1 or 0 — drop them straight into {{if::...}}.
+{{if::{{var::strict_canon}}}}
+Strictly adhere to established canon.
+{{/if}}
+
+// Multi-select: the rendered value is the joined block of selected option values.
+Style guidelines:
+{{var::style_guides}}
+
+// Multi-select: branch on WHICH options are selected with the ison sub-syntax.
+{{if::{{var::style_guides::ison::concise,polite}}}}
+Stay tight and respectful — no throat-clearing.
+{{/if}}
+```
+
 ---
 
 ## Runtime & State
@@ -605,7 +890,9 @@ Think step by step about what {{char}} would do next.
 
 ## Memory
 
-Long-term memory retrieval from the vector memory system.
+Long-term memory and retrieval macros from Lumiverse's memory systems.
+
+### Long-Term Memory
 
 | Macro | Aliases | Returns | Args |
 |-------|---------|---------|------|
@@ -614,16 +901,27 @@ Long-term memory retrieval from the vector memory system.
 | `{{memoriesCount}}` | — | Number of memory chunks retrieved | — |
 | `{{memoriesRaw}}` | — | Raw memory chunks without header formatting | Optional: `{{memoriesRaw::count}}` to override chunk count |
 
----
+### Databank Retrieval
 
-## Pipeline
+| Macro | Aliases | Returns | Args |
+|-------|---------|---------|------|
+| `{{databank}}` | `{{databankMemory}}`, `{{documents}}`, `{{knowledgeBank}}` | Formatted databank chunks with source headers | Optional: `{{databank::count}}` to override chunk count |
+| `{{databankActive}}` | — | `"yes"` / `"no"` — whether databank retrieval returned chunks | — |
+| `{{databankCount}}` | — | Number of databank chunks retrieved | — |
+| `{{databankRaw}}` | — | Raw databank chunks without the outer header | Optional: `{{databankRaw::count}}` to override chunk count |
 
-Results from Lumi Engine pipeline modules.
+### Memory Cortex
 
 | Macro | Returns | Args |
 |-------|---------|------|
-| `{{pipeline}}` | All enabled pipeline module results, formatted as labeled sections | — |
-| `{{pipe::module_key}}` | A specific pipeline module's result | Module key name |
+| `{{entities}}` | Formatted entity snapshots with facts and relationships | Optional: `{{entities::count}}` to limit the number of entities |
+| `{{entityFacts::name}}` | Facts for one named entity | Entity name |
+| `{{relationships}}` | Active relationship edges in the current scene | — |
+| `{{arc}}` | Current narrative arc summary | — |
+| `{{memorySalience}}` | Highest-salience retrieved memory | — |
+| `{{cortexActive}}` | `"yes"` / `"no"` — whether Memory Cortex returned results | — |
+| `{{entityCount}}` | Number of active entities in context | — |
+| `{{characterColors}}` | Character speech / thought / narration color instructions | — |
 
 ---
 
@@ -712,19 +1010,28 @@ These macros return `"yes"` / `"no"` or `"true"` / `"false"` and are designed fo
 | Macro | True When |
 |-------|-----------|
 | `{{isGroupChat}}` | Chat has multiple characters |
+| `{{isNarrator}}` | Active persona is marked as a narrator |
+| `{{isMultiplayer}}` | Chat is a multiplayer room |
 | `{{lumiaCouncilModeActive}}` | Council mode is enabled |
 | `{{lumiaCouncilToolsActive}}` | Council tools ran this generation |
 | `{{loomSovHandActive}}` | Sovereign Hand mode is on |
 | `{{memoriesActive}}` | Memories were retrieved |
+| `{{databankActive}}` | Databank retrieval returned chunks |
+| `{{cortexActive}}` | Memory Cortex returned results |
 | `{{hasvar::key}}` | Local variable exists |
 | `{{haschatvar::key}}` | Chat-persisted variable exists |
 | `{{hasgvar::key}}` | Global variable exists |
+| `{{hasPromptVar::name}}` | A prompt variable is available |
+| `{{var::name::ison::keyA,keyB}}` | All listed option keys are selected on a multi-select prompt variable |
 | `{{charTag::tag}}` | Character has the specified tag |
 | `{{regexInstalled::id}}` | Regex script with that ID is installed and enabled |
 | `{{and::a::b}}` | All arguments are truthy |
 | `{{or::a::b}}` | Any argument is truthy |
 | `{{not::value}}` | Value is falsy |
 | `{{eq::a::b}}` / `{{gt}}` / `{{lt}}` / etc. | Comparison is true |
+| `{{includes::list::item}}` | List contains the item |
+| `{{some::list::var}}…{{/some}}` | Any list item satisfies the predicate |
+| `{{every::list::var}}…{{/every}}` | All list items satisfy the predicate |
 
 **Usage:**
 
@@ -761,6 +1068,15 @@ The adventure is well underway.
 !!! tip "`{{switch}}` for multi-branch logic"
     Instead of nested if/else chains, use `{{switch::{{.mood}}::happy::cheerful tone::sad::somber tone::neutral tone}}`.
 
+!!! tip "`{{foreach}}` over lists"
+    Any macro that returns a comma-separated list — `{{players}}`, `{{group}}`, a `{{.var}}` you built up — can be fed straight into `{{foreach}}`: `{{foreach::{{players}}::p}}{{.p_number}}. {{.p}}{{newline}}{{/foreach}}`. Wrap multiplayer-only content in `{{if::{{isMultiplayer}}}}` so it stays out of solo chats.
+
+!!! tip "Shape lists before you loop"
+    The `{{sort}}`, `{{unique}}`, `{{filter}}`, `{{slice}}`, and `{{take}}` macros all return lists, so they chain: `{{foreach::{{unique::{{sort::{{group}}}}}}::name}}…{{/foreach}}` loops a sorted, de-duplicated roster. Use `{{count}}` / `{{includes}}` / `{{some}}` / `{{every}}` to gate on a list without looping at all.
+
+!!! tip "Dynamic state tables"
+    Track per-entity state with prefixed chat variables — `{{@hp_Alice = 100}}`, `{{@hp_Bob = 80}}` — then render or aggregate the whole table without hard-coding names: `{{foreachChatVar::hp_::p}}{{.p}}: {{.p_value}}{{newline}}{{/foreachChatVar}}` to list it, or `{{sum::{{foreachChatVar::hp_::p}}{{.p_value}},{{/foreachChatVar}}}}` to total it. Combine with `{{foreachMessage}}` to drive state from the conversation.
+
 !!! tip "`{{wrap}}` for conditional formatting"
     `{{wrap}}` only outputs if the content is non-empty — `{{wrap::(**::**)::{{.note}}}}` produces nothing when the note is unset, avoiding stray delimiters.
 
@@ -774,4 +1090,4 @@ The adventure is well underway.
     Lumiverse supports SillyTavern-style syntax: `{{.var}}` shorthand, space-delimited arguments, `{{if .var}}` conditions, and `!` negation. Your existing presets should work with minimal changes. See the [Execution Order](execution-order.md) guide for any differences.
 
 !!! tip "Mind the evaluation order"
-    Macros are evaluated iteratively (up to 5 passes) in strict left-to-right order. A macro inside another macro's output will be resolved in the next pass. See the [Execution Order](execution-order.md) guide for the complete breakdown.
+    Macros resolve primarily in one depth-first AST walk, with nested macro output expanded inline and a small outer retry loop for edge cases. State still flows left-to-right: a later setter will not retroactively change an earlier read in the same block. See the [Execution Order](execution-order.md) guide for the complete breakdown.

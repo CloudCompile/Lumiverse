@@ -1,11 +1,63 @@
 import { getDb } from "../db/connection";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
+import {
+  worldBookVectorDesiredStatusSql,
+} from "./world-book-vector-state";
+import { WORLD_BOOK_VECTOR_SETTINGS_KEY } from "./world-book-vector-constants";
 
 export interface Setting {
   key: string;
   value: any;
   updated_at: number;
+}
+
+const MAX_SETTING_KEY_LENGTH = 200;
+const MAX_SETTING_VALUE_BYTES = 2 * 1024 * 1024; // 2 MB serialized JSON
+const SETTING_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+
+export class InvalidSettingError extends Error {
+  status = 400 as const;
+}
+
+function markWorldBookVectorStatesStaleForSettingsChange(userId: string): void {
+  getDb().query(
+    `UPDATE world_book_entries
+     SET vector_index_status = ${worldBookVectorDesiredStatusSql()},
+         vector_indexed_at = NULL,
+         vector_index_error = NULL
+     WHERE world_book_id IN (SELECT id FROM world_books WHERE user_id = ?)`
+  ).run(userId);
+}
+
+function assertValidKey(key: unknown): asserts key is string {
+  if (typeof key !== "string" || key.length === 0 || key.length > MAX_SETTING_KEY_LENGTH) {
+    throw new InvalidSettingError(
+      `Setting key must be a non-empty string ≤${MAX_SETTING_KEY_LENGTH} chars`,
+    );
+  }
+  if (!SETTING_KEY_PATTERN.test(key)) {
+    throw new InvalidSettingError(
+      "Setting key may only contain letters, digits, '.', '_', '-', and ':'",
+    );
+  }
+}
+
+function serializeValueOrThrow(key: string, value: unknown): string {
+  // Settings storage is opaque JSON; reject payloads that would otherwise
+  // bloat the DB or block the event loop on every read.
+  let json: string;
+  try {
+    json = JSON.stringify(value ?? null);
+  } catch (err: any) {
+    throw new InvalidSettingError(`Setting "${key}" value is not JSON-serializable: ${err?.message || "unknown"}`);
+  }
+  if (json.length > MAX_SETTING_VALUE_BYTES) {
+    throw new InvalidSettingError(
+      `Setting "${key}" exceeds ${MAX_SETTING_VALUE_BYTES} bytes serialized`,
+    );
+  }
+  return json;
 }
 
 export function getAllSettings(userId: string): Setting[] {
@@ -33,8 +85,12 @@ export function getSettingsByKeys(userId: string, keys: string[]): Map<string, a
 }
 
 export function putSetting(userId: string, key: string, value: any): Setting {
-  const json = JSON.stringify(value);
+  assertValidKey(key);
+  const json = serializeValueOrThrow(key, value);
   const now = Math.floor(Date.now() / 1000);
+  const existingRow = key === WORLD_BOOK_VECTOR_SETTINGS_KEY
+    ? getDb().query("SELECT value FROM settings WHERE key = ? AND user_id = ?").get(key, userId) as { value: string } | null
+    : null;
 
   getDb()
     .query(
@@ -43,15 +99,49 @@ export function putSetting(userId: string, key: string, value: any): Setting {
     )
     .run(key, json, userId, now);
 
+  if (key === WORLD_BOOK_VECTOR_SETTINGS_KEY && existingRow?.value !== json) {
+    markWorldBookVectorStatesStaleForSettingsChange(userId);
+  }
+
   const setting = { key, value, updated_at: now };
   eventBus.emit(EventType.SETTINGS_UPDATED, { key, value }, userId);
+  if (key === "activeChatId") {
+    eventBus.emit(EventType.CHAT_SWITCHED, { chatId: typeof value === "string" ? value : null }, userId);
+  }
   return setting;
 }
 
+const MAX_SETTINGS_PER_BULK_PUT = 200;
+
 export function putMany(userId: string, settings: Record<string, any>): Setting[] {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    throw new InvalidSettingError("settings payload must be an object");
+  }
+  const entries = Object.entries(settings);
+  if (entries.length > MAX_SETTINGS_PER_BULK_PUT) {
+    throw new InvalidSettingError(
+      `Cannot upsert more than ${MAX_SETTINGS_PER_BULK_PUT} settings in one request`,
+    );
+  }
+  // Validate everything before opening the transaction so an invalid entry
+  // doesn't leave us in a partially-applied state.
+  const prepared: Array<{ key: string; value: any; json: string }> = [];
+  for (const [key, value] of entries) {
+    assertValidKey(key);
+    prepared.push({ key, value, json: serializeValueOrThrow(key, value) });
+  }
+
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
   const results: Setting[] = [];
+  const existingValues = prepared.some((entry) => entry.key === WORLD_BOOK_VECTOR_SETTINGS_KEY)
+    ? new Map(
+        (db
+          .query(`SELECT key, value FROM settings WHERE user_id = ? AND key IN (${prepared.map(() => "?").join(", ")})`)
+          .all(userId, ...prepared.map((entry) => entry.key)) as Array<{ key: string; value: string }>)
+          .map((row) => [row.key, row.value]),
+      )
+    : null;
 
   const upsert = db.query(
     `INSERT INTO settings (key, value, user_id, updated_at) VALUES (?, ?, ?, ?)
@@ -59,15 +149,25 @@ export function putMany(userId: string, settings: Record<string, any>): Setting[
   );
 
   const transaction = db.transaction(() => {
-    for (const [key, value] of Object.entries(settings)) {
-      const json = JSON.stringify(value);
+    for (const { key, value, json } of prepared) {
       upsert.run(key, json, userId, now);
       results.push({ key, value, updated_at: now });
     }
   });
   transaction();
 
-  eventBus.emit(EventType.SETTINGS_UPDATED, { keys: Object.keys(settings) }, userId);
+  const worldBookVectorSettingsChanged = prepared.some(
+    (entry) => entry.key === WORLD_BOOK_VECTOR_SETTINGS_KEY && existingValues?.get(entry.key) !== entry.json,
+  );
+  if (worldBookVectorSettingsChanged) {
+    markWorldBookVectorStatesStaleForSettingsChange(userId);
+  }
+
+  eventBus.emit(EventType.SETTINGS_UPDATED, { keys: prepared.map((p) => p.key) }, userId);
+  const activeChatEntry = prepared.find((p) => p.key === "activeChatId");
+  if (activeChatEntry) {
+    eventBus.emit(EventType.CHAT_SWITCHED, { chatId: typeof activeChatEntry.value === "string" ? activeChatEntry.value : null }, userId);
+  }
   return results;
 }
 

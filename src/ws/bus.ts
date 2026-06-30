@@ -3,15 +3,54 @@ import { EventType, type EventMessage } from "./events";
 
 type Listener = (event: EventMessage) => void;
 
+const CLIENT_SWEEP_INTERVAL_MS = 60_000;
+const CLIENT_TIMEOUT_MS = 120_000;
+
+function getUserTopic(userId: string): string {
+  return `user:${userId}`;
+}
+
+function getStreamTopic(userId: string, chatId: string): string {
+  return `stream:${userId}:${chatId}`;
+}
+
+function getRoomTopic(roomId: string): string {
+  return `room:${roomId}`;
+}
+
+// The "feed" topic carries the re-broadcast chat/generation events
+// (MESSAGE_SENT / STREAM_TOKEN_RECEIVED / GENERATION_*). ONLY peers subscribe
+// to it — the host already receives those on its own user topic (it owns the
+// chat), so subscribing the host here too would double-deliver every token.
+function getRoomFeedTopic(roomId: string): string {
+  return `room:${roomId}:feed`;
+}
+
 class EventBus {
   private server: import("bun").Server<unknown> | null = null;
   private clientToUser = new Map<ServerWebSocket<unknown>, string>();
   private sessionToClient = new Map<string, ServerWebSocket<unknown>>();
   private clientToSession = new Map<ServerWebSocket<unknown>, string>();
+  private clientToFocusedChat = new Map<ServerWebSocket<unknown>, string>();
+  private clientLastActivity = new Map<ServerWebSocket<unknown>, number>();
+  // ── Multiplayer rooms ──
+  // A socket may subscribe to one or more room topics. Peer (room-token)
+  // sockets are tracked HERE but NOT in clientToUser — they never receive
+  // user:/system events, only their room:{roomId} topic.
+  private clientToRooms = new Map<ServerWebSocket<unknown>, Set<string>>();
+  private participantToClient = new Map<string, ServerWebSocket<unknown>>();
+  private clientToParticipants = new Map<ServerWebSocket<unknown>, Set<string>>();
+  // In-process sinks for ALL room broadcasts (lifecycle + feed). The relay
+  // bridge subscribes here to mirror a room's full event stream to off-instance
+  // peers, since publishToRoom/Feed deliver only to local WS topic subscribers.
+  private roomBroadcastListeners = new Set<(roomId: string, event: EventType, payload: any) => void>();
   private listeners = new Map<EventType, Set<Listener>>();
+  private pendingListenerDispatches: Array<() => void> = [];
+  private listenerDispatchTimer: ReturnType<typeof setTimeout> | null = null;
   /** Per-user visibility: true if at least one session reports visible. */
   private userVisibility = new Map<string, Map<string, boolean>>();
   private userAllHiddenSince = new Map<string, number>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Store the Bun server reference so we can use native publish(). */
   setServer(server: import("bun").Server<unknown>): void {
@@ -19,6 +58,12 @@ class EventBus {
   }
 
   addClient(ws: ServerWebSocket<unknown>, userId: string, sessionId?: string): void {
+    // If the socket already closed during onOpen's async auth/DB work, don't
+    // register it. onClose would have run removeClient as a no-op (not yet in
+    // the maps), so inserting a dead socket here would leave tracking that only
+    // the 120s sweep reclaims. readyState 1 === OPEN on Bun's ServerWebSocket.
+    if ((ws as { readyState?: number }).readyState !== 1) return;
+
     // Track session → socket mapping for dedup, but do NOT forcefully evict
     // the old socket. Stale sockets are cleaned up naturally via onClose →
     // removeClient. Forceful eviction causes reconnect loops because the
@@ -35,28 +80,37 @@ class EventBus {
     }
 
     this.clientToUser.set(ws, userId);
+    this.clientLastActivity.set(ws, Date.now());
 
     // Subscribe to per-user topic and system broadcast topic.
     // Bun's native pub/sub handles delivery in Zig — no JS iteration needed.
     try {
-      ws.subscribe(`user:${userId}`);
+      ws.subscribe(getUserTopic(userId));
       ws.subscribe("system");
     } catch {
       // Socket may already be closed
     }
+
+    this.startSweep();
   }
 
   removeClient(ws: ServerWebSocket<unknown>): void {
     const userId = this.clientToUser.get(ws);
     const sessionId = this.clientToSession.get(ws);
+    const focusedChatId = this.clientToFocusedChat.get(ws);
     if (userId) {
       try {
-        ws.unsubscribe(`user:${userId}`);
+        ws.unsubscribe(getUserTopic(userId));
         ws.unsubscribe("system");
+        if (focusedChatId) {
+          ws.unsubscribe(getStreamTopic(userId, focusedChatId));
+        }
       } catch {
         // Socket may already be closed
       }
       this.clientToUser.delete(ws);
+      this.clientToFocusedChat.delete(ws);
+      this.clientLastActivity.delete(ws);
       if (sessionId) this.removeSessionVisibility(userId, sessionId);
     }
     if (sessionId) {
@@ -65,6 +119,216 @@ class EventBus {
         this.sessionToClient.delete(sessionId);
       }
       this.clientToSession.delete(ws);
+    }
+
+    // Multiplayer room cleanup (runs for peer sockets that have no userId too).
+    const rooms = this.clientToRooms.get(ws);
+    if (rooms) {
+      for (const roomId of rooms) {
+        try {
+          ws.unsubscribe(getRoomTopic(roomId));
+          ws.unsubscribe(getRoomFeedTopic(roomId));
+        } catch {
+          // Socket may already be closed
+        }
+      }
+      this.clientToRooms.delete(ws);
+    }
+    const participants = this.clientToParticipants.get(ws);
+    if (participants) {
+      for (const pid of participants) {
+        if (this.participantToClient.get(pid) === ws) {
+          this.participantToClient.delete(pid);
+        }
+      }
+      this.clientToParticipants.delete(ws);
+    }
+    // Peer-only sockets are tracked for the sweep but never had a userId, so
+    // the userId block above won't have cleared their activity entry.
+    if (!userId) this.clientLastActivity.delete(ws);
+  }
+
+  /** Refresh activity timestamp for a known socket. Called on any message. */
+  touchClient(ws: ServerWebSocket<unknown>): void {
+    if (this.clientToUser.has(ws) || this.clientToRooms.has(ws)) {
+      this.clientLastActivity.set(ws, Date.now());
+    }
+  }
+
+  /** Route stream tokens only to the session actively viewing a chat. */
+  setClientStreamFocus(
+    ws: ServerWebSocket<unknown>,
+    userId: string,
+    chatId: string | null,
+  ): void {
+    if (this.clientToUser.get(ws) !== userId) return;
+
+    const previousChatId = this.clientToFocusedChat.get(ws);
+    if (previousChatId === chatId) return;
+
+    try {
+      if (previousChatId) {
+        ws.unsubscribe(getStreamTopic(userId, previousChatId));
+        this.clientToFocusedChat.delete(ws);
+      }
+      if (chatId) {
+        ws.subscribe(getStreamTopic(userId, chatId));
+        this.clientToFocusedChat.set(ws, chatId);
+      }
+    } catch {
+      // Socket may already be closed
+    }
+  }
+
+  // ─── Multiplayer rooms ─────────────────────────────────────────────────
+
+  /**
+   * Attach a socket to a room. For peer (room-token) sockets this is the ONLY
+   * subscription they get — they never see user:/system topics. The socket is
+   * registered in the activity sweep so idle peer connections are reclaimed.
+   */
+  subscribeClientToRoom(
+    ws: ServerWebSocket<unknown>,
+    roomId: string,
+    participantId: string,
+    opts?: { feed?: boolean },
+  ): void {
+    try {
+      ws.subscribe(getRoomTopic(roomId));
+      // Peers also subscribe to the feed topic (re-broadcast chat/gen events).
+      // The host does NOT — it gets those on its user topic already.
+      if (opts?.feed) ws.subscribe(getRoomFeedTopic(roomId));
+    } catch {
+      // Socket may already be closed
+    }
+
+    let rooms = this.clientToRooms.get(ws);
+    if (!rooms) {
+      rooms = new Set();
+      this.clientToRooms.set(ws, rooms);
+    }
+    rooms.add(roomId);
+
+    let participants = this.clientToParticipants.get(ws);
+    if (!participants) {
+      participants = new Set();
+      this.clientToParticipants.set(ws, participants);
+    }
+    participants.add(participantId);
+    this.participantToClient.set(participantId, ws);
+
+    this.clientLastActivity.set(ws, Date.now());
+    this.startSweep();
+  }
+
+  unsubscribeClientFromRoom(
+    ws: ServerWebSocket<unknown>,
+    roomId: string,
+    participantId: string,
+  ): void {
+    try {
+      ws.unsubscribe(getRoomTopic(roomId));
+      ws.unsubscribe(getRoomFeedTopic(roomId));
+    } catch {
+      // Socket may already be closed
+    }
+    this.clientToRooms.get(ws)?.delete(roomId);
+    this.clientToParticipants.get(ws)?.delete(participantId);
+    if (this.participantToClient.get(participantId) === ws) {
+      this.participantToClient.delete(participantId);
+    }
+  }
+
+  /**
+   * Publish an event ONLY to a room topic. Unlike `emit`, this does NOT fire
+   * in-process listeners — so the multiplayer fan-out (which re-broadcasts
+   * MESSAGE_SENT / STREAM_TOKEN_RECEIVED / GENERATION_* into a room) cannot
+   * recurse back into its own listener.
+   */
+  /** Subscribe to every room broadcast (lifecycle + feed). For the relay bridge. */
+  onRoomBroadcast(fn: (roomId: string, event: EventType, payload: any) => void): () => void {
+    this.roomBroadcastListeners.add(fn);
+    return () => this.roomBroadcastListeners.delete(fn);
+  }
+
+  private fireRoomBroadcast(roomId: string, event: EventType, payload: any): void {
+    for (const fn of this.roomBroadcastListeners) {
+      try {
+        fn(roomId, event, payload);
+      } catch (err) {
+        console.error("[bus] roomBroadcast listener error:", err);
+      }
+    }
+  }
+
+  publishToRoom(roomId: string, event: EventType, payload: any = {}): void {
+    if (this.server) {
+      const message: EventMessage = { event, payload, timestamp: Date.now() };
+      this.server.publish(getRoomTopic(roomId), JSON.stringify(message));
+    }
+    this.fireRoomBroadcast(roomId, event, payload);
+  }
+
+  /**
+   * Publish to the room FEED topic (peers only) — used by the fan-out to
+   * re-broadcast chat/generation events without double-delivering to the host.
+   */
+  publishToRoomFeed(roomId: string, event: EventType, payload: any = {}): void {
+    if (this.server) {
+      const message: EventMessage = { event, payload, timestamp: Date.now() };
+      this.server.publish(getRoomFeedTopic(roomId), JSON.stringify(message));
+    }
+    this.fireRoomBroadcast(roomId, event, payload);
+  }
+
+  /** Force-close a specific participant's socket (kick / ban / room close). */
+  disconnectParticipant(participantId: string, code = 1000, reason = ""): void {
+    const ws = this.participantToClient.get(participantId);
+    if (!ws) return;
+    try {
+      ws.close(code, reason);
+    } catch {
+      // Already closed
+    }
+  }
+
+  isParticipantConnected(participantId: string): boolean {
+    return this.participantToClient.has(participantId);
+  }
+
+  // ─── Sweep ───────────────────────────────────────────────────────────
+
+  private startSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.sweep(), CLIENT_SWEEP_INTERVAL_MS);
+    if (typeof (this.sweepTimer as { unref?: () => void }).unref === "function") {
+      (this.sweepTimer as { unref: () => void }).unref();
+    }
+  }
+
+  stopSweep(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+  }
+
+  private sweep(): void {
+    const now = Date.now();
+    let closed = 0;
+    for (const [ws, lastActivity] of this.clientLastActivity) {
+      if (now - lastActivity > CLIENT_TIMEOUT_MS) {
+        try {
+          ws.close(1001, "Timeout");
+        } catch {
+          // Already closed; remove tracking below
+        }
+        this.removeClient(ws);
+        closed++;
+      }
+    }
+    if (closed > 0) {
+      console.log(`[WS] Sweep closed ${closed} stale client(s) (timeout ${CLIENT_TIMEOUT_MS}ms)`);
     }
   }
 
@@ -76,7 +340,27 @@ class EventBus {
     return () => this.listeners.get(event)?.delete(listener);
   }
 
-  emit(event: EventType, payload: any = {}, userId?: string): void {
+  private flushListenerDispatches(): void {
+    this.listenerDispatchTimer = null;
+    const pending = this.pendingListenerDispatches.splice(0, this.pendingListenerDispatches.length);
+    for (const run of pending) run();
+    if (this.pendingListenerDispatches.length > 0) {
+      this.listenerDispatchTimer = setTimeout(() => this.flushListenerDispatches(), 0);
+    }
+  }
+
+  private scheduleListenerDispatch(task: () => void): void {
+    this.pendingListenerDispatches.push(task);
+    if (this.listenerDispatchTimer) return;
+    this.listenerDispatchTimer = setTimeout(() => this.flushListenerDispatches(), 0);
+  }
+
+  emit(
+    event: EventType,
+    payload: any = {},
+    userId?: string,
+    options?: { topic?: string },
+  ): void {
     const message: EventMessage = {
       event,
       payload,
@@ -89,7 +373,7 @@ class EventBus {
     // Use Bun's native pub/sub for WebSocket delivery — single native call
     // instead of iterating over JS Maps and calling ws.send() per-socket.
     if (this.server) {
-      const topic = userId ? `user:${userId}` : "system";
+      const topic = options?.topic || (userId ? getUserTopic(userId) : "system");
       this.server.publish(topic, json);
     }
 
@@ -98,7 +382,7 @@ class EventBus {
     const eventListeners = this.listeners.get(event);
     if (eventListeners) {
       for (const listener of eventListeners) {
-        queueMicrotask(() => {
+        this.scheduleListenerDispatch(() => {
           try {
             listener(message);
           } catch (err) {
@@ -167,8 +451,13 @@ class EventBus {
       }
     }
 
-    if (visibleSessions === 0 && !this.userAllHiddenSince.has(userId)) {
-      this.userAllHiddenSince.set(userId, Date.now());
+    // No write here — `allHiddenSince` is set by updateUserVisibilityState
+    // whenever a session transitions to hidden. Reading the snapshot used to
+    // also stamp the timer, which mixed observation and mutation in the same
+    // call and left subtle behavior depending on who polled first.
+    let allHiddenSince: number | null = null;
+    if (visibleSessions === 0) {
+      allHiddenSince = this.userAllHiddenSince.get(userId) ?? null;
     }
 
     return {
@@ -176,7 +465,7 @@ class EventBus {
       visibleSessions,
       hiddenSessions: Math.max(totalSessions - visibleSessions, 0),
       isVisible: visibleSessions > 0,
-      allHiddenSince: visibleSessions > 0 ? null : (this.userAllHiddenSince.get(userId) ?? null),
+      allHiddenSince,
     };
   }
 

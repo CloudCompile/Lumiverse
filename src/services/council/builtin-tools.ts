@@ -1,11 +1,11 @@
-import type { CouncilToolDefinition } from "lumiverse-spindle-types";
+import type { RuntimeCouncilToolDefinition } from "./tool-runtime";
 
 /**
  * All 16 built-in council tool definitions.
  * Dynamic-prompt tools (pov_enforcer, style_adherence, generate_scene) store
  * a static base prompt here; dynamic context enrichment happens at execution time.
  */
-export const BUILTIN_COUNCIL_TOOLS: CouncilToolDefinition[] = [
+const BUILTIN_COUNCIL_TOOLS_RAW = [
   // ── Story Direction (6) ──────────────────────────────────────────────
 
   {
@@ -669,6 +669,47 @@ Note: No specific narrative style is currently selected. Analyze based on intern
     },
   },
 
+  {
+    name: "web_search",
+    displayName: "Web Search",
+    description: "Search the public web for current, factual, or source-backed information and return a condensed context block from the most relevant pages. Use this when the next reply depends on external facts, recent changes, official documentation, prices, release details, locations, availability, or niche information not reliably contained in the current chat context. The `query` must be a short search-engine phrase, not a full sentence, answer, summary, or roleplay narration.",
+    category: "context",
+    execution: "host",
+    strict: true,
+    argsSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          minLength: 2,
+          description: "Required. A concrete keyword-heavy web search phrase like 'latest OpenRouter pricing', 'Tokyo weather today', 'Claude Sonnet 4.5 release notes', or 'Baldur's Gate 3 patch 8 romance changes'. Do not write a sentence, roleplay excerpt, or answer fragment.",
+        },
+        result_count: {
+          type: "integer",
+          minimum: 1,
+          maximum: 10,
+          description: "Optional. How many search results to fetch before scraping the best matches. Usually 3 for focused lookups or 5 when you need light cross-checking.",
+        },
+      },
+      required: ["query"],
+    },
+    inputExamples: [
+      { query: "latest OpenRouter pricing", result_count: 3 },
+      { query: "Tokyo weather today", result_count: 3 },
+      { query: "Claude Sonnet 4.5 release notes", result_count: 5 },
+    ],
+    planningGuidance: `Your job is to produce a search-engine query, not an answer.
+
+- Prefer 2-8 focused words anchored on the named entity, product, location, date, version, or event that actually needs verification.
+- Strip filler such as 'here is', 'tell me', 'what is', 'search for', 'the answer is', or roleplay narration.
+- If the story context implies a factual lookup, convert that need into a literal web query a human would type.
+- Good: 'latest OpenRouter pricing', 'Tokyo weather today', 'Claude Sonnet 4.5 release notes'
+- Bad: 'here is the latest pricing', 'the answer about Tokyo weather', 'search the web for what happened next'`,
+    resultVariable: "web_search_context",
+    storeInDeliberation: false,
+    gatedBy: "webSearch",
+  },
+
   // ── Content (2) ──────────────────────────────────────────────────────
 
   {
@@ -791,20 +832,23 @@ If the story context is unclear or just starting, describe a neutral establishin
   {
     name: "detect_expression",
     displayName: "Expression Detector",
-    description: "Analyze scene sentiment and select the character's facial expression from configured expression labels",
+    description: "Analyze the latest scene and select the character's full sprite state from configured expression labels",
     category: "content",
     resultVariable: "expression_data",
     storeInDeliberation: false,
     gatedBy: "expressions",
-    prompt: `You are a character expression analyst. Read the recent messages and determine which facial expression best represents the character's current emotional state.
+    prompt: `You are a character sprite analyst. Read the recent messages and determine which available sprite label best represents the character's current visible state.
 
 You will be given a list of available expression labels. Select exactly ONE label that best matches.
 
 Consider:
 1. The character's dialogue tone and word choice
 2. Actions and body language described in the narrative
-3. The emotional arc of the conversation
-4. The character's personality (stoic characters shift less, expressive ones shift more)
+3. Outfit, pose, action, body position, and facial expression implied by the latest response
+4. The emotional arc of the conversation
+5. The character's personality (stoic characters shift less, expressive ones shift more)
+
+Prefer the most specific matching label. Only choose a generic neutral/default label if no specific action, pose, or expression label fits.
 
 Respond with ONLY the chosen label, exactly as written in the available list. Your entire response must be a single word or short phrase matching one of the available labels.`,
     inputSchema: {
@@ -818,7 +862,12 @@ Respond with ONLY the chosen label, exactly as written in the available list. Yo
       required: ["expression"],
     },
   },
-];
+ ] satisfies RuntimeCouncilToolDefinition[];
+
+export const BUILTIN_COUNCIL_TOOLS: RuntimeCouncilToolDefinition[] = BUILTIN_COUNCIL_TOOLS_RAW.map((tool) => ({
+  execution: "llm",
+  ...tool,
+}));
 
 /** Lookup map for quick tool access by name. */
 export const BUILTIN_TOOLS_MAP = new Map(

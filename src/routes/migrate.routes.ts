@@ -61,7 +61,7 @@ app.post("/chats", async (c) => {
         created_at: chatInput.created_at,
       });
 
-      const msgCount = chatsSvc.bulkInsertMessages(chat.id, chatInput.messages || []);
+      const msgCount = chatsSvc.bulkInsertMessages(chat.id, chatInput.messages || [], userId);
 
       result.results.push({
         chat_name: chatName,
@@ -155,7 +155,7 @@ app.post("/world-books", async (c) => {
         name: wb.name,
         description: wb.description,
         entries: wb.entries,
-      });
+      }, { signal: c.req.raw.signal });
 
       result.results.push({
         name,

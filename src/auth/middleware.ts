@@ -2,6 +2,8 @@ import type { Context, Next } from "hono";
 import { auth } from "./index";
 import { getDb } from "../db/connection";
 import { getFirstUserId } from "./seed";
+import { authLockoutService } from "../services/auth-lockout.service";
+import { getClientIp } from "../utils/client-ip";
 
 // Augment Hono's context variables
 declare module "hono" {
@@ -28,13 +30,29 @@ declare module "hono" {
 }
 
 export async function requireAuth(c: Context, next: Next) {
+  const clientId = getClientIp(c);
   const session = await auth.api.getSession({
     headers: c.req.raw.headers,
   });
 
   if (!session) {
+    const result = authLockoutService.recordFailure(clientId, "unauthorized", {
+      method: c.req.method,
+      path: c.req.path,
+      origin: c.req.header("origin") || undefined,
+      host: c.req.header("host") || undefined,
+    });
+    if (result.lockout) {
+      c.header("Retry-After", String(result.lockout.retryAfterMs / 1000));
+      return c.json(
+        authLockoutService.buildPayload(result.lockout, "Too many unauthorized requests. Try again later."),
+        429,
+      );
+    }
     return c.json({ error: "Unauthorized" }, 401);
   }
+
+  authLockoutService.recordSuccess(clientId, "unauthorized");
 
   // BetterAuth's admin plugin adds the `role` field to the user schema, but
   // getSession() sometimes omits it (adapter/transform quirks with plugin-
@@ -68,6 +86,13 @@ export async function requireAuth(c: Context, next: Next) {
   return next();
 }
 
+/**
+ * Owner-or-admin gate. Despite the historical name, this allows BOTH the
+ * "owner" and "admin" roles — Lumiverse's admin UIs (Operator, Spindle install,
+ * Dropbox/Drive, etc.) all expect this behavior, so changing it would be a
+ * silent privilege regression. For genuinely owner-only operations (cross-user
+ * impersonation, destructive single-tenant actions), use `requireOwnerStrict`.
+ */
 export async function requireOwner(c: Context, next: Next) {
   const session = c.get("session");
   if (!session) {
@@ -87,9 +112,9 @@ export async function requireOwner(c: Context, next: Next) {
 }
 
 /**
- * Strictly requires the "owner" role — does NOT allow admins.
- * Use this for destructive global operations (e.g. vector store wipe, identity
- * key rotation) that affect all users and should never be delegated to admins.
+ * Strict owner-only gate. Use for operations that admins should NOT perform —
+ * e.g. installing an extension into another user's context, resetting an
+ * owner's password, or modifying owner-owned identity material.
  */
 export async function requireOwnerStrict(c: Context, next: Next) {
   const session = c.get("session");

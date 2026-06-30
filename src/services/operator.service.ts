@@ -2,7 +2,7 @@ import { RingBuffer } from "../utils/ring-buffer";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { env } from "../env";
-import type { LogEntry, OperatorStatus, IPCMessage } from "../types/operator";
+import type { LogEntry, OperatorStatus, IPCMessage, OperatorIpcReason } from "../types/operator";
 import { getDatabasePath, getDb } from "../db/connection";
 import {
   collectDatabaseStats,
@@ -17,17 +17,9 @@ import {
   type WalCheckpointMode,
 } from "../db/maintenance";
 import { getAutomaticDatabaseMaintenanceStatus } from "../db/maintenance-scheduler";
+import { getGitMetadata } from "../utils/git-metadata";
 
-// ─── Git helpers (sync, lightweight) ────────────────────────────────────────
-
-function gitSync(...args: string[]): string {
-  const result = Bun.spawnSync(["git", ...args], {
-    cwd: import.meta.dir + "/../..",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  return result.exitCode === 0 ? result.stdout.toString().trim() : "";
-}
+// ─── Static metadata helpers ────────────────────────────────────────────────
 
 function readVersion(): string {
   try {
@@ -50,6 +42,7 @@ interface PendingRequest {
 
 class OperatorService {
   readonly ipcAvailable: boolean;
+  readonly ipcReason: OperatorIpcReason;
   private logBuffer: RingBuffer<LogEntry>;
   private pendingRequests = new Map<string, PendingRequest>();
   private readonly startedAt = Date.now();
@@ -62,9 +55,14 @@ class OperatorService {
   private readonly version = readVersion();
 
   constructor() {
-    this.ipcAvailable =
-      process.env.LUMIVERSE_RUNNER_IPC === "1" &&
-      typeof process.send === "function";
+    const hasRunnerEnv = process.env.LUMIVERSE_RUNNER_IPC === "1";
+    const hasProcessSend = typeof process.send === "function";
+    this.ipcAvailable = hasRunnerEnv && hasProcessSend;
+    this.ipcReason = this.ipcAvailable
+      ? "connected"
+      : hasRunnerEnv
+        ? "runner_env_without_process_send"
+        : "not_started_with_runner";
 
     this.logBuffer = new RingBuffer(150);
 
@@ -145,15 +143,18 @@ class OperatorService {
   // ── Status ────────────────────────────────────────────────────────────
 
   getLocalStatus(): Omit<OperatorStatus, "updateAvailable" | "commitsBehind" | "latestUpdateMessage"> {
+    const git = getGitMetadata();
+
     return {
       port: env.port,
       pid: process.pid,
       uptime: Date.now() - this.startedAt,
-      branch: gitSync("rev-parse", "--abbrev-ref", "HEAD") || "unknown",
+      branch: git.branch,
       version: this.version,
-      commit: gitSync("rev-parse", "--short", "HEAD") || "unknown",
+      commit: git.commit,
       remoteMode: env.trustAnyOrigin,
       ipcAvailable: this.ipcAvailable,
+      ipcReason: this.ipcReason,
     };
   }
 

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
 import { verifyPassword } from "../crypto/password";
+import { rateLimit } from "../middleware/rate-limit";
 import { getDb } from "../db/connection";
 import * as managerSvc from "../spindle/manager.service";
 import { PRIVILEGED_PERMISSIONS } from "../spindle/manager.service";
@@ -15,6 +16,7 @@ import {
 } from "../spindle/ephemeral-pool.service";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
+import { ifNoneMatchSatisfies } from "../utils/http-cache";
 
 const app = new Hono();
 
@@ -98,8 +100,17 @@ app.get("/ephemeral/config", requireOwner, async (c) => {
   return c.json(await getEphemeralPoolConfig());
 });
 
+// Re-auth gate before scrypt-verifying the owner password — bound how often
+// a single client can drive scrypt work even when authenticated.
+const ephemeralReauthLimiter = rateLimit({
+  bucket: "spindle-ephemeral-reauth",
+  max: 5,
+  windowMs: 5 * 60 * 1000,
+  message: "Too many configuration attempts. Try again later.",
+});
+
 // PUT /api/v1/spindle/ephemeral/config — Update pool config (credential-gated)
-app.put("/ephemeral/config", requireOwner, async (c) => {
+app.put("/ephemeral/config", requireOwner, ephemeralReauthLimiter, async (c) => {
   try {
     const body = await c.req.json();
     if (!body || typeof body !== "object") {
@@ -268,12 +279,16 @@ app.post("/:id/update", async (c) => {
       await lifecycle.stopExtension(ext.id);
     }
 
-    const updated = await managerSvc.update(ext.identifier);
+    await managerSvc.update(ext.identifier);
 
     // Restart if was enabled
     if (ext.enabled) {
       await lifecycle.startExtension(ext.id);
     }
+
+    // Re-fetch so the returned status reflects the post-restart state
+    const finalExt = await managerSvc.getExtension(ext.id);
+    const result = finalExt ?? ext;
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -281,7 +296,7 @@ app.post("/:id/update", async (c) => {
       name: ext.name,
     });
 
-    return c.json(updated);
+    return c.json(result);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
   }
@@ -478,7 +493,8 @@ app.get("/:id/manifest", async (c) => {
     if (!ext) return c.json({ error: "Not found" }, 404);
 
     const manifest = await managerSvc.getManifest(ext.identifier);
-    return c.json(manifest);
+    const frontendCacheKey = await managerSvc.getFrontendBundleCacheKey(ext.identifier);
+    return c.json(frontendCacheKey ? { ...manifest, frontend_cache_key: frontendCacheKey } : manifest);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
   }
@@ -514,14 +530,18 @@ app.post("/:id/switch-branch", async (c) => {
       await lifecycle.stopExtension(ext.id);
     }
 
-    const updated = await managerSvc.switchBranch(ext.identifier, body.branch);
+    await managerSvc.switchBranch(ext.identifier, body.branch);
 
     // Restart if was enabled
     if (ext.enabled) {
       await lifecycle.startExtension(ext.id);
     }
 
-    return c.json(updated);
+    // Re-fetch so the returned status reflects the post-restart state
+    const finalExt = await managerSvc.getExtension(ext.id);
+    const result = finalExt ?? ext;
+
+    return c.json(result);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
   }
@@ -546,14 +566,32 @@ app.get("/:id/frontend", async (c) => {
     return c.json({ error: "No frontend bundle" }, 404);
   }
 
-  const content = await Bun.file(bundlePath).text();
-  return new Response(content, {
+  const cacheKey = await managerSvc.getFrontendBundleCacheKey(ext.identifier);
+  const etag = cacheKey ? `"spindle-frontend-${ext.id}-${cacheKey}"` : undefined;
+  const versioned = !!cacheKey && c.req.query("v") === cacheKey;
+  const cacheControl = versioned
+    ? "private, max-age=31536000, immutable"
+    : "private, no-cache";
+
+  if (etag && ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        "Cache-Control": cacheControl,
+      },
+    });
+  }
+
+  const response = new Response(Bun.file(bundlePath), {
     headers: {
       "Content-Type": "application/javascript",
-      "Cache-Control": "no-cache",
-      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none';",
+      "Cache-Control": cacheControl,
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; child-src 'none'; object-src 'none'; base-uri 'none'; upgrade-insecure-requests;",
     },
   });
+  if (etag) response.headers.set("ETag", etag);
+  return response;
 });
 
 export { app as spindleRoutes };

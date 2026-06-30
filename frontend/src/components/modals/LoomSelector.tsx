@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, type ComponentType } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Search, XCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { IconScript, IconTool, IconTransform } from '@tabler/icons-react'
 import { CloseButton } from '@/components/shared/CloseButton'
@@ -14,22 +15,10 @@ interface LoomSelectorProps {
   onClose: () => void
 }
 
-const CATEGORY_CONFIG: Record<LoomItemCategory, { title: string; subtitle: string; icon: ComponentType<{ size?: number | string }> }> = {
-  narrative_style: {
-    title: 'Narrative Styles',
-    subtitle: 'Choose writing styles to shape the narrative voice',
-    icon: IconScript,
-  },
-  loom_utility: {
-    title: 'Loom Utilities',
-    subtitle: 'Choose utility prompts for enhanced output control',
-    icon: IconTool,
-  },
-  retrofit: {
-    title: 'Retrofits',
-    subtitle: 'Choose retrofits to augment character behavior',
-    icon: IconTransform,
-  },
+const CATEGORY_ICONS: Record<LoomItemCategory, ComponentType<{ size?: number | string }>> = {
+  narrative_style: IconScript,
+  loom_utility: IconTool,
+  retrofit: IconTransform,
 }
 
 interface PackGroup {
@@ -39,6 +28,9 @@ interface PackGroup {
 }
 
 export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
+  const { t } = useTranslation('modals', { keyPrefix: 'loomSelector' })
+  const { t: tc } = useTranslation('common')
+
   const packs = useStore((s) => s.packs)
   const packsWithItems = useStore((s) => s.packsWithItems)
   const setPackWithItems = useStore((s) => s.setPackWithItems)
@@ -54,7 +46,17 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
   const [loadingPacks, setLoadingPacks] = useState(false)
   const [collapsedPacks, setCollapsedPacks] = useState<Set<string>>(new Set())
 
-  const config = CATEGORY_CONFIG[category]
+  const categoryTitle = category === 'narrative_style'
+    ? t('narrativeStyleTitle')
+    : category === 'loom_utility'
+      ? t('loomUtilityTitle')
+      : t('retrofitTitle')
+  const categorySubtitle = category === 'narrative_style'
+    ? t('narrativeStyleSubtitle')
+    : category === 'loom_utility'
+      ? t('loomUtilitySubtitle')
+      : t('retrofitSubtitle')
+  const Icon = CATEGORY_ICONS[category]
 
   // Get the correct selection array and setter for this category
   const { selected, setSelected } = useMemo(() => {
@@ -127,21 +129,19 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
 
   const expandAll = useCallback(() => setCollapsedPacks(new Set()), [])
 
-  const Icon = config.icon
-
   return (
     <ModalShell isOpen onClose={onClose} maxWidth={560} className={styles.modal}>
       {/* Header */}
       <div className={styles.header}>
         <div className={styles.headerIcon}><Icon size={20} /></div>
         <div className={styles.headerText}>
-          <h3 className={styles.title}>{config.title}</h3>
-          <p className={styles.subtitle}>{config.subtitle}</p>
+          <h3 className={styles.title}>{categoryTitle}</h3>
+          <p className={styles.subtitle}>{categorySubtitle}</p>
         </div>
         {selectedCount > 0 && (
-          <button className={styles.clearBtn} onClick={handleClearAll} title="Clear all">
+          <button className={styles.clearBtn} onClick={handleClearAll} title={t('clearAll')}>
             <XCircle size={14} />
-            Clear ({selectedCount})
+            {t('clearCount', { count: selectedCount })}
           </button>
         )}
         <CloseButton onClick={onClose} iconSize={20} />
@@ -154,7 +154,7 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
           <input
             type="text"
             className={styles.searchInput}
-            placeholder={`Search ${config.title.toLowerCase()}...`}
+            placeholder={t('searchPlaceholder')}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
@@ -167,10 +167,10 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
         {packGroups.length > 1 && (
           <div className={styles.controlBtns}>
             <button className={styles.controlBtn} onClick={expandAll}>
-              <ChevronDown size={12} /> Expand
+              <ChevronDown size={12} /> {t('expand')}
             </button>
             <button className={styles.controlBtn} onClick={collapseAll}>
-              <ChevronUp size={12} /> Collapse
+              <ChevronUp size={12} /> {t('collapse')}
             </button>
           </div>
         )}
@@ -179,12 +179,10 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
       {/* Content */}
       <div className={styles.scrollArea}>
         {loadingPacks ? (
-          <div className={styles.empty}>Loading packs...</div>
+          <div className={styles.empty}>{t('loadingPacks')}</div>
         ) : packGroups.length === 0 ? (
           <div className={styles.empty}>
-            {searchTerm
-              ? 'No matching items found.'
-              : `No ${config.title.toLowerCase()} available. Import packs in the Browser tab.`}
+            {searchTerm ? t('noMatches') : t('noItems')}
           </div>
         ) : (
           packGroups.map((group) => (
@@ -213,7 +211,7 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
                         <div className={styles.itemContent}>
                           <span className={styles.itemName}>{item.name}</span>
                           {item.author_name && (
-                            <span className={styles.itemAuthor}>by {item.author_name}</span>
+                            <span className={styles.itemAuthor}>{t('byAuthor', { author: item.author_name })}</span>
                           )}
                         </div>
                         <div className={clsx(styles.toggle, isSelected && styles.toggleOn)}>
@@ -232,9 +230,9 @@ export default function LoomSelector({ category, onClose }: LoomSelectorProps) {
       {/* Footer */}
       <div className={styles.footer}>
         <span className={styles.footerCount}>
-          {selectedCount} selected
+          {t('selectedCount', { count: selectedCount })}
         </span>
-        <button className={styles.doneBtn} onClick={onClose}>Done</button>
+        <button className={styles.doneBtn} onClick={onClose}>{tc('actions.done')}</button>
       </div>
     </ModalShell>
   )

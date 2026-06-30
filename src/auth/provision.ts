@@ -2,7 +2,31 @@ import { mkdirSync, existsSync } from "fs";
 import { join, resolve, sep } from "path";
 import { env } from "../env";
 
+// BetterAuth's default generator produces 32-char alphanumeric IDs; our
+// owner-seed path uses crypto.randomUUID(). Accept both shapes (plus nanoid)
+// by allowing URL-safe characters only. Critically, `.`, `/`, and `\` are
+// rejected so a corrupt row can never escape the per-user data dir via
+// path.join (which doesn't strip "..").
+const USER_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+// Extension identifiers are validated separately at install time
+// (lumiverse-spindle-types.validateIdentifier), but defend the path call
+// anyway so a bug elsewhere can't leak into a traversal.
+const EXTENSION_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
+
+function assertUserId(userId: string): void {
+  if (!USER_ID_PATTERN.test(userId)) {
+    throw new Error("Invalid user id");
+  }
+}
+
+function assertExtensionIdentifier(identifier: string): void {
+  if (!EXTENSION_ID_PATTERN.test(identifier)) {
+    throw new Error("Invalid extension identifier");
+  }
+}
+
 export function provisionUserDirectories(userId: string): void {
+  assertUserId(userId);
   const userDir = getUserBaseDir(userId);
   const storagePath = join(userDir, "storage");
   const extensionsPath = join(userDir, "extensions");
@@ -15,6 +39,7 @@ export function provisionUserDirectories(userId: string): void {
 }
 
 export function getUserBaseDir(userId: string): string {
+  assertUserId(userId);
   return join(env.dataDir, "users", userId);
 }
 
@@ -23,13 +48,6 @@ export function getUserStoragePath(userId: string): string {
 }
 
 export function getUserExtensionPath(userId: string, identifier: string): string {
-  const base = join(getUserBaseDir(userId), "extensions");
-  // Resolve the full path and verify it is still inside the user's extensions
-  // directory.  path.join() does not prevent directory traversal so we must
-  // use resolve() + a startsWith() guard.
-  const resolved = resolve(base, identifier);
-  if (!resolved.startsWith(base + sep) && resolved !== base) {
-    throw new Error(`Invalid extension identifier: path traversal detected`);
-  }
-  return resolved;
+  assertExtensionIdentifier(identifier);
+  return join(getUserBaseDir(userId), "extensions", identifier);
 }

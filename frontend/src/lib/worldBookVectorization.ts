@@ -1,56 +1,56 @@
+import i18n from '@/i18n'
 import type { WorldBookEntry, WorldBookReindexProgress, WorldBookVectorIndexStatus } from '@/types/api'
 
+const statusKey = (status: WorldBookVectorIndexStatus) =>
+  `worldBookPanel.entryEditor.vectorStatus.${status === 'not_enabled' ? 'notEnabled' : status}` as const
+
 export function getVectorIndexStatusLabel(status: WorldBookVectorIndexStatus): string {
-  switch (status) {
-    case 'indexed':
-      return 'Indexed'
-    case 'pending':
-      return 'Pending'
-    case 'error':
-      return 'Error'
-    case 'not_enabled':
-    default:
-      return 'Not enabled'
-  }
+  return i18n.t(statusKey(status), { ns: 'panels' })
 }
 
 export function getVectorIndexStatusDescription(entry: WorldBookEntry): string {
+  const t = (key: string, opts?: Record<string, unknown>) =>
+    i18n.t(`worldBookPanel.entryEditor.vectorStatus.${key}`, { ns: 'panels', ...opts })
+
   if (!entry.vectorized) {
-    return 'Vector activation is off for this entry.'
+    return t('off')
   }
   if (entry.vector_index_status === 'indexed') {
     return entry.vector_indexed_at
-      ? `Indexed ${new Date(entry.vector_indexed_at * 1000).toLocaleString()}.`
-      : 'Indexed and ready for vector activation.'
+      ? t('indexedAt', { date: new Date(entry.vector_indexed_at * 1000).toLocaleString() })
+      : t('indexedReady')
   }
   if (entry.vector_index_status === 'error') {
-    return entry.vector_index_error || 'The last indexing attempt failed.'
+    return entry.vector_index_error || t('lastFailed')
   }
   if (entry.disabled) {
-    return 'This entry is disabled, so it will not be indexed until it is enabled again.'
+    return t('disabledEntry')
   }
   if (!(entry.content || '').trim()) {
-    return 'This entry needs content before it can be indexed.'
+    return t('needsContent')
   }
-  return 'Reindex this book after vector changes so this entry can be searched.'
+  return t('reindexNeeded')
 }
 
 export function formatWorldBookReindexStatus(progress: WorldBookReindexProgress): string {
+  const t = (key: string, opts?: Record<string, unknown>) =>
+    i18n.t(`worldBookPanel.reindexStatus.${key}`, { ns: 'panels', ...opts })
+
   const skipped = progress.skipped_not_enabled + progress.skipped_disabled_or_empty
   const parts = [
-    `${progress.current}/${progress.total}`,
-    `${progress.eligible} eligible`,
-    `${progress.indexed} indexed`,
+    t('progress', { current: progress.current, total: progress.total }),
+    t('eligible', { count: progress.eligible }),
+    t('indexed', { count: progress.indexed }),
   ]
 
   if (skipped > 0) {
-    parts.push(`${skipped} skipped`)
+    parts.push(t('skipped', { count: skipped }))
   }
   if (progress.removed > 0) {
-    parts.push(`${progress.removed} cleaned`)
+    parts.push(t('cleaned', { count: progress.removed }))
   }
   if (progress.failed > 0) {
-    parts.push(`${progress.failed} failed`)
+    parts.push(t('failed', { count: progress.failed }))
   }
 
   return parts.join(' | ')

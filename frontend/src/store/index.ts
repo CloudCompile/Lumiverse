@@ -16,11 +16,13 @@ import { createSpindleSlice } from './slices/spindle'
 import { createAuthSlice } from './slices/auth'
 import { createWorldInfoSlice } from './slices/world-info'
 import { createGroupChatSlice } from './slices/group-chat'
+import { createMultiplayerSlice } from './slices/multiplayer'
 import { createSpindlePlacementSlice } from './slices/spindle-placement'
 import { createPromptBreakdownSlice } from './slices/prompt-breakdown'
 import { createRegexSlice } from './slices/regex'
 import { createExpressionSlice } from './slices/expressions'
 import { createImageGenConnectionsSlice } from './slices/image-gen-connections'
+import { createSttConnectionsSlice } from './slices/stt-connections'
 import { createTtsConnectionsSlice } from './slices/tts-connections'
 import { createMcpServersSlice } from './slices/mcp-servers'
 import { createLoadoutsSlice } from './slices/loadouts'
@@ -29,6 +31,10 @@ import { createOperatorSlice } from './slices/operator'
 import { createFloatingAvatarSlice } from './slices/floating-avatar'
 import { createChatHeadsSlice } from './slices/chat-heads'
 import { createDatabankSlice } from './slices/databank'
+import { createConnectionSlice } from './slices/connection'
+import { createWeaverSlice } from './slices/weaver'
+import { createContainersSlice } from './slices/containers'
+import { registerUserScopedResetStore } from './user-scoped-reset'
 
 export const useStore = create<AppStore>()((...a) => ({
   ...createChatSlice(...a),
@@ -47,11 +53,13 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createAuthSlice(...a),
   ...createWorldInfoSlice(...a),
   ...createGroupChatSlice(...a),
+  ...createMultiplayerSlice(...a),
   ...createSpindlePlacementSlice(...a),
   ...createPromptBreakdownSlice(...a),
   ...createRegexSlice(...a),
   ...createExpressionSlice(...a),
   ...createImageGenConnectionsSlice(...a),
+  ...createSttConnectionsSlice(...a),
   ...createTtsConnectionsSlice(...a),
   ...createMcpServersSlice(...a),
   ...createLoadoutsSlice(...a),
@@ -60,4 +68,9 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createFloatingAvatarSlice(...a),
   ...createChatHeadsSlice(...a),
   ...createDatabankSlice(...a),
+  ...createConnectionSlice(...a),
+  ...createWeaverSlice(...a),
+  ...createContainersSlice(...a),
 }))
+
+registerUserScopedResetStore(useStore, useStore.getState())

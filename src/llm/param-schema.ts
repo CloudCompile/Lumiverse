@@ -18,6 +18,21 @@ export interface ProviderCapabilities {
   supportsStreaming: boolean;
   apiKeyRequired: boolean;
   modelListStyle: "openai" | "anthropic" | "google" | "none";
+  /**
+   * When true, inline tool-call continuations are sent back as native
+   * `tool_use` / `tool_result` parts with the model's reasoning preserved,
+   * enabling interleaved thinking — the model keeps reasoning *between* tool
+   * calls instead of restarting its chain of thought each round.
+   *
+   * Only enable this for providers whose message serialization round-trips
+   * reasoning across tool turns. Today the generation loop carries reasoning
+   * via `reasoning_content` (the OpenAI-compatible carrier used by DeepSeek /
+   * Moonshot). Providers that preserve reasoning differently — Anthropic
+   * `thinking` blocks with signatures, Gemini thought signatures — must wire
+   * their own carrier before turning this on, otherwise sending structured
+   * `tool_use` without the required reasoning blocks will be rejected.
+   */
+  interleavedThinking?: boolean;
 }
 
 /** Pre-built schemas for standard parameters. Providers pick the ones they support. */
@@ -81,5 +96,10 @@ export const COMMON_PARAMS = {
     min: 0,
     max: 3,
     description: "Penalise repeated tokens. Values above 1 discourage repetition.",
+  },
+  prompt_caching: {
+    type: "boolean" as const,
+    default: false,
+    description: "Automatically cache prompts to reduce cost and latency for repetitive prefixes.",
   },
 } satisfies ParameterSchemaMap;

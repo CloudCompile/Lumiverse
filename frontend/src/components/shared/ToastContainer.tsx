@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
 import { CheckCircle, AlertTriangle, XCircle, Info, X } from 'lucide-react'
@@ -29,6 +30,7 @@ function getSlideDirection(position: ToastPosition): { x?: number; y?: number } 
 }
 
 function ToastItem({ toast, position }: { toast: Toast; position: ToastPosition }) {
+  const { t } = useTranslation('shared', { keyPrefix: 'toast' })
   const removeToast = useStore((s) => s.removeToast)
   const timerRef = useRef<ReturnType<typeof setTimeout>>(null)
   const duration = toast.duration ?? DEFAULT_DURATION[toast.type]
@@ -78,7 +80,7 @@ function ToastItem({ toast, position }: { toast: Toast; position: ToastPosition 
         <div className={styles.message}>{toast.message}</div>
       </div>
       {toast.dismissible !== false && (
-        <button type="button" className={styles.closeBtn} onClick={dismiss} aria-label="Dismiss">
+        <button type="button" className={styles.closeBtn} onClick={dismiss} aria-label={t('dismiss')}>
           <X size={14} />
         </button>
       )}

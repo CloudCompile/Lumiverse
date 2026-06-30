@@ -4,6 +4,7 @@ import { hashPassword } from "../crypto/password";
 import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";
+export { backfillDefaultPresets } from "./default-preset";
 import {
   ownerCredentialsExist,
   readOwnerCredentials,
@@ -30,6 +31,16 @@ let firstUserId: string | null = null;
 
 /** Returns the cached first-user ID, or null if not yet resolved. */
 export function getFirstUserId(): string | null {
+  if (!firstUserId) {
+    try {
+      const row = getDb()
+        .query('SELECT id FROM "user" ORDER BY createdAt ASC LIMIT 1')
+        .get() as { id: string } | null;
+      firstUserId = row?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
   return firstUserId;
 }
 
@@ -45,9 +56,9 @@ function seedOwnerDirectly(db: ReturnType<typeof getDb>, username: string, passw
   const normalizedUsername = username.toLowerCase();
   const email = `${normalizedUsername}@lumiverse.local`;
 
-  // M-02: Wrap both inserts in a transaction so a process crash between the
-  // first and second INSERT cannot leave an orphaned user row with no
-  // associated account (which would prevent the owner from logging in).
+  // Wrap both inserts in a transaction so a failure on the account row doesn't
+  // leave a stranded user row that blocks future re-seeding (the count-guard in
+  // seedOwner skips when any user exists).
   db.transaction(() => {
     db.run(
       `INSERT INTO "user" (id, name, email, emailVerified, username, displayUsername, role, createdAt, updatedAt)

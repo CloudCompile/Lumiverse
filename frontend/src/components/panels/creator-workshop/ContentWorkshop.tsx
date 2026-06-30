@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import {
   User, ScrollText, Wrench, Plus, ChevronRight,
   Pencil, Trash2, Download, Upload, Package,
@@ -15,13 +17,16 @@ import type { Pack, PackWithItems, LumiaItem, LoomItem, LoomTool } from '@/types
 import clsx from 'clsx'
 import styles from './ContentWorkshop.module.css'
 
-const CATEGORY_LABELS: Record<string, string> = {
-  narrative_style: 'Style',
-  loom_utility: 'Utility',
-  retrofit: 'Retrofit',
+function categoryLabel(category: string, t: (key: string) => string): string {
+  if (category === 'narrative_style') return t('creatorWorkshop.shared.category.style')
+  if (category === 'loom_utility') return t('creatorWorkshop.shared.category.utility')
+  if (category === 'retrofit') return t('creatorWorkshop.shared.category.retrofit')
+  return category
 }
 
 export default function ContentWorkshop() {
+  const { t } = useTranslation('panels')
+
   const packs = useStore((s) => s.packs)
   const setPacks = useStore((s) => s.setPacks)
   const addPack = useStore((s) => s.addPack)
@@ -108,11 +113,11 @@ export default function ContentWorkshop() {
       setSelectedPackId(customPacks[0].id)
       return customPacks[0].id
     }
-    const pack = await packsApi.create({ name: 'My Pack', is_custom: true })
+    const pack = await packsApi.create({ name: t('creatorWorkshop.workshop.myPackDefault'), is_custom: true })
     addPack(pack)
     setSelectedPackId(pack.id)
     return pack.id
-  }, [selectedPackId, customPacks, addPack])
+  }, [selectedPackId, customPacks, addPack, t])
 
   const handleCreateNew = useCallback(async (type: 'lumia' | 'loom' | 'tool') => {
     const packId = await ensurePack()
@@ -211,16 +216,16 @@ export default function ContentWorkshop() {
 
   const handleCreatePack = useCallback(async () => {
     try {
-      const pack = await packsApi.create({ name: 'New Pack', is_custom: true })
+      const pack = await packsApi.create({ name: t('creatorWorkshop.workshop.newPack'), is_custom: true })
       addPack(pack)
       setSelectedPackId(pack.id)
     } catch (err) {
       console.error('Failed to create pack:', err)
     }
-  }, [addPack])
+  }, [addPack, t])
 
   if (loading) {
-    return <div className={styles.loading}>Loading...</div>
+    return <div className={styles.loading}>{t('creatorWorkshop.workshop.loading')}</div>
   }
 
   return (
@@ -228,39 +233,44 @@ export default function ContentWorkshop() {
       <div className={styles.workshop}>
         {/* Quick Create */}
       <div>
-        <div className={styles.sectionTitle}>Quick Create</div>
-        {customPacks.length > 1 && (
+        <div className={styles.sectionTitle}>{t('creatorWorkshop.workshop.quickCreate')}</div>
+        <div className={styles.packSelector}>
           <PackDropdown
             packs={customPacks}
             selectedPackId={selectedPackId}
             onSelect={setSelectedPackId}
             onCreateNew={handleCreatePack}
           />
-        )}
+        </div>
         <div className={styles.quickCreateGrid}>
           <button type="button" className={styles.quickCard} onClick={() => handleCreateNew('lumia')}>
             <div className={styles.quickCardIcon}><User size={18} /></div>
-            <span className={styles.quickCardLabel}>Lumia</span>
-            <span className={styles.quickCardSub}>Character</span>
+            <span className={styles.quickCardLabel}>{t('creatorWorkshop.workshop.lumia')}</span>
+            <span className={styles.quickCardSub}>{t('creatorWorkshop.workshop.lumiaSub')}</span>
           </button>
           <button type="button" className={styles.quickCard} onClick={() => handleCreateNew('loom')}>
             <div className={styles.quickCardIcon}><ScrollText size={18} /></div>
-            <span className={styles.quickCardLabel}>Loom</span>
-            <span className={styles.quickCardSub}>Style / Utility</span>
+            <span className={styles.quickCardLabel}>{t('creatorWorkshop.workshop.loom')}</span>
+            <span className={styles.quickCardSub}>{t('creatorWorkshop.workshop.loomSub')}</span>
           </button>
           <button type="button" className={styles.quickCard} onClick={() => handleCreateNew('tool')}>
             <div className={styles.quickCardIcon}><Wrench size={18} /></div>
-            <span className={styles.quickCardLabel}>Tool</span>
-            <span className={styles.quickCardSub}>Council Tool</span>
+            <span className={styles.quickCardLabel}>{t('creatorWorkshop.workshop.tool')}</span>
+            <span className={styles.quickCardSub}>{t('creatorWorkshop.workshop.toolSub')}</span>
           </button>
         </div>
       </div>
 
       {/* My Packs */}
       <div>
-        <div className={styles.sectionTitle}>My Packs</div>
+        <div className={styles.sectionHeader}>
+          <span className={styles.sectionTitle}>{t('creatorWorkshop.workshop.myPacks')}</span>
+          <button type="button" className={styles.newPackBtn} onClick={handleCreatePack}>
+            <Plus size={12} /> {t('creatorWorkshop.workshop.newPack')}
+          </button>
+        </div>
         {customPacks.length === 0 ? (
-          <div className={styles.emptyPacks}>No custom packs yet. Click a Quick Create card to get started.</div>
+          <div className={styles.emptyPacks}>{t('creatorWorkshop.workshop.emptyPacks')}</div>
         ) : (
           customPacks.map((pack) => (
             <PackSection
@@ -283,7 +293,7 @@ export default function ContentWorkshop() {
 
       {/* Import / Export */}
       <div>
-        <div className={styles.sectionTitle}>Import</div>
+        <div className={styles.sectionTitle}>{t('creatorWorkshop.workshop.import')}</div>
         <div className={styles.importSection}>
           <button
             type="button"
@@ -292,7 +302,7 @@ export default function ContentWorkshop() {
             disabled={importing}
           >
             <Upload size={14} />
-            {importing ? 'Importing...' : 'Import JSON Pack'}
+            {importing ? t('creatorWorkshop.workshop.importing') : t('creatorWorkshop.workshop.importJsonPack')}
           </button>
           <input
             ref={fileInputRef}
@@ -307,10 +317,10 @@ export default function ContentWorkshop() {
       {deleteTarget && (
         <ConfirmationModal
           isOpen
-          title={`Delete ${deleteTarget.type === 'pack' ? 'pack' : 'item'}?`}
-          message={`Are you sure you want to delete "${deleteTarget.name}"? This cannot be undone.`}
+          title={deleteTarget.type === 'pack' ? t('creatorWorkshop.workshop.deletePackTitle') : t('creatorWorkshop.workshop.deleteItemTitle')}
+          message={t('creatorWorkshop.workshop.deleteMessage', { name: deleteTarget.name })}
           variant="danger"
-          confirmText="Delete"
+          confirmText={t('creatorWorkshop.shared.delete')}
           onConfirm={handleDelete}
           onCancel={() => setDeleteTarget(null)}
         />
@@ -345,6 +355,8 @@ interface PackSectionProps {
 }
 
 function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onExport, onDelete, onCreateItem, onEditItem, onDeleteItem }: PackSectionProps) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
   return (
     <div className={styles.packSection}>
       <div className={styles.packHeader} onClick={onToggle}>
@@ -353,13 +365,13 @@ function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onEx
         </span>
         <span className={styles.packName}>{pack.name}</span>
         <div className={styles.packActions} onClick={(e) => e.stopPropagation()}>
-          <button type="button" className={styles.packActionBtn} onClick={onEdit} title="Edit pack details">
+          <button type="button" className={styles.packActionBtn} onClick={onEdit} title={t('creatorWorkshop.workshop.editPackDetails')}>
             <Pencil size={13} />
           </button>
-          <button type="button" className={styles.packActionBtn} onClick={onExport} title="Export">
+          <button type="button" className={styles.packActionBtn} onClick={onExport} title={tc('actions.export')}>
             <Download size={13} />
           </button>
-          <button type="button" className={clsx(styles.packActionBtn, styles.packActionBtnDanger)} onClick={onDelete} title="Delete pack">
+          <button type="button" className={clsx(styles.packActionBtn, styles.packActionBtnDanger)} onClick={onDelete} title={t('creatorWorkshop.workshop.deletePack')}>
             <Trash2 size={13} />
           </button>
         </div>
@@ -368,17 +380,17 @@ function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onEx
       {expanded && (
         <div className={styles.packBody}>
           {loading ? (
-            <div className={styles.emptyItems}>Loading...</div>
+            <div className={styles.emptyItems}>{t('creatorWorkshop.shared.loading')}</div>
           ) : packData ? (
             <>
               {/* Lumia Items */}
               <ItemGroup
-                label="Lumia"
+                label={t('creatorWorkshop.workshop.lumia')}
                 count={packData.lumia_items.length}
                 onAdd={() => onCreateItem('lumia')}
               >
                 {packData.lumia_items.length === 0 ? (
-                  <div className={styles.emptyItems}>No lumia items</div>
+                  <div className={styles.emptyItems}>{t('creatorWorkshop.workshop.noLumiaItems')}</div>
                 ) : (
                   packData.lumia_items.map((item) => (
                     <div key={item.id} className={styles.itemRow}>
@@ -391,10 +403,10 @@ function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onEx
                       />
                       <span className={styles.itemName}>{item.name}</span>
                       <div className={styles.itemActions}>
-                        <button type="button" className={styles.itemActionBtn} onClick={() => onEditItem('lumia', item)} title="Edit">
+                        <button type="button" className={styles.itemActionBtn} onClick={() => onEditItem('lumia', item)} title={tc('actions.edit')}>
                           <Pencil size={12} />
                         </button>
-                        <button type="button" className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)} onClick={() => onDeleteItem('lumia', item.id, item.name)} title="Delete">
+                        <button type="button" className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)} onClick={() => onDeleteItem('lumia', item.id, item.name)} title={tc('actions.delete')}>
                           <Trash2 size={12} />
                         </button>
                       </div>
@@ -405,23 +417,23 @@ function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onEx
 
               {/* Loom Items */}
               <ItemGroup
-                label="Loom"
+                label={t('creatorWorkshop.workshop.loom')}
                 count={packData.loom_items.length}
                 onAdd={() => onCreateItem('loom')}
               >
                 {packData.loom_items.length === 0 ? (
-                  <div className={styles.emptyItems}>No loom items</div>
+                  <div className={styles.emptyItems}>{t('creatorWorkshop.workshop.noLoomItems')}</div>
                 ) : (
                   packData.loom_items.map((item) => (
                     <div key={item.id} className={styles.itemRow}>
                       <div className={styles.itemIcon}><ScrollText size={14} /></div>
                       <span className={styles.itemName}>{item.name}</span>
-                      <span className={styles.itemBadge}>{CATEGORY_LABELS[item.category] || item.category}</span>
+                      <span className={styles.itemBadge}>{categoryLabel(item.category, t)}</span>
                       <div className={styles.itemActions}>
-                        <button type="button" className={styles.itemActionBtn} onClick={() => onEditItem('loom', item)} title="Edit">
+                        <button type="button" className={styles.itemActionBtn} onClick={() => onEditItem('loom', item)} title={tc('actions.edit')}>
                           <Pencil size={12} />
                         </button>
-                        <button type="button" className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)} onClick={() => onDeleteItem('loom', item.id, item.name)} title="Delete">
+                        <button type="button" className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)} onClick={() => onDeleteItem('loom', item.id, item.name)} title={tc('actions.delete')}>
                           <Trash2 size={12} />
                         </button>
                       </div>
@@ -432,22 +444,22 @@ function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onEx
 
               {/* Tools */}
               <ItemGroup
-                label="Tools"
+                label={t('creatorWorkshop.workshop.tools')}
                 count={packData.loom_tools.length}
                 onAdd={() => onCreateItem('tool')}
               >
                 {packData.loom_tools.length === 0 ? (
-                  <div className={styles.emptyItems}>No tools</div>
+                  <div className={styles.emptyItems}>{t('creatorWorkshop.workshop.noTools')}</div>
                 ) : (
                   packData.loom_tools.map((tool) => (
                     <div key={tool.id} className={styles.itemRow}>
                       <div className={styles.itemIcon}><Wrench size={14} /></div>
                       <span className={styles.itemName}>{tool.display_name || tool.tool_name}</span>
                       <div className={styles.itemActions}>
-                        <button type="button" className={styles.itemActionBtn} onClick={() => onEditItem('tool', tool)} title="Edit">
+                        <button type="button" className={styles.itemActionBtn} onClick={() => onEditItem('tool', tool)} title={tc('actions.edit')}>
                           <Pencil size={12} />
                         </button>
-                        <button type="button" className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)} onClick={() => onDeleteItem('tool', tool.id, tool.display_name || tool.tool_name)} title="Delete">
+                        <button type="button" className={clsx(styles.itemActionBtn, styles.itemActionBtnDanger)} onClick={() => onDeleteItem('tool', tool.id, tool.display_name || tool.tool_name)} title={tc('actions.delete')}>
                           <Trash2 size={12} />
                         </button>
                       </div>
@@ -457,7 +469,7 @@ function PackSection({ pack, expanded, loading, packData, onToggle, onEdit, onEx
               </ItemGroup>
             </>
           ) : (
-            <div className={styles.emptyItems}>Failed to load items</div>
+            <div className={styles.emptyItems}>{t('creatorWorkshop.workshop.failedLoadItems')}</div>
           )}
         </div>
       )}
@@ -475,12 +487,13 @@ interface ItemGroupProps {
 }
 
 function ItemGroup({ label, count, onAdd, children }: ItemGroupProps) {
+  const { t } = useTranslation('panels')
   return (
     <div className={styles.itemGroup}>
       <div className={styles.itemGroupHeader}>
         <span>{label}</span>
         <span className={styles.itemGroupCount}>({count})</span>
-        <button type="button" className={styles.itemGroupAdd} onClick={onAdd} title={`Add ${label}`}>
+        <button type="button" className={styles.itemGroupAdd} onClick={onAdd} title={t('creatorWorkshop.workshop.addLabel', { label })}>
           <Plus size={12} />
         </button>
       </div>

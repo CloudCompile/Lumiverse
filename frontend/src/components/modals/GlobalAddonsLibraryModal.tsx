@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Plus, Check, Trash2, Copy, Globe } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
+import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { useStore } from '@/store'
 import { globalAddonsApi } from '@/api/global-addons'
 import { toast } from '@/lib/toast'
@@ -12,16 +14,19 @@ import styles from './GlobalAddonsLibraryModal.module.css'
 import clsx from 'clsx'
 
 export default function GlobalAddonsLibraryModal() {
+  const { t } = useTranslation('modals', { keyPrefix: 'globalAddons' })
+  const { t: tc } = useTranslation('common')
   const closeModal = useStore((s) => s.closeModal)
 
   const [addons, setAddons] = useState<GlobalAddon[]>([])
   const [loading, setLoading] = useState(true)
+  const [deleteTarget, setDeleteTarget] = useState<GlobalAddon | null>(null)
   const saveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   useEffect(() => {
     globalAddonsApi.list({ limit: 200, offset: 0 })
       .then((res) => setAddons(res.data))
-      .catch(() => toast.error('Failed to load global add-ons'))
+      .catch(() => toast.error(t('loadFailed')))
       .finally(() => setLoading(false))
   }, [])
 
@@ -33,7 +38,7 @@ export default function GlobalAddonsLibraryModal() {
         const updated = await globalAddonsApi.update(id, input)
         setAddons((prev) => prev.map((a) => a.id === id ? updated : a))
       } catch {
-        toast.error('Failed to save add-on')
+        toast.error(t('saveFailed'))
       }
       saveTimers.current.delete(id)
     }, 300))
@@ -44,16 +49,17 @@ export default function GlobalAddonsLibraryModal() {
       const addon = await globalAddonsApi.create({ label: '', content: '', sort_order: addons.length })
       setAddons((prev) => [...prev, addon])
     } catch {
-      toast.error('Failed to create add-on')
+      toast.error(t('createFailed'))
     }
   }, [addons.length])
 
   const handleDelete = useCallback(async (id: string) => {
+    setDeleteTarget(null)
     try {
       await globalAddonsApi.delete(id)
       setAddons((prev) => prev.filter((a) => a.id !== id))
     } catch {
-      toast.error('Failed to delete add-on')
+      toast.error(t('deleteFailed'))
     }
   }, [])
 
@@ -62,7 +68,7 @@ export default function GlobalAddonsLibraryModal() {
       const addon = await globalAddonsApi.duplicate(id)
       setAddons((prev) => [...prev, addon])
     } catch {
-      toast.error('Failed to duplicate add-on')
+      toast.error(t('duplicateFailed'))
     }
   }, [])
 
@@ -82,19 +88,16 @@ export default function GlobalAddonsLibraryModal() {
       <div className={styles.header}>
         <div className={styles.headerLeft}>
           <Globe size={15} className={styles.headerIcon} />
-          <span className={styles.title}>Global Add-Ons Library</span>
+          <span className={styles.title}>{t('title')}</span>
         </div>
         <CloseButton onClick={closeModal} size="sm" />
       </div>
 
       {/* Body */}
       <div className={styles.body}>
-        {loading && <div className={styles.empty}>Loading...</div>}
+        {loading && <div className={styles.empty}>{t('loading')}</div>}
         {!loading && addons.length === 0 && (
-          <div className={styles.empty}>
-            No global add-ons yet. Global add-ons can be attached to any persona,
-            making them reusable across your entire library.
-          </div>
+          <div className={styles.empty}>{t('empty')}</div>
         )}
         {addons.map((addon) => (
           <div key={addon.id} className={styles.addonCard}>
@@ -107,21 +110,21 @@ export default function GlobalAddonsLibraryModal() {
                 className={styles.addonLabelInput}
                 value={addon.label}
                 onChange={(e) => handleLabelChange(addon.id, e.target.value)}
-                placeholder="Add-on name..."
+                placeholder={t('namePlaceholder')}
               />
               <button
                 type="button"
                 className={styles.addonActionBtn}
                 onClick={() => handleDuplicate(addon.id)}
-                title="Duplicate add-on"
+                title={t('duplicateTitle')}
               >
                 <Copy size={13} />
               </button>
               <button
                 type="button"
                 className={clsx(styles.addonActionBtn, styles.addonDeleteBtn)}
-                onClick={() => handleDelete(addon.id)}
-                title="Delete add-on"
+                onClick={() => setDeleteTarget(addon)}
+                title={t('deleteTitle')}
               >
                 <Trash2 size={13} />
               </button>
@@ -130,8 +133,8 @@ export default function GlobalAddonsLibraryModal() {
               className={styles.addonContent}
               value={addon.content}
               onChange={(v) => handleContentChange(addon.id, v)}
-              title={addon.label || 'Global Add-On Content'}
-              placeholder="Add-on content (appended to persona description when enabled)..."
+              title={addon.label || t('contentTitle')}
+              placeholder={t('contentPlaceholder')}
               rows={2}
             />
           </div>
@@ -141,12 +144,26 @@ export default function GlobalAddonsLibraryModal() {
       {/* Footer */}
       <div className={styles.footer}>
         <Button variant="primary" icon={<Plus size={13} />} onClick={handleAdd}>
-          Add Global Add-On
+          {t('addButton')}
         </Button>
         <span className={styles.addonCount}>
-          {addons.length} add-on{addons.length !== 1 ? 's' : ''}
+          {t('addonCount', { count: addons.length })}
         </span>
       </div>
+
+      {deleteTarget && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('deleteConfirmTitle')}
+          message={deleteTarget.label
+            ? t('deleteConfirmMessage', { name: deleteTarget.label })
+            : t('deleteConfirmMessageUnnamed')}
+          variant="danger"
+          confirmText={tc('actions.delete')}
+          onConfirm={() => { void handleDelete(deleteTarget.id) }}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </ModalShell>
   )
 }

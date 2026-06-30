@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Toggle } from '@/components/shared/Toggle'
 import styles from './DepthControls.module.css'
 
@@ -35,6 +36,7 @@ export default function DepthControls({
   onFontScaleChange,
   onUiScaleChange,
 }: DepthControlsProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'themePanel' })
   // Local state for sliders that should only commit on release.
   // This gives visual feedback during drag without triggering expensive
   // theme recalculations on every step.
@@ -48,7 +50,7 @@ export default function DepthControls({
     <div className={styles.controls}>
       {/* Radius scale */}
       <label className={styles.row}>
-        <span className={styles.label}>Corner Radius</span>
+        <span className={styles.label}>{t('cornerRadius')}</span>
         <input
           type="range"
           min={0.5}
@@ -64,25 +66,25 @@ export default function DepthControls({
 
       {/* Font scale — commits on release */}
       <label className={styles.row}>
-        <span className={styles.label}>Font Scale</span>
+        <span className={styles.label}>{t('fontScale')}</span>
         <input
           type="range"
           min={0.85}
-          max={1.5}
+          max={2}
           step={0.05}
           value={localFontScale}
           onChange={(e) => setLocalFontScale(Number(e.target.value))}
           onPointerUp={(e) => commitFromInput(e, onFontScaleChange)}
           onKeyUp={(e) => commitFromInput(e, onFontScaleChange)}
           className={styles.slider}
-          style={trackFill(localFontScale, 0.85, 1.5)}
+          style={trackFill(localFontScale, 0.85, 2)}
         />
         <span className={styles.value}>{localFontScale.toFixed(2)}x</span>
       </label>
 
       {/* UI scale — commits on release */}
       <label className={styles.row}>
-        <span className={styles.label}>UI Scale</span>
+        <span className={styles.label}>{t('uiScale')}</span>
         <input
           type="range"
           min={0.8}
@@ -102,7 +104,7 @@ export default function DepthControls({
       <Toggle.Checkbox
         checked={enableGlass}
         onChange={onGlassToggle}
-        label="Glass effects"
+        label={t('glassEffects')}
       />
     </div>
   )

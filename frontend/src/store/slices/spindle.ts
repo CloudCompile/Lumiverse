@@ -3,11 +3,47 @@ import type { SpindleSlice, PendingPermissionRequest, PendingTextEditorRequest, 
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/loader'
+import { scheduleLowPriorityTask } from '@/lib/low-priority-task'
+import { yieldToBrowser } from '@/lib/spindle/browser-scheduler'
+
+const MUTED_THEMES_KEY = 'lumiverse:mutedExtensionThemes'
+const FRONTEND_HYDRATION_CONCURRENCY = 4
+
+function isHighPriorityFrontend(ext: {
+  enabled: boolean
+  has_frontend: boolean
+  granted_permissions: string[]
+}): boolean {
+  if (!ext.enabled || !ext.has_frontend) return false
+  return (
+    ext.granted_permissions.includes('ui_panels') ||
+    ext.granted_permissions.includes('app_manipulation')
+  )
+}
+
+function loadMutedThemes(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(MUTED_THEMES_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const result: Record<string, boolean> = {}
+    for (const [id, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (v === true) result[id] = true
+    }
+    return result
+  } catch { return {} }
+}
+
+function saveMutedThemes(muted: Record<string, boolean>) {
+  try { localStorage.setItem(MUTED_THEMES_KEY, JSON.stringify(muted)) } catch {}
+}
 
 export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
   extensionThemeOverrides: {},
-  mutedExtensionThemes: {},
+  mutedExtensionThemes: loadMutedThemes(),
+  chatStyleModes: {},
   extensionOperationStatus: null,
   bulkUpdateStatus: null,
   spindlePrivileged: false,
@@ -23,16 +59,68 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
       const { extensions, isPrivileged } = await spindleApi.list()
       set({ extensions, spindlePrivileged: isPrivileged })
 
-      await Promise.all(
-        extensions.map(async (ext) => {
+      scheduleLowPriorityTask(() => {
+        const hydrateExtension = async (ext: typeof extensions[number]) => {
+          const status = get().extensionOperationStatus
+          const updateReloadPending =
+            status?.extensionId === ext.id &&
+            (status.operation === 'updating' || status.operation === 'updated')
+
+          if (updateReloadPending) return
+
           if (ext.enabled && ext.has_frontend) {
             const manifest = await spindleApi.getManifest(ext.id)
             await loadFrontendExtension(ext.id, manifest)
           } else {
             await unloadFrontendExtension(ext.id)
           }
+        }
+
+        void (async () => {
+          const hydrationQueue = extensions
+            .filter((ext) => ext.enabled && ext.has_frontend)
+            .sort((a, b) => {
+              const aPriority = isHighPriorityFrontend(a) ? 1 : 0
+              const bPriority = isHighPriorityFrontend(b) ? 1 : 0
+              if (aPriority !== bPriority) return bPriority - aPriority
+              return b.installed_at - a.installed_at
+            })
+
+          const cleanupQueue = extensions.filter((ext) => !(ext.enabled && ext.has_frontend))
+
+          let nextIndex = 0
+          const workerCount = Math.min(FRONTEND_HYDRATION_CONCURRENCY, Math.max(1, hydrationQueue.length))
+
+          if (hydrationQueue.length > 0) {
+            await Promise.allSettled(
+              Array.from({ length: workerCount }, async () => {
+                while (true) {
+                  const ext = hydrationQueue[nextIndex++]
+                  if (!ext) return
+
+                  try {
+                    await hydrateExtension(ext)
+                  } catch (err) {
+                    console.error(`[Spindle] Failed to hydrate frontend for ${ext.id}:`, err)
+                  }
+
+                  await yieldToBrowser({ when: 'paint' })
+                }
+              })
+            )
+          }
+
+          for (const ext of cleanupQueue) {
+            try {
+              await hydrateExtension(ext)
+            } catch (err) {
+              console.error(`[Spindle] Failed to reconcile frontend for ${ext.id}:`, err)
+            }
+          }
+        })().catch((err) => {
+          console.error('[Spindle] Frontend hydration loop failed:', err)
         })
-      )
+      }, { label: 'spindle frontend hydration' })
     } catch (err) {
       console.error('[Spindle] Failed to load extensions:', err)
     }
@@ -45,57 +133,98 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   updateExtension: async (id: string) => {
     const updated = await spindleApi.update(id)
+    spindleApi.clearManifestCache(id)
     set((state) => ({
       extensions: state.extensions.map((e) => (e.id === id ? updated : e)),
     }))
+    if (updated.enabled && updated.has_frontend) {
+      const manifest = await spindleApi.getManifest(id, { force: true })
+      await loadFrontendExtension(id, manifest, true)
+    }
   },
 
   switchBranch: async (id: string, branch: string) => {
     const updated = await spindleApi.switchBranch(id, branch)
+    spindleApi.clearManifestCache(id)
     set((state) => ({
       extensions: state.extensions.map((e) => (e.id === id ? updated : e)),
     }))
+    if (updated.enabled && updated.has_frontend) {
+      const manifest = await spindleApi.getManifest(id, { force: true })
+      await loadFrontendExtension(id, manifest, true)
+    }
   },
 
   removeExtension: async (id: string) => {
     await spindleApi.remove(id)
+    spindleApi.clearManifestCache(id)
     await unloadFrontendExtension(id)
-    set((state) => ({
-      extensions: state.extensions.filter((e) => e.id !== id),
-    }))
+    get().clearExtensionChatStyleModes(id)
+    set((state) => {
+      const { [id]: _o, ...overridesRest } = state.extensionThemeOverrides
+      const { [id]: _m, ...mutedRest } = state.mutedExtensionThemes
+      if (id in state.mutedExtensionThemes) saveMutedThemes(mutedRest)
+      return {
+        extensions: state.extensions.filter((e) => e.id !== id),
+        extensionThemeOverrides: overridesRest,
+        mutedExtensionThemes: mutedRest,
+      }
+    })
   },
 
   enableExtension: async (id: string) => {
     await spindleApi.enable(id)
-
-    const manifest = await spindleApi.getManifest(id)
-    await loadFrontendExtension(id, manifest)
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, enabled: true, status: 'running' as const } : e
       ),
     }))
+
+    const ext = get().extensions.find((e) => e.id === id)
+    if (ext?.has_frontend) {
+      scheduleLowPriorityTask(() => {
+        void spindleApi.getManifest(id)
+          .then((manifest) => loadFrontendExtension(id, manifest))
+          .catch((err) => console.error('[Spindle] Failed to load frontend after enable:', err))
+      }, { label: 'spindle frontend enable hydration' })
+    }
   },
 
   disableExtension: async (id: string) => {
     await spindleApi.disable(id)
     await unloadFrontendExtension(id)
+    get().clearExtensionChatStyleModes(id)
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, enabled: false, status: 'stopped' as const } : e
+      ),
+      extensionThemeOverrides: Object.fromEntries(
+        Object.entries(state.extensionThemeOverrides).filter(([extensionId]) => extensionId !== id)
       ),
     }))
   },
 
   restartExtension: async (id: string) => {
+    get().clearExtensionThemeOverride(id)
     await unloadFrontendExtension(id)
     await spindleApi.restart(id)
-    const manifest = await spindleApi.getManifest(id)
+    spindleApi.clearManifestCache(id)
+    const manifest = await spindleApi.getManifest(id, { force: true })
     await loadFrontendExtension(id, manifest)
   },
 
   grantPermission: async (id: string, permission: string) => {
     const result = await spindleApi.setPermissions(id, { grant: [permission] })
+    set((state) => ({
+      extensions: state.extensions.map((e) =>
+        e.id === id ? { ...e, granted_permissions: result.granted as any } : e
+      ),
+    }))
+  },
+
+  grantPermissions: async (id: string, permissions: string[]) => {
+    if (permissions.length === 0) return
+    const result = await spindleApi.setPermissions(id, { grant: permissions })
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, granted_permissions: result.granted as any } : e
@@ -212,11 +341,30 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   },
 
   openContextMenu: (request: PendingContextMenuRequest) => {
+    // If another extension already has a pending context menu, cancel it so
+    // its showContextMenu() promise resolves with null instead of being
+    // silently orphaned when we overwrite the slot. This preserves ownership
+    // correctness: the previous extension sees cancellation, and only the
+    // new request owns the visible menu.
+    const prev = get().pendingContextMenu
+    if (prev && prev.requestId !== request.requestId) {
+      window.dispatchEvent(
+        new CustomEvent('spindle:context-menu-resolved', {
+          detail: { requestId: prev.requestId, selectedKey: null },
+        })
+      )
+    }
     set({ pendingContextMenu: request })
   },
 
   closeContextMenu: (requestId: string, selectedKey: string | null) => {
-    set({ pendingContextMenu: null })
+    // Only clear the slot if the requestId still matches the currently-pending
+    // menu. A stale close (e.g. from an onClose closure captured when a prior
+    // request was pending) must not wipe out a newer request's menu.
+    const current = get().pendingContextMenu
+    if (current && current.requestId === requestId) {
+      set({ pendingContextMenu: null })
+    }
     window.dispatchEvent(
       new CustomEvent('spindle:context-menu-resolved', {
         detail: { requestId, selectedKey },
@@ -244,19 +392,69 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     set({ extensionThemeOverrides: {} })
   },
 
+  setChatStyleMode: (chatId: string, extensionId: string, mode: 'bounded' | 'extension-relaxed') => {
+    set((state) => {
+      const current = state.chatStyleModes[chatId] ?? {}
+      const hasClaim = extensionId in current
+      if (mode === 'bounded') {
+        if (!hasClaim) return state
+        const { [extensionId]: _, ...remaining } = current
+        const nextBucket = remaining
+        if (Object.keys(nextBucket).length === 0) {
+          const { [chatId]: __, ...rest } = state.chatStyleModes
+          return { chatStyleModes: rest }
+        }
+        return { chatStyleModes: { ...state.chatStyleModes, [chatId]: nextBucket } }
+      }
+      if (current[extensionId] === mode) return state
+      return {
+        chatStyleModes: {
+          ...state.chatStyleModes,
+          [chatId]: { ...current, [extensionId]: mode },
+        },
+      }
+    })
+  },
+
+  clearChatStyleMode: (chatId: string) => {
+    set((state) => {
+      if (!(chatId in state.chatStyleModes)) return state
+      const { [chatId]: _, ...rest } = state.chatStyleModes
+      return { chatStyleModes: rest }
+    })
+  },
+
+  clearExtensionChatStyleModes: (extensionId: string) => {
+    set((state) => {
+      let mutated = false
+      const next: Record<string, Record<string, 'extension-relaxed'>> = {}
+      for (const [chatId, bucket] of Object.entries(state.chatStyleModes)) {
+        if (!(extensionId in bucket)) {
+          next[chatId] = bucket
+          continue
+        }
+        mutated = true
+        const { [extensionId]: _, ...remaining } = bucket
+        if (Object.keys(remaining).length > 0) {
+          next[chatId] = remaining as Record<string, 'extension-relaxed'>
+        }
+      }
+      return mutated ? { chatStyleModes: next } : state
+    })
+  },
+
   muteExtensionTheme: (extensionId: string) => {
     set((state) => {
-      const { [extensionId]: _, ...rest } = state.extensionThemeOverrides
-      return {
-        mutedExtensionThemes: { ...state.mutedExtensionThemes, [extensionId]: true },
-        extensionThemeOverrides: rest,
-      }
+      const next = { ...state.mutedExtensionThemes, [extensionId]: true }
+      saveMutedThemes(next)
+      return { mutedExtensionThemes: next }
     })
   },
 
   unmuteExtensionTheme: (extensionId: string) => {
     set((state) => {
       const { [extensionId]: _, ...rest } = state.mutedExtensionThemes
+      saveMutedThemes(rest)
       return { mutedExtensionThemes: rest }
     })
   },

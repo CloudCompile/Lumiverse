@@ -7,16 +7,26 @@ import { useThemeApplicator } from '@/hooks/useThemeApplicator'
 import { useCharacterTheme } from '@/hooks/useCharacterTheme'
 import { useCustomCSSApplicator } from '@/hooks/useCustomCSSApplicator'
 import { useAppInit } from '@/hooks/useAppInit'
+import { useDocumentTitle } from '@/hooks/useDocumentTitle'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
 import AuthGuard from '@/components/auth/AuthGuard'
 import ViewportDrawer from '@/components/panels/ViewportDrawer'
 import ModalContainer from '@/components/modals/ModalContainer'
 import SpindleUIManager from '@/components/spindle/SpindleUIManager'
 import ToastContainer from '@/components/shared/ToastContainer'
+import ConnectionLostOverlay from '@/components/shared/ConnectionLostOverlay'
 import ChatHeads from '@/components/chat-heads/ChatHeads'
+import WallpaperLayer from '@/components/shared/WallpaperLayer'
+import DesktopPwaTitlebar from '@/components/shared/DesktopPwaTitlebar'
 import useIsMobile from '@/hooks/useIsMobile'
 import { useBadging } from '@/hooks/useBadging'
 import { useTTSAutoPlay } from '@/hooks/useTTSAutoPlay'
+import { useAutoSummarization } from '@/hooks/useAutoSummarization'
+import { usePresetRegexActivation } from '@/hooks/usePresetRegexActivation'
+import { useBoundPresetSelection } from '@/hooks/useBoundPresetSelection'
+import { RouterContextExporter } from '@/lib/router-bridge'
+import { resolveDockPanelEdge } from '@/lib/spindle/dock-placement'
+import { installNotificationAudioPrimer } from '@/lib/notificationAudio'
 import styles from './App.module.css'
 
 export default function App() {
@@ -25,20 +35,30 @@ export default function App() {
   useCharacterTheme()
   useCustomCSSApplicator()
   useAppInit()
+  useDocumentTitle()
   useBadging()
   useTTSAutoPlay()
+  useAutoSummarization()
+  useBoundPresetSelection()
+  usePresetRegexActivation()
+
+  useEffect(() => installNotificationAudioPrimer(), [])
 
   const isMobile = useIsMobile()
   const dockPanels = useStore((s) => s.dockPanels)
   const hiddenPlacements = useStore((s) => s.hiddenPlacements)
+  const dockPanelDesktopSide = useStore((s) => s.spindleSettings.dockPanelDesktopSide)
+  const wallpaper = useStore((s) => s.wallpaper)
+  const activeChatWallpaper = useStore((s) => s.activeChatWallpaper)
+  const sceneBackground = useStore((s) => s.sceneBackground)
+  const globalWallpaperHidden = !!activeChatWallpaper?.image_id || !!sceneBackground
 
   const dockInsets = useMemo(() => {
     let left = 0, right = 0, top = 0, bottom = 0
     for (const p of dockPanels) {
       if (hiddenPlacements.includes(p.id)) continue
       const size = p.collapsed ? 36 : p.size
-      // On mobile, left/right docks render as top sheets (bottom conflicts with input area)
-      const edge = isMobile && (p.edge === 'left' || p.edge === 'right') ? 'top' : p.edge
+      const edge = resolveDockPanelEdge(p.edge, dockPanelDesktopSide, isMobile)
       switch (edge) {
         case 'left': left = Math.max(left, size); break
         case 'right': right = Math.max(right, size); break
@@ -47,19 +67,12 @@ export default function App() {
       }
     }
     return { left, right, top, bottom }
-  }, [dockPanels, hiddenPlacements, isMobile])
+  }, [dockPanels, hiddenPlacements, isMobile, dockPanelDesktopSide])
 
-  const loadSettings = useStore((s) => s.loadSettings)
-  const isAuthenticated = useStore((s) => s.isAuthenticated)
   const openDrawer = useStore((s) => s.openDrawer)
   const setDrawerTab = useStore((s) => s.setDrawerTab)
   const setActiveProfile = useStore((s) => s.setActiveProfile)
   const setActiveImageGenConnection = useStore((s) => s.setActiveImageGenConnection)
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadSettings()
-    }
-  }, [isAuthenticated, loadSettings])
 
   // Capture BYOP API key returned in URL hash globally so it can be consumed
   // later when the relevant connection form is opened.
@@ -148,6 +161,7 @@ export default function App() {
         <MotionConfig reducedMotion="user">
           <div
             className={styles.app}
+            data-app-root=""
             style={{
               '--spindle-dock-left': `${dockInsets.left}px`,
               '--spindle-dock-right': `${dockInsets.right}px`,
@@ -155,7 +169,11 @@ export default function App() {
               '--spindle-dock-bottom': `${dockInsets.bottom}px`,
             } as React.CSSProperties}
           >
+            <DesktopPwaTitlebar />
+            <WallpaperLayer wallpaper={wallpaper.global} settings={wallpaper} hidden={globalWallpaperHidden} fixed fadeInOnMount />
             <ErrorBoundary label="App">
+              {/* Mirrors react-router context out to detached drawer-tab roots */}
+              <RouterContextExporter />
               <main className={styles.main}>
                 <Outlet />
               </main>
@@ -164,6 +182,7 @@ export default function App() {
               <SpindleUIManager />
               <ToastContainer />
               <ChatHeads />
+              <ConnectionLostOverlay />
             </ErrorBoundary>
           </div>
         </MotionConfig>

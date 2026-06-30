@@ -1,13 +1,19 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type KeyboardEvent } from "react";
+import { useTranslation } from 'react-i18next'
+import { formatRelativeTime } from '@/lib/formatRelativeTime'
+
 import {
   Brain, Users, Network, ChevronDown, ChevronRight, ChevronLeft, RefreshCw,
   MapPin, Swords, Package, Landmark, Lightbulb, Calendar,
   Heart, Shield, Zap, BookOpen, BarChart3, Search, ArrowRight,
   Palette, Trash2, AlertTriangle, FileQuestion, Clock, Link2,
+  Edit2, CheckCircle2, Plus,
 } from "lucide-react";
 import { useStore } from "@/store";
-import { memoryCortexApi, type CortexEntity, type CortexRelation, type CortexUsageStats } from "@/api/memory-cortex";
+import { memoryCortexApi, type CortexEntity, type CortexFontColor, type CortexRelation, type CortexUsageStats } from "@/api/memory-cortex";
+import ConfirmationModal from "@/components/shared/ConfirmationModal";
 import CortexLinksTab from "./CortexLinksTab";
+import { EntityEditorModal, RelationEditorModal, RelationCreatorModal, ColorEditorModal } from "./MemoryCortexEditors";
 import styles from "./MemoryCortexPanel.module.css";
 import clsx from "clsx";
 
@@ -31,6 +37,9 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function MemoryCortexPanel() {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
+
   const activeChatId = useStore((s) => s.activeChatId);
   const totalChatLength = useStore((s) => s.totalChatLength);
   const addToast = useStore((s) => s.addToast);
@@ -38,10 +47,37 @@ export default function MemoryCortexPanel() {
   const [tab, setTab] = useState<ViewTab>("entities");
   const [entities, setEntities] = useState<CortexEntity[]>([]);
   const [stats, setStats] = useState<CortexUsageStats | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Start in the loading state: the fetch is kicked off by an effect that runs
+  // after first paint, so initializing to false would paint the empty state
+  // ("No entities yet") for one frame before loading begins — a visible flash.
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedEntityIds, setSelectedEntityIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [editingEntity, setEditingEntity] = useState<CortexEntity | null>(null);
+  const [deleteEntityTarget, setDeleteEntityTarget] = useState<CortexEntity | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+
+  // Reset read-state when the active chat changes — DURING render, not in an
+  // effect. An effect runs after paint, so it can't stop the previous chat's
+  // entities/stats (and the count badge) from flashing for a frame before the
+  // refetch lands. React's "adjust state on prior-render change" pattern
+  // re-renders synchronously with the cleared state before committing.
+  const [loadedChatId, setLoadedChatId] = useState<string | null>(activeChatId);
+  if (activeChatId !== loadedChatId) {
+    setLoadedChatId(activeChatId);
+    setEntities([]);
+    setStats(null);
+    setLoading(true);
+    setExpandedId(null);
+    setSelectionMode(false);
+    setSelectedEntityIds(new Set());
+    setDeleteEntityTarget(null);
+    setConfirmBulkDelete(false);
+  }
 
   const loadEntities = useCallback(async () => {
     if (!activeChatId) return;
@@ -76,9 +112,15 @@ export default function MemoryCortexPanel() {
     try {
       await memoryCortexApi.deleteEntity(activeChatId, entityId);
       setEntities((prev) => prev.filter((e) => e.id !== entityId));
-      addToast({ type: "info", message: "Entity removed" });
+      setSelectedEntityIds((prev) => {
+        if (!prev.has(entityId)) return prev;
+        const next = new Set(prev);
+        next.delete(entityId);
+        return next;
+      });
+      addToast({ type: "info", message: t('memoryCortexPanel.toast.entityRemoved') });
     } catch {
-      addToast({ type: "error", message: "Failed to remove entity" });
+      addToast({ type: "error", message: t('memoryCortexPanel.toast.entityRemoveFailed') });
     }
   };
 
@@ -96,6 +138,57 @@ export default function MemoryCortexPanel() {
 
   const activeEntities = filtered.filter((e) => e.status !== "inactive");
   const archivedEntities = filtered.filter((e) => e.status === "inactive");
+  const visibleArchivedEntities = archivedEntities.slice(0, 10);
+  const visibleEntityIds = [...activeEntities, ...visibleArchivedEntities].map((e) => e.id);
+  const selectedCount = selectedEntityIds.size;
+
+  const toggleEntitySelection = (entityId: string) => {
+    setSelectedEntityIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(entityId)) next.delete(entityId);
+      else next.add(entityId);
+      return next;
+    });
+  };
+
+  const selectVisibleEntities = () => {
+    setSelectionMode(true);
+    setSelectedEntityIds((prev) => {
+      const next = new Set(prev);
+      for (const id of visibleEntityIds) next.add(id);
+      return next;
+    });
+  };
+
+  const clearEntitySelection = () => {
+    setSelectedEntityIds(new Set());
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    clearEntitySelection();
+  };
+
+  const handleBulkDeleteEntities = async () => {
+    if (!activeChatId || selectedEntityIds.size === 0 || bulkDeleting) return;
+    const ids = [...selectedEntityIds];
+    setConfirmBulkDelete(false);
+    setBulkDeleting(true);
+    try {
+      const res = await memoryCortexApi.bulkDeleteEntities(activeChatId, ids);
+      const deletedIds = new Set(ids);
+      setEntities((prev) => prev.filter((e) => !deletedIds.has(e.id)));
+      setSelectedEntityIds(new Set());
+      setSelectionMode(false);
+      setExpandedId((prev) => prev && deletedIds.has(prev) ? null : prev);
+      await loadStats();
+      addToast({ type: "info", message: t('memoryCortexPanel.toast.bulkRemoved', { count: res.deletedCount }) });
+    } catch {
+      addToast({ type: "error", message: t('memoryCortexPanel.toast.bulkRemoveFailed') });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
 
   // Get unique entity types for filter
   const entityTypes = [...new Set(entities.map((e) => e.entityType))];
@@ -105,7 +198,7 @@ export default function MemoryCortexPanel() {
     return (
       <div className={styles.empty}>
         <Brain size={32} strokeWidth={1.5} />
-        <p>Open a chat to view its memory graph</p>
+        <p>{t('memoryCortexPanel.noChat')}</p>
       </div>
     );
   }
@@ -116,22 +209,22 @@ export default function MemoryCortexPanel() {
       <div className={styles.tabBar}>
         <button className={clsx(styles.tab, tab === "entities" && styles.tabActive)} onClick={() => setTab("entities")}>
           <Users size={13} />
-          Entities
+          {t('memoryCortexPanel.tabs.entities')}
           {entities.length > 0 && <span className={styles.tabBadge}>{activeEntities.length}</span>}
         </button>
         <button className={clsx(styles.tab, tab === "colors" && styles.tabActive)} onClick={() => setTab("colors")}>
           <Palette size={13} />
-          Colors
+          {t('memoryCortexPanel.tabs.colors')}
         </button>
         <button className={clsx(styles.tab, tab === "stats" && styles.tabActive)} onClick={() => setTab("stats")}>
           <BarChart3 size={13} />
-          Stats
+          {t('memoryCortexPanel.tabs.stats')}
         </button>
         <button className={clsx(styles.tab, tab === "links" && styles.tabActive)} onClick={() => setTab("links")}>
           <Link2 size={13} />
-          Links
+          {t('memoryCortexPanel.tabs.links')}
         </button>
-        <button className={styles.refreshBtn} onClick={() => { loadEntities(); loadStats(); }} title="Refresh">
+        <button className={styles.refreshBtn} onClick={() => { loadEntities(); loadStats(); }} title={tc('actions.refresh')}>
           <RefreshCw size={13} />
         </button>
       </div>
@@ -140,10 +233,9 @@ export default function MemoryCortexPanel() {
         <div className={styles.noticeBanner}>
           <AlertTriangle size={14} className={styles.noticeIcon} />
           <div>
-            <div className={styles.noticeTitle}>Memory Cortex is still warming up</div>
+            <div className={styles.noticeTitle}>{t('memoryCortexPanel.warmupTitle')}</div>
             <p className={styles.noticeText}>
-              This chat only has {totalChatLength} message{totalChatLength === 1 ? "" : "s"} so far.
-              Cortex mappings, relationships, and recall context will have more to surface once the conversation has a few more turns.
+              {t('memoryCortexPanel.warmupText', { count: totalChatLength })}
             </p>
           </div>
         </div>
@@ -159,7 +251,7 @@ export default function MemoryCortexPanel() {
               className={styles.searchInput}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search entities..."
+              placeholder={t('memoryCortexPanel.searchPlaceholder')}
             />
             {entityTypes.length > 1 && (
               <select
@@ -167,22 +259,49 @@ export default function MemoryCortexPanel() {
                 value={typeFilter}
                 onChange={(e) => setTypeFilter(e.target.value)}
               >
-                <option value="all">All</option>
+                <option value="all">{t('memoryCortexPanel.filterAll')}</option>
                 {entityTypes.map((t) => (
                   <option key={t} value={t}>{t}</option>
                 ))}
               </select>
             )}
+            <button
+              className={clsx(styles.selectionModeBtn, selectionMode && styles.selectionModeBtnActive)}
+              onClick={() => selectionMode ? exitSelectionMode() : setSelectionMode(true)}
+              type="button"
+            >
+              {selectionMode ? t('memoryCortexPanel.done') : t('memoryCortexPanel.select')}
+            </button>
           </div>
+
+          {selectionMode && (
+            <div className={styles.selectionToolbar}>
+              <span className={styles.selectionCount}>{t('memoryCortexPanel.selectedCount', { count: selectedCount })}</span>
+              <button className={styles.selectionToolbarBtn} onClick={selectVisibleEntities} type="button">
+                {t('memoryCortexPanel.selectVisible')}
+              </button>
+              <button className={styles.selectionToolbarBtn} onClick={clearEntitySelection} disabled={selectedCount === 0} type="button">
+                {t('memoryCortexPanel.clear')}
+              </button>
+              <button
+                className={styles.selectionToolbarDanger}
+                onClick={() => setConfirmBulkDelete(true)}
+                disabled={selectedCount === 0 || bulkDeleting}
+                type="button"
+              >
+                {bulkDeleting ? t('memoryCortexPanel.removing') : t('memoryCortexPanel.removeSelected')}
+              </button>
+            </div>
+          )}
 
           {/* Entity list */}
           {loading ? (
-            <div className={styles.loadingText}>Loading entities...</div>
+            <div className={styles.loadingText}>{t('memoryCortexPanel.loadingEntities')}</div>
           ) : activeEntities.length === 0 && archivedEntities.length === 0 ? (
             <div className={styles.emptyList}>
               <Lightbulb size={20} strokeWidth={1.5} />
-              <p>No entities tracked yet</p>
-              <span>Entities are extracted automatically as you chat</span>
+              <p>{t('memoryCortexPanel.emptyEntitiesTitle')}</p>
+              <span>{t('memoryCortexPanel.emptyEntitiesHint')}</span>
             </div>
           ) : (
             <div className={styles.entityList}>
@@ -192,19 +311,27 @@ export default function MemoryCortexPanel() {
                   entity={entity}
                   expanded={expandedId === entity.id}
                   onToggle={() => setExpandedId(expandedId === entity.id ? null : entity.id)}
-                  onDelete={() => handleDeleteEntity(entity.id)}
+                  onDelete={() => setDeleteEntityTarget(entity)}
+                  onEdit={() => setEditingEntity(entity)}
+                  selectionMode={selectionMode}
+                  selected={selectedEntityIds.has(entity.id)}
+                  onSelect={() => toggleEntitySelection(entity.id)}
                 />
               ))}
               {archivedEntities.length > 0 && (
                 <div className={styles.archivedSection}>
-                  <span className={styles.archivedLabel}>Archived ({archivedEntities.length})</span>
-                  {archivedEntities.slice(0, 10).map((entity) => (
+                  <span className={styles.archivedLabel}>{t('memoryCortexPanel.archived', { count: archivedEntities.length })}</span>
+                  {visibleArchivedEntities.map((entity) => (
                     <EntityCard
                       key={entity.id}
                       entity={entity}
                       expanded={expandedId === entity.id}
                       onToggle={() => setExpandedId(expandedId === entity.id ? null : entity.id)}
-                      onDelete={() => handleDeleteEntity(entity.id)}
+                      onDelete={() => setDeleteEntityTarget(entity)}
+                      onEdit={() => setEditingEntity(entity)}
+                      selectionMode={selectionMode}
+                      selected={selectedEntityIds.has(entity.id)}
+                      onSelect={() => toggleEntitySelection(entity.id)}
                     />
                   ))}
                 </div>
@@ -215,15 +342,52 @@ export default function MemoryCortexPanel() {
       )}
 
       {tab === "colors" && (
-        <ColorsView chatId={activeChatId} addToast={addToast} />
+        <ColorsView chatId={activeChatId} addToast={addToast} entities={entities} />
       )}
 
       {tab === "stats" && (
-        <StatsView stats={stats} chatId={activeChatId} />
+        <StatsView stats={stats} chatId={activeChatId} entities={entities} addToast={addToast} />
       )}
 
       {tab === "links" && (
         <CortexLinksTab activeChatId={activeChatId} />
+      )}
+
+      {editingEntity && (
+        <EntityEditorModal
+          chatId={activeChatId}
+          entity={editingEntity}
+          onClose={() => setEditingEntity(null)}
+          onSaved={() => { setEditingEntity(null); loadEntities(); }}
+        />
+      )}
+
+      {deleteEntityTarget && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('memoryCortexPanel.confirm.entityTitle')}
+          message={t('memoryCortexPanel.confirm.entityMessage', { name: deleteEntityTarget.name })}
+          variant="danger"
+          confirmText={tc('actions.delete')}
+          onConfirm={() => {
+            const id = deleteEntityTarget.id;
+            setDeleteEntityTarget(null);
+            void handleDeleteEntity(id);
+          }}
+          onCancel={() => setDeleteEntityTarget(null)}
+        />
+      )}
+
+      {confirmBulkDelete && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('memoryCortexPanel.confirm.bulkTitle')}
+          message={t('memoryCortexPanel.confirm.bulkMessage', { count: selectedCount })}
+          variant="danger"
+          confirmText={tc('actions.delete')}
+          onConfirm={() => { void handleBulkDeleteEntities() }}
+          onCancel={() => setConfirmBulkDelete(false)}
+        />
       )}
     </div>
   );
@@ -231,27 +395,26 @@ export default function MemoryCortexPanel() {
 
 // ─── Entity Card ───────────────────────────────────────────────
 
-/** Format a timestamp as relative time ("2m ago", "3h ago", "5d ago") */
-function relativeTime(timestamp: number | null): string | null {
-  if (!timestamp) return null;
-  const diff = Math.floor(Date.now() / 1000) - timestamp;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
 function EntityCard({
   entity,
   expanded,
   onToggle,
   onDelete,
+  onEdit,
+  selectionMode,
+  selected,
+  onSelect,
 }: {
   entity: CortexEntity;
   expanded: boolean;
   onToggle: () => void;
   onDelete: () => void;
+  onEdit: () => void;
+  selectionMode: boolean;
+  selected: boolean;
+  onSelect: () => void;
 }) {
+  const { t } = useTranslation('panels')
   const Icon = ENTITY_ICONS[entity.entityType] || Lightbulb;
   const statusColor = STATUS_COLORS[entity.status] || STATUS_COLORS.unknown;
   const isProvisional = entity.confidence === "provisional";
@@ -264,21 +427,56 @@ function EntityCard({
 
   // Salience breakdown for mini bar
   const bd = entity.salienceBreakdown;
-  const bdTotal = bd ? (bd.mentionComponent + bd.arcComponent + bd.graphComponent) || 1 : 0;
+  const bdTotal = bd ? (bd.mentionComponent + bd.arcComponent + bd.graphComponent + (bd.frequencyFloor ?? 0)) || 1 : 0;
 
   // Fact extraction status indicator
   const needsFacts = entity.factExtractionStatus !== "ok" && entity.salienceAvg > 0.45;
 
-  // Last seen
-  const lastSeen = relativeTime(entity.lastMentionTimestamp ?? entity.lastSeenAt);
+  const lastSeenTs = entity.lastMentionTimestamp ?? entity.lastSeenAt
+  const lastSeen = lastSeenTs ? formatRelativeTime(lastSeenTs) : null
+
+  // Blurb shown in the expanded card body. A user-edited entity surfaces its
+  // curated description — the manual edit must win. Otherwise we keep the
+  // original behaviour: prefer the freshest mention excerpt over the
+  // auto-backfilled (first-mention) description. Each side falls back to the
+  // other so the line is never blank.
+  const rawBlurb = entity.userEditedAt
+    ? (entity.description || entity.latestExcerpt)
+    : (entity.latestExcerpt || entity.description);
+  const blurb = (rawBlurb || "")
+    .replace(/^\.*\s*\[(?:CHARACTER|USER)\s*\|\s*[^\]]*\]\s*:\s*/i, "")
+    .replace(/^\.{3}\s*/, "")
+    .replace(/\s*\.{3}$/, "")
+    .trim();
+  const handleHeaderClick = () => {
+    if (selectionMode) onSelect();
+    else onToggle();
+  };
+
+  const handleHeaderKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    handleHeaderClick();
+  };
 
   return (
     <div className={clsx(
       styles.entityCard,
       entity.status === "inactive" && styles.entityCardArchived,
       isProvisional && styles.entityCardProvisional,
+      selected && styles.entityCardSelected,
     )}>
-      <div className={styles.entityHeader} role="button" tabIndex={0} onClick={onToggle}>
+      <div className={styles.entityHeader} role="button" tabIndex={0} onClick={handleHeaderClick} onKeyDown={handleHeaderKeyDown}>
+        {selectionMode && (
+          <input
+            className={styles.entitySelectCheckbox}
+            type="checkbox"
+            checked={selected}
+            onChange={onSelect}
+            onClick={(e) => e.stopPropagation()}
+            aria-label={t('memoryCortexPanel.entity.selectAria', { name: entity.name })}
+          />
+        )}
         <div className={styles.entityIcon}>
           <Icon size={14} />
         </div>
@@ -286,29 +484,49 @@ function EntityCard({
           <div className={styles.entityName}>
             {entity.name}
             <span className={styles.entityStatus} style={{ background: statusColor }} />
-            {isProvisional && <span className={styles.provisionalBadge}>provisional</span>}
+            {isProvisional && <span className={styles.provisionalBadge}>{t('memoryCortexPanel.entity.provisional')}</span>}
+            {entity.userEditedAt !== null && (
+              <span className={styles.curatedBadge} title={t('memoryCortexPanel.entity.curatedTitle')}>
+                <CheckCircle2 size={9} /> {t('memoryCortexPanel.entity.curated')}
+              </span>
+            )}
             {needsFacts && (
-              <span className={clsx(styles.factStatusBadge, entity.factExtractionStatus === "never" ? styles.factStatusNever : styles.factStatusEmpty)} title={entity.factExtractionStatus === "never" ? "No facts extracted yet" : "Fact extraction found nothing — will retry"}>
+              <span className={clsx(styles.factStatusBadge, entity.factExtractionStatus === "never" ? styles.factStatusNever : styles.factStatusEmpty)} title={entity.factExtractionStatus === "never" ? t('memoryCortexPanel.entity.noFactsTitle') : t('memoryCortexPanel.entity.retryFactsTitle')}>
                 <FileQuestion size={9} />
-                {entity.factExtractionStatus === "never" ? "no facts" : "retry"}
+                {entity.factExtractionStatus === "never" ? t('memoryCortexPanel.entity.noFacts') : t('memoryCortexPanel.entity.retry')}
               </span>
             )}
           </div>
           <div className={styles.entityMeta}>
-            {entity.entityType} &middot; {entity.mentionCount} mentions
+            {entity.entityType} &middot; {t('memoryCortexPanel.entity.mentions', { count: entity.mentionCount })}
             {lastSeen && <span className={styles.lastSeen}> &middot; {lastSeen}</span>}
             {entity.salienceAvg > 0 && (
               <span className={styles.salienceBadge} style={{
                 opacity: 0.4 + entity.salienceAvg * 0.6,
-              }}>
+              }} title={[
+                `Salience: ${(entity.salienceAvg * 100).toFixed(0)}%`,
+                bd ? `Mention: ${(bd.mentionComponent * 100).toFixed(0)}%` : null,
+                bd ? `Arc: ${(bd.arcComponent * 100).toFixed(0)}%` : null,
+                bd ? `Graph: ${(bd.graphComponent * 100).toFixed(0)}%` : null,
+                bd?.frequencyFloor ? `Floor: ${(bd.frequencyFloor * 100).toFixed(0)}%` : null,
+                entity.saliencePeak > 0 ? `Peak: ${(entity.saliencePeak * 100).toFixed(0)}%` : null,
+              ].filter(Boolean).join("\n")}>
                 {(entity.salienceAvg * 100).toFixed(0)}%
               </span>
             )}
             {bd && bdTotal > 0 && (
-              <span className={styles.salienceBar} title={`Mention: ${(bd.mentionComponent * 100).toFixed(0)}% · Arc: ${(bd.arcComponent * 100).toFixed(0)}% · Graph: ${(bd.graphComponent * 100).toFixed(0)}%`}>
+              <span className={styles.salienceBar} title={`${t('memoryCortexPanel.entity.salienceTooltip', {
+                mention: (bd.mentionComponent * 100).toFixed(0),
+                arc: (bd.arcComponent * 100).toFixed(0),
+                graph: (bd.graphComponent * 100).toFixed(0),
+              })}${bd.frequencyFloor ? ` · ${t('memoryCortexPanel.entity.salienceFloor', { floor: (bd.frequencyFloor * 100).toFixed(0) })}` : ""}`}>
+
                 <span className={clsx(styles.salienceBarSegment, styles.salienceBarMention)} style={{ width: `${(bd.mentionComponent / bdTotal) * 100}%` }} />
                 <span className={clsx(styles.salienceBarSegment, styles.salienceBarArc)} style={{ width: `${(bd.arcComponent / bdTotal) * 100}%` }} />
                 <span className={clsx(styles.salienceBarSegment, styles.salienceBarGraph)} style={{ width: `${(bd.graphComponent / bdTotal) * 100}%` }} />
+                {(bd.frequencyFloor ?? 0) > 0 && (
+                  <span className={clsx(styles.salienceBarSegment, styles.salienceBarFloor)} style={{ width: `${((bd.frequencyFloor ?? 0) / bdTotal) * 100}%` }} />
+                )}
               </span>
             )}
           </div>
@@ -320,20 +538,14 @@ function EntityCard({
 
       {expanded && (
         <div className={styles.entityBody}>
-          {/* Show the latest mention excerpt — the actual chunk text, not a stale description */}
-          {((entity as any).latestExcerpt || entity.description) && (
-            <p className={styles.entityDescription}>
-              {((entity as any).latestExcerpt || entity.description)
-                .replace(/^\.*\s*\[(?:CHARACTER|USER)\s*\|\s*[^\]]*\]\s*:\s*/i, "")
-                .replace(/^\.{3}\s*/, "")
-                .replace(/\s*\.{3}$/, "")
-                .trim() || null}
-            </p>
+          {/* User edits win; otherwise show the latest mention excerpt (see `blurb` above). */}
+          {blurb && (
+            <p className={styles.entityDescription}>{blurb}</p>
           )}
 
           {entity.aliases.length > 0 && (
             <div className={styles.entityField}>
-              <span className={styles.fieldLabel}>Aliases</span>
+              <span className={styles.fieldLabel}>{t('memoryCortexPanel.entity.aliases')}</span>
               <div className={styles.tagRow}>
                 {entity.aliases.map((a) => (
                   <span key={a} className={styles.miniTag}>{a}</span>
@@ -344,7 +556,7 @@ function EntityCard({
 
           {entity.facts.length > 0 && (
             <div className={styles.entityField}>
-              <span className={styles.fieldLabel}>Facts</span>
+              <span className={styles.fieldLabel}>{t('memoryCortexPanel.entity.facts')}</span>
               <ul className={styles.factList}>
                 {entity.facts.map((f, i) => (
                   <li key={i}>{f}</li>
@@ -355,7 +567,7 @@ function EntityCard({
 
           {topEmotions.length > 0 && (
             <div className={styles.entityField}>
-              <span className={styles.fieldLabel}>Emotional profile</span>
+              <span className={styles.fieldLabel}>{t('memoryCortexPanel.entity.emotionalProfile')}</span>
               <div className={styles.tagRow}>
                 {topEmotions.map((tag) => (
                   <span key={tag} className={styles.emotionTag}>{tag}</span>
@@ -367,24 +579,37 @@ function EntityCard({
           {/* Salience breakdown detail when expanded */}
           {bd && bd.total > 0 && (
             <div className={styles.entityField}>
-              <span className={styles.fieldLabel}>Salience breakdown</span>
+              <span className={styles.fieldLabel}>{t('memoryCortexPanel.entity.salienceBreakdown')}</span>
               <div className={styles.tagRow}>
                 <span className={styles.miniTag} style={{ borderColor: "color-mix(in srgb, var(--lumiverse-primary) 30%, transparent)" }}>
-                  Mention {(bd.mentionComponent * 100).toFixed(0)}%
+                  {t('memoryCortexPanel.entity.salienceMention', { percent: (bd.mentionComponent * 100).toFixed(0) })}
                 </span>
                 <span className={styles.miniTag} style={{ borderColor: "color-mix(in srgb, #8b5cf6 30%, transparent)" }}>
-                  Arc {(bd.arcComponent * 100).toFixed(0)}%
+                  {t('memoryCortexPanel.entity.salienceArc', { percent: (bd.arcComponent * 100).toFixed(0) })}
                 </span>
                 <span className={styles.miniTag} style={{ borderColor: "color-mix(in srgb, #06b6d4 30%, transparent)" }}>
-                  Graph {(bd.graphComponent * 100).toFixed(0)}%
+                  {t('memoryCortexPanel.entity.salienceGraph', { percent: (bd.graphComponent * 100).toFixed(0) })}
                 </span>
+                {(bd.frequencyFloor ?? 0) > 0 && (
+                  <span className={styles.miniTag} style={{ borderColor: "color-mix(in srgb, #f59e0b 30%, transparent)" }}>
+                    Floor {((bd.frequencyFloor ?? 0) * 100).toFixed(0)}%
+                  </span>
+                )}
+                {(entity.saliencePeak ?? 0) > 0 && (
+                  <span className={styles.miniTag} style={{ borderColor: "color-mix(in srgb, #ef4444 30%, transparent)" }}>
+                    Peak {((entity.saliencePeak ?? 0) * 100).toFixed(0)}%
+                  </span>
+                )}
               </div>
             </div>
           )}
 
           <div className={styles.entityActions}>
+            <button className={styles.editBtn} onClick={(e) => { e.stopPropagation(); onEdit(); }}>
+              <Edit2 size={12} /> {t('memoryCortexPanel.entity.edit')}
+            </button>
             <button className={styles.dangerBtn} onClick={(e) => { e.stopPropagation(); onDelete(); }}>
-              Remove
+              {t('memoryCortexPanel.entity.remove')}
             </button>
           </div>
         </div>
@@ -395,9 +620,21 @@ function EntityCard({
 
 // ─── Colors View ───────────────────────────────────────────────
 
-function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) => void }) {
-  const [colors, setColors] = useState<any[]>([]);
+function ColorsView({
+  chatId,
+  addToast,
+  entities,
+}: {
+  chatId: string;
+  addToast: (t: any) => void;
+  entities: CortexEntity[];
+}) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
+  const [colors, setColors] = useState<CortexFontColor[]>([]);
   const [loading, setLoading] = useState(true);
+  const [editingColor, setEditingColor] = useState<CortexFontColor | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CortexFontColor | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -414,56 +651,98 @@ function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) =
   useEffect(() => { load(); }, [load]);
 
   const handleDelete = async (id: string) => {
+    setDeleteTarget(null);
     try {
       await memoryCortexApi.deleteColor(chatId, id);
       setColors((prev) => prev.filter((c) => c.id !== id));
-      addToast({ type: "info", message: "Color attribution removed" });
+      addToast({ type: "info", message: t('memoryCortexPanel.colors.removed') });
     } catch {
-      addToast({ type: "error", message: "Failed to remove" });
+      addToast({ type: "error", message: t('memoryCortexPanel.colors.removeFailed') });
     }
   };
 
-  if (loading) return <div className={styles.loadingText}>Loading color map...</div>;
+  const handleReattribute = async (colorId: string, entityId: string | null) => {
+    try {
+      await memoryCortexApi.reattributeColor(chatId, colorId, entityId);
+      addToast({ type: "success", message: entityId ? t('memoryCortexPanel.colors.reattributed') : t('memoryCortexPanel.colors.detached') });
+      load();
+    } catch (err: any) {
+      addToast({ type: "error", message: t('memoryCortexPanel.colors.reattributeFailed', { error: err.message }) });
+    }
+  };
+
+  if (loading) return <div className={styles.loadingText}>{t('memoryCortexPanel.colors.loading')}</div>;
 
   if (colors.length === 0) {
     return (
       <div className={styles.emptyList}>
         <Palette size={20} strokeWidth={1.5} />
-        <p>No font colors detected yet</p>
-        <span>Colors are extracted from font tags in chat messages as you play</span>
+        <p>{t('memoryCortexPanel.colors.emptyTitle')}</p>
+        <span>{t('memoryCortexPanel.colors.emptyHint')}</span>
       </div>
     );
   }
 
-  // Group by entity
-  const byEntity = new Map<string, any[]>();
-  const unattributed: any[] = [];
+  // Group by detected character name, with legacy entity-name fallback.
+  const byCharacter = new Map<string, CortexFontColor[]>();
+  const unattributed: CortexFontColor[] = [];
   for (const c of colors) {
-    if (c.entityName) {
-      const list = byEntity.get(c.entityName) || [];
+    if (c.displayName) {
+      const list = byCharacter.get(c.displayName) || [];
       list.push(c);
-      byEntity.set(c.entityName, list);
+      byCharacter.set(c.displayName, list);
     } else {
       unattributed.push(c);
     }
   }
 
+  const renderRow = (c: CortexFontColor) => (
+    <div key={c.id} className={styles.colorRow}>
+      <div className={styles.colorRowMain}>
+        <span className={styles.colorSwatch} style={{ background: c.hexColor }} />
+        <span className={styles.colorHex}>{c.hexColor}</span>
+        <span className={styles.colorUsage}>{c.usageType.replace(/_/g, " ")}</span>
+        <span className={styles.colorConfidence}>{(c.confidence * 100).toFixed(0)}%</span>
+        <button className={styles.colorEditBtn} onClick={() => setEditingColor(c)} title={tc('actions.edit')}>
+          <Edit2 size={11} />
+        </button>
+        <button className={styles.colorDeleteBtn} onClick={() => setDeleteTarget(c)} title={tc('actions.delete')}>
+          <Trash2 size={11} />
+        </button>
+      </div>
+      <div className={styles.colorRowReassign}>
+        <span className={styles.colorRowReassignLabel}>{t('memoryCortexPanel.colors.reattributeLabel')}</span>
+        <select
+          className={styles.colorReattributeSelect}
+          value={c.entityId ?? ""}
+          onChange={(e) => handleReattribute(c.id, e.target.value || null)}
+          disabled={entities.length === 0}
+          title={entities.length === 0 ? t('memoryCortexPanel.colors.noEntitiesTitle') : t('memoryCortexPanel.colors.reattributeTitle')}
+        >
+          <option value="">{c.entityId ? t('memoryCortexPanel.colors.detach') : t('memoryCortexPanel.colors.pickEntity')}</option>
+          {entities.map((ent) => (
+            <option key={ent.id} value={ent.id}>{ent.name}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+
   return (
     <div className={styles.entityList}>
-      {[...byEntity.entries()].map(([name, entries]) => (
+      {unattributed.length > 0 && (
+        <div className={styles.colorGroup}>
+          <div className={styles.colorGroupHeader} style={{ color: "#f59e0b" }}>
+            <AlertTriangle size={12} style={{ marginRight: 4, verticalAlign: -1 }} />
+            {t('memoryCortexPanel.colors.unattributed', { count: unattributed.length })}
+          </div>
+          {unattributed.map(renderRow)}
+        </div>
+      )}
+      {[...byCharacter.entries()].map(([name, entries]) => (
         <div key={name} className={styles.colorGroup}>
           <div className={styles.colorGroupHeader}>{name}</div>
-          {entries.map((c) => (
-            <div key={c.id} className={styles.colorRow}>
-              <span className={styles.colorSwatch} style={{ background: c.hexColor }} />
-              <span className={styles.colorHex}>{c.hexColor}</span>
-              <span className={styles.colorUsage}>{c.usageType}</span>
-              <span className={styles.colorConfidence}>{(c.confidence * 100).toFixed(0)}%</span>
-              <button className={styles.colorDeleteBtn} onClick={() => handleDelete(c.id)} title="Remove">
-                <Trash2 size={11} />
-              </button>
-            </div>
-          ))}
+          {entries.map(renderRow)}
           {entries[0]?.sampleExcerpt && (
             <div className={styles.colorSample}>
               {entries[0].sampleExcerpt.slice(0, 100)}
@@ -471,21 +750,27 @@ function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) =
           )}
         </div>
       ))}
-      {unattributed.length > 0 && (
-        <div className={styles.colorGroup}>
-          <div className={styles.colorGroupHeader} style={{ opacity: 0.6 }}>Unattributed</div>
-          {unattributed.map((c) => (
-            <div key={c.id} className={styles.colorRow}>
-              <span className={styles.colorSwatch} style={{ background: c.hexColor }} />
-              <span className={styles.colorHex}>{c.hexColor}</span>
-              <span className={styles.colorUsage}>{c.usageType}</span>
-              <span className={styles.colorConfidence}>{(c.confidence * 100).toFixed(0)}%</span>
-              <button className={styles.colorDeleteBtn} onClick={() => handleDelete(c.id)} title="Remove">
-                <Trash2 size={11} />
-              </button>
-            </div>
-          ))}
-        </div>
+
+      {deleteTarget && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('memoryCortexPanel.colors.deleteConfirmTitle')}
+          message={t('memoryCortexPanel.colors.deleteConfirmMessage', { hex: deleteTarget.hexColor })}
+          variant="danger"
+          confirmText={tc('actions.delete')}
+          onConfirm={() => { void handleDelete(deleteTarget.id) }}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {editingColor && (
+        <ColorEditorModal
+          chatId={chatId}
+          color={editingColor}
+          entities={entities}
+          onClose={() => setEditingColor(null)}
+          onSaved={() => { setEditingColor(null); load(); }}
+        />
       )}
     </div>
   );
@@ -495,10 +780,47 @@ function ColorsView({ chatId, addToast }: { chatId: string; addToast: (t: any) =
 
 type DrillTarget = "chunks" | "entities" | "relations" | "consolidations" | "salience" | null;
 
-function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: string }) {
+function StatsView({
+  stats,
+  chatId,
+  entities,
+  addToast,
+}: {
+  stats: CortexUsageStats | null;
+  chatId: string;
+  entities: CortexEntity[];
+  addToast: (t: any) => void;
+}) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
+  const dl = (key: string) => t(`memoryCortexPanel.stats.drillLabels.${key}`)
   const [drill, setDrill] = useState<DrillTarget>(null);
   const [drillData, setDrillData] = useState<any[]>([]);
   const [drillLoading, setDrillLoading] = useState(false);
+  const [editingRelation, setEditingRelation] = useState<CortexRelation | null>(null);
+  const [creatingRelation, setCreatingRelation] = useState(false);
+  const [deleteRelationId, setDeleteRelationId] = useState<string | null>(null);
+
+  const reloadDrill = useCallback(async () => {
+    if (!drill) return;
+    setDrillLoading(true);
+    try {
+      let res: { data: any[] };
+      switch (drill) {
+        case "chunks": res = await memoryCortexApi.getChunks(chatId, 30); break;
+        case "entities": res = await memoryCortexApi.getEntities(chatId); break;
+        case "relations": res = await memoryCortexApi.getRelations(chatId); break;
+        case "consolidations": res = await memoryCortexApi.getConsolidations(chatId); break;
+        case "salience": res = await memoryCortexApi.getSalience(chatId, 30); break;
+        default: res = { data: [] };
+      }
+      setDrillData(res.data);
+    } catch {
+      setDrillData([]);
+    } finally {
+      setDrillLoading(false);
+    }
+  }, [drill, chatId]);
 
   const openDrill = async (target: DrillTarget) => {
     if (!target) return;
@@ -523,7 +845,18 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
     }
   };
 
-  if (!stats) return <div className={styles.loadingText}>Loading stats...</div>;
+  const handleDeleteRelation = async (relationId: string) => {
+    setDeleteRelationId(null);
+    try {
+      await memoryCortexApi.deleteRelation(chatId, relationId);
+      addToast({ type: "success", message: t('memoryCortexPanel.stats.relationDeleted') });
+      reloadDrill();
+    } catch (err: any) {
+      addToast({ type: "error", message: t('memoryCortexPanel.stats.deleteFailed', { error: err.message }) });
+    }
+  };
+
+  if (!stats) return <div className={styles.loadingText}>{t('memoryCortexPanel.stats.loading')}</div>;
 
   // Drill-down view
   if (drill) {
@@ -531,27 +864,39 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
       <div className={styles.drillView}>
         <button className={styles.drillBack} onClick={() => setDrill(null)}>
           <ChevronLeft size={14} />
-          Back to stats
+          {t('memoryCortexPanel.stats.backToStats')}
         </button>
-        <div className={styles.drillTitle}>{drill.charAt(0).toUpperCase() + drill.slice(1)}</div>
+        <div className={styles.drillTitle}>
+          {t(`memoryCortexPanel.stats.drill.${drill}`)}
+          {drill === "relations" && entities.length >= 2 && (
+            <button className={styles.addRelationBtn} onClick={() => setCreatingRelation(true)}>
+              <Plus size={11} /> {t('memoryCortexPanel.stats.addRelation')}
+            </button>
+          )}
+        </div>
         {drillLoading ? (
-          <div className={styles.loadingText}>Loading records...</div>
+          <div className={styles.loadingText}>{t('memoryCortexPanel.stats.loadingRecords')}</div>
         ) : drillData.length === 0 ? (
-          <div className={styles.loadingText}>No records found</div>
+          <div className={styles.loadingText}>{t('memoryCortexPanel.stats.noRecords')}</div>
         ) : (
           <div className={styles.drillList}>
             {drill === "chunks" && drillData.map((c: any) => (
               <DrillRecord key={c.id} lines={[
-                { label: "Content", value: (c.content || "").slice(0, 200) + ((c.content || "").length > 200 ? "..." : "") },
-                { label: "Tokens", value: c.token_count },
-                { label: "Messages", value: c.message_count },
-                { label: "Salience", value: c.salience_score != null ? `${(c.salience_score * 100).toFixed(0)}%` : "unscored" },
-                { label: "Retrieved", value: c.retrieval_count ? `${c.retrieval_count}x` : "never" },
-                { label: "Vectorized", value: c.vectorized_at ? "yes" : "pending" },
+                { label: dl('content'), value: (c.content || "").slice(0, 200) + ((c.content || "").length > 200 ? "..." : "") },
+                { label: dl('tokens'), value: c.token_count },
+                { label: dl('messages'), value: c.message_count },
+                { label: dl('salience'), value: c.salience_score != null ? `${(c.salience_score * 100).toFixed(0)}%` : dl('unscored') },
+                { label: dl('retrieved'), value: c.retrieval_count ? `${c.retrieval_count}x` : dl('never') },
+                { label: dl('vectorized'), value: c.vectorized_at ? dl('yes') : dl('pending') },
               ]} tags={c.emotional_tags ? JSON.parse(c.emotional_tags) : []} />
             ))}
             {drill === "relations" && drillData.map((r: CortexRelation) => (
-              <RelationDrillRecord key={r.id} relation={r} />
+              <RelationDrillRecord
+                key={r.id}
+                relation={r}
+                onEdit={() => setEditingRelation(r)}
+                onDelete={() => setDeleteRelationId(r.id)}
+              />
             ))}
             {drill === "consolidations" && (() => {
               const arcs = drillData.filter((c: any) => c.tier === 2);
@@ -560,18 +905,18 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
                 <>
                   {arcs.length > 0 && (
                     <>
-                      <div className={styles.drillSectionHeader}>Story Arcs</div>
+                      <div className={styles.drillSectionHeader}>{dl('storyArcs')}</div>
                       {arcs.map((c: any) => (
                         <div key={c.id} className={styles.arcRecord}>
                           <div className={styles.arcHeader}>
-                            <span className={styles.arcBadge}>Arc</span>
-                            <span className={styles.arcTitle}>{c.title || "Arc Summary"}</span>
+                            <span className={styles.arcBadge}>{dl('arc')}</span>
+                            <span className={styles.arcTitle}>{c.title || dl('arcSummary')}</span>
                           </div>
                           <div className={styles.arcSummary}>{c.summary || ""}</div>
                           <div className={styles.arcMeta}>
-                            <span className={styles.arcMetaItem}><strong>Messages</strong> {c.messageRangeStart ?? "?"}–{c.messageRangeEnd ?? "?"}</span>
-                            <span className={styles.arcMetaItem}><strong>Entities</strong> {(c.entityIds || []).length}</span>
-                            <span className={styles.arcMetaItem}><strong>Salience</strong> {c.salienceAvg != null ? `${(c.salienceAvg * 100).toFixed(0)}%` : "—"}</span>
+                            <span className={styles.arcMetaItem}><strong>{dl('messages')}</strong> {c.messageRangeStart ?? "?"}–{c.messageRangeEnd ?? "?"}</span>
+                            <span className={styles.arcMetaItem}><strong>{dl('entitiesCount')}</strong> {(c.entityIds || []).length}</span>
+                            <span className={styles.arcMetaItem}><strong>{dl('salience')}</strong> {c.salienceAvg != null ? `${(c.salienceAvg * 100).toFixed(0)}%` : "—"}</span>
                           </div>
                           {(c.emotionalTags || []).length > 0 && (
                             <div className={styles.drillTags}>
@@ -586,13 +931,13 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
                   )}
                   {scenes.length > 0 && (
                     <>
-                      {arcs.length > 0 && <div className={styles.drillSectionHeader}>Scene Summaries</div>}
+                      {arcs.length > 0 && <div className={styles.drillSectionHeader}>{dl('sceneSummaries')}</div>}
                       {scenes.map((c: any) => (
                         <DrillRecord key={c.id} lines={[
-                          { label: c.title || "Scene Summary", value: "" },
-                          { label: "Summary", value: (c.summary || "").slice(0, 250) + ((c.summary || "").length > 250 ? "..." : "") },
-                          { label: "Messages", value: `${c.messageRangeStart ?? "?"}–${c.messageRangeEnd ?? "?"}` },
-                          { label: "Salience", value: c.salienceAvg != null ? `${(c.salienceAvg * 100).toFixed(0)}%` : "—" },
+                          { label: c.title || dl('sceneSummary'), value: "" },
+                          { label: dl('summary'), value: (c.summary || "").slice(0, 250) + ((c.summary || "").length > 250 ? "..." : "") },
+                          { label: dl('messages'), value: `${c.messageRangeStart ?? "?"}–${c.messageRangeEnd ?? "?"}` },
+                          { label: dl('salience'), value: c.salienceAvg != null ? `${(c.salienceAvg * 100).toFixed(0)}%` : "—" },
                         ]} tags={c.emotionalTags || []} />
                       ))}
                     </>
@@ -605,16 +950,46 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
             ))}
             {drill === "entities" && drillData.map((e: CortexEntity) => (
               <DrillRecord key={e.id} lines={[
-                { label: "Name", value: `${e.name}${e.confidence === "provisional" ? " (provisional)" : ""}` },
-                { label: "Type", value: e.entityType },
-                { label: "Status", value: e.status },
-                { label: "Mentions", value: e.mentionCount },
-                { label: "Salience", value: `${((e.salienceAvg ?? 0) * 100).toFixed(0)}%` },
-                { label: "Facts", value: `${(e.facts || []).length}${e.factExtractionStatus === "never" ? " (needs extraction)" : e.factExtractionStatus === "attempted_empty" ? " (retry pending)" : ""}` },
-                ...(e.lastMentionTimestamp ? [{ label: "Last seen", value: relativeTime(e.lastMentionTimestamp) || "—" }] : []),
+                { label: dl('name'), value: `${e.name}${e.confidence === "provisional" ? dl('provisional') : ""}` },
+                { label: dl('type'), value: e.entityType },
+                { label: dl('status'), value: e.status },
+                { label: dl('mentions'), value: e.mentionCount },
+                { label: dl('salience'), value: `${((e.salienceAvg ?? 0) * 100).toFixed(0)}%` },
+                { label: dl('facts'), value: `${(e.facts || []).length}${e.factExtractionStatus === "never" ? dl('needsExtraction') : e.factExtractionStatus === "attempted_empty" ? dl('retryPending') : ""}` },
+                ...(e.lastMentionTimestamp ? [{ label: dl('lastSeen'), value: formatRelativeTime(e.lastMentionTimestamp) }] : []),
               ]} />
             ))}
           </div>
+        )}
+
+        {editingRelation && (
+          <RelationEditorModal
+            chatId={chatId}
+            relation={editingRelation}
+            sourceName={editingRelation.sourceName}
+            targetName={editingRelation.targetName}
+            onClose={() => setEditingRelation(null)}
+            onSaved={() => { setEditingRelation(null); reloadDrill(); }}
+          />
+        )}
+        {creatingRelation && (
+          <RelationCreatorModal
+            chatId={chatId}
+            entities={entities}
+            onClose={() => setCreatingRelation(false)}
+            onSaved={() => { setCreatingRelation(false); reloadDrill(); }}
+          />
+        )}
+        {deleteRelationId && (
+          <ConfirmationModal
+            isOpen={true}
+            title={t('memoryCortexPanel.stats.deleteRelationTitle')}
+            message={t('memoryCortexPanel.stats.deleteRelationConfirm')}
+            variant="danger"
+            confirmText={tc('actions.delete')}
+            onConfirm={() => { void handleDeleteRelation(deleteRelationId) }}
+            onCancel={() => setDeleteRelationId(null)}
+          />
         )}
       </div>
     );
@@ -623,12 +998,12 @@ function StatsView({ stats, chatId }: { stats: CortexUsageStats | null; chatId: 
   // Stats overview
   return (
     <div className={styles.statsGrid}>
-      <StatCard icon={Brain} label="Memory chunks" value={stats.chunkCount} sub={`${stats.vectorizedChunkCount} vectorized`} desc="Segments of conversation stored for recall." onClick={() => openDrill("chunks")} />
-      <StatCard icon={Users} label="Entities" value={stats.activeEntityCount} sub={`${stats.entityCount - stats.activeEntityCount} archived`} desc="Characters, locations, items tracked." onClick={() => openDrill("entities")} />
-      <StatCard icon={Network} label="Relations" value={stats.relationCount} desc="Connections between entities." onClick={() => openDrill("relations")} />
-      <StatCard icon={BookOpen} label="Consolidations" value={stats.consolidationCount} desc="Compressed memory summaries." onClick={() => openDrill("consolidations")} />
-      <StatCard icon={Zap} label="Embedding calls" value={stats.estimatedEmbeddingCalls} sub="estimated total" desc="API calls used for vectorization." />
-      <StatCard icon={Heart} label="Salience records" value={stats.salienceRecordCount} desc="Chunks scored for importance." onClick={() => openDrill("salience")} />
+      <StatCard icon={Brain} label={t('memoryCortexPanel.stats.cards.chunks')} value={stats.chunkCount} sub={t('memoryCortexPanel.stats.cards.chunksSub', { count: stats.vectorizedChunkCount })} desc={t('memoryCortexPanel.stats.cards.chunksDesc')} onClick={() => openDrill("chunks")} />
+      <StatCard icon={Users} label={t('memoryCortexPanel.stats.cards.entities')} value={stats.activeEntityCount} sub={t('memoryCortexPanel.stats.cards.entitiesSub', { count: stats.entityCount - stats.activeEntityCount })} desc={t('memoryCortexPanel.stats.cards.entitiesDesc')} onClick={() => openDrill("entities")} />
+      <StatCard icon={Network} label={t('memoryCortexPanel.stats.cards.relations')} value={stats.relationCount} desc={t('memoryCortexPanel.stats.cards.relationsDesc')} onClick={() => openDrill("relations")} />
+      <StatCard icon={BookOpen} label={t('memoryCortexPanel.stats.cards.consolidations')} value={stats.consolidationCount} desc={t('memoryCortexPanel.stats.cards.consolidationsDesc')} onClick={() => openDrill("consolidations")} />
+      <StatCard icon={Zap} label={t('memoryCortexPanel.stats.cards.embeddingCalls')} value={stats.estimatedEmbeddingCalls} sub={t('memoryCortexPanel.stats.cards.embeddingSub')} desc={t('memoryCortexPanel.stats.cards.embeddingDesc')} />
+      <StatCard icon={Heart} label={t('memoryCortexPanel.stats.cards.salienceRecords')} value={stats.salienceRecordCount} desc={t('memoryCortexPanel.stats.cards.salienceDesc')} onClick={() => openDrill("salience")} />
     </div>
   );
 }
@@ -710,6 +1085,7 @@ const RELATION_TYPE_COLORS: Record<string, string> = {
 // ─── Salience Drill Record ────────────────────────────────────
 
 function SalienceDrillRecord({ record: s }: { record: any }) {
+  const { t } = useTranslation('panels')
   const score = s.score ?? 0;
   const preview = (s.chunk_content || "").slice(0, 200) + ((s.chunk_content || "").length > 200 ? "..." : "");
   const emotionalTags: string[] = (() => { try { return JSON.parse(s.emotional_tags || "[]"); } catch { return []; } })();
@@ -735,16 +1111,15 @@ function SalienceDrillRecord({ record: s }: { record: any }) {
           styles.sourceBadge,
           s.score_source === "sidecar" && styles.sourceBadgeSidecar,
         )}>
-          {s.score_source || "heuristic"}
+          {s.score_source || t('memoryCortexPanel.stats.salience.heuristic')}
         </span>
       </div>
 
-      {/* Structural signals */}
       <div className={styles.salienceSignals}>
-        {s.has_dialogue ? <span className={styles.signalActive}>dialogue</span> : <span className={styles.signalDim}>no dialogue</span>}
-        {s.has_action ? <span className={styles.signalActive}>action</span> : null}
-        {s.has_internal_thought ? <span className={styles.signalActive}>thought</span> : null}
-        <span className={styles.signalDim}>{s.word_count} words</span>
+        {s.has_dialogue ? <span className={styles.signalActive}>{t('memoryCortexPanel.stats.salience.dialogue')}</span> : <span className={styles.signalDim}>{t('memoryCortexPanel.stats.salience.noDialogue')}</span>}
+        {s.has_action ? <span className={styles.signalActive}>{t('memoryCortexPanel.stats.salience.action')}</span> : null}
+        {s.has_internal_thought ? <span className={styles.signalActive}>{t('memoryCortexPanel.stats.salience.thought')}</span> : null}
+        <span className={styles.signalDim}>{t('memoryCortexPanel.stats.salience.words', { count: s.word_count })}</span>
       </div>
 
       {/* Emotional tags */}
@@ -789,7 +1164,18 @@ function SalienceDrillRecord({ record: s }: { record: any }) {
 
 // ─── Relation Drill Record ────────────────────────────────────
 
-function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
+function RelationDrillRecord({
+  relation: r,
+  onEdit,
+  onDelete,
+}: {
+  relation: CortexRelation;
+  onEdit?: () => void;
+  onDelete?: () => void;
+}) {
+  const { t } = useTranslation('panels')
+  const { t: tc } = useTranslation('common')
+  const RD = 'memoryCortexPanel.relationDrill';
   const contradictionFlag = r.contradictionFlag ?? "none";
   const hasContradiction = contradictionFlag !== "none";
   const edgeSalience = r.edgeSalience ?? r.strength ?? 0;
@@ -809,6 +1195,11 @@ function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
           <span className={styles.relationEntityName}>{r.sourceName || (r.sourceEntityId ?? "").slice(0, 8)}</span>
           <span className={styles.relationArrow}>→</span>
           <span className={styles.relationEntityName}>{r.targetName || (r.targetEntityId ?? "").slice(0, 8)}</span>
+          {r.userEditedAt !== null && (
+            <span className={styles.curatedBadge} title={t(`${RD}.curatedTitle`)} style={{ marginLeft: 6 }}>
+              <CheckCircle2 size={9} /> {t(`${RD}.curated`)}
+            </span>
+          )}
         </span>
         <span
           className={styles.relationTypeBadge}
@@ -826,14 +1217,14 @@ function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
       <div className={styles.relationBody}>
         {r.relationLabel && (
           <div className={styles.drillLine}>
-            <span className={styles.drillLineLabel}>Label</span>
+            <span className={styles.drillLineLabel}>{t(`${RD}.label`)}</span>
             <span className={styles.drillLineValue}>{r.relationLabel}</span>
           </div>
         )}
 
         {/* Sentiment gradient bar */}
         <div className={styles.drillLine}>
-          <span className={styles.drillLineLabel}>Sentiment</span>
+          <span className={styles.drillLineLabel}>{t(`${RD}.sentiment`)}</span>
           <span className={styles.sentimentBarContainer}>
             <span className={styles.sentimentTrack}>
               <span className={styles.sentimentCenter} />
@@ -855,7 +1246,7 @@ function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
 
         {/* Strength + edge salience */}
         <div className={styles.drillLine}>
-          <span className={styles.drillLineLabel}>Strength</span>
+          <span className={styles.drillLineLabel}>{t(`${RD}.strength`)}</span>
           <span className={styles.edgeSalienceBar}>
             <span className={styles.edgeSalienceTrack}>
               <span className={styles.edgeSalienceFill} style={{ width: `${Math.min(100, edgeSalience * 100)}%` }} />
@@ -865,8 +1256,10 @@ function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
         </div>
 
         <div className={styles.drillLine}>
-          <span className={styles.drillLineLabel}>Evidence</span>
-          <span className={styles.drillLineValue}>{(r.evidenceChunkIds || []).length} chunks</span>
+          <span className={styles.drillLineLabel}>{t(`${RD}.evidence`)}</span>
+          <span className={styles.drillLineValue}>
+            {t(`${RD}.evidenceChunks`, { count: (r.evidenceChunkIds || []).length })}
+          </span>
         </div>
       </div>
 
@@ -886,13 +1279,28 @@ function RelationDrillRecord({ relation: r }: { relation: CortexRelation }) {
           )}
           {aliases.length > 0 && (
             <>
-              <span className={styles.drillLineLabel}>Also called</span>
+              <span className={styles.drillLineLabel}>{t(`${RD}.alsoCalled`)}</span>
               <div className={styles.labelAliasList}>
                 {aliases.map((a, i) => (
                   <span key={i} className={styles.labelAlias}>{a}</span>
                 ))}
               </div>
             </>
+          )}
+        </div>
+      )}
+
+      {(onEdit || onDelete) && (
+        <div className={styles.relationActions}>
+          {onEdit && (
+            <button className={styles.editBtn} onClick={onEdit}>
+              <Edit2 size={11} /> {t(`${RD}.edit`)}
+            </button>
+          )}
+          {onDelete && (
+            <button className={styles.dangerBtn} onClick={onDelete}>
+              <Trash2 size={11} /> {tc('actions.delete')}
+            </button>
           )}
         </div>
       )}

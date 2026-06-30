@@ -20,19 +20,32 @@ interface CachedResult {
 
 const resultCache = new Map<string, CachedResult>();
 
-/** Get cached result for a chat (synchronous, for assembly hot path). */
-export function getCachedDatabankResult(chatId: string): DatabankRetrievalResult | null {
-  const cached = resultCache.get(chatId);
+function cacheKey(userId: string, chatId: string, limit: number): string {
+  return `${userId}:${chatId}:${limit}`;
+}
+
+/**
+ * Get cached result for a chat (synchronous, for assembly hot path).
+ * Keys include userId so a DB restore that reused chatIds across users (or
+ * any future test fixture re-using chat ids) can never serve another user's
+ * results from the in-memory cache.
+ */
+export function getCachedDatabankResult(userId: string, chatId: string, limit: number): DatabankRetrievalResult | null {
+  const key = cacheKey(userId, chatId, limit);
+  const cached = resultCache.get(key);
   if (!cached) return null;
   if (Date.now() - cached.cachedAt > CACHE_TTL_MS) {
-    resultCache.delete(chatId);
+    resultCache.delete(key);
     return null;
   }
   return cached.result;
 }
 
-export function clearCache(chatId: string): void {
-  resultCache.delete(chatId);
+export function clearCache(userId: string, chatId: string): void {
+  const prefix = `${userId}:${chatId}:`;
+  for (const key of resultCache.keys()) {
+    if (key.startsWith(prefix)) resultCache.delete(key);
+  }
 }
 
 // ─── Search ───────────────────────────────────────────────────
@@ -42,6 +55,11 @@ const DEFAULT_SEPARATOR = "\n---\n";
 
 /**
  * Search active databanks by vector similarity. Caches result for assembly consumption.
+ *
+ * `onTiming` (optional) is invoked with sub-phase wall times so the prompt
+ * profiler can attribute the cost between the embedding round-trip and the
+ * LanceDB hybrid search. The callback fires even when the call aborts or
+ * returns early — partial timings still tell us what was waiting.
  */
 export async function searchDatabanks(
   userId: string,
@@ -49,17 +67,33 @@ export async function searchDatabanks(
   databankIds: string[],
   queryText: string,
   limit = 4,
+  signal?: AbortSignal,
+  onTiming?: (phase: string, ms: number) => void,
 ): Promise<DatabankRetrievalResult> {
   if (databankIds.length === 0) {
     return { chunks: [], formatted: "", count: 0 };
   }
 
+  // Skip everything — most importantly the query embedding round-trip — when
+  // the active banks hold nothing searchable. An attached-but-empty databank
+  // would otherwise pay ~500ms to embed a query against zero chunks.
+  if (!crud.hasSearchableChunks(userId, databankIds)) {
+    return { chunks: [], formatted: "", count: 0 };
+  }
+
   try {
+    if (signal?.aborted) return { chunks: [], formatted: "", count: 0 };
+
     // Embed the query
-    const [queryVector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText]);
+    const embedStart = performance.now();
+    const [queryVector] = await embeddingsSvc.cachedEmbedTexts(userId, [queryText], { signal });
+    onTiming?.("databank-embed", performance.now() - embedStart);
+    if (signal?.aborted) return { chunks: [], formatted: "", count: 0 };
 
     // Search LanceDB
-    const raw = await embeddingsSvc.searchDatabankChunks(userId, databankIds, queryVector, limit, queryText);
+    const searchStart = performance.now();
+    const raw = await embeddingsSvc.searchDatabankChunks(userId, databankIds, queryVector, limit, queryText, signal);
+    onTiming?.("databank-lancedb", performance.now() - searchStart);
 
     const chunks: DatabankSearchResult[] = raw.map((r) => ({
       chunkId: r.chunk_id,
@@ -74,11 +108,16 @@ export async function searchDatabanks(
     const formatted = formatResult(chunks);
     const result: DatabankRetrievalResult = { chunks, formatted, count: chunks.length };
 
-    // Cache for synchronous consumption
-    resultCache.set(chatId, { result, cachedAt: Date.now() });
+    // Cache for synchronous consumption — but not when the caller aborted.
+    // A truncated or abort-interrupted result shouldn't poison the next
+    // generation's warm cache.
+    if (!signal?.aborted) {
+      resultCache.set(cacheKey(userId, chatId, limit), { result, cachedAt: Date.now() });
+    }
 
     return result;
   } catch (err) {
+    if (signal?.aborted) return { chunks: [], formatted: "", count: 0 };
     console.warn("[databank] Search failed:", err);
     return { chunks: [], formatted: "", count: 0 };
   }

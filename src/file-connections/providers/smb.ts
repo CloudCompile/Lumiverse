@@ -76,7 +76,7 @@ export class SMBFileSystem implements FileSystem {
       // Try as a file by listing parent with the filename as pattern
       try {
         const dir = posix.dirname(path);
-        const base = posix.basename(path);
+        const base = this.toSmbPath(posix.basename(path));
         const smbDir = this.toSmbPath(dir);
         const output = await this.runCommand(`cd "${smbDir}"; ls "${base}"`);
         return output.trim().length > 0 && !output.includes("NT_STATUS_");
@@ -164,19 +164,24 @@ export class SMBFileSystem implements FileSystem {
 
   // ─── Path helpers ──────────────────────────────────────────────────────
 
-  /** Convert forward-slash paths to backslash for smbclient commands.
-   *
-   * smbclient -c arguments are passed as a single shell-quoted string.
-   * Paths are embedded inside double-quoted substrings (e.g. `ls "path"`),
-   * so a `"` in the path would break out of the quote context.  A semicolon
-   * or the smbclient shell-escape `!` would inject additional commands.
-   * Strip all of those characters to prevent command injection.
+  /**
+   * Convert forward-slash paths to backslash and reject any character that
+   * would let an attacker break out of the quoted `-c` argument. smbclient
+   * honors `!cmd` to spawn a local shell, so a path containing `"; !id; ls "`
+   * was previously enough to get arbitrary code execution on the host.
    */
   private toSmbPath(path: string): string {
-    return path
-      .replace(/^\/+/, "")
-      .replace(/\//g, "\\")
-      .replace(/["`;!]/g, ""); // remove characters that break smbclient -c quoting
+    if (typeof path !== "string") {
+      throw new Error("SMB path must be a string");
+    }
+    // Disallow shell-meta and quote characters outright. SMB filenames can
+    // technically contain quotes/semicolons, but supporting that safely would
+    // require building commands without `-c` shell concatenation; rejecting
+    // these characters keeps the simple spawn path safe.
+    if (/["'`;!\n\r\u0000$<>|&]/.test(path)) {
+      throw new Error("SMB path contains disallowed characters");
+    }
+    return path.replace(/^\/+/, "").replace(/\//g, "\\");
   }
 
   join(...parts: string[]): string {
@@ -198,13 +203,17 @@ export class SMBFileSystem implements FileSystem {
   // ─── smbclient execution ──────────────────────────────────────────────
 
   private async runCommand(command: string): Promise<string> {
-    const { args, credentials } = this.buildArgs(command);
+    const { args, password } = this.buildArgs(command);
+    // Pass the password via env (PASSWD) instead of `-U user%pass` so it does
+    // not appear in /proc/<pid>/cmdline or `ps` output. smbclient honors
+    // PASSWD for non-interactive auth; this is the standard way to script it.
+    const envForChild: Record<string, string> = {};
+    if (process.env.PATH) envForChild.PATH = process.env.PATH;
+    if (password) envForChild.PASSWD = password;
     const proc = Bun.spawn(["smbclient", ...args], {
       stdout: "pipe",
       stderr: "pipe",
-      // Feed credentials via stdin so the password is never visible in
-      // /proc/<pid>/cmdline or `ps` output.
-      stdin: credentials ? new TextEncoder().encode(credentials) : undefined,
+      env: envForChild,
     });
 
     const [stdout, stderr] = await Promise.all([
@@ -239,7 +248,7 @@ export class SMBFileSystem implements FileSystem {
     return stdout;
   }
 
-  private buildArgs(command: string): { args: string[]; credentials: string | null } {
+  private buildArgs(command: string): { args: string[]; password: string | undefined } {
     const { host, share, port, username, password, domain } = this.config;
     const service = `//${host}/${share}`;
 
@@ -251,20 +260,9 @@ export class SMBFileSystem implements FileSystem {
 
     let credentials: string | null = null;
     if (username) {
-      // Pass just the username via -U (no password in the argument) and supply
-      // the password via stdin using smbclient's "credentials file" stdin format
-      // so it never appears in /proc/<pid>/cmdline or `ps` output.
+      // Username goes on the command line; password is delivered via the
+      // PASSWD env var by runCommand() so it never appears in argv.
       args.push("-U", username);
-      if (password) {
-        // smbclient reads a credentials file when given --authentication-file=-
-        // but the simplest cross-version approach is to provide
-        // "username\npassword\n" via stdin when using -U without %.
-        credentials = `${password}\n`;
-        args.push("--no-pass"); // tell smbclient not to prompt; we provide it via stdin
-        // Remove --no-pass and instead supply password via stdin pipe
-        args.pop(); // remove --no-pass
-        // smbclient will prompt for password; we feed it via stdin
-      }
     } else {
       // Anonymous / guest
       args.push("-N");
@@ -274,7 +272,7 @@ export class SMBFileSystem implements FileSystem {
       args.push("-W", domain);
     }
 
-    return { args, credentials };
+    return { args, password: username ? password : undefined };
   }
 
   // ─── Output parsing ───────────────────────────────────────────────────

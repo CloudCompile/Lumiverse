@@ -1,11 +1,112 @@
 import { Hono } from "hono";
 import * as svc from "../services/chats.service";
 import * as personasSvc from "../services/personas.service";
+import * as charactersSvc from "../services/characters.service";
+import * as regexScriptsSvc from "../services/regex-scripts.service";
+import * as managerSvc from "../spindle/manager.service";
+import { pruneOrphanedWiState } from "../services/wi-state-prune.service";
 import { parsePagination } from "../services/pagination";
 import { RECENT_CHATS_DEFAULT_LIMIT } from "../types/pagination";
-import { parseDateString, parseMessageDate } from "../migration/st-reader";
+import { parseStChatJsonl, parseStGroupChatJsonl } from "../migration/st-reader";
+import {
+  messageContentProcessorChain,
+  type MessageContentProcessorCtx,
+} from "../spindle/message-content-processor";
+import { resolveRenderedMessageContent } from "../services/chat-macro-render.service";
+import { contentHasMacroHints } from "../services/vectorization-content.service";
+import { computeMessageTokenCount } from "../services/message-token-count";
+
+async function runMessageContentProcessors(
+  ctx: MessageContentProcessorCtx,
+  userId: string,
+  signal?: AbortSignal,
+): Promise<MessageContentProcessorCtx> {
+  if (messageContentProcessorChain.count === 0) return ctx;
+  return messageContentProcessorChain.run(ctx, userId, signal);
+}
+
+// Auto-greetings are inserted by service-layer createMessage calls that
+// bypass the per-route processor hook; run the chain explicitly so the
+// DB holds resolved content before MESSAGE_SENT broadcasts.
+async function processChatGreeting(userId: string, chat: { id: string }) {
+  if (messageContentProcessorChain.count === 0) return;
+  const msgs = svc.listMessagesTail(userId, chat.id, 1);
+  const greeting = msgs.data[0];
+  if (!greeting || greeting.is_user || greeting.extra?.greeting !== true) return;
+  const ctx: MessageContentProcessorCtx = {
+    chatId: chat.id,
+    messageId: greeting.id,
+    content: greeting.content,
+    extra: greeting.extra,
+    origin: "create",
+    userId,
+  };
+  const processed = await messageContentProcessorChain.run(ctx, userId);
+  const update: { content?: string; extra?: Record<string, unknown> } = {};
+  if (processed.content !== greeting.content) update.content = processed.content;
+  if (processed.extra && processed.extra !== greeting.extra) update.extra = processed.extra;
+  if (update.content !== undefined || update.extra !== undefined) {
+    svc.updateMessage(userId, greeting.id, update);
+  }
+}
 
 const app = new Hono();
+
+const DISPLAY_PREPROCESS_BATCH_MAX = 100;
+
+interface DisplayPreprocessItem {
+  messageId?: string;
+  messageIndex?: number;
+  role?: string;
+  rawContent: string;
+}
+
+function parseDisplayPreprocessItem(input: unknown): DisplayPreprocessItem | null {
+  if (!input || typeof input !== "object") return null;
+  const body = input as {
+    messageId?: unknown;
+    messageIndex?: unknown;
+    role?: unknown;
+    rawContent?: unknown;
+  };
+  if (typeof body.rawContent !== "string") return null;
+
+  return {
+    rawContent: body.rawContent,
+    ...(typeof body.messageId === "string" ? { messageId: body.messageId } : {}),
+    ...(typeof body.messageIndex === "number" ? { messageIndex: body.messageIndex } : {}),
+    ...(typeof body.role === "string" ? { role: body.role } : {}),
+  };
+}
+
+async function runDisplayPreprocessItem(
+  userId: string,
+  chatId: string,
+  item: DisplayPreprocessItem,
+  signal?: AbortSignal,
+) {
+  const processed = messageContentProcessorChain.count > 0
+    ? await messageContentProcessorChain.run({
+        chatId,
+        content: item.rawContent,
+        origin: "render",
+        userId,
+        ...(item.messageId ? { messageId: item.messageId } : {}),
+        extra: {
+          ...(typeof item.messageIndex === "number" ? { messageIndex: item.messageIndex } : {}),
+          ...(item.role ? { role: item.role, is_user: item.role === "user" } : {}),
+        },
+      }, userId, signal)
+    : { content: item.rawContent };
+
+  let content = processed.content ?? item.rawContent;
+  if (contentHasMacroHints(content)) {
+    const env = svc.buildMacroEnvForChat(userId, chatId);
+    if (env) content = await resolveRenderedMessageContent(content, env);
+  }
+
+  return { messageId: item.messageId, content };
+}
 
 // --- Chat endpoints ---
 
@@ -25,7 +126,18 @@ app.get("/recent", (c) => {
 app.get("/recent-grouped", (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"), RECENT_CHATS_DEFAULT_LIMIT);
-  return c.json(svc.listRecentChatsGrouped(userId, pagination));
+  const search = c.req.query("search");
+  const sortParam = c.req.query("sort");
+  const directionParam = c.req.query("direction");
+  const sort: svc.GroupedRecentChatSort | undefined =
+    sortParam === "name" || sortParam === "recent" || sortParam === "created" ? sortParam : undefined;
+  const direction: "asc" | "desc" | undefined =
+    directionParam === "asc" || directionParam === "desc" ? directionParam : undefined;
+  return c.json(svc.listRecentChatsGrouped(userId, pagination, {
+    ...(search ? { search } : {}),
+    ...(sort ? { sort } : {}),
+    ...(direction ? { direction } : {}),
+  }));
 });
 
 app.get("/character-chats/:characterId", (c) => {
@@ -34,12 +146,52 @@ app.get("/character-chats/:characterId", (c) => {
   return c.json(svc.listChatSummaries(userId, characterId));
 });
 
+app.delete("/character-chats/:characterId", (c) => {
+  const userId = c.get("userId");
+  const deleted = svc.deleteAllChatsForCharacter(userId, c.req.param("characterId"));
+  return c.json({ success: true, deleted });
+});
+
+app.get("/group-chats", (c) => {
+  const userId = c.get("userId");
+  const rawCharacterIds = c.req.query("character_ids");
+  const characterIds = rawCharacterIds
+    ? rawCharacterIds.split(",").map((id) => id.trim()).filter(Boolean)
+    : undefined;
+  return c.json(svc.listGroupChatSummaries(userId, characterIds));
+});
+
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (!body.character_id) return c.json({ error: "character_id is required" }, 400);
   const chat = svc.createChat(userId, body);
+  await processChatGreeting(userId, chat);
   return c.json(chat, 201);
+});
+
+// Temporary character-less, persona-less chat for trying out a connection
+// profile. No greeting, hidden from recent lists, swept when the user
+// returns to the landing page (DELETE below). Registered before the /:id
+// routes so "temporary" never matches as a chat id.
+app.post("/temporary", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const chat = svc.createChat(userId, {
+    character_id: null,
+    name: typeof body?.name === "string" && body.name.trim() ? body.name : "Temporary Chat",
+    // no_preset opts the chat out of presets entirely (raw model test):
+    // generation skips preset blocks/parameters and the active/connection
+    // preset fallbacks.
+    metadata: { temporary: true, ...(body?.no_preset === true ? { no_preset: true } : {}) },
+  });
+  return c.json(chat, 201);
+});
+
+app.delete("/temporary", (c) => {
+  const userId = c.get("userId");
+  const deleted = svc.deleteTemporaryChats(userId);
+  return c.json({ success: true, deleted });
 });
 
 app.post("/group", async (c) => {
@@ -49,7 +201,19 @@ app.post("/group", async (c) => {
     return c.json({ error: "character_ids must be an array with at least 2 entries" }, 400);
   }
   const chat = svc.createGroupChat(userId, body);
+  await processChatGreeting(userId, chat);
   return c.json(chat, 201);
+});
+
+app.post("/:id/convert-to-group", (c) => {
+  const userId = c.get("userId");
+  try {
+    const chat = svc.convertSoloChatToGroup(userId, c.req.param("id"));
+    if (!chat) return c.json({ error: "Not found" }, 404);
+    return c.json(chat, 201);
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Failed to convert chat" }, 400);
+  }
 });
 
 // Group chat muting
@@ -76,6 +240,7 @@ app.post("/:id/members/:characterId", async (c) => {
     greeting_index: body.greeting_index,
   });
   if (!updated) return c.json({ error: "Not found, not a group chat, character not found, or already a member" }, 400);
+  if (!body.skip_greeting) await processChatGreeting(userId, updated);
   return c.json(updated);
 });
 
@@ -86,13 +251,36 @@ app.delete("/:id/members/:characterId", (c) => {
   return c.json(updated);
 });
 
+app.patch("/:id/members/:characterId/alternate-fields", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const selections = body?.selections;
+  if (!selections || typeof selections !== "object" || Array.isArray(selections)) {
+    return c.json({ error: "selections must be an object" }, 400);
+  }
+  const updated = svc.setGroupMemberAlternateFields(
+    userId,
+    c.req.param("id"),
+    c.req.param("characterId"),
+    selections,
+  );
+  if (!updated) {
+    return c.json({ error: "Not found, not a group chat/member, or invalid alternate field selection" }, 400);
+  }
+  return c.json(updated);
+});
+
 app.get("/:id", (c) => {
   const userId = c.get("userId");
   const chat = svc.getChat(userId, c.req.param("id"));
   if (!chat) return c.json({ error: "Not found" }, 404);
-  if (c.req.query("messages") === "false") return c.json(chat);
+  const ownerCandidates = managerSvc.getEnabledExtensionIdentifiers();
+  const character_display_owner = chat.character_id
+    ? charactersSvc.getCharacterDisplayOwner(userId, chat.character_id, ownerCandidates)
+    : null;
+  if (c.req.query("messages") === "false") return c.json({ ...chat, character_display_owner });
   const messages = svc.getMessages(userId, chat.id);
-  return c.json({ ...chat, messages });
+  return c.json({ ...chat, character_display_owner, messages });
 });
 
 app.put("/:id", async (c) => {
@@ -100,7 +288,16 @@ app.put("/:id", async (c) => {
   const chat = svc.getChat(userId, c.req.param("id"));
   if (!chat) return c.json({ error: "Not found" }, 404);
   const body = await c.req.json();
-  const updated = svc.updateChat(userId, chat.id, body);
+  let updated = svc.updateChat(userId, chat.id, body);
+  // PUT replaces metadata wholesale, so book attachments can change (or
+  // vanish) on any metadata write.
+  if (updated && body?.metadata !== undefined) {
+    const beforeIds = JSON.stringify(chat.metadata?.chat_world_book_ids ?? []);
+    const afterIds = JSON.stringify(updated.metadata?.chat_world_book_ids ?? []);
+    if (beforeIds !== afterIds) {
+      updated = pruneOrphanedWiState(userId, updated);
+    }
+  }
   return c.json(updated);
 });
 
@@ -124,12 +321,32 @@ app.patch("/:id/metadata", async (c) => {
     return c.json({ error: "Body must be an object of metadata keys" }, 400);
   }
   // Translate `null` sentinels to `undefined` so mergeChatMetadata deletes them.
+  // Also sanitize the `voiceOverrides` payload here — TTS voice routing is
+  // client-side, but defensive parsing keeps malformed clients from writing
+  // garbage that confuses the resolver later.
   const partial: Record<string, any> = {};
   for (const [key, value] of Object.entries(body)) {
-    partial[key] = value === null ? undefined : value;
+    if (value === null) {
+      partial[key] = undefined;
+      continue;
+    }
+    if (key === "voiceOverrides") {
+      const sanitized = svc.sanitizeVoiceOverrides(value);
+      // If the caller sent a voiceOverrides blob and nothing survived
+      // sanitization, treat it as a delete rather than silently keeping
+      // a stale value.
+      partial[key] = sanitized ?? undefined;
+      continue;
+    }
+    partial[key] = value;
   }
-  const updated = svc.mergeChatMetadata(userId, chatId, partial);
+  let updated = svc.mergeChatMetadata(userId, chatId, partial);
   if (!updated) return c.json({ error: "Not found" }, 404);
+
+  if ("chat_world_book_ids" in body) {
+    updated = pruneOrphanedWiState(userId, updated);
+  }
+
   return c.json(updated);
 });
 
@@ -172,7 +389,7 @@ app.post("/import", async (c) => {
       extra: m.extra,
     }));
 
-    const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages);
+    const msgCount = svc.bulkInsertMessages(chat.id, bulkMessages, userId);
 
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
@@ -200,85 +417,105 @@ app.post("/import-st", async (c) => {
     return c.json({ error: "file is required" }, 400);
   }
 
-  const text = await file.text();
-  const lines = text.split("\n").filter((l) => l.trim());
-  if (lines.length === 0) return c.json({ error: "File is empty" }, 400);
-
-  // Detect and parse optional ST metadata header (line 0)
-  let chatName = (file.name || "import").replace(/\.jsonl$/i, "");
-  let chatCreatedAt: number | undefined;
-
-  try {
-    const meta = JSON.parse(lines[0]);
-    if (meta.chat_metadata || meta.user_name !== undefined) {
-      chatName = meta.chat_metadata?.name || chatName;
-      if (meta.create_date) {
-        const ts = parseDateString(meta.create_date);
-        if (ts) chatCreatedAt = ts;
-      }
-    }
-  } catch { /* not a metadata line */ }
-
-  const startLine = (() => {
-    try {
-      const first = JSON.parse(lines[0]);
-      if (first.user_name !== undefined || first.chat_metadata) return 1;
-    } catch { /* ignore */ }
-    return 0;
-  })();
-
-  const messages: {
-    is_user: boolean;
-    name: string;
-    content: string;
-    send_date: number;
-    swipes?: string[];
-    swipe_id?: number;
-    extra?: Record<string, any>;
-  }[] = [];
-
-  for (let i = startLine; i < lines.length; i++) {
-    try {
-      const msg = JSON.parse(lines[i]);
-      const msgSwipes: string[] | undefined = Array.isArray(msg.swipes) ? msg.swipes : undefined;
-      const swipeId: number | undefined = typeof msg.swipe_id === "number" ? msg.swipe_id : undefined;
-
-      // ST sometimes leaves `mes` empty when the active swipe holds the content.
-      // Resolve: mes → swipes[swipe_id] → swipes[0] → "".
-      const content =
-        msg.mes ||
-        msg.content ||
-        (msgSwipes && swipeId !== undefined ? msgSwipes[swipeId] : undefined) ||
-        (msgSwipes ? msgSwipes[0] : undefined) ||
-        "";
-
-      if (!content && !msg.name) continue;
-
-      messages.push({
-        is_user: !!msg.is_user,
-        name: msg.name || (msg.is_user ? "User" : "Character"),
-        content,
-        send_date: parseMessageDate(msg),
-        swipes: msgSwipes,
-        swipe_id: swipeId,
-        extra: msg.extra || undefined,
-      });
-    } catch { /* skip unparseable lines */ }
-  }
-
-  if (messages.length === 0) {
+  const parsed = parseStChatJsonl(await file.text(), (file.name || "import").replace(/\.jsonl$/i, ""));
+  if (!parsed) {
     return c.json({ error: "No valid messages found in file" }, 400);
   }
 
   try {
     const chat = svc.createChatRaw(userId, {
       character_id: characterId,
-      name: chatName,
+      name: parsed.name,
       metadata: {},
-      ...(chatCreatedAt ? { created_at: chatCreatedAt } : {}),
+      ...(parsed.createdAt ? { created_at: parsed.createdAt } : {}),
     });
 
-    const msgCount = svc.bulkInsertMessages(chat.id, messages);
+    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages, userId);
+    return c.json({
+      chat_id: chat.id,
+      name: chat.name,
+      message_count: msgCount,
+      speaker_name_fallback_count: parsed.speakerNameFallbackCount ?? 0,
+    }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Import failed" }, 500);
+  }
+});
+
+app.post("/import-st-group", async (c) => {
+  const userId = c.get("userId");
+
+  let formData: FormData;
+  try {
+    formData = await c.req.formData();
+  } catch {
+    return c.json({ error: "Expected multipart/form-data" }, 400);
+  }
+
+  const characterIds = formData
+    .getAll("character_ids")
+    .map((value) => typeof value === "string" ? value.trim() : "")
+    .filter(Boolean);
+  const greetingCharacterIdValue = formData.get("greeting_character_id");
+  const greetingCharacterId = typeof greetingCharacterIdValue === "string" ? greetingCharacterIdValue.trim() : "";
+  const file = formData.get("file") as File | null;
+
+  if (characterIds.length < 2) {
+    return c.json({ error: "character_ids must contain at least 2 entries" }, 400);
+  }
+  if (!file) {
+    return c.json({ error: "file is required" }, 400);
+  }
+
+  const uniqueCharacterIds = Array.from(new Set(characterIds));
+  const characters = charactersSvc.getCharactersByIds(userId, uniqueCharacterIds);
+  if (characters.size !== uniqueCharacterIds.length) {
+    return c.json({ error: "One or more group characters were not found" }, 404);
+  }
+
+  const filenameToId = new Map<string, string>();
+  for (const [id, character] of characters.entries()) {
+    const sourceFilename = typeof character.extensions?._lumiverse_source_filename === "string"
+      ? character.extensions._lumiverse_source_filename.trim()
+      : "";
+    const addKey = (key: string) => {
+      const normalized = key.trim();
+      if (!normalized) return;
+      filenameToId.set(normalized, id);
+      filenameToId.set(normalized.toLowerCase(), id);
+    };
+    addKey(character.name);
+    addKey(sourceFilename);
+    if (sourceFilename.toLowerCase().endsWith(".png")) addKey(sourceFilename.slice(0, -4));
+  }
+
+  const personas = personasSvc.listPersonas(userId, { limit: 10000, offset: 0 });
+  const personaNameToId = new Map<string, string>();
+  for (const persona of personas.data) {
+    if (persona.name) personaNameToId.set(persona.name, persona.id);
+  }
+
+  const parsed = parseStGroupChatJsonl(
+    await file.text(),
+    (file.name || "group").replace(/\.jsonl$/i, ""),
+    personaNameToId,
+    filenameToId,
+  );
+  if (!parsed) {
+    return c.json({ error: "No valid messages found in file" }, 400);
+  }
+
+  try {
+    const chat = svc.createChatRaw(userId, {
+      character_id: greetingCharacterId && characters.has(greetingCharacterId)
+        ? greetingCharacterId
+        : uniqueCharacterIds[0],
+      name: parsed.name,
+      metadata: { group: true, character_ids: uniqueCharacterIds },
+      ...(parsed.createdAt ? { created_at: parsed.createdAt } : {}),
+    });
+
+    const msgCount = svc.bulkInsertMessages(chat.id, parsed.messages, userId);
     return c.json({ chat_id: chat.id, name: chat.name, message_count: msgCount }, 201);
   } catch (err: any) {
     return c.json({ error: err.message || "Import failed" }, 500);
@@ -342,14 +579,19 @@ app.get("/:chatId/messages", (c) => {
   const chat = svc.getChat(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
+  // Lists ship the light projection (active swipe only, no per-swipe extra
+  // arrays) — non-active swipe data dominated the payload but is only needed
+  // by swipe actions, which re-fetch the full message. ?full=true opts out.
+  const light = c.req.query("full") !== "true";
+
   // tail=true fetches the last N messages efficiently (single index scan from end)
   if (c.req.query("tail") === "true") {
     const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 1000);
-    return c.json(svc.listMessagesTail(userId, chatId, limit));
+    return c.json(svc.listMessagesTail(userId, chatId, limit, { light }));
   }
 
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listMessages(userId, chatId, pagination));
+  return c.json(svc.listMessages(userId, chatId, pagination, { light }));
 });
 
 app.post("/:chatId/messages/bulk-hide", async (c) => {
@@ -404,6 +646,22 @@ app.post("/:chatId/messages", async (c) => {
     return c.json({ error: "name and content are required" }, 400);
   }
 
+  const processed = await runMessageContentProcessors(
+    { chatId, content: body.content, extra: body.extra, origin: "create", userId },
+    userId,
+    c.req.raw.signal,
+  );
+  body.content = processed.content;
+  if (processed.extra !== undefined) body.extra = processed.extra;
+
+  // Tokenize user-sent (and any manually-created) messages so they carry a
+  // tokenCount just like assistant messages do. Inline so the count rides the
+  // creation response/MESSAGE_SENT broadcast, avoiding a follow-up edit event.
+  const tokenCount = await computeMessageTokenCount(userId, body.content, body.connection_id);
+  if (tokenCount != null) {
+    body.extra = { ...(body.extra || {}), tokenCount };
+  }
+
   const msg = svc.createMessage(chatId, body, userId);
   return c.json(msg, 201);
 });
@@ -411,13 +669,54 @@ app.post("/:chatId/messages", async (c) => {
 app.put("/:chatId/messages/:id", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
-  // M-30: Verify the message actually belongs to the specified chatId, not just
-  // to any chat owned by the user.  Without this check the chatId URL parameter
-  // is completely ignored, allowing cross-chat mutations by ID enumeration.
-  const existing = svc.getMessage(userId, c.req.param("id"));
-  if (!existing || existing.chat_id !== chatId) return c.json({ error: "Not found" }, 404);
-  const msg = svc.updateMessage(userId, c.req.param("id"), body);
+
+  if (body.content !== undefined) {
+    const processed = await runMessageContentProcessors(
+      {
+        chatId,
+        messageId,
+        content: body.content,
+        extra: body.extra,
+        origin: "update",
+        userId,
+      },
+      userId,
+      c.req.raw.signal,
+    );
+    body.content = processed.content;
+    if (processed.extra !== undefined) body.extra = processed.extra;
+
+    const chat = svc.getChat(userId, chatId);
+    if (chat) {
+      const editScripts = regexScriptsSvc.getRunOnEditScripts(userId, {
+        characterId: chat.character_id ?? undefined,
+        chatId,
+      });
+      if (editScripts.length > 0) {
+        const existing = svc.getMessage(userId, messageId);
+        const placement = existing?.is_user ? "user_input" as const : "ai_output" as const;
+        body.content = await regexScriptsSvc.applyRegexScripts(
+          body.content,
+          editScripts,
+          placement,
+          0,
+        );
+      }
+    }
+
+    // Content changed → refresh the stored tokenCount so it doesn't reflect the
+    // pre-edit text. Merge onto the extra being saved (the edit may omit extra,
+    // in which case base off the message's current extra to avoid clobbering it).
+    const tokenCount = await computeMessageTokenCount(userId, body.content, body.connection_id);
+    if (tokenCount != null) {
+      const baseExtra = body.extra ?? svc.getMessage(userId, messageId)?.extra ?? {};
+      body.extra = { ...baseExtra, tokenCount };
+    }
+  }
+
+  const msg = svc.updateMessage(userId, messageId, body);
   if (!msg) return c.json({ error: "Not found" }, 404);
   return c.json(msg);
 });
@@ -433,15 +732,35 @@ app.delete("/:chatId/messages/:id", (c) => {
   return c.json({ success: true });
 });
 
+app.delete("/:chatId/messages/:id/attachments/:imageId", (c) => {
+  const userId = c.get("userId");
+  const updated = svc.removeMessageAttachment(userId, c.req.param("id"), c.req.param("imageId"));
+  if (!updated) return c.json({ error: "Message not found" }, 404);
+  return c.json(updated);
+});
+
 app.post("/:chatId/messages/:id/swipe", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
   let msg = null;
 
   if (body.direction === "left" || body.direction === "right") {
-    msg = svc.cycleSwipe(userId, c.req.param("id"), body.direction);
+    msg = svc.cycleSwipe(userId, messageId, body.direction);
   } else if (body.content !== undefined) {
-    msg = svc.addSwipe(userId, c.req.param("id"), body.content);
+    const processed = await runMessageContentProcessors(
+      {
+        chatId,
+        messageId,
+        content: body.content,
+        origin: "swipe_add",
+        userId,
+      },
+      userId,
+      c.req.raw.signal,
+    );
+    msg = svc.addSwipe(userId, messageId, processed.content);
   } else {
     return c.json({ error: "direction or content is required" }, 400);
   }
@@ -452,10 +771,45 @@ app.post("/:chatId/messages/:id/swipe", async (c) => {
 
 app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
   const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
   const body = await c.req.json();
   if (body.content === undefined) return c.json({ error: "content is required" }, 400);
   const idx = parseInt(c.req.param("idx"), 10);
-  const msg = svc.updateSwipe(userId, c.req.param("id"), idx, body.content);
+
+  const processed = await runMessageContentProcessors(
+    {
+      chatId,
+      messageId,
+      content: body.content,
+      origin: "swipe_update",
+      swipeIndex: idx,
+      userId,
+    },
+    userId,
+    c.req.raw.signal,
+  );
+
+  let finalContent = processed.content;
+  const chat = svc.getChat(userId, chatId);
+  if (chat) {
+    const editScripts = regexScriptsSvc.getRunOnEditScripts(userId, {
+      characterId: chat.character_id ?? undefined,
+      chatId,
+    });
+    if (editScripts.length > 0) {
+      const existing = svc.getMessage(userId, messageId);
+      const placement = existing?.is_user ? "user_input" as const : "ai_output" as const;
+      finalContent = await regexScriptsSvc.applyRegexScripts(
+        finalContent,
+        editScripts,
+        placement,
+        0,
+      );
+    }
+  }
+
+  const msg = svc.updateSwipe(userId, messageId, idx, finalContent);
   if (!msg) return c.json({ error: "Not found or invalid swipe index" }, 404);
   return c.json(msg);
 });
@@ -466,6 +820,39 @@ app.delete("/:chatId/messages/:id/swipe/:idx", (c) => {
   const msg = svc.deleteSwipe(userId, c.req.param("id"), idx);
   if (!msg) return c.json({ error: "Not found, invalid index, or last swipe" }, 404);
   return c.json(msg);
+});
+
+app.post("/:chatId/display-preprocess", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const body = await c.req.json().catch(() => null);
+
+  if (body && typeof body === "object" && Array.isArray((body as { items?: unknown }).items)) {
+    const rawItems = (body as { items: unknown[] }).items;
+    if (rawItems.length > DISPLAY_PREPROCESS_BATCH_MAX) {
+      return c.json({ error: `items must contain at most ${DISPLAY_PREPROCESS_BATCH_MAX} entries` }, 400);
+    }
+
+    const items = rawItems.map(parseDisplayPreprocessItem);
+    if (items.some((item) => item === null)) {
+      return c.json({ error: "each item requires rawContent (string)" }, 400);
+    }
+
+    const processed = [];
+    for (const item of items as DisplayPreprocessItem[]) {
+      processed.push(await runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal));
+    }
+
+    return c.json({ items: processed });
+  }
+
+  const item = parseDisplayPreprocessItem(body);
+  if (!item) {
+    return c.json({ error: "rawContent (string) required" }, 400);
+  }
+
+  const processed = await runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal);
+  return c.json({ content: processed.content });
 });
 
 export { app as chatsRoutes };

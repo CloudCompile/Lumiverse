@@ -6,17 +6,26 @@ import * as embeddingsSvc from "../services/embeddings.service";
 import * as personasSvc from "../services/personas.service";
 import * as settingsSvc from "../services/settings.service";
 import { parsePagination } from "../services/pagination";
+import { REVALIDATE_PRIVATE, ifNoneMatchSatisfies } from "../utils/http-cache";
 import {
   collectVectorActivatedWorldInfoDetailed,
   getWorldInfoVectorQueryPreview,
   mergeActivatedWorldInfoEntries,
   applyVectorPriorityBoost,
 } from "../services/prompt-assembly.service";
+import {
+  collectWorldInfoSources,
+  resolveWorldInfoCharacters,
+  type BookSource,
+} from "../services/world-info-sources.service";
 import { deduplicateWorldInfoEntries } from "../services/world-info-dedup.service";
-import { activateWorldInfo, finalizeActivatedWorldInfoEntries, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
+import { activateWorldInfo, finalizeActivatedWorldInfoEntries, normalizeWorldInfoSettings, type WiState, type WorldInfoSettings } from "../services/world-info-activation.service";
 import type { WorldBookEntry } from "../types/world-book";
+import { makeAssistantCharacter } from "../types/character";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
+import { rewriteBotBooruUrl } from "../utils/botbooru";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
+import { loadWorldBookVectorSettings } from "../services/world-book-vector-settings.service";
 
 const MAX_IMPORT_RESPONSE_BYTES = 100 * 1024 * 1024; // 100 MB
 
@@ -181,15 +190,9 @@ function traceDiagnosticVectorHitOutcomes(
   keywordEntries: WorldBookEntry[],
   vectorEntries: VectorHitEntry[],
   settingsInput?: Partial<WorldInfoSettings>,
+  bookSourceMap?: Map<string, BookSource>,
 ): Map<string, DiagnosticVectorHitOutcome> {
-  const settings: WorldInfoSettings = {
-    globalScanDepth: null,
-    maxRecursionPasses: 0,
-    maxActivatedEntries: 50,
-    maxTokenBudget: 0,
-    minPriority: 0,
-    ...settingsInput,
-  };
+  const settings = normalizeWorldInfoSettings(settingsInput);
   const mergedEntries: WorldBookEntry[] = [];
   const sources = new Map<string, { source: "keyword" | "vector"; score?: number }>();
   const seen = new Set<string>();
@@ -313,7 +316,7 @@ function traceDiagnosticVectorHitOutcomes(
     }));
   }
 
-  const dedupResult = deduplicateWorldInfoEntries(mergedEntries, sources);
+  const dedupResult = deduplicateWorldInfoEntries(mergedEntries, sources, bookSourceMap);
   for (const removed of dedupResult.removed) {
     if (!outcomes.has(removed.removedEntryId)) continue;
     outcomes.set(removed.removedEntryId, buildDiagnosticVectorOutcome("deduplicated", {
@@ -372,6 +375,16 @@ function resolveDiagnosticVectorTraceOutcome(
 app.get("/", (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
+
+  // ETag off a cheap list signature so re-opening the Lorebook tab returns 304
+  // (no body) until a book or any entry changes.
+  const sig = svc.getWorldBookListSignature(userId);
+  const etag = `"wb-list-${sig.count}-${sig.maxUpdatedAt}-${pagination.limit}-${pagination.offset}"`;
+  if (ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": REVALIDATE_PRIVATE } });
+  }
+  c.header("ETag", etag);
+  c.header("Cache-Control", REVALIDATE_PRIVATE);
   return c.json(svc.listWorldBooks(userId, pagination));
 });
 
@@ -387,6 +400,17 @@ app.get("/:id", (c) => {
   const book = svc.getWorldBook(userId, c.req.param("id"));
   if (!book) return c.json({ error: "Not found" }, 404);
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
+
+  // book.updated_at is bumped on any entry mutation (touchWorldBook), and the
+  // entries signature covers count/content; together they version the embedded
+  // entries page so an unchanged book+page returns 304 without re-serializing.
+  const sig = svc.getWorldBookEntriesSignature(book.id);
+  const etag = `"wb-${book.id}-${book.updated_at}-${sig.count}-${sig.maxUpdatedAt}-${pagination.limit}-${pagination.offset}"`;
+  if (ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": REVALIDATE_PRIVATE } });
+  }
+  c.header("ETag", etag);
+  c.header("Cache-Control", REVALIDATE_PRIVATE);
   const entries = svc.listEntriesPaginated(userId, book.id, pagination);
   return c.json({ ...book, entries });
 });
@@ -461,7 +485,9 @@ app.post("/:id/diagnostics", async (c) => {
   const chat = chatsSvc.getChat(userId, body.chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
-  const character = charSvc.getCharacter(userId, chat.character_id);
+  const character = chat.character_id
+    ? charSvc.getCharacter(userId, chat.character_id)
+    : makeAssistantCharacter();
   if (!character) return c.json({ error: "Character not found" }, 404);
 
   const persona = personasSvc.resolvePersonaOrDefault(userId);
@@ -469,9 +495,11 @@ app.post("/:id/diagnostics", async (c) => {
   const chatWorldBookIds = (chat.metadata?.chat_world_book_ids as string[] | undefined) ?? [];
   const messages = chatsSvc.getMessages(userId, chat.id);
   const vectorSummary = svc.getWorldBookVectorSummary(userId, bookId)!;
-  const bookEntries = svc.listEntries(userId, bookId);
+  const worldInfoCharacters = resolveWorldInfoCharacters(userId, character, chat);
   const attachmentSources = {
-    character: getCharacterWorldBookIds(character.extensions).includes(bookId),
+    character: worldInfoCharacters.some((sourceCharacter) =>
+      getCharacterWorldBookIds(sourceCharacter.extensions).includes(bookId)
+    ),
     persona: persona?.attached_world_book_id === bookId,
     global: globalWorldBooks.includes(bookId),
     chat: chatWorldBookIds.includes(bookId),
@@ -479,19 +507,34 @@ app.post("/:id/diagnostics", async (c) => {
   const isAttached = attachmentSources.character || attachmentSources.persona || attachmentSources.global || attachmentSources.chat;
 
   const embeddings = await embeddingsSvc.getEmbeddingConfig(userId);
-  const queryPreview = await getWorldInfoVectorQueryPreview(userId, messages);
+  const worldBookVectorSettings = loadWorldBookVectorSettings(userId, {
+    retrievalTopK: embeddings.retrieval_top_k,
+  });
+  const queryPreview = await getWorldInfoVectorQueryPreview(userId, messages, chat.id);
   const blockerMessages: string[] = [];
 
   if (!isAttached) {
-    blockerMessages.push("This world book is not attached to the current character, active persona, global world books, or this chat's world books.");
+    blockerMessages.push("This world book is not attached to the active group lorebook scope, active persona, global world books, or this chat's world books.");
   }
 
   const worldInfoSettings = (settingsSvc.getSetting(userId, "worldInfoSettings")?.value as Partial<WorldInfoSettings> | undefined) ?? {};
   const wiState: WiState = (chat.metadata?.wi_state as WiState) ?? {};
+  const wiSources = collectWorldInfoSources(
+    userId,
+    character,
+    persona,
+    globalWorldBooks,
+    chatWorldBookIds,
+    { chat },
+  );
+  const bookEntries = wiSources.entries.filter((entry) => entry.world_book_id === bookId);
+  const selectedEligibleEntries = bookEntries.filter((entry) =>
+    entry.vectorized && !entry.disabled && (entry.content || "").trim().length > 0
+  );
 
   const wiResult = isAttached
     ? activateWorldInfo({
-        entries: bookEntries,
+        entries: wiSources.entries,
         messages,
         chatTurn: messages.length,
         wiState: JSON.parse(JSON.stringify(wiState)),
@@ -506,7 +549,7 @@ app.post("/:id/diagnostics", async (c) => {
       });
 
   const vectorDetail = isAttached
-    ? await collectVectorActivatedWorldInfoDetailed(userId, [bookId], bookEntries, messages)
+    ? await collectVectorActivatedWorldInfoDetailed(userId, chat.id, wiSources.worldBookIds, wiSources.entries, messages)
       : {
         entries: [],
         candidateTrace: [],
@@ -517,9 +560,16 @@ app.post("/:id/diagnostics", async (c) => {
         thresholdRejected: 0,
         hitsAfterRerankCutoff: 0,
         rerankRejected: 0,
-        topK: Math.max(1, embeddings.retrieval_top_k || 4),
-        cap: Math.max(1, embeddings.retrieval_top_k || 4),
+        topK: Math.max(1, worldBookVectorSettings.retrievalTopK || embeddings.retrieval_top_k || 4),
+        cap: Math.max(1, worldBookVectorSettings.retrievalTopK || embeddings.retrieval_top_k || 4),
         blockerMessages: [] as string[],
+        timingsMs: {
+          queryBuildMs: 0,
+          queryEmbedMs: 0,
+          searchMs: 0,
+          rankingMs: 0,
+          totalMs: 0,
+        },
       };
 
   blockerMessages.push(...vectorDetail.blockerMessages);
@@ -528,13 +578,17 @@ app.post("/:id/diagnostics", async (c) => {
     wiResult.activatedEntries,
     vectorDetail.entries,
     worldInfoSettings,
+    wiSources.bookSourceMap,
   );
   const vectorHitOutcomes = traceDiagnosticVectorHitOutcomes(
     wiResult.activatedEntries,
     vectorDetail.candidateTrace.filter((item) => item.retrievalStage === "shortlisted"),
     worldInfoSettings,
+    wiSources.bookSourceMap,
   );
-  const vectorTrace = vectorDetail.candidateTrace.map((item) => {
+  const selectedCandidateTrace = vectorDetail.candidateTrace.filter((item) => item.entry.world_book_id === bookId);
+  const selectedVectorEntries = vectorDetail.entries.filter((item) => item.entry.world_book_id === bookId);
+  const vectorTrace = selectedCandidateTrace.map((item) => {
     const outcome = resolveDiagnosticVectorTraceOutcome(item, vectorHitOutcomes, {
       topK: vectorDetail.topK,
       rerankCutoff: embeddings.rerank_cutoff,
@@ -559,68 +613,71 @@ app.post("/:id/diagnostics", async (c) => {
     };
   });
 
+  const selectedActivatedWorldInfo = mergedWorldInfo.activatedWorldInfo.filter((entry) => entry.bookId === bookId);
+  const selectedKeywordActivated = selectedActivatedWorldInfo.filter((entry) => entry.source === "keyword").length;
+  const selectedVectorActivated = selectedActivatedWorldInfo.filter((entry) => entry.source === "vector").length;
   const keywordHits = mergedWorldInfo.activatedWorldInfo
-    .filter((entry) => entry.source === "keyword")
+    .filter((entry) => entry.source === "keyword" && entry.bookId === bookId)
     .map((entry) => ({
       entry_id: entry.id,
       comment: entry.comment || "",
     }));
   const keywordHitIds = new Set(keywordHits.map((entry) => entry.entry_id));
-  const vectorKeywordOverlapCount = vectorDetail.entries.reduce(
+  const vectorKeywordOverlapCount = selectedVectorEntries.reduce(
     (count, item) => count + (keywordHitIds.has(item.entry.id) ? 1 : 0),
     0,
   );
-  const displacedFreshVectorHits = vectorDetail.entries.filter((item) => {
+  const displacedFreshVectorHits = selectedVectorEntries.filter((item) => {
     if (keywordHitIds.has(item.entry.id)) return false;
     const outcome = vectorHitOutcomes.get(item.entry.id);
     return outcome?.code !== "injected_vector";
   });
 
-  if (vectorDetail.thresholdRejected > 0 && vectorDetail.entries.length === 0) {
+  if (selectedCandidateTrace.some((item) => item.retrievalStage === "rejected_by_similarity_threshold") && selectedVectorEntries.length === 0) {
     blockerMessages.push("Vector matches were found, but all of them were rejected by the current similarity threshold.");
   }
 
-  if (vectorDetail.rerankRejected > 0 && vectorDetail.entries.length === 0) {
+  if (selectedCandidateTrace.some((item) => item.retrievalStage === "rejected_by_rerank_cutoff") && selectedVectorEntries.length === 0) {
     blockerMessages.push("Vector matches survived raw similarity filtering, but all of them were rejected by the current rerank cutoff.");
   }
 
   if (worldInfoSettings.minPriority && worldInfoSettings.minPriority > 0) {
     const belowMinPriority = bookEntries.some((entry) => !entry.disabled && !entry.constant && entry.priority < worldInfoSettings.minPriority!);
-    if (belowMinPriority && mergedWorldInfo.totalActivated === 0) {
+    if (belowMinPriority && selectedActivatedWorldInfo.length === 0) {
       blockerMessages.push("Entry priority is below the current World Info minimum priority setting.");
     }
   }
 
   if (
     mergedWorldInfo.evictedByBudget > 0 &&
-    mergedWorldInfo.totalActivated === 0 &&
+    selectedActivatedWorldInfo.length === 0 &&
     bookEntries.some((entry) => !entry.disabled && (entry.content || "").trim().length > 0)
   ) {
     blockerMessages.push("World Info budget limits may be crowding this book out of the final prompt.");
   }
 
   if (
-    vectorDetail.entries.length > 0 &&
-    mergedWorldInfo.vectorActivated === 0 &&
+    selectedVectorEntries.length > 0 &&
+    selectedVectorActivated === 0 &&
     mergedWorldInfo.evictedByBudget > 0
   ) {
     blockerMessages.push("Vector matches were found, but the World Info max-activated or token budget limits left no room for them after keyword activation.");
   }
 
   if (
-    vectorDetail.entries.length > 0 &&
-    mergedWorldInfo.vectorActivated === 0 &&
-    mergedWorldInfo.totalActivated === 0
+    selectedVectorEntries.length > 0 &&
+    selectedVectorActivated === 0 &&
+    selectedActivatedWorldInfo.length === 0
   ) {
     blockerMessages.push("Vector candidates were found, but they lost to group, minimum-priority, or budget rules before final injection.");
   }
 
   if (
-    vectorDetail.entries.length > 0 &&
-    mergedWorldInfo.vectorActivated === 0 &&
+    selectedVectorEntries.length > 0 &&
+    selectedVectorActivated === 0 &&
     keywordHits.length > 0 &&
     mergedWorldInfo.evictedByBudget === 0 &&
-    vectorKeywordOverlapCount === vectorDetail.entries.length
+    vectorKeywordOverlapCount === selectedVectorEntries.length
   ) {
     blockerMessages.push("Vector matches were found, but the top vector hits were already activated by keyword, so the final list still counts them as keyword entries.");
   }
@@ -659,14 +716,22 @@ app.post("/:id/diagnostics", async (c) => {
     },
     vector_summary: vectorSummary,
     query_preview: vectorDetail.queryPreview || queryPreview,
-    eligible_entries: vectorDetail.eligibleCount,
+    eligible_entries: isAttached ? selectedEligibleEntries.length : 0,
     retrieval: {
       top_k: vectorDetail.topK,
-      hits_before_threshold: vectorDetail.hitsBeforeThreshold,
-      hits_after_threshold: vectorDetail.hitsAfterThreshold,
-      threshold_rejected: vectorDetail.thresholdRejected,
-      hits_after_rerank_cutoff: vectorDetail.hitsAfterRerankCutoff,
-      rerank_rejected: vectorDetail.rerankRejected,
+      hits_before_threshold: selectedCandidateTrace.length,
+      hits_after_threshold: selectedCandidateTrace.filter((item) => item.retrievalStage !== "rejected_by_similarity_threshold").length,
+      threshold_rejected: selectedCandidateTrace.filter((item) => item.retrievalStage === "rejected_by_similarity_threshold").length,
+      hits_after_rerank_cutoff: selectedCandidateTrace.filter((item) => item.retrievalStage === "shortlisted" || item.retrievalStage === "trimmed_by_top_k").length,
+      rerank_rejected: selectedCandidateTrace.filter((item) => item.retrievalStage === "rejected_by_rerank_cutoff").length,
+      timings_ms: {
+        query_build: vectorDetail.timingsMs?.queryBuildMs ?? 0,
+        query_embed: vectorDetail.timingsMs?.queryEmbedMs ?? 0,
+        search: vectorDetail.timingsMs?.searchMs ?? 0,
+        ranking: vectorDetail.timingsMs?.rankingMs ?? 0,
+        merge: mergedWorldInfo.mergeDurationMs ?? 0,
+        total: (vectorDetail.timingsMs?.totalMs ?? 0) + (mergedWorldInfo.mergeDurationMs ?? 0),
+      },
     },
     keyword_hits: keywordHits,
     vector_hits: vectorTrace.filter((item) =>
@@ -693,9 +758,9 @@ app.post("/:id/diagnostics", async (c) => {
       activatedAfterBudget: mergedWorldInfo.activatedAfterBudget,
       evictedByBudget: mergedWorldInfo.evictedByBudget,
       estimatedTokens: mergedWorldInfo.estimatedTokens,
-      keywordActivated: mergedWorldInfo.keywordActivated,
-      vectorActivated: mergedWorldInfo.vectorActivated,
-      totalActivated: mergedWorldInfo.totalActivated,
+      keywordActivated: selectedKeywordActivated,
+      vectorActivated: selectedVectorActivated,
+      totalActivated: selectedActivatedWorldInfo.length,
       deduplicated: mergedWorldInfo.deduplicated,
       queryPreview: vectorDetail.queryPreview || queryPreview,
     },
@@ -708,21 +773,47 @@ app.post("/import", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   try {
-    const result = svc.importWorldBook(userId, body);
+    const result = svc.importWorldBook(userId, body, { signal: c.req.raw.signal });
     return c.json({ world_book: result.worldBook, entry_count: result.entryCount }, 201);
   } catch (err: any) {
     return c.json({ error: err.message || "Import failed" }, 400);
   }
 });
 
+/**
+ * Accept either a lorebook-shaped payload ({ entries, ... }) or a character
+ * card, reducing the latter to its embedded lorebook. This lets a pasted
+ * character source (e.g. a BotBooru card JSON) import as a world book rather
+ * than failing with zero entries.
+ */
+function coerceLorebookPayload(payload: any): any {
+  if (!payload || typeof payload !== "object") return payload;
+  if (payload.entries) return payload; // already lorebook-shaped
+
+  const card = payload.data && typeof payload.data === "object" ? payload.data : payload;
+  const book = card.character_book ?? card.extensions?.character_book ?? payload.character_book;
+  if (book && typeof book === "object" && book.entries) {
+    return {
+      name: book.name || (card.name ? `${card.name} Lorebook` : undefined),
+      description: book.description || "",
+      entries: book.entries,
+    };
+  }
+  return payload;
+}
+
 app.post("/import-url", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (!body.url) return c.json({ error: "url is required" }, 400);
 
+  // BotBooru hosts character cards; rewrite to the JSON download so the embedded
+  // lorebook can be extracted below. Other URLs are fetched as-is.
+  const fetchUrl = rewriteBotBooruUrl(body.url, "json") ?? body.url;
+
   let payload: any;
   try {
-    const res = await safeFetch(body.url, {
+    const res = await safeFetch(fetchUrl, {
       maxBytes: MAX_IMPORT_RESPONSE_BYTES,
       timeoutMs: 10_000,
     });
@@ -732,7 +823,7 @@ app.post("/import-url", async (c) => {
     if (text.length > MAX_IMPORT_RESPONSE_BYTES) {
       return c.json({ error: "Response too large" }, 400);
     }
-    payload = JSON.parse(text);
+    payload = coerceLorebookPayload(JSON.parse(text));
   } catch (err: any) {
     if (err instanceof SSRFError) {
       return c.json({ error: err.message }, 400);
@@ -740,8 +831,12 @@ app.post("/import-url", async (c) => {
     return c.json({ error: "Failed to fetch or parse URL" }, 400);
   }
 
+  if (svc.countImportedWorldBookEntries(payload?.entries) === 0) {
+    return c.json({ error: "No lorebook entries found at that URL" }, 400);
+  }
+
   try {
-    const result = svc.importWorldBook(userId, payload);
+    const result = svc.importWorldBook(userId, payload, { signal: c.req.raw.signal });
     return c.json({ world_book: result.worldBook, entry_count: result.entryCount }, 201);
   } catch (err: any) {
     return c.json({ error: err.message || "Import failed" }, 400);
@@ -760,12 +855,26 @@ app.post("/import-character-book", async (c) => {
   if (!character) return c.json({ error: "Character not found" }, 404);
 
   const characterBook = character.extensions?.character_book;
-  if (!characterBook?.entries?.length) {
+  if (svc.countImportedWorldBookEntries(characterBook?.entries) === 0) {
     return c.json({ error: "No embedded character book found" }, 400);
   }
 
-  const result = svc.importCharacterBook(userId, characterId, character.name, characterBook);
   const currentIds = getCharacterWorldBookIds(character.extensions);
+  const existing = svc.findImportedCharacterBookWorldBook(userId, characterId, currentIds);
+  if (existing) {
+    if (!currentIds.includes(existing.id)) {
+      const nextExtensions = setCharacterWorldBookIds(
+        { ...(character.extensions || {}) },
+        [...currentIds, existing.id],
+      );
+      await charSvc.updateCharacter(userId, characterId, { extensions: nextExtensions });
+    }
+    return c.json({ world_book: existing, entry_count: svc.listEntries(userId, existing.id).length });
+  }
+
+  const result = svc.importCharacterBook(userId, characterId, character.name, characterBook, {
+    signal: c.req.raw.signal,
+  });
   const nextExtensions = setCharacterWorldBookIds(
     { ...(character.extensions || {}) },
     [...currentIds, result.worldBook.id],
@@ -776,12 +885,33 @@ app.post("/import-character-book", async (c) => {
 
 // --- Entry endpoints ---
 
+const VALID_ENTRY_SORT_KEYS = new Set(["order", "priority", "created", "updated", "name"]);
+
 app.get("/:id/entries", (c) => {
   const userId = c.get("userId");
   const book = svc.getWorldBook(userId, c.req.param("id"));
   if (!book) return c.json({ error: "World book not found" }, 404);
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listEntriesPaginated(userId, book.id, pagination));
+  const rawSortBy = c.req.query("sort_by");
+  const rawSortDir = c.req.query("sort_dir");
+  const sortBy = rawSortBy && VALID_ENTRY_SORT_KEYS.has(rawSortBy) ? (rawSortBy as svc.EntrySortKey) : undefined;
+  const sortDir = rawSortDir === "desc" || rawSortDir === "asc" ? rawSortDir : undefined;
+  const search = c.req.query("search") || undefined;
+
+  // Selecting a book for edit loads a page of (full-content) entries — the
+  // heavy read. ETag from book.updated_at (bumped on any entry mutation) + the
+  // entries signature + the safe sort/page params lets a re-select return 304.
+  // The search string is omitted from the ETag on purpose (the browser cache is
+  // keyed by the full URL, so distinct searches never collide), keeping any
+  // user input out of the response header.
+  const sig = svc.getWorldBookEntriesSignature(book.id);
+  const etag = `"wb-entries-${book.id}-${book.updated_at}-${sig.count}-${sig.maxUpdatedAt}-${pagination.limit}-${pagination.offset}-${sortBy ?? ""}-${sortDir ?? ""}"`;
+  if (ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": REVALIDATE_PRIVATE } });
+  }
+  c.header("ETag", etag);
+  c.header("Cache-Control", REVALIDATE_PRIVATE);
+  return c.json(svc.listEntriesPaginated(userId, book.id, pagination, { sortBy, sortDir, search }));
 });
 
 app.post("/:id/entries", async (c) => {
@@ -794,12 +924,58 @@ app.post("/:id/entries", async (c) => {
   return c.json(entry, 201);
 });
 
+app.post("/:id/entries/reorder", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  const book = svc.getWorldBook(userId, bookId);
+  if (!book) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json();
+  if (!Array.isArray(body?.ordered_ids) || body.ordered_ids.length === 0) {
+    return c.json({ error: "ordered_ids is required" }, 400);
+  }
+  const success = svc.reorderEntries(userId, bookId, body.ordered_ids);
+  if (!success) return c.json({ error: "Unable to reorder entries" }, 400);
+  return c.json({ success: true, count: body.ordered_ids.length });
+});
+
+app.post("/:id/entries/bulk", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  const book = svc.getWorldBook(userId, bookId);
+  if (!book) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json();
+  if (!body?.action) return c.json({ error: "action is required" }, 400);
+  if (!Array.isArray(body?.entry_ids) || body.entry_ids.length === 0) {
+    return c.json({ error: "entry_ids is required" }, 400);
+  }
+  try {
+    const result = svc.bulkOperateEntries(userId, bookId, body);
+    if (!result) return c.json({ error: "World book not found" }, 404);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message || "Bulk action failed" }, 400);
+  }
+});
+
 app.put("/:id/entries/:eid", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   const entry = svc.updateEntry(userId, c.req.param("eid"), body);
   if (!entry) return c.json({ error: "Not found" }, 404);
   return c.json(entry);
+});
+
+app.post("/:id/entries/:eid/duplicate", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  const book = svc.getWorldBook(userId, bookId);
+  if (!book) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const entry = svc.getEntry(userId, c.req.param("eid"));
+  if (!entry || entry.world_book_id !== bookId) return c.json({ error: "Not found" }, 404);
+  const duplicated = svc.duplicateEntry(userId, entry.id, body);
+  if (!duplicated) return c.json({ error: "Target world book not found" }, 404);
+  return c.json(duplicated, 201);
 });
 
 app.delete("/:id/entries/:eid", (c) => {

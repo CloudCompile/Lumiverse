@@ -25,6 +25,88 @@ export type UpdatePresetInput = Partial<CreatePresetInput>;
 
 // --- Loom Preset Assembly Types ---
 
+export interface PromptVariableOption {
+  id: string;
+  label: string;
+  value: string;
+}
+
+export type PromptVariableDef =
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'text';
+      defaultValue: string;
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'textarea';
+      defaultValue: string;
+      rows?: number;
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'number';
+      defaultValue: number;
+      min?: number;
+      max?: number;
+      step?: number;
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'slider';
+      defaultValue: number;
+      min: number;
+      max: number;
+      step?: number;
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'select';
+      /** Stored selection: an option id. */
+      defaultValue: string;
+      options: PromptVariableOption[];
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'switch';
+      /** 0 (off) or 1 (on). */
+      defaultValue: 0 | 1;
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
+      type: 'multiselect';
+      /** Stored selection: array of option ids. */
+      defaultValue: string[];
+      options: PromptVariableOption[];
+      /** String inserted between joined option values. Defaults to two newlines. */
+      separator?: string;
+      description?: string;
+    };
+
+export type PromptVariableType = PromptVariableDef['type'];
+export type PromptVariableValue = string | number | string[];
+export type PromptVariableValues = Record<string /* blockId */, Record<string /* varName */, PromptVariableValue>>;
+
 export interface PromptBlock {
   id: string;
   name: string;
@@ -39,10 +121,18 @@ export interface PromptBlock {
   injectionTrigger: string[];
   group: string | null;
   categoryMode?: 'radio' | 'checkbox' | null;
+  variables?: PromptVariableDef[];
+  sealed?: boolean;
+  sealedKey?: string;
+  sealedSource?: string;
+  sealedOriginPresetId?: string;
+  sealedOriginVersion?: string | null;
+  sealedSha256?: string;
 }
 
 export interface PromptBehavior {
   continueNudge: string;
+  emptySendNudge: string;
   impersonationPrompt: string;
   groupNudge: string;
   newChatPrompt: string;

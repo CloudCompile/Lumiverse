@@ -1,6 +1,7 @@
 export enum EventType {
   CONNECTED = 'CONNECTED',
   SETTINGS_UPDATED = 'SETTINGS_UPDATED',
+  CHARACTER_CREATED = 'CHARACTER_CREATED',
   CHARACTER_EDITED = 'CHARACTER_EDITED',
   CHARACTER_DELETED = 'CHARACTER_DELETED',
   PERSONA_CHANGED = 'PERSONA_CHANGED',
@@ -8,10 +9,17 @@ export enum EventType {
   MESSAGE_EDITED = 'MESSAGE_EDITED',
   MESSAGE_DELETED = 'MESSAGE_DELETED',
   MESSAGE_SWIPED = 'MESSAGE_SWIPED',
+  CHAT_CHANGED = 'CHAT_CHANGED',
+  CHAT_SWITCHED = 'CHAT_SWITCHED',
   GENERATION_STARTED = 'GENERATION_STARTED',
+  GENERATION_IN_PROGRESS = 'GENERATION_IN_PROGRESS',
+  GENERATION_PHASE_CHANGED = 'GENERATION_PHASE_CHANGED',
+  GENERATION_METRICS_READY = 'GENERATION_METRICS_READY',
+  GENERATION_BREAKDOWN_READY = 'GENERATION_BREAKDOWN_READY',
   STREAM_TOKEN_RECEIVED = 'STREAM_TOKEN_RECEIVED',
   GENERATION_ENDED = 'GENERATION_ENDED',
   GENERATION_STOPPED = 'GENERATION_STOPPED',
+  GENERATION_ACKNOWLEDGED = 'GENERATION_ACKNOWLEDGED',
   GENERATION_ERROR = 'GENERATION_ERROR',
   CHAT_CREATED = 'CHAT_CREATED',
   CHAT_DELETED = 'CHAT_DELETED',
@@ -32,25 +40,53 @@ export enum EventType {
   GROUP_TURN_STARTED = 'GROUP_TURN_STARTED',
   GROUP_ROUND_COMPLETE = 'GROUP_ROUND_COMPLETE',
 
+  // Multiplayer rooms
+  ROOM_STATUS = 'ROOM_STATUS',
+  ROOM_PARTICIPANT_JOINED = 'ROOM_PARTICIPANT_JOINED',
+  ROOM_PARTICIPANT_LEFT = 'ROOM_PARTICIPANT_LEFT',
+  ROOM_PARTICIPANT_KICKED = 'ROOM_PARTICIPANT_KICKED',
+  ROOM_PERSONA_CHANGED = 'ROOM_PERSONA_CHANGED',
+  ROOM_TURN_CHANGED = 'ROOM_TURN_CHANGED',
+  ROOM_TURN_SKIPPED = 'ROOM_TURN_SKIPPED',
+  ROOM_PRESENCE = 'ROOM_PRESENCE',
+  ROOM_ROUND_COMPLETE = 'ROOM_ROUND_COMPLETE',
+  ROOM_INVITE_CODE = 'ROOM_INVITE_CODE',
+  ROOM_JOIN_REJECTED = 'ROOM_JOIN_REJECTED',
+
   // World Info
   WORLD_INFO_ACTIVATED = 'WORLD_INFO_ACTIVATED',
+
+  // World Books (lorebook editor live-sync — mirror src/ws/events.ts)
+  WORLD_BOOK_CHANGED = 'WORLD_BOOK_CHANGED',
+  WORLD_BOOK_DELETED = 'WORLD_BOOK_DELETED',
+  WORLD_BOOK_ENTRY_CHANGED = 'WORLD_BOOK_ENTRY_CHANGED',
+  WORLD_BOOK_ENTRY_DELETED = 'WORLD_BOOK_ENTRY_DELETED',
 
   // Spindle extension events
   SPINDLE_EXTENSION_LOADED = 'SPINDLE_EXTENSION_LOADED',
   SPINDLE_EXTENSION_UNLOADED = 'SPINDLE_EXTENSION_UNLOADED',
   SPINDLE_EXTENSION_ERROR = 'SPINDLE_EXTENSION_ERROR',
   SPINDLE_EXTENSION_STATUS = 'SPINDLE_EXTENSION_STATUS',
+  SPINDLE_RUNTIME_STATS = 'SPINDLE_RUNTIME_STATS',
+  SPINDLE_PRE_GENERATION_ACTIVITY = 'SPINDLE_PRE_GENERATION_ACTIVITY',
   SPINDLE_BULK_UPDATE_PROGRESS = 'SPINDLE_BULK_UPDATE_PROGRESS',
   SPINDLE_BULK_UPDATE_COMPLETE = 'SPINDLE_BULK_UPDATE_COMPLETE',
   SPINDLE_FRONTEND_MSG = 'SPINDLE_FRONTEND_MSG',
+  SPINDLE_FRONTEND_PROCESS = 'SPINDLE_FRONTEND_PROCESS',
   SPINDLE_TOAST = 'SPINDLE_TOAST',
   MESSAGE_TAG_INTERCEPTED = 'MESSAGE_TAG_INTERCEPTED',
 
   // Spindle command palette commands
   SPINDLE_COMMANDS_CHANGED = 'SPINDLE_COMMANDS_CHANGED',
 
+  // Spindle UI automation (extension navigates the user to a tab/settings/etc.)
+  SPINDLE_UI_NAVIGATE = 'SPINDLE_UI_NAVIGATE',
+
   // Spindle theme overrides
   SPINDLE_THEME_OVERRIDES = 'SPINDLE_THEME_OVERRIDES',
+
+  // Per-chat CSS containment mode (Spindle, app_manipulation)
+  SPINDLE_CHAT_STYLE_MODE = 'SPINDLE_CHAT_STYLE_MODE',
 
   // Spindle text editor
   SPINDLE_TEXT_EDITOR_OPEN = 'SPINDLE_TEXT_EDITOR_OPEN',
@@ -77,8 +113,17 @@ export enum EventType {
   // Avatar
   CHARACTER_AVATAR_CHANGED = 'CHARACTER_AVATAR_CHANGED',
 
+  // Wallpaper uploads
+  WALLPAPER_UPLOAD_PROGRESS = 'WALLPAPER_UPLOAD_PROGRESS',
+
   // Import progress
   IMPORT_GALLERY_PROGRESS = 'IMPORT_GALLERY_PROGRESS',
+
+  // User-data export/import (portability)
+  USER_EXPORT_PROGRESS = 'USER_EXPORT_PROGRESS',
+  USER_IMPORT_PROGRESS = 'USER_IMPORT_PROGRESS',
+  USER_IMPORT_COMPLETE = 'USER_IMPORT_COMPLETE',
+  USER_IMPORT_FAILED = 'USER_IMPORT_FAILED',
 
   // LumiHub remote install
   LUMIHUB_INSTALL_STARTED = 'LUMIHUB_INSTALL_STARTED',
@@ -91,17 +136,10 @@ export enum EventType {
   IMAGE_GEN_COMPLETE = 'IMAGE_GEN_COMPLETE',
   IMAGE_GEN_ERROR = 'IMAGE_GEN_ERROR',
 
-  // Dream Weaver
-  DREAM_WEAVER_GENERATING = 'DREAM_WEAVER_GENERATING',
-  DREAM_WEAVER_COMPLETE = 'DREAM_WEAVER_COMPLETE',
-  DREAM_WEAVER_ERROR = 'DREAM_WEAVER_ERROR',
-  DREAM_WEAVER_PROGRESS = 'DREAM_WEAVER_PROGRESS',
-
-  // Dream Weaver Visual Jobs
-  DREAM_WEAVER_VISUAL_JOB_CREATED = 'DREAM_WEAVER_VISUAL_JOB_CREATED',
-  DREAM_WEAVER_VISUAL_JOB_PROGRESS = 'DREAM_WEAVER_VISUAL_JOB_PROGRESS',
-  DREAM_WEAVER_VISUAL_JOB_COMPLETED = 'DREAM_WEAVER_VISUAL_JOB_COMPLETED',
-  DREAM_WEAVER_VISUAL_JOB_FAILED = 'DREAM_WEAVER_VISUAL_JOB_FAILED',
+  WEAVER_VISUAL_JOB_CREATED = 'WEAVER_VISUAL_JOB_CREATED',
+  WEAVER_VISUAL_JOB_PROGRESS = 'WEAVER_VISUAL_JOB_PROGRESS',
+  WEAVER_VISUAL_JOB_COMPLETED = 'WEAVER_VISUAL_JOB_COMPLETED',
+  WEAVER_VISUAL_JOB_FAILED = 'WEAVER_VISUAL_JOB_FAILED',
 
   // SillyTavern Migration
   MIGRATION_PROGRESS = 'MIGRATION_PROGRESS',
@@ -116,12 +154,71 @@ export enum EventType {
 
   // Memory Cortex
   CORTEX_REBUILD_PROGRESS = 'CORTEX_REBUILD_PROGRESS',
+  CORTEX_INGESTION_PROGRESS = 'CORTEX_INGESTION_PROGRESS',
 
   // MCP Servers
   MCP_SERVER_CONNECTED = 'MCP_SERVER_CONNECTED',
   MCP_SERVER_DISCONNECTED = 'MCP_SERVER_DISCONNECTED',
   MCP_SERVER_ERROR = 'MCP_SERVER_ERROR',
   MCP_SERVER_CHANGED = 'MCP_SERVER_CHANGED',
+
+  // Loom summary auto-summarization
+  SUMMARIZATION_STARTED = 'SUMMARIZATION_STARTED',
+  SUMMARIZATION_PROGRESS = 'SUMMARIZATION_PROGRESS',
+  SUMMARIZATION_COMPLETED = 'SUMMARIZATION_COMPLETED',
+  SUMMARIZATION_FAILED = 'SUMMARIZATION_FAILED',
+
+  // System health
+  SYSTEM_DISK_LOW = 'SYSTEM_DISK_LOW',
+}
+
+export interface SystemDiskLowPayload {
+  path: string
+  /** 0..1, e.g. 0.93 = 93% full */
+  usagePercent: number
+  freeBytes: number
+  totalBytes: number
+  /** 0..1, the threshold that was crossed */
+  thresholdPercent: number
+  thresholdFreeBytes: number
+}
+
+export interface WallpaperUploadProgressPayload {
+  uploadId: string
+  phase: 'received' | 'transcoding_primary' | 'transcoding_variant' | 'extracting_poster' | 'finalizing' | 'completed'
+  step: number
+  totalSteps: number
+  codec?: 'h264' | 'hevc'
+  phaseProgressPct?: number
+  currentTimeMs?: number
+  durationMs?: number
+  speed?: number
+}
+
+export interface SummarizationStartedPayload {
+  chatId: string
+  generationId: string
+  startedAt: number
+}
+
+export interface SummarizationCompletedPayload {
+  chatId: string
+  generationId: string
+  summaryText?: string
+}
+
+export interface SummarizationProgressPayload {
+  chatId: string
+  generationId: string
+  batchNumber: number
+  totalBatches: number
+  messagesProcessed: number
+}
+
+export interface SummarizationFailedPayload {
+  chatId: string
+  generationId: string
+  error: string
 }
 
 // ---- Operator ----
@@ -144,6 +241,7 @@ export interface OperatorStatusPayload {
   commit: string
   remoteMode: boolean
   ipcAvailable: boolean
+  ipcReason: 'connected' | 'not_started_with_runner' | 'runner_env_without_process_send'
   updateAvailable: boolean
   commitsBehind: number
   latestUpdateMessage: string
@@ -155,6 +253,15 @@ export interface OperatorProgressPayload {
   message: string
 }
 
+export interface SpindlePreGenerationActivityPayload {
+  chatId: string
+  phase: 'message_content_processor' | 'context_handler' | 'interceptor'
+  status: 'started' | 'completed' | 'error' | 'aborted'
+  extensionId: string
+  extensionName: string
+  error?: string
+}
+
 export interface WSEvent<T = any> {
   type: EventType
   payload: T
@@ -162,16 +269,66 @@ export interface WSEvent<T = any> {
 
 export interface StreamTokenPayload {
   generationId: string
+  chatId: string
   token: string
   type?: 'text' | 'reasoning'
+  // seq is the tokenSeq of the LAST token coalesced into this segment; startSeq
+  // is the FIRST. Retained for Spindle extensions; reconciliation now uses
+  // `offset` instead.
+  seq?: number
+  startSeq?: number
+  // Char position of this segment's start within the server's cumulative
+  // buffer for its stream type (content vs reasoning). Drives exact overlap
+  // dedupe after recovery and immediate gap detection (missed segments).
+  offset?: number
+}
+
+export interface ContextClipStats {
+  enabled: boolean
+  maxContext: number
+  maxResponseTokens: number
+  safetyMargin: number
+  inputBudget: number
+  fixedTokens: number
+  remainingHistoryBudget: number
+  chatHistoryTokensBefore: number
+  chatHistoryTokensAfter: number
+  messagesDropped: number
+  tokensDropped: number
+  tokenizerUsed: string
+  budgetInvalid?: boolean
+  fixedOverBudget?: boolean
 }
 
 export interface GenerationStartedPayload {
   generationId: string
   chatId: string
   targetMessageId?: string
+  /** Swipe index the generation streams into (for swipe-gated streaming display). */
+  targetSwipeId?: number
+  generationType?: string
   characterId?: string
   characterName?: string
+  contextClipStats?: ContextClipStats
+  breakdown?: Array<{
+    name: string
+    type: string
+    role?: string
+    content?: string
+    blockId?: string
+    extensionId?: string
+    extensionName?: string
+  }>
+}
+
+export interface GenerationInProgressPayload extends GenerationStartedPayload {
+  model?: string
+}
+
+export interface GenerationPhaseChangedPayload {
+  generationId: string
+  chatId: string
+  phase: 'reasoning' | 'streaming'
 }
 
 export interface GenerationMetrics {
@@ -179,16 +336,51 @@ export interface GenerationMetrics {
   tps?: number
   durationMs: number
   wasStreaming: boolean
+  model?: string
+  provider?: string
 }
 
 export interface GenerationEndedPayload {
   generationId: string
   chatId: string
-  messageId: string
-   content?: string
+  messageId?: string
+  content?: string
   error?: string
+  generationType?: string
   tokenCount?: number
   generationMetrics?: GenerationMetrics
+}
+
+/**
+ * Follow-up to GENERATION_ENDED carrying the deferred metrics (token count,
+ * TTFT/TPS, model/provider) once they've been computed and persisted. `swipeId`
+ * is the swipe these metrics belong to, so the client can avoid patching them
+ * onto a different swipe the user navigated to mid-stream.
+ */
+export interface GenerationMetricsReadyPayload {
+  generationId: string
+  chatId: string
+  messageId: string
+  swipeId?: number
+  tokenCount?: number
+  generationMetrics?: GenerationMetrics
+}
+
+/**
+ * Follow-up to GENERATION_ENDED carrying the prompt breakdown once its deferred
+ * tokenization finishes, so an opened Prompt Breakdown modal renders from cache.
+ * `messages` is intentionally omitted server-side (derived/fetched on demand).
+ */
+export interface GenerationBreakdownReadyPayload {
+  generationId: string
+  chatId: string
+  messageId: string
+  breakdown: Omit<import('@/types/store').BreakdownCacheEntry, 'chatId'>
+}
+
+export interface GenerationAcknowledgedPayload {
+  chatId: string
+  generationIds: string[]
 }
 
 export interface MessageSentPayload {
@@ -204,6 +396,21 @@ export interface MessageEditedPayload {
 export interface MessageDeletedPayload {
   chatId: string
   messageId: string
+}
+
+export interface ChatChangedPayload {
+  chat?: import('./api').Chat
+  chatId?: string
+  reattributedUserMessages?: number
+  /** Dot-paths of fields that differ between prior and new chat row.
+   *  Optional; older servers omit it, in which case consumers fall back
+   *  to treating the chat as fully changed. */
+  changedFields?: string[]
+}
+
+export interface ChatSwitchedPayload {
+  /** The chat the user switched to, or `null` when returning to the home screen. */
+  chatId: string | null
 }
 
 export type MessageSwipeAction = 'added' | 'updated' | 'deleted' | 'navigated'
@@ -244,6 +451,87 @@ export interface GroupRoundCompletePayload {
   charactersSpoken: string[]
 }
 
+// ── Multiplayer room payloads ──
+import type { RoomParticipant, RoomStateView, PersonaSnapshot } from '@/types/multiplayer'
+
+export interface RoomBasePayload {
+  chatId: string
+  roomId: string
+}
+/** In-flight host generation embedded in hydration so a peer joining mid-stream
+ *  resumes the reply already in progress (instead of only seeing it complete). */
+export interface RoomHydrationGeneration {
+  active: boolean
+  generationId: string
+  status: string
+  content: string
+  reasoning: string
+  contentOffset: number
+  reasoningOffset: number
+  generationType?: string
+  targetMessageId?: string
+  targetSwipeId?: number
+  characterName?: string
+  characterId?: string
+  reasoningStartedAt?: number
+  reasoningDurationMs?: number
+}
+export interface RoomStatusPayload extends RoomBasePayload {
+  status?: string
+  room?: RoomStateView
+  /** Present on the private hydration payload sent to a joining socket. */
+  messages?: unknown[]
+  chatName?: string
+  characterName?: string
+  /** Compressed WebP data URL of the bot avatar, so peers can render it. */
+  characterAvatar?: string | null
+  /** Present when a generation was streaming as the joining socket hydrated. */
+  generation?: RoomHydrationGeneration | null
+}
+export interface RoomInviteCodePayload extends RoomBasePayload {
+  code: string
+  expiresAt?: number
+  server?: string
+}
+export interface RoomJoinRejectedPayload extends RoomBasePayload {
+  reason?: 'not_found' | 'closed' | 'banned' | 'full' | 'kicked' | string
+}
+export interface RoomParticipantJoinedPayload extends RoomBasePayload {
+  participant: RoomParticipant
+}
+export interface RoomParticipantLeftPayload extends RoomBasePayload {
+  participantId: string
+}
+export interface RoomParticipantKickedPayload extends RoomBasePayload {
+  participantId: string
+  banned: boolean
+}
+export interface RoomPersonaChangedPayload extends RoomBasePayload {
+  participantId: string
+  persona: PersonaSnapshot | null
+  displayName: string
+}
+export interface RoomTurnChangedPayload extends RoomBasePayload {
+  turnStrategy: 'round_robin' | 'freeform'
+  currentTurnParticipantId: string | null
+  turnOrder: string[]
+  round: number
+  freeformDeadline: number | null
+  /** True on the event that opens a freeform window. */
+  windowOpen?: boolean
+}
+export interface RoomTurnSkippedPayload extends RoomBasePayload {
+  skippedParticipantId: string
+  currentTurnParticipantId: string | null
+}
+export interface RoomPresencePayload extends RoomBasePayload {
+  participantId: string
+  typing: boolean
+}
+export interface RoomRoundCompletePayload extends RoomBasePayload {
+  round: number
+}
+
 export interface LumiPipelineStartedPayload {
   chatId: string
   moduleCount: number
@@ -257,7 +545,7 @@ export interface LumiModuleDonePayload {
   content?: string
   error?: string
   durationMs: number
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; provider_raw?: Record<string, unknown> }
 }
 
 export interface LumiPipelineCompletedPayload {
@@ -265,7 +553,7 @@ export interface LumiPipelineCompletedPayload {
   status: 'success' | 'skipped' | 'error' | 'aborted'
   reason?: string
   totalDurationMs?: number
-  totalUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  totalUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; provider_raw?: Record<string, unknown> }
 }
 
 export interface SpindleThemeOverridesPayload {
@@ -286,7 +574,7 @@ export interface SpindleToastPayload {
 // ---- Migration ----
 export interface MigrationProgressPayload {
   migrationId: string
-  phase: 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats'
+  phase: 'starting' | 'scanning' | 'characters' | 'worldBooks' | 'personas' | 'chats' | 'groupChats' | 'completed' | 'failed'
   label: string
   current: number
   total: number
@@ -307,6 +595,26 @@ export interface MigrationCompletedPayload {
 export interface MigrationFailedPayload {
   migrationId: string
   error: string
+}
+
+// ---- World Books (lorebook editor live-sync) ----
+/** Emitted on book create/update and on structural entry ops (reorder, bulk). */
+export interface WorldBookChangedPayload {
+  id: string
+  worldBook: import('./api').WorldBook
+}
+export interface WorldBookDeletedPayload {
+  id: string
+}
+/** Emitted on entry create/update. Carries the full entry so the editor can patch in place. */
+export interface WorldBookEntryChangedPayload {
+  id: string
+  worldBookId: string
+  entry: import('./api').WorldBookEntry
+}
+export interface WorldBookEntryDeletedPayload {
+  id: string
+  worldBookId: string
 }
 
 // ---- Council Tool Failure ----

@@ -6,6 +6,7 @@ import { useStore } from '@/store'
 import SpindleFloatWidget from './SpindleFloatWidget'
 import SpindleDockPanel from './SpindleDockPanel'
 import SpindleAppMount from './SpindleAppMount'
+import ContainerTabContent from './ContainerTabContent'
 import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { InputPromptModal } from '@/components/shared/InputPromptModal'
@@ -79,6 +80,9 @@ export default function SpindleUIManager() {
           <SpindleAppMount key={m.id} mount={m} />
         ))}
 
+      {/* Re-parents tab roots into registered containers (e.g. Canvas secondary drawer) */}
+      <ContainerTabContent />
+
       <SpindleTextEditor />
       <SpindleModal />
       <SpindleConfirm />
@@ -139,6 +143,8 @@ function SpindleModal() {
       onClick={handleBackdrop}
       style={{
         position: 'fixed', inset: 0, zIndex: 10003,
+        width: 'var(--app-scaled-viewport-width, calc(100vw / var(--lumiverse-ui-scale, 1)))',
+        height: 'var(--app-scaled-viewport-height, calc(100vh / var(--lumiverse-ui-scale, 1)))',
         background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}

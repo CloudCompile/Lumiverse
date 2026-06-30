@@ -3,74 +3,61 @@ import * as svc from "../services/characters.service";
 import * as files from "../services/files.service";
 import * as images from "../services/images.service";
 import * as cardSvc from "../services/character-card.service";
+import * as characterLoraSvc from "../services/character-lora.service";
 import * as exportSvc from "../services/character-export.service";
-import * as gallerySvc from "../services/character-gallery.service";
-import * as regexSvc from "../services/regex-scripts.service";
-import * as exprSvc from "../services/expressions.service";
+import * as tagLibrarySvc from "../services/tag-library-import.service";
 import * as wbSvc from "../services/world-books.service";
+import * as regexSvc from "../services/regex-scripts.service";
+import * as gallerySvc from "../services/character-gallery.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
-import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
+import { rewriteBotBooruUrl } from "../utils/botbooru";
 import { createAvatarResolverResponse } from "../utils/avatar-cache";
-import { eventBus } from "../ws/bus";
-import { EventType } from "../ws/events";
 import { buildSlug } from "../lumihub/manifest";
+import { applyCharxModulesAndAssets, autoImportEmbeddedWorldbook } from "../services/charx-import.service";
+import { mapWithConcurrency } from "../utils/concurrency";
 
 const app = new Hono();
+const PERSPECTIVE_LAYERS = new Set<svc.PerspectiveLayerKind>(["background", "framing", "subject"]);
 
-// ─── RisuAI module regex import helper ────────────────────────────────────
+// ─── Import error response helper ────────────────────────────────────────
 
-function importRisuModuleRegexScripts(
-  userId: string,
-  characterId: string,
-  module: cardSvc.RisuModule | null
-): number {
-  if (!module?.regex?.length) return 0;
-  const scripts = cardSvc.convertRisuRegexScripts(module.regex, characterId);
-  let imported = 0;
-  for (const script of scripts) {
-    const result = regexSvc.createRegexScript(userId, script);
-    if (typeof result !== "string") imported++;
+function respondImportError(c: any, err: any, fallbackMessage: string) {
+  // Log every import failure server-side so silent 4xx responses are traceable.
+  // Generic 400s from the old code swallowed this — which is how a 500 MB
+  // decompression-cap hit looked like "no backend error" to operators.
+  console.error("[character import] failed:", err);
+  if (err instanceof cardSvc.CharacterImportError) {
+    return c.json({ error: err.message, code: err.code }, err.status);
   }
-  return imported;
+  return c.json({ error: err?.message || fallbackMessage }, 400);
 }
 
-async function importRisuExpressionAssets(
-  userId: string,
-  characterId: string,
-  assets: cardSvc.CharxExpressionAsset[]
-): Promise<number> {
-  if (!assets.length) return 0;
-  const config = await exprSvc.importFromAssets(userId, characterId, assets);
-  return Object.keys(config.mappings).length;
-}
-
-// ─── Auto-import embedded character book as world book ───────────────────
-
-function autoImportEmbeddedWorldbook(userId: string, characterId: string): void {
-  const character = svc.getCharacter(userId, characterId);
-  if (!character) return;
-
-  const charBook = character.extensions?.character_book;
-  const entries = Array.isArray(charBook?.entries)
-    ? charBook.entries
-    : Object.values(charBook?.entries || {});
-  if (entries.length === 0) return;
-
-  // Skip if world books are already linked (e.g. from Lumiverse modules)
-  const existingIds = getCharacterWorldBookIds(character.extensions);
-  if (existingIds.length > 0) return;
-
+// Bind any card-embedded regex scripts (Lumiverse bundle or SillyTavern) to a
+// freshly-imported character. Best-effort: the character already exists, so a
+// regex failure must not fail the import. CHARX imports bind their own bundle
+// via applyCharxModulesAndAssets, so this is only used on the non-CHARX paths.
+function importCardRegexBestEffort(userId: string, characterId: string, extensions: unknown): void {
   try {
-    const { worldBook } = wbSvc.importCharacterBook(userId, characterId, character.name, charBook);
-    const nextExtensions = setCharacterWorldBookIds(
-      { ...(character.extensions || {}) },
-      [...existingIds, worldBook.id],
-    );
-    svc.updateCharacter(userId, characterId, { extensions: nextExtensions });
-  } catch {
-    // Non-critical — character is still imported without the world book
+    regexSvc.importCharacterBoundRegexScripts(userId, characterId, extensions);
+  } catch (err) {
+    console.error("[character import] regex import failed:", err);
   }
+}
+
+// ─── Portable LoRA surfacing ──────────────────────────────────────────────
+//
+// The portable LoRA reference (lumiverse_image_gen_lora) rides along in a
+// character's `extensions` on every import format. We surface it in the import
+// response as `lumiverse_lora` so the UI can show "this character expects
+// <file> @ <weight>" and let the user confirm a binding. We deliberately do NOT
+// auto-bind it: the runtime binding is per-user and may point at a different
+// local LoRA library (and source_url is never auto-fetched).
+function loraSurface(
+  character: { extensions?: Record<string, any> } | null | undefined,
+): { lumiverse_lora?: characterLoraSvc.PortableLoraReference } {
+  const ref = character ? characterLoraSvc.readPortableLoraReference(character) : null;
+  return ref ? { lumiverse_lora: ref } : {};
 }
 
 // ─── URL parsing helpers ──────────────────────────────────────────────────
@@ -79,6 +66,20 @@ const CHUB_DOMAINS = ["chub.ai", "www.chub.ai", "characterhub.org", "www.charact
 const JANNY_DOMAINS = ["janitorai.com", "www.janitorai.com", "jannyai.com", "www.jannyai.com"];
 
 function parseChubUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (!CHUB_DOMAINS.includes(parsed.hostname.toLowerCase())) return null;
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const start = segments[0]?.toLowerCase() === "characters" ? 1 : 0;
+    if (segments.length - start >= 2) {
+      return segments.slice(start, start + 2).map(decodeURIComponent).join("/");
+    }
+    return null;
+  } catch {
+    // Fall through to legacy loose parsing below for pasted strings that URL()
+    // will not accept but still contain a recognizable Chub path.
+  }
+
   const parts = url.split("/");
   let domainIdx = -1;
   for (let i = 0; i < parts.length; i++) {
@@ -92,7 +93,7 @@ function parseChubUrl(url: string): string | null {
   const rest = parts.slice(domainIdx + 1);
   // Strip leading "characters" segment if present
   const start = rest[0]?.toLowerCase() === "characters" ? 1 : 0;
-  const pathParts = rest.slice(start).filter(Boolean);
+  const pathParts = rest.slice(start).map((part) => part.split(/[?#]/, 1)[0]).filter(Boolean);
   if (pathParts.length >= 2) {
     return pathParts.slice(0, 2).join("/");
   }
@@ -114,17 +115,103 @@ function parseJannyUrl(url: string): string | null {
 
 // ─── Chub.ai character fetcher ────────────────────────────────────────────
 
-async function fetchChubCharacter(chubPath: string, userId: string) {
-  const apiUrl = `https://gateway.chub.ai/api/characters/${chubPath}?full=true`;
-  const res = await safeFetch(apiUrl, {
-    timeoutMs: 15_000,
-    headers: { "Accept": "application/json", "User-Agent": "Lumiverse" },
-  });
-  if (!res.ok) {
-    throw new Error(`Chub API returned ${res.status}`);
-  }
+const CHUB_API_BASES = ["https://gateway.chub.ai/api", "https://api.chub.ai/api"];
 
-  const data = await res.json() as any;
+async function fetchChubJson(path: string): Promise<Record<string, any>> {
+  let lastStatus = 0;
+  for (const base of CHUB_API_BASES) {
+    const res = await safeFetch(`${base}/${path}`, {
+      timeoutMs: 15_000,
+      maxBytes: 100 * 1024 * 1024,
+      headers: { "Accept": "application/json", "User-Agent": "Lumiverse" },
+    });
+    if (res.ok) return await res.json() as Record<string, any>;
+    lastStatus = res.status;
+  }
+  throw new Error(`Chub API returned ${lastStatus || "no response"}`);
+}
+
+async function fetchChubLorebookDefinition(idOrPath: string | number): Promise<Record<string, any> | null> {
+  try {
+    const raw = String(idOrPath).replace(/^lorebooks\//, "");
+    const data = await fetchChubJson(`lorebooks/${raw}?full=true`);
+    return data?.node?.definition ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function buildChubCharacterBook(def: Record<string, any>, data: Record<string, any>): Promise<Record<string, any> | undefined> {
+  const embeddedBook = def.embedded_lorebook ?? def.character_book;
+  const embeddedEntries = Array.isArray(embeddedBook?.entries) ? embeddedBook.entries : [];
+  const relatedLorebooks = Array.isArray(data.node?.related_lorebooks) ? data.node.related_lorebooks : [];
+
+  if (relatedLorebooks.length === 0) return embeddedBook || undefined;
+
+  const linkedBooks = await Promise.all(
+    relatedLorebooks.map(async (id: number) => {
+      const relatedNode = data.nodes?.[String(id)];
+      const definition = await fetchChubLorebookDefinition(relatedNode?.fullPath || id);
+      const entries = definition?.embedded_lorebook?.entries ?? definition?.character_book?.entries;
+      if (!Array.isArray(entries) || entries.length === 0) return null;
+      return {
+        id,
+        name: relatedNode?.name || definition?.name || "Linked Lorebook",
+        entries,
+      };
+    })
+  );
+
+  const linkedEntries = linkedBooks.flatMap((book) => book?.entries ?? []);
+  const entries = [...embeddedEntries, ...linkedEntries];
+  if (entries.length === 0) return embeddedBook || undefined;
+
+  return {
+    ...(embeddedBook && typeof embeddedBook === "object" ? embeddedBook : {}),
+    name: linkedEntries.length > 0 ? `${def.name || data.node?.name || "Character"} Lorebooks` : embeddedBook?.name,
+    entries,
+  };
+}
+
+async function fetchChubGalleryUrls(projectId: unknown): Promise<string[]> {
+  if (!projectId) return [];
+  try {
+    const data = await fetchChubJson(`gallery/project/${projectId}`);
+    return (Array.isArray(data.nodes) ? data.nodes : [])
+      .map((n: any) => typeof n?.primary_image_path === "string" ? n.primary_image_path : null)
+      .filter((url: string | null): url is string => !!url);
+  } catch {
+    return [];
+  }
+}
+
+async function importGalleryFromUrls(userId: string, characterId: string, urls: string[]): Promise<void> {
+  const downloaded = await mapWithConcurrency(urls, 6, async (url): Promise<File | null> => {
+    try {
+      const res = await safeFetch(url, { timeoutMs: 15_000, maxBytes: 50 * 1024 * 1024 });
+      if (!res.ok) return null;
+      const buf = await res.arrayBuffer();
+      const contentType = res.headers.get("content-type") || "image/webp";
+      const ext = contentType.includes("png") ? "png" : contentType.includes("jpeg") || contentType.includes("jpg") ? "jpg" : "webp";
+      return new File([buf], `chub_gallery_${crypto.randomUUID()}.${ext}`, { type: contentType });
+    } catch {
+      return null;
+    }
+  });
+
+  const files = downloaded.filter((file): file is File => file !== null);
+  if (files.length === 0) return;
+  if (files.length > 3) {
+    await gallerySvc.uploadBulkToGallery(userId, characterId, files);
+    return;
+  }
+  for (const file of files) {
+    try { await gallerySvc.uploadToGallery(userId, characterId, file); } catch { /* skip */ }
+  }
+}
+
+async function fetchChubCharacter(chubPath: string, userId: string) {
+  const data = await fetchChubJson(`characters/${chubPath}?full=true`);
   const node = data?.node;
   if (!node) throw new Error("Invalid Chub API response: missing node");
 
@@ -146,8 +233,8 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
     spec_version: "2.0",
     data: {
       name,
-      description: def.personality ?? "",
-      personality: def.tavern_personality ?? "",
+      description: def.personality ?? def.description ?? "",
+      personality: def.tavern_personality ?? def.personality ?? "",
       scenario: def.scenario ?? "",
       first_mes: def.first_message ?? def.first_mes ?? "",
       mes_example: def.example_dialogs ?? def.mes_example ?? "",
@@ -161,13 +248,14 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
     },
   };
 
-  const characterBook = def.embedded_lorebook ?? def.character_book;
+  const characterBook = await buildChubCharacterBook(def, data);
   if (characterBook) {
-    card.data.extensions = { ...card.data.extensions, character_book: characterBook };
+    card.data.character_book = characterBook;
   }
 
   const cardInput = cardSvc.parseCardJson(card);
   const character = svc.createCharacter(userId, cardInput);
+  importCardRegexBestEffort(userId, character.id, cardInput.extensions);
 
   // Fetch avatar image
   const avatarUrl = node.max_res_url || node.avatar_url;
@@ -207,6 +295,12 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
   }
 
   autoImportEmbeddedWorldbook(userId, character.id);
+
+  const galleryUrls = await fetchChubGalleryUrls(node.id);
+  if (galleryUrls.length > 0) {
+    await importGalleryFromUrls(userId, character.id, galleryUrls);
+  }
+
   return svc.getCharacter(userId, character.id)!;
 }
 
@@ -249,7 +343,7 @@ async function fetchJannyCharacter(uuid: string, userId: string) {
   const buf = await pngRes.arrayBuffer();
   const file = new File([buf], `${uuid}.png`, { type: "image/png" });
 
-  const cardInput = await cardSvc.extractCardFromPng(file);
+  const cardInput = cardSvc.normalizeJannyCharacterInput(await cardSvc.extractCardFromPng(file));
   const character = svc.createCharacter(userId, cardInput);
 
   // Use the PNG as avatar
@@ -263,14 +357,38 @@ async function fetchJannyCharacter(uuid: string, userId: string) {
 
 // ─── Generic URL fetcher (PNG or JSON) ────────────────────────────────────
 
+/**
+ * Detect a binary card container by its magic bytes. Needed because some
+ * sources (e.g. BotBooru's /download/png/{id}) serve cards from extensionless
+ * URLs, so neither the `.png`/`.charx` suffix nor a trustworthy Content-Type
+ * may be present.
+ */
+function sniffCardContainer(buf: ArrayBuffer): "png" | "zip" | null {
+  const b = new Uint8Array(buf, 0, Math.min(8, buf.byteLength));
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    b.length >= 8 &&
+    b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+    b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+  ) {
+    return "png";
+  }
+  // ZIP (charx): "PK" followed by a local-file / central-dir / end-of-archive marker
+  if (b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && (b[2] === 0x03 || b[2] === 0x05 || b[2] === 0x07)) {
+    return "zip";
+  }
+  return null;
+}
+
 async function fetchGenericCharacter(url: string, userId: string) {
   const res = await safeFetch(url, { timeoutMs: 15_000, maxBytes: 100 * 1024 * 1024 });
   if (!res.ok) throw new Error(`Failed to fetch URL: ${res.status}`);
 
   const contentType = res.headers.get("content-type") || "";
   const buf = await res.arrayBuffer();
+  const sniffed = sniffCardContainer(buf);
 
-  if (contentType.includes("image/png") || url.toLowerCase().endsWith(".png")) {
+  if (sniffed === "png" || contentType.includes("image/png") || url.toLowerCase().endsWith(".png")) {
     const file = new File([buf], "import.png", { type: "image/png" });
     const cardInput = await cardSvc.extractCardFromPng(file);
     const character = svc.createCharacter(userId, cardInput);
@@ -283,29 +401,11 @@ async function fetchGenericCharacter(url: string, userId: string) {
     return svc.getCharacter(userId, character.id)!;
   }
 
-  if (contentType.includes("application/zip") || url.toLowerCase().endsWith(".charx")) {
+  if (sniffed === "zip" || contentType.includes("application/zip") || url.toLowerCase().endsWith(".charx")) {
     const file = new File([buf], "import.charx", { type: "application/zip" });
-    const { card: cardInput, avatarFile, galleryFiles, risuModule, expressionAssets } = await cardSvc.extractCardFromCharx(file);
-    const character = svc.createCharacter(userId, cardInput);
-
-    if (avatarFile) {
-      const image = await images.uploadImage(userId, avatarFile);
-      svc.setCharacterImage(userId, character.id, image.id);
-      svc.setCharacterAvatar(userId, character.id, image.filename);
-    }
-
-    if (galleryFiles.length > 3) {
-      await gallerySvc.uploadBulkToGallery(userId, character.id, galleryFiles);
-    } else {
-      for (const gf of galleryFiles) {
-        try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
-      }
-    }
-
-    importRisuModuleRegexScripts(userId, character.id, risuModule);
-    await importRisuExpressionAssets(userId, character.id, expressionAssets);
-
-    autoImportEmbeddedWorldbook(userId, character.id);
+    const charxResult = await cardSvc.extractCardFromCharx(file);
+    const character = svc.createCharacter(userId, charxResult.card);
+    await applyCharxModulesAndAssets(userId, character, charxResult);
     return svc.getCharacter(userId, character.id)!;
   }
 
@@ -345,6 +445,8 @@ app.get("/summary", (c) => {
   const search = c.req.query("search") || undefined;
   const rawTags = c.req.query("tags");
   const tags = rawTags ? rawTags.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
+  const rawExcludeTags = c.req.query("exclude_tags");
+  const excludeTags = rawExcludeTags ? rawExcludeTags.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
   const sort = c.req.query("sort") || undefined;
   const direction = (c.req.query("direction") as "asc" | "desc") || undefined;
   const filterMode = (c.req.query("filter") as "all" | "favorites" | "non-favorites") || undefined;
@@ -357,6 +459,7 @@ app.get("/summary", (c) => {
     svc.listCharacterSummaries(userId, pagination, {
       search,
       tags,
+      excludeTags,
       sort,
       direction,
       favoriteIds,
@@ -395,19 +498,27 @@ app.post("/import-url", async (c) => {
     const chubPath = parseChubUrl(url);
     if (chubPath) {
       character = await fetchChubCharacter(chubPath, userId);
-      return c.json({ character }, 201);
+      return c.json({ character, ...loraSurface(character) }, 201);
     }
 
     // Check for JannyAI URL
     const jannyId = parseJannyUrl(url);
     if (jannyId) {
       character = await fetchJannyCharacter(jannyId, userId);
-      return c.json({ character }, 201);
+      return c.json({ character, ...loraSurface(character) }, 201);
+    }
+
+    // Check for BotBooru URL → rewrite to the PNG download, which embeds a
+    // SillyTavern-compatible card *and* an avatar, then reuse the generic importer.
+    const botBooruPngUrl = rewriteBotBooruUrl(url, "png");
+    if (botBooruPngUrl) {
+      character = await fetchGenericCharacter(botBooruPngUrl, userId);
+      return c.json({ character, ...loraSurface(character) }, 201);
     }
 
     // Generic URL (direct PNG or JSON link)
     character = await fetchGenericCharacter(url, userId);
-    return c.json({ character }, 201);
+    return c.json({ character, ...loraSurface(character) }, 201);
   } catch (err: any) {
     if (err instanceof SSRFError) {
       return c.json({ error: err.message }, 400);
@@ -447,12 +558,13 @@ app.get("/:id/avatar", async (c) => {
   const tier = sizeParam === "sm" || sizeParam === "lg" ? sizeParam : undefined;
 
   // Prefer image_id, fall back to legacy avatar_path
-  if (info.image_id) {
-    const filepath = await images.getImageFilePath(userId, info.image_id, tier);
+  for (const imageId of [info.avatar_crop_image_id, info.image_id]) {
+    if (!imageId) continue;
+    const filepath = await images.getImageFilePath(userId, imageId, tier);
     if (filepath) {
       return createAvatarResolverResponse(
         filepath,
-        info.image_id + (tier ? `_${tier}` : ""),
+        imageId + (tier ? `_${tier}` : ""),
         c.req.header("If-None-Match")
       );
     }
@@ -477,6 +589,50 @@ app.post("/:id/duplicate", (c) => {
   const character = svc.duplicateCharacter(userId, c.req.param("id"));
   if (!character) return c.json({ error: "Not found" }, 404);
   return c.json(character, 201);
+});
+
+app.get("/:id/image-gen-lora", (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  if (!svc.getCharacter(userId, characterId)) {
+    return c.json({ error: "Not found" }, 404);
+  }
+  return c.json({ binding: characterLoraSvc.getCharacterLora(userId, characterId) });
+});
+
+app.put("/:id/image-gen-lora", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object") {
+    return c.json({ error: "Body must be a JSON object" }, 400);
+  }
+  if (typeof body.lora_name !== "string" || !body.lora_name.trim()) {
+    return c.json({ error: "lora_name is required" }, 400);
+  }
+  try {
+    const binding = characterLoraSvc.setCharacterLora(userId, characterId, {
+      lora_name: body.lora_name,
+      weight_model: body.weight_model,
+      weight_clip: body.weight_clip,
+      base_tags: typeof body.base_tags === "string" ? body.base_tags : undefined,
+      source_url: typeof body.source_url === "string" ? body.source_url : undefined,
+    });
+    return c.json({ binding });
+  } catch (err: any) {
+    if (err?.message === "Character not found") return c.json({ error: err.message }, 404);
+    return c.json({ error: err?.message || "Invalid binding" }, 400);
+  }
+});
+
+app.delete("/:id/image-gen-lora", (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  if (!svc.getCharacter(userId, characterId)) {
+    return c.json({ error: "Not found" }, 404);
+  }
+  characterLoraSvc.deleteCharacterLora(userId, characterId);
+  return c.json({ success: true });
 });
 
 app.get("/:id/export", async (c) => {
@@ -529,19 +685,87 @@ app.post("/:id/avatar", async (c) => {
 
   const formData = await c.req.formData();
   const file = formData.get("avatar") as File | null;
+  const originalFile = formData.get("original_avatar") as File | null;
   if (!file) return c.json({ error: "avatar file is required" }, 400);
 
-  // Clean up old image if present
-  if (char.image_id) images.deleteImage(userId, char.image_id);
-  if (char.avatar_path) await files.deleteAvatar(char.avatar_path);
-
-  const image = await images.uploadImage(userId, file);
-  svc.setCharacterImage(userId, char.id, image.id);
-  svc.setCharacterAvatar(userId, char.id, image.filename);
-  const updated = svc.getCharacter(userId, char.id);
+  const updated = await svc.replaceCharacterAvatar(userId, char.id, file, originalFile ?? undefined);
   if (!updated) return c.json({ error: "Not found" }, 404);
+  return c.json(updated);
+});
 
-  eventBus.emit(EventType.CHARACTER_EDITED, { id: char.id, character: updated }, userId);
+app.post("/:id/perspective-layers", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  if (!svc.getCharacter(userId, characterId)) return c.json({ error: "Not found" }, 404);
+
+  const formData = await c.req.formData();
+  const file = formData.get("image") as File | null;
+  if (!file) return c.json({ error: "image file is required" }, 400);
+  if (typeof file.type === "string" && file.type && !file.type.startsWith("image/")) {
+    return c.json({ error: "image file is required" }, 400);
+  }
+
+  const label = formData.get("label");
+  const intensityRaw = formData.get("intensity");
+  const intensity = typeof intensityRaw === "string" ? Number(intensityRaw) : undefined;
+
+  try {
+    const updated = await svc.addCharacterPerspectiveLayer(userId, characterId, file, {
+      label: typeof label === "string" ? label : undefined,
+      intensity,
+    });
+    if (!updated) return c.json({ error: "Not found" }, 404);
+    return c.json(updated, 201);
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Invalid image" }, 400);
+  }
+});
+
+app.put("/:id/perspective-layers", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !Array.isArray((body as any).layers)) {
+    return c.json({ error: "layers array is required" }, 400);
+  }
+
+  const updated = svc.updateCharacterPerspectiveLayers(userId, characterId, (body as any).layers);
+  if (!updated) return c.json({ error: "Not found" }, 404);
+  return c.json(updated);
+});
+
+app.post("/:id/perspective-layers/:layer", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  const layer = c.req.param("layer") as svc.PerspectiveLayerKind;
+  if (!PERSPECTIVE_LAYERS.has(layer)) return c.json({ error: "Invalid layer" }, 400);
+  if (!svc.getCharacter(userId, characterId)) return c.json({ error: "Not found" }, 404);
+
+  const formData = await c.req.formData();
+  const file = formData.get("image") as File | null;
+  if (!file) return c.json({ error: "image file is required" }, 400);
+  if (typeof file.type === "string" && file.type && !file.type.startsWith("image/")) {
+    return c.json({ error: "image file is required" }, 400);
+  }
+
+  try {
+    const updated = await svc.setCharacterPerspectiveLayer(userId, characterId, layer, file);
+    if (!updated) return c.json({ error: "Not found" }, 404);
+    return c.json(updated);
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Invalid image" }, 400);
+  }
+});
+
+app.delete("/:id/perspective-layers/:layer", (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  const layer = c.req.param("layer");
+
+  const updated = PERSPECTIVE_LAYERS.has(layer as svc.PerspectiveLayerKind)
+    ? svc.clearCharacterPerspectiveLayer(userId, characterId, layer as svc.PerspectiveLayerKind)
+    : svc.deleteCharacterPerspectiveLayer(userId, characterId, layer);
+  if (!updated) return c.json({ error: "Not found" }, 404);
   return c.json(updated);
 });
 
@@ -561,41 +785,27 @@ app.post("/import-bulk", async (c) => {
       success: boolean;
       character?: any;
       lorebook?: { name: string; entryCount: number };
+      lumiverse_lora?: characterLoraSvc.PortableLoraReference;
       error?: string;
       skipped?: boolean;
     }> = [];
 
     for (const file of files) {
       const filename = file.name || "unknown";
-      const filenameLower = filename.toLowerCase();
       try {
         let cardInput;
-        let avatarFile: File | null = null;
-        let charxGalleryFiles: File[] = [];
-        let charxAssetFiles: Map<string, File> | null = null;
-        let risuModule: cardSvc.RisuModule | null = null;
-        let expressionAssets: cardSvc.CharxExpressionAsset[] = [];
+        let pngAvatar: File | null = null;
+        let charxResult: cardSvc.CharxResult | null = null;
 
-        // Detect JPEG+ZIP polyglot (RisuAI card format)
-        const isJpeg = /\.jpe?g$/i.test(filenameLower) || file.type === "image/jpeg";
-        let isJpegPolyglot = false;
-        if (isJpeg) {
-          const peek = new Uint8Array(await file.slice(0, Math.min(file.size, 5_000_000)).arrayBuffer());
-          isJpegPolyglot = cardSvc.looksLikeJpegZipPolyglot(peek);
-        }
+        const detectedFormat = await cardSvc.detectCharacterImportFormat(file);
 
-        if (file.type === "image/png" || filenameLower.endsWith(".png")) {
+        if (detectedFormat === "png") {
           cardInput = await cardSvc.extractCardFromPng(file);
-          avatarFile = file;
-        } else if (filenameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed" || isJpegPolyglot) {
-          const charxResult = await cardSvc.extractCardFromCharx(file);
+          pngAvatar = file;
+        } else if (detectedFormat === "charx" || detectedFormat === "jpeg_polyglot") {
+          charxResult = await cardSvc.extractCardFromCharx(file);
           cardInput = charxResult.card;
-          avatarFile = charxResult.avatarFile;
-          charxGalleryFiles = charxResult.galleryFiles;
-          charxAssetFiles = charxResult.assetFiles;
-          risuModule = charxResult.risuModule;
-          expressionAssets = charxResult.expressionAssets;
-        } else if (isJpeg) {
+        } else if (detectedFormat === "jpeg") {
           // Plain JPEG with no embedded data — skip
           results.push({ filename, success: false, error: "JPEG file does not contain embedded character card data" });
           continue;
@@ -632,86 +842,35 @@ app.post("/import-bulk", async (c) => {
           svc.setCharacterSourceFilename(userId, character.id, filename);
         }
 
-        if (avatarFile) {
-          const image = await images.uploadImage(userId, avatarFile);
-          svc.setCharacterImage(userId, character.id, image.id);
-          svc.setCharacterAvatar(userId, character.id, image.filename);
-        }
-
-        // Upload gallery images, tracking archive path → image ID for inline asset resolution
-        const bulkAssetImageMap = new Map<string, string>();
-        if (charxAssetFiles) {
-          for (const [path, gf] of charxAssetFiles) {
-            if (avatarFile && gf.name === avatarFile.name) continue;
-            if (!/^assets\/(icon|other)\//i.test(path)) continue;
-            try {
-              const img = await images.uploadImage(userId, gf);
-              gallerySvc.addToGallery(userId, character.id, img.id);
-              bulkAssetImageMap.set(path, img.id);
-            } catch { /* skip */ }
-          }
+        if (charxResult) {
+          // Full CHARX processing (lumiverse_modules, gallery, inline assets,
+          // RisuAI module/expressions) shared with single & URL import so the
+          // bulk path keeps parity with the exporter.
+          await applyCharxModulesAndAssets(userId, character, charxResult);
         } else {
-          for (const gf of charxGalleryFiles) {
-            try { await gallerySvc.uploadToGallery(userId, character.id, gf); } catch { /* skip */ }
+          if (pngAvatar) {
+            const image = await images.uploadImage(userId, pngAvatar);
+            svc.setCharacterImage(userId, character.id, image.id);
+            svc.setCharacterAvatar(userId, character.id, image.filename);
           }
+          importCardRegexBestEffort(userId, character.id, cardInput.extensions);
+          autoImportEmbeddedWorldbook(userId, character.id);
         }
-
-        // Resolve inline asset references in character text fields
-        if (bulkAssetImageMap.size > 0) {
-          const resolvedFields = cardSvc.resolveInlineAssetReferences(
-            {
-              first_mes: character.first_mes,
-              description: character.description,
-              personality: character.personality,
-              scenario: character.scenario,
-              mes_example: character.mes_example,
-              system_prompt: character.system_prompt,
-              post_history_instructions: character.post_history_instructions,
-              creator_notes: character.creator_notes,
-              alternate_greetings: character.alternate_greetings,
-            },
-            bulkAssetImageMap,
-          );
-          if (Object.keys(resolvedFields).length > 0) {
-            svc.updateCharacter(userId, character.id, resolvedFields);
-          }
-
-          // Store Risu asset name → image ID mapping for display-time resolution
-          const risuAssetMap: Record<string, string> = {};
-          for (const [archivePath, imageId] of bulkAssetImageMap) {
-            const stem = cardSvc.fileStem(archivePath);
-            if (!risuAssetMap[stem]) risuAssetMap[stem] = imageId;
-          }
-          if (Object.keys(risuAssetMap).length > 0) {
-            const char = svc.getCharacter(userId, character.id);
-            if (char) {
-              svc.updateCharacter(userId, character.id, {
-                extensions: { ...(char.extensions || {}), risu_asset_map: risuAssetMap },
-              });
-            }
-          }
-        }
-
-        importRisuModuleRegexScripts(userId, character.id, risuModule);
-        await importRisuExpressionAssets(userId, character.id, expressionAssets);
-        autoImportEmbeddedWorldbook(userId, character.id);
 
         const imported = svc.getCharacter(userId, character.id)!;
 
         // Check for embedded lorebook
         let lorebook: { name: string; entryCount: number } | undefined;
         const charBook = imported.extensions?.character_book;
-        if (charBook?.entries?.length) {
-          const entries = Array.isArray(charBook.entries)
-            ? charBook.entries
-            : Object.values(charBook.entries);
+        const entryCount = wbSvc.countImportedWorldBookEntries(charBook?.entries);
+        if (entryCount > 0) {
           lorebook = {
             name: charBook.name || `${imported.name}'s Lorebook`,
-            entryCount: entries.length,
+            entryCount,
           };
         }
 
-        results.push({ filename, success: true, character: imported, lorebook });
+        results.push({ filename, success: true, character: imported, lorebook, ...loraSurface(imported) });
       } catch (err: any) {
         results.push({
           filename,
@@ -727,7 +886,24 @@ app.post("/import-bulk", async (c) => {
 
     return c.json({ results, summary: { total: files.length, imported, skipped, failed } }, 201);
   } catch (err: any) {
-    return c.json({ error: err.message || "Bulk import failed" }, 400);
+    return respondImportError(c, err, "Bulk import failed");
+  }
+});
+
+app.post("/import-tag-library", async (c) => {
+  const userId = c.get("userId");
+  const formData = await c.req.formData();
+  const file = formData.get("file");
+
+  if (!(file instanceof File) || file.size === 0) {
+    return c.json({ error: "TagLibrary backup file is required" }, 400);
+  }
+
+  try {
+    const result = await tagLibrarySvc.importTagLibraryBackup(userId, file);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Failed to import TagLibrary backup" }, 400);
   }
 });
 
@@ -741,259 +917,38 @@ app.post("/import", async (c) => {
       const file = formData.get("file") as File | null;
       if (!file) return c.json({ error: "file is required" }, 400);
 
-      const nameLower = file.name?.toLowerCase() ?? "";
+      const detectedFormat = await cardSvc.detectCharacterImportFormat(file);
 
-      // Detect file format — JPEG+ZIP polyglots (RisuAI card format) route to the CharX pipeline
-      const isPng = file.type === "image/png" || nameLower.endsWith(".png");
-      const isCharx = nameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed";
-      const isJpeg = /\.jpe?g$/i.test(nameLower) || file.type === "image/jpeg";
-      let isJpegPolyglot = false;
-      if (isJpeg && !isPng && !isCharx) {
-        const peek = new Uint8Array(await file.slice(0, Math.min(file.size, 5_000_000)).arrayBuffer());
-        isJpegPolyglot = cardSvc.looksLikeJpegZipPolyglot(peek);
-        if (!isJpegPolyglot) {
-          return c.json({ error: "JPEG file does not contain embedded character card data" }, 400);
-        }
-      }
-
-      if (isPng) {
+      if (detectedFormat === "png") {
         // PNG card — extract embedded JSON + use as avatar
         const cardInput = await cardSvc.extractCardFromPng(file);
         const character = svc.createCharacter(userId, cardInput);
         const image = await images.uploadImage(userId, file);
         svc.setCharacterImage(userId, character.id, image.id);
         svc.setCharacterAvatar(userId, character.id, image.filename);
+        importCardRegexBestEffort(userId, character.id, cardInput.extensions);
         autoImportEmbeddedWorldbook(userId, character.id);
         const imported = svc.getCharacter(userId, character.id)!;
-        return c.json({ character: imported }, 201);
-      } else if (isCharx || isJpegPolyglot) {
-        // CHARX archive (or JPEG+ZIP polyglot) — ZIP with card.json + optional avatar + gallery images + modules
+        return c.json({ character: imported, ...loraSurface(imported) }, 201);
+      } else if (detectedFormat === "charx" || detectedFormat === "jpeg_polyglot") {
+        // CHARX archive (or JPEG+ZIP polyglot) — ZIP with card.json + optional
+        // avatar + gallery images + lumiverse_modules. The full processing is
+        // shared with bulk & URL import so all paths stay in parity (see
+        // applyCharxModulesAndAssets).
         const charxResult = await cardSvc.extractCardFromCharx(file);
-        const { card: cardInput, avatarFile, risuModule, expressionAssets, lumiverseModules, assetFiles, expressionGroupAnalysis } = charxResult;
-        const character = svc.createCharacter(userId, cardInput);
-        // Track archive-path → image-id for resolving inline asset references in text fields
-        const assetImageMap = new Map<string, string>();
-        if (avatarFile) {
-          const image = await images.uploadImage(userId, avatarFile);
-          svc.setCharacterImage(userId, character.id, image.id);
-          svc.setCharacterAvatar(userId, character.id, image.filename);
-        }
-
-        // Track consumed asset paths so remaining go to gallery
-        const consumedPaths = new Set<string>();
-        let lumiverseModulesSummary: Record<string, any> | undefined;
-
-        if (lumiverseModules) {
-          const extensions: Record<string, any> = { ...(character.extensions || {}) };
-
-          // Import expressions from Lumiverse modules
-          if (lumiverseModules.expressions?.mappings) {
-            const exprMappings: Record<string, string> = {};
-            for (const [label, archivePath] of Object.entries(lumiverseModules.expressions.mappings)) {
-              const assetFile = assetFiles.get(archivePath);
-              if (assetFile) {
-                const img = await images.uploadImage(userId, assetFile);
-                exprMappings[label] = img.id;
-                consumedPaths.add(archivePath);
-                assetImageMap.set(archivePath, img.id);
-              }
-            }
-            if (Object.keys(exprMappings).length > 0) {
-              extensions.expressions = {
-                enabled: lumiverseModules.expressions.enabled,
-                defaultExpression: lumiverseModules.expressions.defaultExpression,
-                mappings: exprMappings,
-              };
-            }
-          }
-
-          // Import expression groups from Lumiverse modules (multi-character)
-          if (lumiverseModules.expression_groups?.groups) {
-            const expressionGroups: Record<string, Record<string, string>> = {};
-
-            for (const [groupName, labelMap] of Object.entries(lumiverseModules.expression_groups.groups)) {
-              const groupMappings: Record<string, string> = {};
-              for (const [label, archivePath] of Object.entries(labelMap)) {
-                const assetFile = assetFiles.get(archivePath);
-                if (assetFile) {
-                  const img = await images.uploadImage(userId, assetFile);
-                  groupMappings[label] = img.id;
-                  consumedPaths.add(archivePath);
-                  assetImageMap.set(archivePath, img.id);
-                }
-              }
-              if (Object.keys(groupMappings).length > 0) {
-                expressionGroups[groupName] = groupMappings;
-              }
-            }
-
-            if (Object.keys(expressionGroups).length > 0) {
-              extensions.expression_groups = expressionGroups;
-            }
-          }
-
-          // Import alternate fields
-          if (lumiverseModules.alternate_fields) {
-            extensions.alternate_fields = lumiverseModules.alternate_fields;
-          }
-
-          // Import alternate avatars
-          const altAvatars: Array<{ id: string; image_id: string; label: string }> = [];
-          if (Array.isArray(lumiverseModules.alternate_avatars)) {
-            for (const av of lumiverseModules.alternate_avatars) {
-              const assetFile = assetFiles.get(av.path);
-              if (assetFile) {
-                const img = await images.uploadImage(userId, assetFile);
-                altAvatars.push({ id: av.id || crypto.randomUUID(), image_id: img.id, label: av.label });
-                consumedPaths.add(av.path);
-                assetImageMap.set(av.path, img.id);
-              }
-            }
-            if (altAvatars.length > 0) {
-              extensions.alternate_avatars = altAvatars;
-            }
-          }
-
-          // Import world books from Lumiverse modules
-          let importedWorldBookCount = 0;
-          if (Array.isArray(lumiverseModules.world_books) && lumiverseModules.world_books.length > 0) {
-            const importedBookIds: string[] = [];
-            for (const bookData of lumiverseModules.world_books) {
-              try {
-                const result = wbSvc.importLumiverseWorldBook(userId, character.id, bookData);
-                importedBookIds.push(result.worldBook.id);
-              } catch { /* skip individual failures */ }
-            }
-            if (importedBookIds.length > 0) {
-              const currentIds = getCharacterWorldBookIds(extensions);
-              Object.assign(extensions, setCharacterWorldBookIds(extensions, [...currentIds, ...importedBookIds]));
-              importedWorldBookCount = importedBookIds.length;
-            }
-          }
-
-          svc.updateCharacter(userId, character.id, { extensions });
-
-          lumiverseModulesSummary = {
-            has_expressions: !!extensions.expressions,
-            has_alternate_fields: !!lumiverseModules.alternate_fields,
-            has_alternate_avatars: altAvatars.length > 0,
-            has_world_books: importedWorldBookCount > 0,
-            world_book_count: importedWorldBookCount,
-            expression_count: Object.keys(extensions.expressions?.mappings || {}).length,
-            alternate_field_counts: lumiverseModules.alternate_fields
-              ? Object.fromEntries(
-                  Object.entries(lumiverseModules.alternate_fields).map(
-                    ([k, v]) => [k, Array.isArray(v) ? v.length : 0]
-                  )
-                )
-              : undefined,
-          };
-        }
-
-        // Upload remaining unconsumed asset images to gallery, tracking archive path → image ID
-        const remainingGalleryEntries: Array<{ path: string; file: File }> = [];
-        for (const [path, assetFile] of assetFiles) {
-          if (consumedPaths.has(path)) continue;
-          if (avatarFile && assetFile.name === avatarFile.name) continue;
-          if (/^assets\/(icon|other)\//i.test(path)) {
-            remainingGalleryEntries.push({ path, file: assetFile });
-          }
-        }
-        const galleryTotal = remainingGalleryEntries.length;
-        for (let i = 0; i < galleryTotal; i++) {
-          const { path, file: gf } = remainingGalleryEntries[i];
-          if (galleryTotal > 3) {
-            eventBus.emit(
-              EventType.IMPORT_GALLERY_PROGRESS,
-              { characterId: character.id, current: i + 1, total: galleryTotal, filename: gf.name },
-              userId,
-            );
-          }
-          try {
-            const img = await images.uploadImage(userId, gf);
-            gallerySvc.addToGallery(userId, character.id, img.id);
-            assetImageMap.set(path, img.id);
-          } catch { /* skip individual failures */ }
-        }
-
-        // Resolve inline asset references (embeded://, relative filenames, Risu <img="...">) in character text fields
-        const risuAssetMap: Record<string, string> = {};
-        if (assetImageMap.size > 0) {
-          const resolvedFields = cardSvc.resolveInlineAssetReferences(
-            {
-              first_mes: character.first_mes,
-              description: character.description,
-              personality: character.personality,
-              scenario: character.scenario,
-              mes_example: character.mes_example,
-              system_prompt: character.system_prompt,
-              post_history_instructions: character.post_history_instructions,
-              creator_notes: character.creator_notes,
-              alternate_greetings: character.alternate_greetings,
-            },
-            assetImageMap,
-          );
-          if (Object.keys(resolvedFields).length > 0) {
-            svc.updateCharacter(userId, character.id, resolvedFields);
-          }
-
-          // Store Risu asset name → image ID mapping for display-time resolution of
-          // AI-generated <img="AssetName"> tags (mirrors RisuAI's display-time asset lookup)
-          for (const [archivePath, imageId] of assetImageMap) {
-            const stem = cardSvc.fileStem(archivePath);
-            if (!risuAssetMap[stem]) risuAssetMap[stem] = imageId;
-          }
-          if (Object.keys(risuAssetMap).length > 0) {
-            const char = svc.getCharacter(userId, character.id);
-            if (char) {
-              svc.updateCharacter(userId, character.id, {
-                extensions: { ...(char.extensions || {}), risu_asset_map: risuAssetMap },
-              });
-            }
-          }
-        }
-
-        importRisuModuleRegexScripts(userId, character.id, risuModule);
-
-        // Multi-character expression handling: when expression assets span multiple
-        // characters (detected by prefix grouping), store structured expression_groups
-        // instead of a flat expression mapping. Display-time resolution uses risu_asset_map.
-        // Skip if Lumiverse modules already imported expression_groups.
-        const charForExprCheck = svc.getCharacter(userId, character.id);
-        const hasLumiverseGroups = !!charForExprCheck?.extensions?.expression_groups;
-        if (!hasLumiverseGroups && expressionGroupAnalysis?.isMultiCharacter && Object.keys(risuAssetMap).length > 0) {
-          const expressionGroups: Record<string, Record<string, string>> = {};
-          for (const [groupName, labelMap] of Object.entries(expressionGroupAnalysis.groups)) {
-            const groupMappings: Record<string, string> = {};
-            for (const [cleanLabel, originalLabel] of Object.entries(labelMap)) {
-              const imageId = risuAssetMap[originalLabel];
-              if (imageId) {
-                groupMappings[cleanLabel] = imageId;
-              }
-            }
-            if (Object.keys(groupMappings).length > 0) {
-              expressionGroups[groupName] = groupMappings;
-            }
-          }
-
-          if (Object.keys(expressionGroups).length > 0) {
-            const char = svc.getCharacter(userId, character.id);
-            if (char) {
-              svc.updateCharacter(userId, character.id, {
-                extensions: { ...(char.extensions || {}), expression_groups: expressionGroups },
-              });
-            }
-          }
-        } else {
-          await importRisuExpressionAssets(userId, character.id, expressionAssets);
-        }
-
-        autoImportEmbeddedWorldbook(userId, character.id);
+        const character = svc.createCharacter(userId, charxResult.card);
+        const { lumiverseModulesSummary } = await applyCharxModulesAndAssets(userId, character, charxResult, {
+          signal: c.req.raw.signal,
+          emitGalleryProgress: true,
+        });
         const imported = svc.getCharacter(userId, character.id)!;
         return c.json({
           character: imported,
           ...(lumiverseModulesSummary ? { lumiverse_modules: lumiverseModulesSummary } : {}),
+          ...loraSurface(imported),
         }, 201);
+      } else if (detectedFormat === "jpeg") {
+        return c.json({ error: "JPEG file does not contain embedded character card data" }, 400);
       } else {
         // JSON file — read text content, parse card spec
         const text = await file.text();
@@ -1005,9 +960,10 @@ app.post("/import", async (c) => {
         }
         const cardInput = cardSvc.parseCardJson(json);
         const character = svc.createCharacter(userId, cardInput);
+        importCardRegexBestEffort(userId, character.id, cardInput.extensions);
         autoImportEmbeddedWorldbook(userId, character.id);
         const imported = svc.getCharacter(userId, character.id)!;
-        return c.json({ character: imported }, 201);
+        return c.json({ character: imported, ...loraSurface(imported) }, 201);
       }
     } else {
       // Raw JSON body — support both card-spec wrapper and flat input
@@ -1015,12 +971,13 @@ app.post("/import", async (c) => {
       const input = (body.spec && body.data) ? cardSvc.parseCardJson(body) : body;
       if (!input.name) return c.json({ error: "name is required" }, 400);
       const character = svc.createCharacter(userId, input);
+      importCardRegexBestEffort(userId, character.id, input.extensions);
       autoImportEmbeddedWorldbook(userId, character.id);
       const imported = svc.getCharacter(userId, character.id)!;
-      return c.json({ character: imported }, 201);
+      return c.json({ character: imported, ...loraSurface(imported) }, 201);
     }
   } catch (err: any) {
-    return c.json({ error: err.message || "Failed to import character card" }, 400);
+    return respondImportError(c, err, "Failed to import character card");
   }
 });
 

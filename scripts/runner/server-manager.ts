@@ -1,4 +1,5 @@
-import { PROJECT_ROOT, ENTRY, STOP_FORCE_KILL_MS } from "./lib/constants.js";
+import { join } from "path";
+import { PROJECT_ROOT, ENTRY, STOP_SIGTERM_GRACE_MS } from "./lib/constants.js";
 
 export type ServerState = "starting" | "running" | "stopping" | "stopped" | "crashed";
 
@@ -50,12 +51,22 @@ async function readStream(
   }
 }
 
+// smol (low-memory GC mode) defaults on to preserve historical behavior and
+// keep low-RAM / Termux installs healthy. Operators opt out with
+// LUMIVERSE_SMOL=false (or 0/off/no) in .env — a choice that survives updates,
+// unlike an edit to the committed bunfig.toml.
+function smolEnabled(): boolean {
+  const v = (process.env.LUMIVERSE_SMOL ?? "").trim().toLowerCase();
+  return !(v === "false" || v === "0" || v === "off" || v === "no");
+}
+
 export function startServer(isDev: boolean): void {
   if (instance?.proc) return;
 
+  const smol = smolEnabled() ? ["--smol"] : [];
   const args = isDev
-    ? ["bun", "run", "--watch", ENTRY]
-    : ["bun", "run", ENTRY];
+    ? ["bun", ...smol, "--watch", ENTRY]
+    : ["bun", ...smol, ENTRY];
 
   const restartCount = instance ? instance.restartCount : 0;
 
@@ -67,6 +78,9 @@ export function startServer(isDev: boolean): void {
       ...process.env,
       FORCE_COLOR: "1",
       LUMIVERSE_RUNNER_IPC: "1",
+      ...("BUN_RUNTIME_TRANSPILER_CACHE_PATH" in process.env
+        ? { BUN_RUNTIME_TRANSPILER_CACHE_PATH: process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH }
+        : { BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(PROJECT_ROOT, "data", ".bun-transpiler-cache") }),
     },
     ipc(message) {
       // Handle IPC messages from the server child
@@ -121,15 +135,24 @@ export async function stopServer(): Promise<void> {
   console.log(`[${ts()}] [runner] Stopping server...`);
 
   const proc = instance.proc;
-  proc.kill();
 
-  // Force kill after timeout
+  // Graceful: SIGTERM triggers src/index.ts gracefulShutdown() (MCP,
+  // extensions, DB close).
+  try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+
+  // Escalation: if the shutdown hooks hang (wedged extension worker,
+  // blocked MCP disconnect, stuck WAL close), SIGKILL after the grace
+  // window. Without this the runner would block forever on proc.exited
+  // and the whole branch-switch / update flow would stall with no
+  // recovery path.
   const forceKill = setTimeout(() => {
     try {
-      proc.kill();
-      console.log(`[${ts()}] [runner] Force killed server (timeout).`);
+      proc.kill("SIGKILL");
+      console.log(
+        `[${ts()}] [runner] Server did not exit within ${STOP_SIGTERM_GRACE_MS}ms of SIGTERM; sent SIGKILL.`
+      );
     } catch { /* already dead */ }
-  }, STOP_FORCE_KILL_MS);
+  }, STOP_SIGTERM_GRACE_MS);
 
   await proc.exited;
   clearTimeout(forceKill);

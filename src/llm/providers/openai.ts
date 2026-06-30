@@ -1,5 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
+import { cancelStreamAndCloseConnection, createCooperativeYielder, fetchWithPreflightAbort, readJsonWithAbort, readWithAbort } from "../stream-utils";
 import type {
   GenerationRequest,
   GenerationResponse,
@@ -9,6 +10,7 @@ import type {
   LlmMessagePart,
 } from "../types";
 import { getTextContent } from "../types";
+import { throwProviderResponseError } from "../../utils/provider-errors";
 
 export class OpenAIProvider extends OpenAICompatibleProvider {
   readonly name = "openai";
@@ -20,6 +22,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       temperature: { ...COMMON_PARAMS.temperature, max: 2 },
       max_tokens: COMMON_PARAMS.max_tokens,
       top_p: COMMON_PARAMS.top_p,
+      top_k: COMMON_PARAMS.top_k,
       frequency_penalty: COMMON_PARAMS.frequency_penalty,
       presence_penalty: COMMON_PARAMS.presence_penalty,
       stop: COMMON_PARAMS.stop,
@@ -63,25 +66,54 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
   /** Format multipart content for the Responses API input format. */
   private formatResponsesContent(m: LlmMessage): string | any[] {
     if (typeof m.content === "string") return m.content;
-    return m.content.map((part: LlmMessagePart) => {
+    const out: any[] = [];
+    for (const part of m.content as LlmMessagePart[]) {
       switch (part.type) {
         case "text":
-          return { type: "input_text", text: part.text };
+          out.push({ type: "input_text", text: part.text });
+          break;
         case "image":
-          return {
-            type: "input_image",
-            image_url: `data:${part.mime_type};base64,${part.data}`,
-          };
+          out.push({ type: "input_image", image_url: `data:${part.mime_type};base64,${part.data}` });
+          break;
         case "audio":
-          return {
-            type: "input_audio",
-            data: part.data,
-            format: part.mime_type.split("/")[1],
-          };
-        default:
-          return { type: "input_text", text: "" };
+          out.push({ type: "input_audio", data: part.data, format: part.mime_type.split("/")[1] });
+          break;
       }
-    });
+    }
+    return out;
+  }
+
+  // Flatten one LlmMessage into the input-item sequence for /v1/responses.
+  // tool_use becomes a function_call item, tool_result becomes a
+  // function_call_output item. Message items (role+content) are emitted only
+  // when non-tool parts exist.
+  private flattenForResponses(m: LlmMessage): any[] {
+    if (typeof m.content === "string") {
+      return [{ role: m.role, content: m.content }];
+    }
+    const parts = m.content as LlmMessagePart[];
+    const out: any[] = [];
+    const nonTool = parts.filter((p) => p.type !== "tool_use" && p.type !== "tool_result");
+    if (nonTool.length > 0) {
+      out.push({ role: m.role, content: this.formatResponsesContent({ ...m, content: nonTool }) });
+    }
+    for (const p of parts) {
+      if (p.type === "tool_use") {
+        out.push({
+          type: "function_call",
+          call_id: p.id,
+          name: p.name,
+          arguments: JSON.stringify(p.input ?? {}),
+        });
+      } else if (p.type === "tool_result") {
+        out.push({
+          type: "function_call_output",
+          call_id: p.tool_use_id,
+          output: p.content,
+        });
+      }
+    }
+    return out;
   }
 
   /**
@@ -103,10 +135,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
 
     const body: Record<string, any> = {
       model: request.model,
-      input: inputMessages.map((m) => ({
-        role: m.role,
-        content: this.formatResponsesContent(m),
-      })),
+      input: inputMessages.flatMap((m) => this.flattenForResponses(m)),
     };
 
     if (systemMessages.length > 0) {
@@ -116,6 +145,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     // Map supported sampler params
     if (params.temperature !== undefined) body.temperature = params.temperature;
     if (params.top_p !== undefined) body.top_p = params.top_p;
+    if (params.top_k !== undefined) body.top_k = params.top_k;
     if (params.max_tokens !== undefined) body.max_output_tokens = params.max_tokens;
 
     // Passthrough: forward any extra params the caller set (e.g. reasoning,
@@ -164,19 +194,15 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const url = `${this.baseUrl(apiUrl)}/responses`;
     const body = this.buildResponsesBody(request);
 
-    const res = await fetch(url, {
+    const res = await fetchWithPreflightAbort(url, {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`${this.name} Responses API error ${res.status}: ${err}`);
-    }
+    if (!res.ok) await throwProviderResponseError(this.displayName, "responses generate", res);
 
-    const data = (await res.json()) as any;
+    const data = (await readJsonWithAbort<any>(res, request.signal)) as any;
 
     // Extract text content from response output
     let content = "";
@@ -249,37 +275,36 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const body = this.buildResponsesBody(request);
     body.stream = true;
 
-    const res = await fetch(url, {
+    const res = await fetchWithPreflightAbort(url, {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`${this.name} Responses API error ${res.status}: ${err}`);
-    }
+    if (!res.ok) await throwProviderResponseError(this.displayName, "responses stream", res);
 
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const maybeYield = createCooperativeYielder(64, request.signal);
 
     // Tool call accumulation for Responses API function_call streaming
     const fnCallBuffer: Map<string, { name: string; argsJson: string; callId: string }> = new Map();
 
+    let streamDoneNaturally = false;
     try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done, value } = await readWithAbort(reader, request.signal);
+      if (done) { streamDoneNaturally = !request.signal?.aborted; break; }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        for (const line of lines) {
+          await maybeYield();
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
         const payload = trimmed.slice(6);
         if (payload === "[DONE]") return;
 
@@ -375,7 +400,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       }
     }
     } finally {
-      reader.cancel().catch(() => {});
+      if (!streamDoneNaturally) await cancelStreamAndCloseConnection(reader, res);
     }
   }
 }

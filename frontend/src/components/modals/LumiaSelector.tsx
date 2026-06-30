@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Search, XCircle, ChevronDown, ChevronUp, Check, User, Sparkles } from 'lucide-react'
 import { IconAdjustments } from '@tabler/icons-react'
 import { CloseButton } from '@/components/shared/CloseButton'
@@ -17,26 +18,11 @@ interface LumiaSelectorProps {
   onClose: () => void
 }
 
-const MODE_CONFIG = {
-  definition: {
-    title: 'Select Definition',
-    subtitle: 'Choose the physical form for your Lumia',
-    icon: User,
-    field: 'definition' as const,
-  },
-  behavior: {
-    title: 'Select Behaviors',
-    subtitle: 'Choose behavioral traits for your Lumia',
-    icon: IconAdjustments,
-    field: 'behavior' as const,
-  },
-  personality: {
-    title: 'Select Personalities',
-    subtitle: 'Choose personality traits for your Lumia',
-    icon: Sparkles,
-    field: 'personality' as const,
-  },
-}
+const MODE_ICONS = {
+  definition: User,
+  behavior: IconAdjustments,
+  personality: Sparkles,
+} as const
 
 interface PackGroup {
   packId: string
@@ -45,15 +31,20 @@ interface PackGroup {
 }
 
 export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
+  const { t } = useTranslation('modals', { keyPrefix: 'lumiaSelector' })
+  const { t: tc } = useTranslation('common')
+
   const packs = useStore((s) => s.packs)
   const packsWithItems = useStore((s) => s.packsWithItems)
   const setPackWithItems = useStore((s) => s.setPackWithItems)
   const chimeraMode = useStore((s) => s.chimeraMode)
 
   const selectedDefinition = useStore((s) => s.selectedDefinition)
+  const selectedChimeraDefinitions = useStore((s) => s.selectedChimeraDefinitions)
   const selectedBehaviors = useStore((s) => s.selectedBehaviors)
   const selectedPersonalities = useStore((s) => s.selectedPersonalities)
   const setSelectedDefinition = useStore((s) => s.setSelectedDefinition)
+  const setSelectedChimeraDefinitions = useStore((s) => s.setSelectedChimeraDefinitions)
   const setSelectedBehaviors = useStore((s) => s.setSelectedBehaviors)
   const setSelectedPersonalities = useStore((s) => s.setSelectedPersonalities)
 
@@ -61,12 +52,29 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
   const [loadingPacks, setLoadingPacks] = useState(false)
   const [collapsedPacks, setCollapsedPacks] = useState<Set<string>>(new Set())
 
-  const config = MODE_CONFIG[mode]
-  const isMultiSelect = mode !== 'definition' || chimeraMode
-  const titleOverride = mode === 'definition' && chimeraMode ? 'Select Chimera Forms' : config.title
-  const subtitleOverride = mode === 'definition' && chimeraMode
-    ? 'Choose multiple physical forms to fuse into a Chimera'
-    : config.subtitle
+  const modeTitle = mode === 'definition'
+    ? t('definitionTitle')
+    : mode === 'behavior'
+      ? t('behaviorTitle')
+      : t('personalityTitle')
+  const modeSubtitle = mode === 'definition'
+    ? t('definitionSubtitle')
+    : mode === 'behavior'
+      ? t('behaviorSubtitle')
+      : t('personalitySubtitle')
+  const isMultiSelect = mode === 'definition' ? chimeraMode : !chimeraMode
+  const titleOverride = mode === 'definition' && chimeraMode ? t('chimeraDefinitionTitle') : modeTitle
+  const subtitleOverride = useMemo(() => {
+    if (mode === 'definition' && chimeraMode) return t('chimeraDefinitionSubtitle')
+    if (mode === 'behavior' && chimeraMode) return t('chimeraBehaviorSubtitle')
+    if (mode === 'personality' && chimeraMode) return t('chimeraPersonalitySubtitle')
+    return modeSubtitle
+  }, [mode, chimeraMode, modeSubtitle, t])
+
+  const effectiveChimeraDefinitions = useMemo(() => {
+    if (selectedChimeraDefinitions.length > 0) return selectedChimeraDefinitions
+    return selectedDefinition ? [selectedDefinition] : []
+  }, [selectedChimeraDefinitions, selectedDefinition])
 
   // Load all packs' items
   useEffect(() => {
@@ -109,71 +117,82 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
   const selectedIds = useMemo(() => {
     const set = new Set<string>()
     if (mode === 'definition') {
-      if (selectedDefinition) set.add(selectedDefinition.id)
+      const definitions = chimeraMode ? effectiveChimeraDefinitions : (selectedDefinition ? [selectedDefinition] : [])
+      definitions.forEach((item) => set.add(item.id))
     } else if (mode === 'behavior') {
       selectedBehaviors.forEach((b) => set.add(b.id))
     } else {
       selectedPersonalities.forEach((p) => set.add(p.id))
     }
     return set
-  }, [mode, selectedDefinition, selectedBehaviors, selectedPersonalities])
+  }, [mode, chimeraMode, effectiveChimeraDefinitions, selectedDefinition, selectedBehaviors, selectedPersonalities])
 
   const selectedCount = selectedIds.size
 
   const handleToggleItem = useCallback((item: LumiaItem) => {
     if (mode === 'definition') {
-      if (isMultiSelect) {
-        // Chimera mode: toggle in the behaviors array (chimera uses behaviors for fused defs)
-        const isSelected = selectedIds.has(item.id)
-        if (isSelected) {
-          if (selectedDefinition?.id === item.id) {
-            setSelectedDefinition(null)
-          }
-        } else {
-          if (!selectedDefinition) {
-            setSelectedDefinition(item)
-          }
-        }
-        // For chimera, we actually still use selectedDefinition for primary
-        // But the backend chimera reads behaviors for the fused items
-        // Let's keep it simple: single select toggles the definition
-        const current = selectedDefinition
-        if (current?.id === item.id) {
-          setSelectedDefinition(null)
-        } else {
-          setSelectedDefinition(item)
-        }
+      if (chimeraMode) {
+        const isSelected = effectiveChimeraDefinitions.some((definition) => definition.id === item.id)
+        const nextDefinitions = isSelected
+          ? effectiveChimeraDefinitions.filter((definition) => definition.id !== item.id)
+          : [...effectiveChimeraDefinitions, item]
+
+        setSelectedChimeraDefinitions(nextDefinitions)
+        setSelectedDefinition(nextDefinitions[0] ?? null)
       } else {
-        // Single select
-        if (selectedDefinition?.id === item.id) {
-          setSelectedDefinition(null)
-        } else {
-          setSelectedDefinition(item)
-        }
+        const nextDefinition = selectedDefinition?.id === item.id ? null : item
+        setSelectedDefinition(nextDefinition)
+        setSelectedChimeraDefinitions(nextDefinition ? [nextDefinition] : [])
       }
     } else if (mode === 'behavior') {
-      const isSelected = selectedBehaviors.some((b) => b.id === item.id)
-      if (isSelected) {
-        setSelectedBehaviors(selectedBehaviors.filter((b) => b.id !== item.id))
+      const isSelected = selectedBehaviors.some((behavior) => behavior.id === item.id)
+      if (isMultiSelect) {
+        if (isSelected) {
+          setSelectedBehaviors(selectedBehaviors.filter((behavior) => behavior.id !== item.id))
+        } else {
+          setSelectedBehaviors([...selectedBehaviors, item])
+        }
+      } else if (isSelected) {
+        setSelectedBehaviors([])
       } else {
-        setSelectedBehaviors([...selectedBehaviors, item])
+        setSelectedBehaviors([item])
       }
     } else {
-      const isSelected = selectedPersonalities.some((p) => p.id === item.id)
-      if (isSelected) {
-        setSelectedPersonalities(selectedPersonalities.filter((p) => p.id !== item.id))
+      const isSelected = selectedPersonalities.some((personality) => personality.id === item.id)
+      if (isMultiSelect) {
+        if (isSelected) {
+          setSelectedPersonalities(selectedPersonalities.filter((personality) => personality.id !== item.id))
+        } else {
+          setSelectedPersonalities([...selectedPersonalities, item])
+        }
+      } else if (isSelected) {
+        setSelectedPersonalities([])
       } else {
-        setSelectedPersonalities([...selectedPersonalities, item])
+        setSelectedPersonalities([item])
       }
     }
-  }, [mode, isMultiSelect, selectedDefinition, selectedBehaviors, selectedPersonalities,
-      setSelectedDefinition, setSelectedBehaviors, setSelectedPersonalities, selectedIds])
+  }, [
+    mode,
+    chimeraMode,
+    isMultiSelect,
+    selectedDefinition,
+    effectiveChimeraDefinitions,
+    selectedBehaviors,
+    selectedPersonalities,
+    setSelectedDefinition,
+    setSelectedChimeraDefinitions,
+    setSelectedBehaviors,
+    setSelectedPersonalities,
+  ])
 
   const handleClearAll = useCallback(() => {
-    if (mode === 'definition') setSelectedDefinition(null)
+    if (mode === 'definition') {
+      setSelectedDefinition(null)
+      setSelectedChimeraDefinitions([])
+    }
     else if (mode === 'behavior') setSelectedBehaviors([])
     else setSelectedPersonalities([])
-  }, [mode, setSelectedDefinition, setSelectedBehaviors, setSelectedPersonalities])
+  }, [mode, setSelectedDefinition, setSelectedChimeraDefinitions, setSelectedBehaviors, setSelectedPersonalities])
 
   const togglePack = useCallback((packId: string) => {
     setCollapsedPacks((prev) => {
@@ -190,7 +209,7 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
 
   const expandAll = useCallback(() => setCollapsedPacks(new Set()), [])
 
-  const Icon = config.icon
+  const Icon = MODE_ICONS[mode]
 
   return (
     <ModalShell isOpen onClose={onClose} maxWidth={600} className={styles.modal}>
@@ -202,9 +221,9 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
           <p className={styles.subtitle}>{subtitleOverride}</p>
         </div>
         {selectedCount > 0 && (
-          <button className={styles.clearBtn} onClick={handleClearAll} title="Clear all">
+          <button className={styles.clearBtn} onClick={handleClearAll} title={t('clearAll')}>
             <XCircle size={14} />
-            Clear ({selectedCount})
+            {t('clearCount', { count: selectedCount })}
           </button>
         )}
         <CloseButton onClick={onClose} iconSize={20} />
@@ -217,7 +236,7 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
           <input
             type="text"
             className={styles.searchInput}
-            placeholder={`Search ${config.title.replace('Select ', '').toLowerCase()}...`}
+            placeholder={t('searchPlaceholder')}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
@@ -230,10 +249,10 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
         {packGroups.length > 1 && (
           <div className={styles.controlBtns}>
             <button className={styles.controlBtn} onClick={expandAll}>
-              <ChevronDown size={12} /> Expand
+              <ChevronDown size={12} /> {t('expand')}
             </button>
             <button className={styles.controlBtn} onClick={collapseAll}>
-              <ChevronUp size={12} /> Collapse
+              <ChevronUp size={12} /> {t('collapse')}
             </button>
           </div>
         )}
@@ -242,10 +261,10 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
       {/* Content */}
       <div className={styles.scrollArea}>
         {loadingPacks ? (
-          <div className={styles.empty}>Loading packs...</div>
+          <div className={styles.empty}>{t('loadingPacks')}</div>
         ) : packGroups.length === 0 ? (
           <div className={styles.empty}>
-            {searchTerm ? 'No matching items found.' : 'No Lumia items available. Import packs in the Browser tab.'}
+            {searchTerm ? t('noMatches') : t('noItems')}
           </div>
         ) : (
           packGroups.map((group) => (
@@ -301,9 +320,9 @@ export default function LumiaSelector({ mode, onClose }: LumiaSelectorProps) {
       {/* Footer */}
       <div className={styles.footer}>
         <span className={styles.footerCount}>
-          {selectedCount} selected
+          {t('selectedCount', { count: selectedCount })}
         </span>
-        <button className={styles.doneBtn} onClick={onClose}>Done</button>
+        <button className={styles.doneBtn} onClick={onClose}>{tc('actions.done')}</button>
       </div>
     </ModalShell>
   )

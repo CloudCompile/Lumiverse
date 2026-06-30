@@ -14,7 +14,7 @@
 
 .headerTitle {
   margin: 0;
-  font-size: 18px;
+  font-size: calc(18px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
 }
@@ -47,16 +47,20 @@
  */
 .messagesCollapsibleBody {
   padding: 8px 12px 12px;
-  height: clamp(240px, 50vh, 600px);
-  display: flex;
-  flex-direction: column;
+  height: clamp(360px, calc(62vh / var(--lumiverse-ui-scale, 1)), 720px);
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: 12px;
 }
 
 .messagesScroll {
-  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  min-height: 0;
+  border-radius: 10px;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
+  background: var(--lumiverse-fill-subtle);
+  padding: 8px;
 }
 
 .messagesScroll::-webkit-scrollbar {
@@ -68,19 +72,58 @@
   border-radius: 4px;
 }
 
-.messageCard {
-  border-radius: 10px;
+.messageRow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
-  background: var(--lumiverse-fill-subtle);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
 
-.messageHeader {
+.messageRow:hover {
+  background: var(--lumiverse-fill);
+}
+
+.messageRowClipBoundary {
+  border-color: rgba(255, 171, 0, 0.48);
+  background:
+    linear-gradient(90deg, rgba(255, 171, 0, 0.11), rgba(255, 171, 0, 0.03) 44%, transparent),
+    transparent;
+  box-shadow: inset 3px 0 0 rgba(255, 171, 0, 0.72);
+}
+
+.messageRowClipBoundary:hover {
+  background:
+    linear-gradient(90deg, rgba(255, 171, 0, 0.14), rgba(255, 171, 0, 0.05) 44%, transparent),
+    var(--lumiverse-fill);
+}
+
+.messageRowActive {
+  border-color: var(--lumiverse-primary, #9370db);
+  background: var(--lumiverse-primary-010);
+  box-shadow: inset 0 0 0 1px var(--lumiverse-primary-015);
+}
+
+.messageRowClipBoundary.messageRowActive {
+  background:
+    linear-gradient(90deg, rgba(255, 171, 0, 0.12), rgba(255, 171, 0, 0.04) 44%, transparent),
+    var(--lumiverse-primary-010);
+  box-shadow:
+    inset 3px 0 0 rgba(255, 171, 0, 0.78),
+    inset 0 0 0 1px var(--lumiverse-primary-015);
+}
+
+.messageRowHeader {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--lumiverse-fill-subtle);
-  border-bottom: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.04));
 }
 
 .roleBadge {
@@ -89,58 +132,153 @@
   font-weight: 600;
 }
 
-/*
- * Each message renders its full content inline (no nested scroll container —
- * 600 nested scrollers used to crash mobile WebKit). Long messages get a
- * webkit-line-clamp preview with a Show full toggle.
- */
-.messageContent {
+.messagePreview {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  line-height: 1.45;
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.58));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.messageIndex {
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.3));
+}
+
+.messageClipBadge {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 171, 0, 0.3);
+  border-radius: 999px;
+  color: #ffab00;
+  background: rgba(255, 171, 0, 0.08);
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.messageReasoningBadge {
+  padding: 2px 6px;
+  border: 1px solid rgba(147, 112, 219, 0.28);
+  border-radius: 999px;
+  background: var(--lumiverse-primary-010);
+  color: var(--lumiverse-primary, #9370db);
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.messagePartBadge {
+  padding: 2px 6px;
+  border: 1px solid rgba(91, 192, 222, 0.24);
+  border-radius: 999px;
+  background: rgba(91, 192, 222, 0.1);
+  color: rgba(146, 219, 241, 0.92);
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.messageMeta {
+  margin-left: auto;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.4));
+  white-space: nowrap;
+}
+
+.messageInspector {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
+  background: var(--lumiverse-fill-subtle);
+  overflow: hidden;
+}
+
+.messageInspectorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 10px 12px;
+  border-bottom: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
+}
+
+.messageInspectorTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobileBackButton {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.72));
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.messageInspectorMeta {
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.45));
+  white-space: nowrap;
+}
+
+.messageInspectorContent {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.messageInspectorSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.messageInspectorLabel {
+  margin: 0;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.5));
+}
+
+.messageInspectorText {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
+  border-radius: 8px;
+  background: var(--lumiverse-fill);
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   line-height: 1.6;
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.85));
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.messageContentClamped {
-  display: -webkit-box;
-  -webkit-line-clamp: 8;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.messageIndex {
-  font-size: 10px;
-  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.3));
-}
-
-.expandButton {
-  margin-left: auto;
-  padding: 2px 8px;
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-radius: 4px;
-  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
-  background: transparent;
-  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.6));
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-
-.expandButton:hover {
-  background: var(--lumiverse-fill);
-  color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
-}
-
 .inlineExpandButton {
   align-self: flex-start;
   margin-top: 4px;
   padding: 2px 6px;
-  font-size: 10px;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
   border-radius: 4px;
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
   background: transparent;
@@ -157,7 +295,7 @@
 .chunkPreview {
   display: block;
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 11px;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
   line-height: 1.5;
   color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.5));
   white-space: pre-wrap;
@@ -182,7 +320,7 @@
   border: none;
   background: transparent;
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.85));
-  font-size: 13px;
+  font-size: calc(13px * var(--lumiverse-font-scale, 1));
   font-weight: 500;
   cursor: pointer;
   transition: background 120ms ease;
@@ -190,6 +328,14 @@
 
 .collapsibleHeader:hover {
   background: var(--lumiverse-fill-subtle);
+}
+
+.collapsibleTitleText {
+  min-width: 0;
+}
+
+.clippedInlineLabel {
+  color: #ffab00;
 }
 
 .chevron {
@@ -214,7 +360,7 @@
   gap: 8px;
   padding: 6px 10px;
   margin-bottom: 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-primary, #9370db);
 }
@@ -232,7 +378,7 @@
   padding: 6px 10px;
   border-radius: 6px;
   background: var(--lumiverse-fill-subtle);
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   min-height: 30px;
 }
 
@@ -244,7 +390,7 @@
 
 .breakdownSource {
   color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.4));
-  font-size: 11px;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
   flex-shrink: 0;
 }
 
@@ -252,7 +398,7 @@
   display: inline-flex;
   align-items: center;
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -262,9 +408,29 @@
   flex-shrink: 0;
 }
 
+.breakdownCacheHint {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.breakdownCacheHintCached {
+  background: rgba(217, 119, 87, 0.12);
+  color: rgba(217, 119, 87, 0.92);
+}
+
+.breakdownCacheHintMiss {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--lumiverse-text-dim, rgba(230, 230, 240, 0.4));
+}
+
 .breakdownTokens {
   margin-left: auto;
-  font-size: 11px;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-primary, #9370db);
   font-weight: 500;
   white-space: nowrap;
@@ -274,7 +440,7 @@
 /* ── Parameters JSON ── */
 .parametersJson {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   line-height: 1.6;
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.85));
   white-space: pre-wrap;
@@ -291,7 +457,7 @@
 }
 
 .prefillLabel {
-  font-size: 11px;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -301,17 +467,58 @@
 
 .prefillContent {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 12px;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
   line-height: 1.6;
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.85));
   white-space: pre-wrap;
+}
+
+/* ── Raw view ── */
+.rawView {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  line-height: 1.5;
+  color: var(--lumiverse-text, rgba(230, 230, 240, 0.85));
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
+  border-radius: 10px;
+  padding: 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── Footer ── */
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  border-top: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  flex-shrink: 0;
+}
+
+.footerTotal {
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  color: var(--lumiverse-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.footerMax {
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-muted);
+}
+
+.footerSpacer {
+  flex: 1;
 }
 
 /* ── Responsive ── */
 @media (max-width: 600px) {
   .modal {
     max-width: 100%;
-    max-height: 95vh;
+    max-height: calc(95vh / var(--lumiverse-ui-scale, 1));
   }
 
   .body {
@@ -320,5 +527,61 @@
 
   .header {
     padding: 16px;
+  }
+
+  .messagesCollapsibleBody {
+    display: block;
+    height: clamp(420px, calc(72vh / var(--lumiverse-ui-scale, 1)), 760px);
+  }
+
+  .messagesScroll,
+  .messageInspector {
+    height: 100%;
+  }
+
+  .messageInspector {
+    display: none;
+  }
+
+  .messagesMobileInspectorVisible .messagesScroll {
+    display: none;
+  }
+
+  .messagesMobileInspectorVisible .messageInspector {
+    display: flex;
+  }
+
+  .messageInspectorHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .messageInspectorMeta {
+    margin-left: 0;
+    white-space: normal;
+  }
+
+  .messageRowHeader {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .messageMeta {
+    margin-left: auto;
+    white-space: nowrap;
+  }
+
+  .mobileBackButton {
+    display: inline-flex;
+  }
+
+  .footer {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+
+  .footerSpacer {
+    display: none;
   }
 }

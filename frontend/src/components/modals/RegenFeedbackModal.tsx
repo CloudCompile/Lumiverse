@@ -1,4 +1,5 @@
 import { MessageSquareText } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { InputPromptModal } from '@/components/shared/InputPromptModal'
 
 interface RegenFeedbackModalProps {
@@ -14,16 +15,18 @@ export default function RegenFeedbackModal({
   onCancel,
   defaultValue,
 }: RegenFeedbackModalProps) {
+  const { t } = useTranslation('modals')
+
   return (
     <InputPromptModal
       isOpen={true}
-      title="Regeneration Feedback"
-      message="Provide guidance for the next generation. This will be included as an OOC instruction."
-      placeholder="e.g. Make the response shorter, focus on dialogue, change the tone to be more playful..."
+      title={t('regenFeedback.title')}
+      message={t('regenFeedback.message')}
+      placeholder={t('regenFeedback.placeholder')}
       defaultValue={defaultValue}
       multiline
-      submitLabel="Regenerate"
-      secondaryLabel="Skip"
+      submitLabel={t('regenFeedback.submit')}
+      secondaryLabel={t('regenFeedback.skip')}
       onSubmit={onSubmit}
       onSecondary={onSkip}
       onCancel={onCancel}

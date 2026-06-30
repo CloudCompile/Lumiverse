@@ -10,26 +10,22 @@ export function registerVariableMacros(): void {
     description: "Get a local (chat-scoped) variable value",
     returnType: "string",
     args: [{ name: "key", description: "Variable name" }],
-    handler: async (ctx) => {
+    handler: (ctx) => {
       const key = (ctx.args[0] || "").trim();
-      // Explicit local variable takes priority
-      if (ctx.env.variables.local.has(key)) {
-        return ctx.env.variables.local.get(key)!;
-      }
-      // Fall back: try resolving as a registered/dynamic macro so that
-      // dot-prefix shorthands like {{.persona}} resolve to {{persona}}
-      // when no variable of that name has been set.
       if (!key) return "";
-      const asMacro = `{{${key}}}`;
-      const resolved = await ctx.resolve(asMacro);
-      // If the evaluator couldn't resolve it (returned raw macro text), return empty
-      if (resolved === asMacro) return "";
-      return resolved;
+      // Explicit local variable lookup only. We do NOT fall back to evaluating
+      // the key as a macro — that allowed character/world-info content to
+      // smuggle macro side effects via keys like "setvar::foo::pwn", silently
+      // mutating variables on lookup.
+      return ctx.env.variables.local.has(key)
+        ? ctx.env.variables.local.get(key)!
+        : "";
     },
   });
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "setvar",
     category: "Variables",
     description: "Set a local variable (returns empty string)",
@@ -48,6 +44,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "addvar",
     category: "Variables",
     description: "Add a numeric value to a local variable",
@@ -68,6 +65,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "incvar",
     category: "Variables",
     description: "Increment a local variable by 1",
@@ -84,6 +82,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "decvar",
     category: "Variables",
     description: "Decrement a local variable by 1",
@@ -100,6 +99,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "hasvar",
     category: "Variables",
     description: "Check if a local variable exists (returns 'true' or 'false')",
@@ -114,6 +114,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "deletevar",
     category: "Variables",
     description: "Delete a local variable",
@@ -137,23 +138,18 @@ export function registerVariableMacros(): void {
     returnType: "string",
     args: [{ name: "key", description: "Variable name" }],
     aliases: ["getglobalvar"],
-    handler: async (ctx) => {
+    handler: (ctx) => {
       const key = (ctx.args[0] || "").trim();
-      // Explicit global variable takes priority
-      if (ctx.env.variables.global.has(key)) {
-        return ctx.env.variables.global.get(key)!;
-      }
-      // Fall back: try resolving as a registered/dynamic macro
       if (!key) return "";
-      const asMacro = `{{${key}}}`;
-      const resolved = await ctx.resolve(asMacro);
-      if (resolved === asMacro) return "";
-      return resolved;
+      return ctx.env.variables.global.has(key)
+        ? ctx.env.variables.global.get(key)!
+        : "";
     },
   });
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "setgvar",
     category: "Variables",
     description: "Set a global variable",
@@ -173,6 +169,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "addgvar",
     category: "Variables",
     description: "Add a numeric value to a global variable",
@@ -194,6 +191,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "incgvar",
     category: "Variables",
     description: "Increment a global variable by 1",
@@ -211,6 +209,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "decgvar",
     category: "Variables",
     description: "Decrement a global variable by 1",
@@ -228,6 +227,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "hasgvar",
     category: "Variables",
     description: "Check if a global variable exists (returns 'true' or 'false')",
@@ -242,6 +242,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "deletegvar",
     category: "Variables",
     description: "Delete a global variable",
@@ -264,21 +265,18 @@ export function registerVariableMacros(): void {
     description: "Get a chat-scoped persisted variable value",
     returnType: "string",
     args: [{ name: "key", description: "Variable name" }],
-    handler: async (ctx) => {
+    handler: (ctx) => {
       const key = (ctx.args[0] || "").trim();
-      if (ctx.env.variables.chat.has(key)) {
-        return ctx.env.variables.chat.get(key)!;
-      }
       if (!key) return "";
-      const asMacro = `{{${key}}}`;
-      const resolved = await ctx.resolve(asMacro);
-      if (resolved === asMacro) return "";
-      return resolved;
+      return ctx.env.variables.chat.has(key)
+        ? ctx.env.variables.chat.get(key)!
+        : "";
     },
   });
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "setchatvar",
     category: "Variables",
     description: "Set a chat-scoped persisted variable (persists across generations)",
@@ -298,6 +296,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "addchatvar",
     category: "Variables",
     description: "Add a numeric value to a chat-scoped persisted variable",
@@ -319,6 +318,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "incchatvar",
     category: "Variables",
     description: "Increment a chat-scoped persisted variable by 1",
@@ -336,6 +336,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "decchatvar",
     category: "Variables",
     description: "Decrement a chat-scoped persisted variable by 1",
@@ -353,6 +354,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "haschatvar",
     category: "Variables",
     description: "Check if a chat-scoped persisted variable exists (returns 'true' or 'false')",
@@ -366,6 +368,7 @@ export function registerVariableMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
     name: "deletechatvar",
     category: "Variables",
     description: "Delete a chat-scoped persisted variable",

@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Upload } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
@@ -21,6 +22,9 @@ interface Props {
 }
 
 export default function ImportWorldBookModal({ onImport, onClose }: Props) {
+  const { t } = useTranslation('modals', { keyPrefix: 'importWorldBook' })
+  const { t: tc } = useTranslation('common')
+
   const [activeTab, setActiveTab] = useState<ImportTab>('file')
 
   // File state
@@ -50,10 +54,10 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
       const result = await worldBooksApi.importJson(payload)
       onImport(result)
     } catch (e: any) {
-      setFileError(e.message || 'Failed to import file')
+      setFileError(e.message || t('importFailed'))
       setFileLoading(false)
     }
-  }, [onImport])
+  }, [onImport, t])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -71,15 +75,15 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
       const result = await worldBooksApi.importUrl(url.trim())
       onImport(result)
     } catch (e: any) {
-      setUrlError(e.message || 'Failed to import from URL')
+      setUrlError(e.message || t('urlImportFailed'))
       setUrlLoading(false)
     }
-  }, [url, onImport])
+  }, [url, onImport, t])
 
   return (
     <ModalShell isOpen={true} onClose={onClose} maxWidth={620}>
       <div className={styles.header}>
-        <h2 className={styles.title}>Import World Book</h2>
+        <h2 className={styles.title}>{t('title')}</h2>
         <CloseButton onClick={onClose} />
       </div>
 
@@ -92,7 +96,7 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
             className={clsx(styles.tab, activeTab === tab && styles.tabActive)}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'file' ? 'File Upload' : 'From URL'}
+            {tab === 'file' ? t('fileUpload') : t('fromUrl')}
           </button>
         ))}
       </div>
@@ -109,8 +113,8 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
             onClick={() => fileInputRef.current?.click()}
           >
             <Upload size={24} style={{ margin: '0 auto 8px', opacity: 0.5, display: 'block' }} />
-            <div className={styles.dropZoneText}>Drop a JSON file here or click to browse</div>
-            <div className={styles.dropZoneSub}>Supports standard world book / lorebook format</div>
+            <div className={styles.dropZoneText}>{t('dropZone')}</div>
+            <div className={styles.dropZoneSub}>{t('dropZoneSub')}</div>
           </div>
           <input
             ref={fileInputRef}
@@ -122,7 +126,7 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
               if (file) handleFile(file)
             }}
           />
-          {fileLoading && <div className={styles.status}>Importing...</div>}
+          {fileLoading && <div className={styles.status}>{t('importing')}</div>}
         </div>
       )}
 
@@ -131,7 +135,7 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
         <div className={styles.body}>
           {urlError && <div className={styles.error}>{urlError}</div>}
           <div className={styles.fieldGroup}>
-            <label className={styles.fieldLabel}>World Book URL</label>
+            <label className={styles.fieldLabel}>{t('urlLabel')}</label>
             <input
               type="text"
               className={styles.fieldInput}
@@ -147,14 +151,14 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
             disabled={!url.trim() || urlLoading}
             onClick={handleUrlImport}
           >
-            {urlLoading ? 'Importing...' : 'Import'}
+            {urlLoading ? t('importing') : tc('actions.import')}
           </Button>
         </div>
       )}
 
       <div className={styles.footer}>
         <Button variant="ghost" onClick={onClose}>
-          Close
+          {tc('actions.close')}
         </Button>
       </div>
     </ModalShell>

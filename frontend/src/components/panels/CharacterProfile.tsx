@@ -1,21 +1,62 @@
-import { useState, useEffect, useCallback, type CSSProperties } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react'
 import { useParams } from 'react-router'
+import { AnimatePresence, motion } from 'motion/react'
+import { Marked } from 'marked'
 import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
 import { getCharacterAvatarLargeUrl, getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
+import { sanitizeRichHtml } from '@/lib/richHtmlSanitizer'
 import { useStore } from '@/store'
+import MessageContent from '@/components/chat/MessageContent'
 import LazyImage from '@/components/shared/LazyImage'
 import { EditorSection } from '@/components/shared/FormComponents'
 import {
   User, Users, BookOpen, MessageSquare, Sparkles, FileText,
   Pencil, Settings2, ChevronRight,
 } from 'lucide-react'
-import { extractPalette } from '@/lib/colorExtraction'
+import { useTranslation } from 'react-i18next'
+import { extractPalette, getSurfaceColor, type ImagePalette, type RGB } from '@/lib/colorExtraction'
 import { deriveHeroTextVars } from '@/lib/characterTheme'
 import type { Character } from '@/types/api'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import clsx from 'clsx'
 import styles from './CharacterProfile.module.css'
+
+const profileMarked = new Marked({ gfm: true, breaks: true })
+const HERO_CACHE_LIMIT = 60
+const heroPaletteCache = new Map<string, Promise<ImagePalette>>()
+const heroTextVarsCache = new Map<string, CSSProperties>()
+type ProfileViewMode = 'profile' | 'creatorNotes'
+
+function rememberCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V): V {
+  if (cache.has(key)) cache.delete(key)
+  cache.set(key, value)
+  if (cache.size > HERO_CACHE_LIMIT) {
+    const oldestKey = cache.keys().next().value
+    if (oldestKey !== undefined) cache.delete(oldestKey)
+  }
+  return value
+}
+
+function getCachedPalette(src: string): Promise<ImagePalette> {
+  const cached = heroPaletteCache.get(src)
+  if (cached) return cached
+
+  const promise = extractPalette(src).catch((err) => {
+    heroPaletteCache.delete(src)
+    throw err
+  })
+  return rememberCacheEntry(heroPaletteCache, src, promise)
+}
+
+function surfaceKey(surface: RGB | null): string {
+  return surface ? `${surface.r},${surface.g},${surface.b}` : 'none'
+}
+
+function renderProfileMarkdown(text: string): string {
+  const html = profileMarked.parse(text, { async: false }) as string
+  return sanitizeRichHtml(html)
+}
 
 export default function CharacterProfile() {
   const params = useParams<{ id: string }>()
@@ -67,11 +108,17 @@ function SingleCharacterProfile({
   setEditingCharacterId: (id: string | null) => void
   setDrawerTab: (tab: string) => void
 }) {
+  const { t } = useTranslation('panels')
+  const activePersonaId = useStore((s) => s.activePersonaId)
+  const personas = useStore((s) => s.personas)
   const charId = paramId || activeCharacterId
   const storedCharacter = charId ? characters.find((entry) => entry.id === charId) ?? null : null
   const [character, setCharacter] = useState<Character | null>(storedCharacter)
   const [loading, setLoading] = useState(false)
   const [heroTextVars, setHeroTextVars] = useState<CSSProperties | undefined>(undefined)
+  const [heroImageLoadedUrl, setHeroImageLoadedUrl] = useState<string | null>(null)
+  const [activeView, setActiveView] = useState<ProfileViewMode>('profile')
+  const heroMetaRef = useRef<HTMLDivElement>(null)
 
   const handleEditCharacter = useCallback(() => {
     if (!charId) return
@@ -93,9 +140,40 @@ function SingleCharacterProfile({
   }, [charId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const avatarUrl = getCharacterAvatarLargeUrl(character) ?? ''
+  // Stored images resolve to the large WebP thumbnail tier (`?size=lg`), which
+  // is plenty for palette sampling and avoids decoding original PNG cards.
+  const heroSampleUrl = avatarUrl
 
   useEffect(() => {
-    if (!avatarUrl) {
+    setHeroTextVars(undefined)
+  }, [avatarUrl])
+
+  useEffect(() => {
+    setActiveView('profile')
+  }, [charId])
+
+  const macroUserName = useMemo(
+    () => personas.find((persona) => persona.id === activePersonaId)?.name ?? 'User',
+    [personas, activePersonaId],
+  )
+
+  const creatorNotesAssetMap = useMemo(() => {
+    const assetMap = character?.extensions?.risu_asset_map
+    return assetMap && typeof assetMap === 'object'
+      ? assetMap as Record<string, string>
+      : null
+  }, [character])
+
+  const hasCreatorNotes = !!character?.creator_notes?.trim()
+
+  useEffect(() => {
+    if (!hasCreatorNotes && activeView !== 'profile') {
+      setActiveView('profile')
+    }
+  }, [hasCreatorNotes, activeView])
+
+  useEffect(() => {
+    if (!heroSampleUrl || heroImageLoadedUrl !== avatarUrl) {
       setHeroTextVars(undefined)
       return
     }
@@ -103,10 +181,35 @@ function SingleCharacterProfile({
     let cancelled = false
 
     const sampleHeroImage = async () => {
+      const surface = await new Promise<RGB | null>((resolve) => {
+        requestAnimationFrame(() => {
+          if (cancelled) {
+            resolve(null)
+            return
+          }
+          resolve(heroMetaRef.current ? getSurfaceColor(heroMetaRef.current) : null)
+        })
+      })
+
+      if (cancelled) return
+
+      const varsCacheKey = `${heroSampleUrl}|${surfaceKey(surface)}`
+      const cachedVars = heroTextVarsCache.get(varsCacheKey)
+      if (cachedVars) {
+        setHeroTextVars(cachedVars)
+        return
+      }
+
       try {
-        const palette = await extractPalette(avatarUrl)
+        const palette = await getCachedPalette(heroSampleUrl)
         if (cancelled) return
-        setHeroTextVars(deriveHeroTextVars(palette) as CSSProperties)
+
+        const vars = rememberCacheEntry(
+          heroTextVarsCache,
+          varsCacheKey,
+          deriveHeroTextVars(palette, surface ?? undefined) as CSSProperties,
+        )
+        setHeroTextVars(vars)
       } catch {
         if (!cancelled) setHeroTextVars(undefined)
       }
@@ -114,84 +217,157 @@ function SingleCharacterProfile({
 
     sampleHeroImage()
     return () => { cancelled = true }
-  }, [avatarUrl])
+  }, [avatarUrl, heroSampleUrl, heroImageLoadedUrl])
 
   if (!charId) {
     return (
       <div className={styles.empty}>
         <User size={40} strokeWidth={1} />
-        <p>No character selected</p>
+        <p>{t('characterProfile.noCharacterSelected')}</p>
       </div>
     )
   }
 
   if (loading || !character) {
-    return <div className={styles.loading}>Loading...</div>
+    return <div className={styles.loading}>{t('characterProfile.loading')}</div>
   }
 
   return (
     <PanelFadeIn>
-      <div className={styles.profile}>
-        {/* Hero avatar */}
-        <div className={styles.hero}>
-        <div className={styles.heroImage}>
-          <LazyImage
-            src={avatarUrl}
-            alt={character.name}
-            fallback={
-              <div className={styles.avatarFallback}>
-                {character.name[0]?.toUpperCase()}
+      <div className={styles.profileShell}>
+        {hasCreatorNotes && (
+          <div className={styles.viewTabs} role="tablist" aria-label={t('drawer.profile.tabName')}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeView === 'profile'}
+              className={clsx(styles.viewTab, activeView === 'profile' && styles.viewTabActive)}
+              onClick={() => setActiveView('profile')}
+            >
+              {t('drawer.profile.tabName')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeView === 'creatorNotes'}
+              className={clsx(styles.viewTab, activeView === 'creatorNotes' && styles.viewTabActive)}
+              onClick={() => setActiveView('creatorNotes')}
+            >
+              {t('characterEditor.creatorNotes')}
+            </button>
+          </div>
+        )}
+
+        <AnimatePresence mode="wait" initial={false}>
+          {activeView === 'creatorNotes' && hasCreatorNotes ? (
+            <motion.div
+              key="creator-notes"
+              className={styles.creatorNotesView}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+            >
+              <div className={styles.creatorNotesHeader}>
+                <span className={styles.creatorNotesEyebrow}>{character.name}</span>
+                <h3 className={styles.creatorNotesTitle}>{t('characterEditor.creatorNotes')}</h3>
+                {character.creator && (
+                  <span className={styles.creatorNotesCreator}>
+                    {t('characterProfile.byCreator', { creator: character.creator })}
+                  </span>
+                )}
+                <p className={styles.creatorNotesHelper}>{t('characterEditor.creatorNotesHelper')}</p>
               </div>
-            }
-          />
-        </div>
-        <div className={styles.heroMeta} style={heroTextVars}>
-          <h2 className={styles.name}>{character.name}</h2>
-          <button type="button" className={styles.editBtn} onClick={handleEditCharacter}>
-            <Pencil size={12} />
-            <span>Edit Character</span>
-          </button>
-          {character.creator && <span className={styles.creator}>by {character.creator}</span>}
-          {character.tags.length > 0 && (
-            <TagList tags={character.tags} />
+              <div className={styles.creatorNotesSurface}>
+                <MessageContent
+                  content={character.creator_notes}
+                  isUser={false}
+                  userName={macroUserName}
+                  characterNameOverride={character.name}
+                  risuAssetMapOverride={creatorNotesAssetMap}
+                  disableInterceptors
+                />
+              </div>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="profile"
+              className={styles.profile}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+            >
+              {/* Hero avatar */}
+              <div className={styles.hero}>
+                <div className={styles.heroImage}>
+                  <LazyImage
+                    src={avatarUrl}
+                    alt={character.name}
+                    onLoad={() => setHeroImageLoadedUrl(avatarUrl)}
+                    onError={() => setHeroImageLoadedUrl(null)}
+                    fallback={
+                      <div className={styles.avatarFallback}>
+                        {character.name[0]?.toUpperCase()}
+                      </div>
+                    }
+                  />
+                </div>
+                <div className={styles.heroMeta} style={heroTextVars} ref={heroMetaRef}>
+                  <h2 className={styles.name}>{character.name}</h2>
+                  <button type="button" className={styles.editBtn} onClick={handleEditCharacter}>
+                    <Pencil size={12} />
+                    <span>{t('characterProfile.editCharacter')}</span>
+                  </button>
+                  {character.creator && <span className={styles.creator}>{t('characterProfile.byCreator', { creator: character.creator })}</span>}
+                  {character.tags.length > 0 && (
+                    <TagList tags={character.tags} />
+                  )}
+                </div>
+              </div>
+
+              {/* Description */}
+              <EditorSection Icon={BookOpen} title={t('characterProfile.sections.description')} defaultExpanded={false}>
+                {character.description
+                  ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.description) }} />
+                  : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.description')}</span></div>
+                }
+              </EditorSection>
+
+              {/* Personality */}
+              <EditorSection Icon={Sparkles} title={t('characterProfile.sections.personality')} defaultExpanded={false}>
+                {character.personality
+                  ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.personality) }} />
+                  : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.personality')}</span></div>
+                }
+              </EditorSection>
+
+              {/* Scenario */}
+              <EditorSection Icon={FileText} title={t('characterProfile.sections.scenario')} defaultExpanded={false}>
+                {character.scenario
+                  ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.scenario) }} />
+                  : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.scenario')}</span></div>
+                }
+              </EditorSection>
+
+              {/* First Message */}
+              <EditorSection Icon={MessageSquare} title={t('characterProfile.sections.firstMessage')} defaultExpanded={false}>
+                {character.first_mes
+                  ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.first_mes) }} />
+                  : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.firstMessage')}</span></div>
+                }
+              </EditorSection>
+
+              {/* System Prompt */}
+              <EditorSection Icon={FileText} title={t('characterProfile.sections.systemPrompt')} defaultExpanded={false}>
+                {character.system_prompt
+                  ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.system_prompt) }} />
+                  : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.systemPrompt')}</span></div>
+                }
+              </EditorSection>
+            </motion.div>
           )}
-        </div>
-      </div>
-
-      {/* Description */}
-      <EditorSection Icon={BookOpen} title="Description" defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.description || <span className={styles.placeholder}>No description</span>}
-        </div>
-      </EditorSection>
-
-      {/* Personality */}
-      <EditorSection Icon={Sparkles} title="Personality" defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.personality || <span className={styles.placeholder}>No personality defined</span>}
-        </div>
-      </EditorSection>
-
-      {/* Scenario */}
-      <EditorSection Icon={FileText} title="Scenario" defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.scenario || <span className={styles.placeholder}>No scenario</span>}
-        </div>
-      </EditorSection>
-
-      {/* First Message */}
-      <EditorSection Icon={MessageSquare} title="First Message" defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.first_mes || <span className={styles.placeholder}>No first message</span>}
-        </div>
-      </EditorSection>
-
-      {/* System Prompt */}
-      <EditorSection Icon={FileText} title="System Prompt" defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.system_prompt || <span className={styles.placeholder}>No system prompt</span>}
-        </div>
-      </EditorSection>
+        </AnimatePresence>
       </div>
     </PanelFadeIn>
   )
@@ -214,6 +390,7 @@ function GroupProfile({
   setDrawerTab: (tab: string) => void
   openModal: (modal: string, props?: any) => void
 }) {
+  const { t } = useTranslation('panels')
   const [chatName, setChatName] = useState<string>('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -240,7 +417,12 @@ function GroupProfile({
     if (!chatId) return
     try {
       const chat = await chatsApi.get(chatId, { messages: false })
-      openModal('groupSettings', { chatId, chatName: chat.name || '', metadata: chat.metadata || {} })
+      openModal('chatSettings', {
+        chatId,
+        chatName: chat.name || '',
+        metadata: chat.metadata || {},
+        onSaved: (updatedChat: import('@/types/api').Chat) => setChatName(updatedChat.name || ''),
+      })
     } catch (err) {
       console.error('[GroupProfile] Failed to load chat:', err)
     }
@@ -276,19 +458,19 @@ function GroupProfile({
 
         {/* Group info */}
         <div className={styles.groupInfo}>
-          <h2 className={styles.groupName}>{chatName || 'Group Chat'}</h2>
+          <h2 className={styles.groupName}>{chatName || t('characterProfile.groupChat')}</h2>
           <span className={styles.groupMemberCount}>
-            {characterIds.length} member{characterIds.length !== 1 ? 's' : ''}
+            {t('characterProfile.memberCount', { count: characterIds.length })}
           </span>
           <button type="button" className={styles.groupSettingsBtn} onClick={handleGroupSettings}>
             <Settings2 size={13} />
-            <span>Group Settings</span>
+            <span>{t('characterProfile.groupSettings')}</span>
           </button>
         </div>
 
         {/* Member list */}
         <div className={styles.groupDivider}>
-          <span className={styles.groupSectionLabel}>Members</span>
+          <span className={styles.groupSectionLabel}>{t('characterProfile.members')}</span>
         </div>
 
         <div className={styles.groupMembers}>
@@ -316,7 +498,7 @@ function GroupProfile({
                   <div className={styles.memberInfo}>
                     <span className={styles.memberName}>{char.name}</span>
                     {char.creator && (
-                      <span className={styles.memberCreator}>by {char.creator}</span>
+                      <span className={styles.memberCreator}>{t('characterProfile.byCreator', { creator: char.creator })}</span>
                     )}
                   </div>
                   <div className={clsx(styles.memberChevron, isExpanded && styles.memberChevronOpen)}>
@@ -336,13 +518,13 @@ function GroupProfile({
                       </div>
                     )}
                     {char.description && (
-                      <MemberField icon={BookOpen} label="Description" content={char.description} />
+                      <MemberField icon={BookOpen} label={t('characterProfile.sections.description')} content={char.description} />
                     )}
                     {char.personality && (
-                      <MemberField icon={Sparkles} label="Personality" content={char.personality} />
+                      <MemberField icon={Sparkles} label={t('characterProfile.sections.personality')} content={char.personality} />
                     )}
                     {char.scenario && (
-                      <MemberField icon={FileText} label="Scenario" content={char.scenario} />
+                      <MemberField icon={FileText} label={t('characterProfile.sections.scenario')} content={char.scenario} />
                     )}
                     <button
                       type="button"
@@ -350,7 +532,7 @@ function GroupProfile({
                       onClick={() => handleEditMember(char.id)}
                     >
                       <Pencil size={11} />
-                      <span>Edit Character</span>
+                      <span>{t('characterProfile.editCharacter')}</span>
                     </button>
                   </div>
                 )}
@@ -366,6 +548,7 @@ function GroupProfile({
 /* ─── Inline field for expanded member cards ──────────────────────── */
 
 function MemberField({ icon: Icon, label, content }: { icon: any; label: string; content: string }) {
+  const { t } = useTranslation('panels')
   const MAX_LEN = 200
   const [showFull, setShowFull] = useState(false)
   const truncated = content.length > MAX_LEN && !showFull
@@ -377,18 +560,16 @@ function MemberField({ icon: Icon, label, content }: { icon: any; label: string;
         <Icon size={12} strokeWidth={2} />
         <span>{label}</span>
       </div>
-      <div className={styles.memberFieldContent}>
-        {display}
-        {content.length > MAX_LEN && (
-          <button
-            type="button"
-            className={styles.memberFieldToggle}
-            onClick={() => setShowFull((v) => !v)}
-          >
-            {showFull ? 'Show less' : 'Show more'}
-          </button>
-        )}
-      </div>
+      <div className={styles.memberFieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(display) }} />
+      {content.length > MAX_LEN && (
+        <button
+          type="button"
+          className={styles.memberFieldToggle}
+          onClick={() => setShowFull((v) => !v)}
+        >
+          {showFull ? t('characterProfile.showLess') : t('characterProfile.showMore')}
+        </button>
+      )}
     </div>
   )
 }
@@ -396,6 +577,7 @@ function MemberField({ icon: Icon, label, content }: { icon: any; label: string;
 const TAG_LIMIT = 10
 
 function TagList({ tags }: { tags: string[] }) {
+  const { t } = useTranslation('panels')
   const [expanded, setExpanded] = useState(false)
   const overflow = tags.length - TAG_LIMIT
   const visible = expanded ? tags : tags.slice(0, TAG_LIMIT)
@@ -411,7 +593,7 @@ function TagList({ tags }: { tags: string[] }) {
           className={styles.tagMore}
           onClick={() => setExpanded((v) => !v)}
         >
-          {expanded ? 'Show less' : `+${overflow} more`}
+          {expanded ? t('characterProfile.showLess') : t('characterProfile.moreCount', { count: overflow })}
         </button>
       )}
     </div>

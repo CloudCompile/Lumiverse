@@ -1,6 +1,7 @@
 import type { TtsProvider } from "../provider";
 import type { TtsProviderCapabilities } from "../param-schema";
 import type { TtsRequest, TtsResponse, TtsStreamChunk, TtsVoice } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
 export class ElevenLabsTtsProvider implements TtsProvider {
   readonly name = "elevenlabs";
@@ -129,10 +130,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       signal: request.signal,
     });
 
-    if (!res.ok) {
-      const err = await res.text().catch(() => "Unknown error");
-      throw new Error(`ElevenLabs API error ${res.status}: ${err}`);
-    }
+    if (!res.ok) await throwProviderResponseError(this.displayName, "tts synthesize", res);
 
     const audioData = await res.arrayBuffer();
     const contentType = res.headers.get("content-type") || "audio/mpeg";
@@ -162,24 +160,22 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       signal: request.signal,
     });
 
-    if (!res.ok) {
-      const err = await res.text().catch(() => "Unknown error");
-      throw new Error(`ElevenLabs API error ${res.status}: ${err}`);
-    }
+    if (!res.ok) await throwProviderResponseError(this.displayName, "tts stream", res);
 
     if (!res.body) {
       throw new Error("ElevenLabs: no response body for streaming");
     }
 
+    const mimeType = res.headers.get("content-type") || "audio/mpeg";
     const reader = res.body.getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          yield { data: new Uint8Array(0), done: true };
+          yield { data: new Uint8Array(0), done: true, kind: "bytes", mimeType };
           break;
         }
-        yield { data: value, done: false };
+        yield { data: value, done: false, kind: "bytes", mimeType };
       }
     } finally {
       reader.cancel().catch(() => {});
@@ -191,9 +187,11 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       const res = await fetch(`${this.baseUrl(apiUrl)}/v1/user/subscription`, {
         headers: this.headers(apiKey),
       });
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({ provider: this.displayName, operation: "authentication", detail: err instanceof Error ? err.message : "network request failed", retryable: true });
     }
   }
 
@@ -202,21 +200,15 @@ export class ElevenLabsTtsProvider implements TtsProvider {
   }
 
   async listVoices(apiKey: string, apiUrl: string): Promise<TtsVoice[]> {
-    try {
-      const res = await fetch(`${this.baseUrl(apiUrl)}/v1/voices`, {
-        headers: this.headers(apiKey),
-      });
-      if (!res.ok) return [];
-      const data = (await res.json()) as any;
-      return (data.voices || []).map((v: any) => ({
-        id: v.voice_id,
-        name: v.name,
-        language: v.labels?.language,
-        gender: v.labels?.gender,
-        previewUrl: v.preview_url,
-      }));
-    } catch {
-      return [];
-    }
+    const data = await fetchProviderJson<any>(this.displayName, "voice listing", `${this.baseUrl(apiUrl)}/v1/voices`, {
+      headers: this.headers(apiKey),
+    });
+    return (data.voices || []).map((v: any) => ({
+      id: v.voice_id,
+      name: v.name,
+      language: v.labels?.language,
+      gender: v.labels?.gender,
+      previewUrl: v.preview_url,
+    }));
   }
 }

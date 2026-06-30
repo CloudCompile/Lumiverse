@@ -4,12 +4,83 @@ import type { CreateCharacterInput } from "../types/character";
 import type { CreateRegexScriptInput, RegexTarget } from "../types/regex-script";
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const ZIP_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
 const MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024; // 100 MB (PNG text chunks)
-// H-19: Reduced from 1 GB to 50 MB to limit zip-bomb / upload abuse.
-const MAX_CHARX_SIZE = 50 * 1024 * 1024; // 50 MB
-// H-19: Maximum total uncompressed size of all accepted CHARX entries to
-// prevent a zip bomb from exhausting memory/CPU during decompression.
-const MAX_CHARX_DECOMPRESSED = 200 * 1024 * 1024; // 200 MB
+const MAX_CHARX_SIZE = 1000 * 1024 * 1024; // 1000 MB
+// Cap on the total bytes produced by .charx ZIP decompression. fflate's
+// unzipSync has no built-in output cap, so a 1 KB compressed file with a 4 GB
+// decompressed payload would otherwise OOM the process. Set to 2x the compressed
+// cap so legitimate large Risu cards (many image assets compress ~1:1 since they
+// are already JPEG/PNG/WebP) still import while still bounding zip-bomb damage.
+const MAX_CHARX_DECOMPRESSED_SIZE = 2000 * 1024 * 1024; // 2000 MB
+
+/**
+ * Typed error for character card import failures, so route handlers can map
+ * to the right HTTP status and expose a stable error code to the frontend.
+ */
+export type CharacterImportErrorCode =
+  | "file_too_large"
+  | "archive_decompresses_too_large"
+  | "invalid_archive"
+  | "invalid_card"
+  | "unsupported_format";
+
+export class CharacterImportError extends Error {
+  readonly code: CharacterImportErrorCode;
+  readonly status: number;
+
+  constructor(code: CharacterImportErrorCode, message: string, status?: number) {
+    super(message);
+    this.name = "CharacterImportError";
+    this.code = code;
+    this.status = status ?? (code === "file_too_large" || code === "archive_decompresses_too_large" ? 413 : 400);
+  }
+}
+
+export type CharacterImportFormat = "png" | "charx" | "jpeg_polyglot" | "jpeg" | "json" | "unknown";
+
+function bufferStartsWith(buffer: Uint8Array, signature: Uint8Array): boolean {
+  return buffer.length >= signature.length && signature.every((byte, i) => buffer[i] === byte);
+}
+
+function looksLikePng(header: Uint8Array): boolean {
+  return bufferStartsWith(header, PNG_SIGNATURE);
+}
+
+function looksLikeZip(header: Uint8Array): boolean {
+  return bufferStartsWith(header, ZIP_SIGNATURE);
+}
+
+function looksLikeJpeg(header: Uint8Array): boolean {
+  return bufferStartsWith(header, JPEG_SIGNATURE);
+}
+
+function looksLikeJsonText(header: Uint8Array): boolean {
+  const sample = new TextDecoder().decode(header.subarray(0, 1024));
+  const trimmed = sample.replace(/^\uFEFF/, "").trimStart();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
+export async function detectCharacterImportFormat(file: File): Promise<CharacterImportFormat> {
+  const nameLower = file.name?.toLowerCase() ?? "";
+  const peekSize = Math.min(file.size, 10_000_000);
+  const header = new Uint8Array(await file.slice(0, peekSize).arrayBuffer());
+
+  if (looksLikePng(header)) return "png";
+  if (looksLikeZip(header)) return "charx";
+  if (looksLikeJpeg(header)) return looksLikeJpegZipPolyglot(header) ? "jpeg_polyglot" : "jpeg";
+  if (looksLikeJsonText(header)) return "json";
+
+  if (file.type === "image/png" || nameLower.endsWith(".png")) return "png";
+  if (nameLower.endsWith(".charx") || file.type === "application/zip" || file.type === "application/x-zip-compressed") {
+    return "charx";
+  }
+  if (/\.jpe?g$/i.test(nameLower) || file.type === "image/jpeg") return "jpeg";
+  if (nameLower.endsWith(".json") || file.type === "application/json" || file.type === "text/json") return "json";
+
+  return "unknown";
+}
 
 /**
  * Reads PNG chunks and extracts the text value for a given keyword.
@@ -226,11 +297,11 @@ export function decodeRisuModule(data: Uint8Array): RisuModule | null {
   return null;
 }
 
-const RISU_TYPE_TO_TARGET: Record<string, RegexTarget> = {
-  editdisplay: "display",
-  editprocess: "prompt",
-  editoutput: "response",
-  editinput: "prompt",
+const RISU_TYPE_TO_TARGET: Record<string, RegexTarget[]> = {
+  editdisplay: ["display"],
+  editprocess: ["prompt"],
+  editoutput: ["response"],
+  editinput: ["prompt"],
 };
 
 /**
@@ -246,7 +317,7 @@ export function convertRisuRegexScripts(
     const r = regexes[i];
     if (!r.in) continue;
 
-    const target = RISU_TYPE_TO_TARGET[r.type] ?? "display";
+    const target = RISU_TYPE_TO_TARGET[r.type] ?? ["display"];
 
     results.push({
       name: r.comment || `Imported RisuAI Script ${i + 1}`,
@@ -257,6 +328,7 @@ export function convertRisuRegexScripts(
       scope: "character",
       scope_id: characterId,
       target,
+      character_id: characterId,
       disabled: r.ableFlag === false,
       sort_order: i,
       description: `Imported from RisuAI module`,
@@ -301,7 +373,50 @@ function mapCardToInput(data: Record<string, any>): CreateCharacterInput {
 
   if (Object.keys(extensions).length > 0) input.extensions = extensions;
 
+  const createDate = data.create_date ?? data.created_at;
+  if (createDate != null) {
+    const parsed = typeof createDate === "number"
+      ? createDate
+      : parseCardDate(String(createDate));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      input.created_at = parsed > 1e12 ? Math.floor(parsed / 1000) : parsed;
+    }
+  }
+
   return input;
+}
+
+// ST uses a custom date format: "2025-8-30 @05h 10m 11s 122ms"
+const ST_DATE_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})\s+@(\d{2})h\s+(\d{2})m\s+(\d{2})s\s+(\d+)ms$/;
+
+function parseCardDate(str: string): number {
+  const native = Date.parse(str);
+  if (Number.isFinite(native)) return native;
+  const m = ST_DATE_RE.exec(str);
+  if (m) {
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7]);
+  }
+  return NaN;
+}
+
+function hasNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * JannyAI's download payload uses the standard card keys, but in practice the
+ * "personality" field contains creator notes while the site's visible
+ * "Personality" section behaves like a description field. Normalize that quirk
+ * only for JannyAI URL imports so regular card imports keep their original
+ * mapping.
+ */
+export function normalizeJannyCharacterInput(input: CreateCharacterInput): CreateCharacterInput {
+  return {
+    ...input,
+    description: hasNonEmptyText(input.description) ? input.description : (hasNonEmptyText(input.personality) ? input.personality : input.description),
+    personality: "",
+    creator_notes: hasNonEmptyText(input.creator_notes) ? input.creator_notes : (hasNonEmptyText(input.personality) ? input.personality : input.creator_notes),
+  };
 }
 
 /**
@@ -339,9 +454,13 @@ export function parseCardJson(json: unknown): CreateCharacterInput {
 
   const obj = json as Record<string, any>;
 
-  // V2/V3 wrapped format
+  // V2/V3 wrapped format — create_date lives on the wrapper, not inside data
   if ((obj.spec === "chara_card_v2" || obj.spec === "chara_card_v3") && obj.data) {
-    return mapCardToInput(obj.data);
+    const data = obj.data as Record<string, any>;
+    if (obj.create_date != null && data.create_date == null) {
+      data.create_date = obj.create_date;
+    }
+    return mapCardToInput(data);
   }
 
   // V1 flat format or plain CreateCharacterInput
@@ -517,7 +636,7 @@ export interface BundledRegexScript {
   placement: string[];
   scope: string;
   scope_id: string | null;
-  target: string;
+  target: string | string[];
   min_depth: number | null;
   max_depth: number | null;
   trim_strings: string[];
@@ -544,6 +663,7 @@ export interface LumiverseModules {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  landing_perspective_layers?: Array<{ id: string; label?: string; path: string; intensity: number }>;
   world_books?: Record<string, any>[];
   regex_scripts?: BundledRegexScript[];
 }
@@ -581,7 +701,10 @@ export interface CharxResult {
 export async function extractCardFromCharx(file: File): Promise<CharxResult> {
   const arrayBuf = await file.arrayBuffer();
   if (arrayBuf.byteLength > MAX_CHARX_SIZE) {
-    throw new Error(`CHARX file too large (${(arrayBuf.byteLength / 1024 / 1024).toFixed(1)} MB, max ${MAX_CHARX_SIZE / 1024 / 1024} MB)`);
+    throw new CharacterImportError(
+      "file_too_large",
+      `CHARX file too large (${(arrayBuf.byteLength / 1024 / 1024).toFixed(1)} MB, max ${MAX_CHARX_SIZE / 1024 / 1024} MB)`,
+    );
   }
 
   let data = new Uint8Array(arrayBuf);
@@ -601,10 +724,9 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
   }
 
   // Only decompress card.json, module files, and image files — skip everything else
-  // H-19: Also reject individual entries whose stated uncompressed size would
-  // exceed the total budget, blocking zip-bomb payloads where a tiny compressed
-  // entry expands to many GB.
-  let totalDecompressedSize = 0;
+  // Track running decompressed size against the cap; throw inside the filter so
+  // fflate aborts before allocating a multi-GB buffer for a zip-bomb payload.
+  let plannedBytes = 0;
   const unzipped = unzipSync(data, {
     filter: (entry) => {
       const wanted =
@@ -613,11 +735,11 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
         entry.name === "lumiverse_modules.json" ||
         IMAGE_EXTENSIONS.test(entry.name);
       if (!wanted) return false;
-      // Reject if this single entry would exceed total decompressed budget
-      totalDecompressedSize += (entry.originalSize ?? 0);
-      if (totalDecompressedSize > MAX_CHARX_DECOMPRESSED) {
-        throw new Error(
-          `CHARX archive decompressed size would exceed ${MAX_CHARX_DECOMPRESSED / 1024 / 1024} MB limit`,
+      plannedBytes += entry.originalSize ?? 0;
+      if (plannedBytes > MAX_CHARX_DECOMPRESSED_SIZE) {
+        throw new CharacterImportError(
+          "archive_decompresses_too_large",
+          `CHARX archive decompresses to more than ${MAX_CHARX_DECOMPRESSED_SIZE / 1024 / 1024} MB`,
         );
       }
       return true;
@@ -626,14 +748,20 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
 
   const cardBytes = unzipped["card.json"];
   if (!cardBytes) {
-    throw new Error("CHARX archive does not contain card.json at the root");
+    throw new CharacterImportError(
+      "invalid_archive",
+      "CHARX archive does not contain card.json at the root",
+    );
   }
 
   let json: any;
   try {
     json = JSON.parse(new TextDecoder().decode(cardBytes));
   } catch {
-    throw new Error("Failed to parse card.json from CHARX archive");
+    throw new CharacterImportError(
+      "invalid_card",
+      "Failed to parse card.json from CHARX archive",
+    );
   }
 
   const card = parseCardJson(json);

@@ -5,8 +5,10 @@ import { Search, X } from 'lucide-react'
 import { useNavigate, useLocation } from 'react-router'
 import clsx from 'clsx'
 import { useStore } from '@/store'
+import { useTranslation } from 'react-i18next'
 import { buildCommands, GROUP_ORDER, type Command, type CommandScope } from '@/lib/commands'
-import { extensionTabsToCommands, extensionCommandsToCommands } from '@/lib/drawer-tab-registry'
+import { commandGroupLabel, translateCommand } from '@/lib/i18n/resolveLabel'
+import { extensionTabsToCommands, extensionCommandsToCommands, sanitizeHiddenDrawerTabIds } from '@/lib/drawer-tab-registry'
 import styles from './CommandPalette.module.css'
 
 // ── Match highlight ────────────────────────────────────────────────────────────
@@ -27,10 +29,13 @@ function highlightMatch(text: string, query: string): ReactNode {
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function CommandPalette() {
+  const { t, i18n } = useTranslation('commands')
   const isOpen = useStore((s) => s.commandPaletteOpen)
   const close = useStore((s) => s.closeCommandPalette)
   const userRole = useStore((s) => s.user?.role)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const drawerSettings = useStore((s) => s.drawerSettings)
+  const hiddenPlacements = useStore((s) => s.hiddenPlacements)
   const extensionCommands = useStore((s) => s.extensionCommands)
   const activeChatId = useStore((s) => s.activeChatId)
   const messageCount = useStore((s) => s.messages.length)
@@ -70,10 +75,26 @@ export default function CommandPalette() {
     return scopes
   }, [location.pathname, streaming, messageCount])
 
+  const hiddenTabIds = useMemo(
+    () => new Set(sanitizeHiddenDrawerTabIds(drawerSettings.hiddenTabIds)),
+    [drawerSettings.hiddenTabIds],
+  )
+  const hiddenPlacementIds = useMemo(
+    () => new Set(hiddenPlacements),
+    [hiddenPlacements],
+  )
+
   const { grouped, orderedFlat, flatIndexMap } = useMemo(() => {
     const allCommands = [...buildCommands(userRole), ...extensionTabsToCommands(drawerTabs), ...extensionCommandsToCommands(extensionCommands)]
-    
+      .map(translateCommand)
+
     let filtered = allCommands.filter((cmd) => {
+      if (cmd.id.startsWith('panel-') && hiddenTabIds.has(cmd.id.slice('panel-'.length))) return false
+      if (cmd.id.startsWith('ext-tab-')) {
+        const tabId = cmd.id.slice('ext-tab-'.length)
+        if (hiddenTabIds.has(tabId) || hiddenPlacementIds.has(tabId)) return false
+      }
+
       const isVisible = activeScopes.has(cmd.scope || 'global')
       if (!isVisible) return false
 
@@ -119,7 +140,7 @@ export default function CommandPalette() {
     }
 
     return { grouped: groups, orderedFlat: flat, flatIndexMap: idxMap }
-  }, [query, userRole, drawerTabs, extensionCommands, activeScopes, location.pathname])
+  }, [query, userRole, drawerTabs, drawerSettings.hiddenTabIds, hiddenPlacements, extensionCommands, activeScopes, location.pathname, hiddenTabIds, hiddenPlacementIds, i18n.language])
 
   // Clamp active index when filtered list shrinks
   useEffect(() => {
@@ -201,7 +222,7 @@ export default function CommandPalette() {
             className={styles.palette}
             role="dialog"
             aria-modal="true"
-            aria-label="Command palette"
+            aria-label={t('palette.aria')}
             initial={{ opacity: 0, scale: 0.96, y: -10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: -10 }}
@@ -220,7 +241,7 @@ export default function CommandPalette() {
                 aria-expanded={orderedFlat.length > 0}
                 aria-activedescendant={orderedFlat[activeIndex] ? `cmd-${orderedFlat[activeIndex].id}` : undefined}
                 className={styles.input}
-                placeholder="Search commands…"
+                placeholder={t('palette.search')}
                 value={query}
                 onChange={handleQueryChange}
                 onKeyDown={handleKeyDown}
@@ -233,7 +254,7 @@ export default function CommandPalette() {
                   className={styles.clearBtn}
                   onClick={clearQuery}
                   tabIndex={-1}
-                  aria-label="Clear search"
+                  aria-label={t('palette.clear')}
                 >
                   <X size={13} />
                 </button>
@@ -247,17 +268,17 @@ export default function CommandPalette() {
               ref={listRef}
               className={styles.results}
               role="listbox"
-              aria-label="Commands"
+              aria-label={t('palette.listAria')}
             >
               {orderedFlat.length === 0 ? (
                 <div className={styles.empty}>
-                  No results for &ldquo;{query}&rdquo;
+                  {t('palette.noResults', { query })}
                 </div>
               ) : (
                 grouped.map(({ group, items }) => {
                   return (
-                    <div key={group} className={styles.group} role="group" aria-label={group}>
-                      <div className={styles.groupLabel}>{group}</div>
+                    <div key={group} className={styles.group} role="group" aria-label={commandGroupLabel(group)}>
+                      <div className={styles.groupLabel}>{commandGroupLabel(group)}</div>
                       {items.map((cmd) => {
                         const idx = flatIndexMap.get(cmd.id) ?? -1
                         const isActive = idx === activeIndex

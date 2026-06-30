@@ -1,6 +1,10 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useMemo, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
+import { charactersApi } from '@/api/characters'
 import { worldBooksApi } from '@/api/world-books'
+import { toast } from '@/lib/toast'
+import { formatTagLibraryImportToastMessage } from '@/lib/tagLibraryImportToast'
 import { useStore } from '@/store'
 import CharacterToolbar from './character-browser/CharacterToolbar'
 import TagFilter from './character-browser/TagFilter'
@@ -19,6 +23,7 @@ import ExpressionsImportModal from '@/components/modals/ExpressionsImportModal'
 import AlternateFieldsSummaryModal from '@/components/modals/AlternateFieldsSummaryModal'
 import Pagination from '@/components/shared/Pagination'
 import type { CharacterViewMode } from '@/types/store'
+import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
 import styles from './CharacterBrowser.module.css'
 
 function CharacterSkeletons({ viewMode }: { viewMode: CharacterViewMode }) {
@@ -61,9 +66,17 @@ function CharacterSkeletons({ viewMode }: { viewMode: CharacterViewMode }) {
 }
 
 export default function CharacterBrowser() {
+  const { t: ts } = useTranslation('settings')
+  const { t } = useTranslation('panels')
   const browser = useCharacterBrowser()
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
   const openModal = useStore((s) => s.openModal)
+  const favoritesBarCollapsed = useStore((s) => s.favoritesBarCollapsed)
+  const setSetting = useStore((s) => s.setSetting)
+
+  const handleToggleFavoritesCollapse = useCallback(() => {
+    setSetting('favoritesBarCollapsed', !favoritesBarCollapsed)
+  }, [favoritesBarCollapsed, setSetting])
   const handleCreateNew = useCallback(async () => {
     try {
       const character = await browser.createCharacter()
@@ -76,6 +89,7 @@ export default function CharacterBrowser() {
   const [importUrlOpen, setImportUrlOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [tagLibraryImporting, setTagLibraryImporting] = useState(false)
   const dragCounterRef = useRef(0)
 
   // Drag and drop handlers
@@ -118,10 +132,48 @@ export default function CharacterBrowser() {
     setConfirmDelete(true)
   }, [])
 
+  const handleImportTagLibrary = useCallback(async (file: File) => {
+    setTagLibraryImporting(true)
+    try {
+      const result = await charactersApi.importTagLibrary(file)
+      await browser.reloadAllCharacters()
+      toast.success(formatTagLibraryImportToastMessage(ts, result), {
+        title: ts('migration.tagLibraryImportComplete'),
+        duration: 7000,
+      })
+    } catch (err: any) {
+      toast.error(err?.body?.error || err?.message || ts('migration.tagLibraryImportFailed'))
+    } finally {
+      setTagLibraryImporting(false)
+    }
+  }, [browser, ts])
+
   const handleConfirmDelete = useCallback(() => {
     browser.batchDelete()
     setConfirmDelete(false)
   }, [browser.batchDelete])
+
+  const pagination: ReactNode = useMemo(
+    () => (
+      <Pagination
+        currentPage={browser.currentPage}
+        totalPages={browser.totalPages}
+        onPageChange={browser.setCurrentPage}
+        perPage={browser.charactersPerPage}
+        perPageOptions={[24, 50, 100, 200, 500]}
+        onPerPageChange={browser.setCharactersPerPage}
+        totalItems={browser.totalFiltered}
+      />
+    ),
+    [
+      browser.currentPage,
+      browser.totalPages,
+      browser.setCurrentPage,
+      browser.charactersPerPage,
+      browser.setCharactersPerPage,
+      browser.totalFiltered,
+    ],
+  )
 
   return (
     <div
@@ -145,17 +197,20 @@ export default function CharacterBrowser() {
         batchMode={browser.batchMode}
         onBatchModeChange={browser.setBatchMode}
         onImportFile={browser.importFiles}
+        onImportTagLibrary={handleImportTagLibrary}
         onImportUrl={() => setImportUrlOpen(true)}
         onCreateNew={handleCreateNew}
         importLoading={browser.importLoading}
+        tagLibraryImporting={tagLibraryImporting}
         onGroupChat={() => openModal('groupChatCreator')}
       />
 
       <TagFilter
         allTags={browser.allTags}
         selectedTags={browser.selectedTags}
-        onToggleTag={browser.toggleSelectedTag}
-        onClearTags={() => browser.setSelectedTags([])}
+        excludedTags={browser.excludedTags}
+        onCycleTag={browser.cycleTagFilter}
+        onClearTags={browser.clearTagFilters}
       />
 
       {browser.batchMode && (
@@ -177,10 +232,13 @@ export default function CharacterBrowser() {
               <span className={styles.importProgressFilename}>{browser.importProgress.filename}</span>
               <span className={styles.importProgressStep}>
                 {browser.importProgress.step === 'uploading'
-                  ? `Uploading\u2026 ${browser.importProgress.percent}%`
+                  ? t('characterBrowser.uploading', { percent: browser.importProgress.percent })
                   : browser.importProgress.step === 'gallery'
-                    ? `Adding to gallery\u2026 ${browser.importProgress.galleryCurrent}/${browser.importProgress.galleryTotal}`
-                    : 'Processing\u2026'}
+                    ? t('characterBrowser.addingToGallery', {
+                        current: browser.importProgress.galleryCurrent,
+                        total: browser.importProgress.galleryTotal,
+                      })
+                    : t('characterBrowser.processing')}
               </span>
             </div>
             <div className={styles.importProgressBar}>
@@ -202,7 +260,7 @@ export default function CharacterBrowser() {
       {browser.importError && (
         <div className={styles.importError}>
           <span>{browser.importError}</span>
-          <button type="button" onClick={browser.clearImportError}>Dismiss</button>
+          <button type="button" onClick={browser.clearImportError}>{t('characterBrowser.dismiss')}</button>
         </div>
       )}
 
@@ -214,8 +272,10 @@ export default function CharacterBrowser() {
             <FavoritesSlider
               characters={browser.favoriteCharacters}
               favorites={browser.favorites}
+              collapsed={favoritesBarCollapsed}
               onOpen={browser.openChat}
               onToggleFavorite={browser.toggleFavorite}
+              onToggleCollapse={handleToggleFavoritesCollapse}
             />
           )}
 
@@ -223,7 +283,7 @@ export default function CharacterBrowser() {
             <CharacterSkeletons viewMode={browser.viewMode} />
           ) : browser.totalFiltered === 0 ? (
             <div className={styles.emptyState}>
-              {browser.searchQuery ? 'No characters match your search' : 'No characters yet'}
+              {browser.searchQuery ? t('characterBrowser.noSearchResults') : t('characterBrowser.noCharactersYet')}
             </div>
           ) : browser.viewMode === 'grid' || browser.viewMode === 'single' ? (
             <CharacterGrid
@@ -250,15 +310,7 @@ export default function CharacterBrowser() {
             />
           )}
 
-          <Pagination
-            currentPage={browser.currentPage}
-            totalPages={browser.totalPages}
-            onPageChange={browser.setCurrentPage}
-            perPage={browser.charactersPerPage}
-            perPageOptions={[24, 50, 100, 200, 500]}
-            onPerPageChange={browser.setCharactersPerPage}
-            totalItems={browser.totalFiltered}
-          />
+          <div className={styles.paginationBar}>{pagination}</div>
         </>
       )}
 
@@ -276,10 +328,10 @@ export default function CharacterBrowser() {
         isOpen={confirmDelete}
         onConfirm={handleConfirmDelete}
         onCancel={() => setConfirmDelete(false)}
-        title="Delete Characters"
-        message={`Are you sure you want to delete ${browser.batchSelected.length} character(s)? This cannot be undone.`}
+        title={t('characterBrowser.deleteCharactersTitle')}
+        message={t('characterBrowser.deleteCharactersMessage', { count: browser.batchSelected.length })}
         variant="danger"
-        confirmText="Delete"
+        confirmText={t('characterBrowser.delete')}
       />
 
       <ConfirmationModal
@@ -293,13 +345,16 @@ export default function CharacterBrowser() {
           } catch { /* silent — user can still import from editor */ }
         }}
         onCancel={() => browser.clearPendingLorebookImport()}
-        title="Import Embedded Lorebook"
+        title={t('characterBrowser.importLorebookTitle')}
         message={
           browser.pendingLorebookImport
-            ? `"${browser.pendingLorebookImport.name}" contains an embedded lorebook with ${browser.pendingLorebookImport.extensions?.character_book?.entries?.length} entries. Import it as a World Book?`
+            ? t('characterBrowser.importLorebookMessage', {
+                name: browser.pendingLorebookImport.name,
+                count: getEmbeddedCharacterBookEntryCount(browser.pendingLorebookImport.extensions),
+              })
             : ''
         }
-        confirmText="Import"
+        confirmText={t('characterBrowser.import')}
       />
 
       <BulkImportProgressModal

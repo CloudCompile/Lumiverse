@@ -1,4 +1,5 @@
 import { upgradeWebSocket } from "hono/bun";
+import { Buffer } from "node:buffer";
 import { eventBus } from "./bus";
 import { EventType } from "./events";
 import { auth } from "../auth";
@@ -6,12 +7,21 @@ import { consumeTicket } from "./tickets";
 import { getWorkerHost } from "../spindle/lifecycle";
 import * as managerSvc from "../spindle/manager.service";
 import { getFirstUserId } from "../auth/seed";
+import { validateRoomCredential } from "../services/room-auth";
+import * as multiplayerSvc from "../services/multiplayer.service";
+
+const WS_MESSAGE_SIZE_LIMIT_DEFAULT = 1024 * 1024;
+const WS_MESSAGE_SIZE_LIMIT_SPINDLE_BACKEND_MSG = 4 * 1024 * 1024;
 
 export const wsHandler = upgradeWebSocket((c) => {
   // Authenticate during upgrade — extract userId + sessionId
   let userId: string | null = null;
   let userRole: string | null = null;
   let sessionId: string | null = null;
+  // Multiplayer: set when this socket is a room participant (peer or joined
+  // local account). The participantId is connection-scoped and authoritative —
+  // inbound room_* messages NEVER trust a participantId from the payload.
+  let roomAuth: { roomId: string; participantId: string } | null = null;
 
   return {
     async onOpen(_event, ws) {
@@ -19,6 +29,50 @@ export const wsHandler = upgradeWebSocket((c) => {
 
       try {
         const url = new URL(c.req.url);
+
+        // Auth path 3: room token (remote multiplayer peer, synthetic identity).
+        // A peer is NOT a host-local account: it gets NO userId, NO user:/system
+        // subscription, and only ever joins its room:{roomId} topic.
+        const roomToken = url.searchParams.get("roomToken");
+        if (roomToken) {
+          const credential = await validateRoomCredential({ roomToken });
+          if (!credential) {
+            ws.send(JSON.stringify({
+              event: "AUTH_ERROR",
+              payload: { message: "Invalid or expired room token" },
+              timestamp: Date.now(),
+            }));
+            ws.close(1008, "Invalid room token");
+            return;
+          }
+          const join = multiplayerSvc.joinByToken(credential.roomId, credential.subject, {
+            displayName: credential.displayName,
+          });
+          if (!join.ok) {
+            ws.send(JSON.stringify({
+              event: "AUTH_ERROR",
+              payload: { message: `Cannot join room: ${join.reason}`, reason: join.reason },
+              timestamp: Date.now(),
+            }));
+            ws.close(1008, "Join refused");
+            return;
+          }
+          const rawPeer = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
+          // Token connections are always peers → subscribe to the feed topic.
+          if (rawPeer) eventBus.subscribeClientToRoom(rawPeer, join.room.id, join.participant.id, { feed: true });
+          roomAuth = { roomId: join.room.id, participantId: join.participant.id };
+          ws.send(JSON.stringify({
+            event: EventType.CONNECTED,
+            payload: { message: "Connected to room", userId: null, role: "peer", peer: true, roomId: join.room.id, participantId: join.participant.id },
+            timestamp: Date.now(),
+          }));
+          ws.send(JSON.stringify({
+            event: EventType.ROOM_STATUS,
+            payload: multiplayerSvc.buildHydrationPayload(join.room, join.participant.id),
+            timestamp: Date.now(),
+          }));
+          return;
+        }
 
         // Auth path 1: single-use ticket (preferred, avoids token in URL)
         const ticket = url.searchParams.get("ticket");
@@ -112,7 +166,34 @@ export const wsHandler = upgradeWebSocket((c) => {
     },
     async onMessage(event, ws) {
       try {
-        const data = JSON.parse(event.data as string);
+        // Refresh activity timestamp for sweep — any inbound message counts
+        const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
+        if (raw) eventBus.touchClient(raw);
+
+        // Guard against oversized payloads. Most client messages are small
+        // control frames, but extension backend messages can carry user data.
+        const raw_data = event.data as string;
+        const rawDataBytes = Buffer.byteLength(raw_data, "utf8");
+        let sizeLimit = WS_MESSAGE_SIZE_LIMIT_DEFAULT;
+        let detectedType: string | null = null;
+
+        if (rawDataBytes > WS_MESSAGE_SIZE_LIMIT_DEFAULT) {
+          const typeMatch = raw_data.slice(0, 256).match(/^\s*\{\s*"type"\s*:\s*"([^"]+)"/);
+          detectedType = typeMatch?.[1] ?? null;
+          if (detectedType === "SPINDLE_BACKEND_MSG") {
+            sizeLimit = WS_MESSAGE_SIZE_LIMIT_SPINDLE_BACKEND_MSG;
+          }
+        }
+
+        if (rawDataBytes > sizeLimit) {
+          console.warn(
+            `[WS] dropped oversized message: ${rawDataBytes} bytes ` +
+              `(limit=${sizeLimit}, type=${detectedType ?? "unknown"})`,
+          );
+          return;
+        }
+
+        const data = JSON.parse(raw_data);
         if (data.type === "ping") {
           ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
           return;
@@ -122,6 +203,93 @@ export const wsHandler = upgradeWebSocket((c) => {
           if (userId && sessionId) {
             eventBus.setUserVisibility(userId, sessionId, !!data.visible);
           }
+          return;
+        }
+
+        if (data.type === "stream_focus") {
+          if (raw && userId) {
+            const chatId = typeof data.chatId === "string" ? data.chatId : null;
+            eventBus.setClientStreamFocus(raw, userId, chatId);
+          }
+          return;
+        }
+
+        // ── Multiplayer room inbound messages ──
+        // The acting participant is ALWAYS resolved from connection-scoped
+        // roomAuth — a participantId in the payload is never trusted.
+        if (data.type === "room_join") {
+          // Local-account user joining a room (multi-tab / LAN). Peers connect
+          // with a room token at upgrade instead (handled in onOpen).
+          if (!userId) return;
+          const roomId = typeof data.roomId === "string" ? data.roomId : null;
+          if (!roomId) return;
+          const join = multiplayerSvc.joinByUser(roomId, userId, {
+            displayName: typeof data.displayName === "string" ? data.displayName : undefined,
+            persona: data.persona,
+          });
+          if (!join.ok) {
+            ws.send(JSON.stringify({ event: "ROOM_JOIN_REJECTED", payload: { roomId, reason: join.reason }, timestamp: Date.now() }));
+            return;
+          }
+          // Only the host may set the room's character (bot) avatar — it's
+          // relayed to peers (who can't fetch the owner-scoped endpoint).
+          if (data.characterAvatar && join.participant.role === "host") {
+            multiplayerSvc.setRoomCharacterAvatar(join.room.id, data.characterAvatar);
+          }
+          // The host gets chat/gen events on its user topic already; only peers
+          // subscribe to the feed topic (avoids double-delivery to the host).
+          if (raw) {
+            eventBus.subscribeClientToRoom(raw, join.room.id, join.participant.id, {
+              feed: join.participant.role !== "host",
+            });
+          }
+          roomAuth = { roomId: join.room.id, participantId: join.participant.id };
+          ws.send(JSON.stringify({
+            event: EventType.ROOM_STATUS,
+            payload: multiplayerSvc.buildHydrationPayload(join.room, join.participant.id),
+            timestamp: Date.now(),
+          }));
+          return;
+        }
+
+        if (data.type === "room_leave") {
+          if (!roomAuth) return;
+          multiplayerSvc.leaveParticipant(roomAuth.roomId, roomAuth.participantId);
+          if (raw) eventBus.unsubscribeClientFromRoom(raw, roomAuth.roomId, roomAuth.participantId);
+          roomAuth = null;
+          return;
+        }
+
+        if (data.type === "room_message") {
+          if (!roomAuth) return;
+          const result = multiplayerSvc.submitPeerMessage(roomAuth.roomId, roomAuth.participantId, data.content);
+          if (!result.ok) {
+            ws.send(JSON.stringify({ event: "ROOM_MESSAGE_REJECTED", payload: { reason: result.reason }, timestamp: Date.now() }));
+          }
+          return;
+        }
+
+        if (data.type === "room_persona_change") {
+          if (!roomAuth) return;
+          multiplayerSvc.updateParticipantPersona(roomAuth.roomId, roomAuth.participantId, data.persona);
+          return;
+        }
+
+        if (data.type === "room_persona_lorebook") {
+          if (!roomAuth) return;
+          multiplayerSvc.updateParticipantLorebook(roomAuth.roomId, roomAuth.participantId, data.lorebook);
+          return;
+        }
+
+        if (data.type === "room_typing") {
+          if (!roomAuth) return;
+          multiplayerSvc.markTyping(roomAuth.roomId, roomAuth.participantId, !!data.typing);
+          return;
+        }
+
+        if (data.type === "room_pass_turn") {
+          if (!roomAuth) return;
+          multiplayerSvc.passTurn(roomAuth.roomId, roomAuth.participantId);
           return;
         }
 
@@ -195,6 +363,60 @@ export const wsHandler = upgradeWebSocket((c) => {
           host.sendFrontendMessage(data.payload, userId!);
         }
 
+        if (data.type === "SPINDLE_FRONTEND_PROCESS_EVENT") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const processId = typeof data.processId === "string" ? data.processId : null;
+          const processEvent = typeof data.event === "string" ? data.event : null;
+          if (!extensionId || !processId || !processEvent || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          if (
+            processEvent !== "ready" &&
+            processEvent !== "heartbeat" &&
+            processEvent !== "complete" &&
+            processEvent !== "fail" &&
+            processEvent !== "frontend_unloaded"
+          ) {
+            return;
+          }
+
+          host.handleFrontendProcessEvent(
+            processId,
+            userId,
+            processEvent,
+            typeof data.error === "string" ? data.error : undefined,
+          );
+          return;
+        }
+
+        if (data.type === "SPINDLE_FRONTEND_PROCESS_MSG") {
+          const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
+          const processId = typeof data.processId === "string" ? data.processId : null;
+          if (!extensionId || !processId || !userId) return;
+
+          const ext = await managerSvc.getExtensionForUser(extensionId, userId, userRole);
+          if (!ext) return;
+
+          const host = getWorkerHost(extensionId);
+          if (!host) return;
+
+          host.handleFrontendProcessMessage(processId, userId, data.payload);
+          return;
+        }
+
+        if (data.type === "SPINDLE_UI_REGISTRY_SYNC") {
+          if (userId) {
+            const { setUserExtensionDrawerTabs } = await import("../spindle/ui-frontend-state.service");
+            setUserExtensionDrawerTabs(userId, data.drawerTabs);
+          }
+          return;
+        }
+
         if (data.type === "SPINDLE_COMMAND_INVOKE") {
           const extensionId = typeof data.extensionId === "string" ? data.extensionId : null;
           const commandId = typeof data.commandId === "string" ? data.commandId : null;
@@ -209,17 +431,24 @@ export const wsHandler = upgradeWebSocket((c) => {
           host.invokeCommand(commandId, data.context ?? {}, userId);
         }
       } catch (err) {
-        // L-16: Log unexpected errors rather than silently discarding them.
-        // This preserves the intent to ignore benign parse errors for malformed
-        // client messages while still surfacing actual server-side bugs.
-        if (err instanceof SyntaxError) return; // malformed JSON from client — ignore silently
-        console.error("[WS] onMessage error:", err);
+        // Malformed JSON is the common case — drop those silently. Any other
+        // error here is a real bug (DB error, worker crash, etc.) that we
+        // need a record of so we can debug from the operator log.
+        if (err instanceof SyntaxError) return;
+        console.error(
+          "[WS] onMessage handler failed:",
+          err instanceof Error ? err.stack || err.message : err,
+        );
       }
     },
     onClose(_event, ws) {
       const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
       if (raw) {
         eventBus.removeClient(raw);
+      }
+      if (roomAuth) {
+        multiplayerSvc.handleDisconnect(roomAuth.roomId, roomAuth.participantId);
+        roomAuth = null;
       }
     },
   };

@@ -2,12 +2,15 @@ import { get, post, put, del } from './client'
 
 export interface LoadoutSnapshot {
   selectedDefinition: any | null
+  selectedChimeraDefinitions: any[]
   selectedBehaviors: any[]
   selectedPersonalities: any[]
   chimeraMode: boolean
   lumiaQuirks: string
   lumiaQuirksEnabled: boolean
-  councilSettings: any
+  /** @deprecated Council is owned by the council-profile system; no longer
+   *  captured or applied. Retained only so older stored snapshots still type. */
+  councilSettings?: any
   selectedLoomStyles: any[]
   selectedLoomUtils: any[]
   selectedLoomRetrofits: any[]

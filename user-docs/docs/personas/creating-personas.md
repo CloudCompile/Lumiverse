@@ -1,3 +1,7 @@
+---
+title: Creating Personas
+---
+
 # Creating Personas
 
 Setting up a persona takes just a minute and makes a noticeable difference in how the AI addresses and interacts with you.
@@ -12,6 +16,7 @@ Setting up a persona takes just a minute and makes a noticeable difference in ho
     - **Name** (required) — How the AI addresses you
     - **Title** — A short description shown in the persona card
     - **Description** — Your character's appearance, personality, and background
+    - **Pronouns** — Subjective, objective, and possessive forms (e.g. *she / her / her*). These power the `{{personaSubjectivePronoun}}`, `{{personaObjectivePronoun}}`, and `{{personaPossessivePronoun}}` macros and reinforce the AI's grammar choices. Blank fields fall back to *they / them / their*.
 4. Optionally:
     - Upload an **avatar**
     - Assign a **folder** for organization
@@ -25,6 +30,14 @@ Setting up a persona takes just a minute and makes a noticeable difference in ho
 Mark one persona as your **default** by toggling the default flag. The default persona is automatically active whenever you start a new chat (unless overridden by a character binding).
 
 Only one persona can be default at a time — setting a new default automatically clears the previous one.
+
+---
+
+## Narrator Mode
+
+Toggle the **Narrator** flag on any persona to mark it as a narrator rather than a self-insert. When active, `{{isNarrator}}` resolves to `"yes"` in prompts.
+
+This is useful for players who don't role-play as a specific character — they're directing the story rather than participating as a persona. Preset creators can use `{{if::{{isNarrator}}}}` to adjust instructions accordingly (e.g., shifting from second-person to third-person narration, or omitting persona descriptions).
 
 ---
 

@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Plus } from 'lucide-react'
+import { Plus, Shuffle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { connectionsApi } from '@/api/connections'
+import { listAllConnections } from '@/api/listAllConnections'
 import { useStore } from '@/store'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ConnectionForm from './connection-manager/ConnectionForm'
@@ -12,11 +14,15 @@ const FALLBACK_PROVIDERS = [
   { id: 'openai', name: 'OpenAI', default_url: 'https://api.openai.com/v1' },
   { id: 'anthropic', name: 'Anthropic', default_url: 'https://api.anthropic.com' },
   { id: 'google', name: 'Google Gemini', default_url: 'https://generativelanguage.googleapis.com' },
+  { id: 'infermatic', name: 'Infermatic', default_url: 'https://api.totalgpt.ai/v1' },
   { id: 'pollinations_text', name: 'Pollinations (Text)', default_url: 'https://text.pollinations.ai/openai' },
   { id: 'pollinations', name: 'Pollinations', default_url: 'https://gen.pollinations.ai/v1' },
 ]
 
+const MODEL_ROULETTE_PROVIDER = 'model_roulette'
+
 export default function ConnectionManager() {
+  const { t } = useTranslation('panels')
   const profiles = useStore((s) => s.profiles)
   const setProfiles = useStore((s) => s.setProfiles)
   const addProfile = useStore((s) => s.addProfile)
@@ -29,6 +35,7 @@ export default function ConnectionManager() {
 
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [creatingProvider, setCreatingProvider] = useState('openai')
   const [deleteTarget, setDeleteTarget] = useState<ConnectionProfile | null>(null)
 
   useEffect(() => {
@@ -47,15 +54,26 @@ export default function ConnectionManager() {
     }
   }, [])
 
-  // Initialization: load profiles and providers in parallel
+  // Initialization: load profiles and providers in parallel.
+  //
+  // `useAppInit` preloads both right after auth, so by the time this panel
+  // mounts the store is usually already populated. We only show the loading
+  // placeholder when we're starting from an empty store (fresh tab / auth
+  // hand-off); otherwise we render from the store immediately and kick off
+  // a silent stale-while-revalidate refresh in the background.
   useEffect(() => {
     let cancelled = false
 
+    const storeState = useStore.getState()
+    const hasCachedProfiles = storeState.profiles.length > 0
+    const hasCachedProviders = storeState.providers.length > 0
+    const cacheHit = hasCachedProfiles && hasCachedProviders
+
     async function init() {
-      setLoading(true)
+      if (!cacheHit) setLoading(true)
       try {
         const [profilesResult, providersResult] = await Promise.allSettled([
-          connectionsApi.list({ limit: 100 }),
+          listAllConnections(connectionsApi),
           connectionsApi.providers(),
         ])
 
@@ -65,14 +83,15 @@ export default function ConnectionManager() {
           setProfiles(profilesResult.value.data)
         }
 
-        const loadedProviders = providersResult.status === 'fulfilled'
-          ? providersResult.value.providers
-          : FALLBACK_PROVIDERS
-        setProviders(loadedProviders)
+        if (providersResult.status === 'fulfilled') {
+          setProviders(providersResult.value.providers)
+        } else if (!hasCachedProviders) {
+          setProviders(FALLBACK_PROVIDERS)
+        }
       } catch (err) {
         console.error('[ConnectionManager] Init failed:', err)
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled && !cacheHit) setLoading(false)
       }
     }
 
@@ -127,21 +146,36 @@ export default function ConnectionManager() {
   }, [deleteTarget, removeProfile])
 
   if (loading) {
-    return <div className={styles.loading}>Loading connections...</div>
+    return <div className={styles.loading}>{t('connectionManager.loading')}</div>
   }
 
   return (
     <div className={styles.manager}>
       {!creating && (
-        <button type="button" className={styles.createBtn} onClick={() => setCreating(true)}>
-          <Plus size={14} />
-          <span>New Connection</span>
-        </button>
+        <div className={styles.createActions}>
+          <button
+            type="button"
+            className={styles.createBtn}
+            onClick={() => { setCreatingProvider('openai'); setCreating(true) }}
+          >
+            <Plus size={14} />
+            <span>{t('connectionManager.newConnection')}</span>
+          </button>
+          <button
+            type="button"
+            className={styles.createBtn}
+            onClick={() => { setCreatingProvider(MODEL_ROULETTE_PROVIDER); setCreating(true) }}
+          >
+            <Shuffle size={14} />
+            <span>{t('connectionManager.newRoulette')}</span>
+          </button>
+        </div>
       )}
 
       {creating && (
         <ConnectionForm
           providers={providers}
+          initialProvider={creatingProvider}
           onSave={handleCreate}
           onCancel={() => setCreating(false)}
           onOAuthCreated={(profile) => {
@@ -165,17 +199,17 @@ export default function ConnectionManager() {
           />
         ))}
         {profiles.length === 0 && !creating && (
-          <div className={styles.empty}>No connections configured. Add one to start chatting.</div>
+          <div className={styles.empty}>{t('connectionManager.empty')}</div>
         )}
       </div>
 
       {deleteTarget && (
         <ConfirmationModal
-          title="Delete Connection"
-          message={`Delete "${deleteTarget.name}"? This cannot be undone.`}
+          title={t('connectionManager.deleteTitle')}
+          message={t('connectionManager.deleteMessage', { name: deleteTarget.name })}
           isOpen={true}
           variant="danger"
-          confirmText="Delete"
+          confirmText={t('connectionManager.deleteConfirm')}
           onConfirm={handleDelete}
           onCancel={() => setDeleteTarget(null)}
         />

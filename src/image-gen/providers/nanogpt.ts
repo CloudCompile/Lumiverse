@@ -1,6 +1,7 @@
 import type { ImageProvider } from "../provider";
 import type { ImageProviderCapabilities } from "../param-schema";
 import type { ImageGenRequest, ImageGenResponse } from "../types";
+import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 import { applyRawOverride } from "../types";
 
 export class NanoGPTImageProvider implements ImageProvider {
@@ -105,9 +106,7 @@ export class NanoGPTImageProvider implements ImageProvider {
       signal: request.signal,
     });
 
-    if (!res.ok) {
-      throw new Error(`Nano-GPT API error ${res.status}: ${await res.text().catch(() => "Unknown error")}`);
-    }
+    if (!res.ok) await throwProviderResponseError(this.displayName, "image generate", res);
 
     const data = await res.json();
     const b64 = data?.data?.[0]?.b64_json;
@@ -126,28 +125,24 @@ export class NanoGPTImageProvider implements ImageProvider {
         method: "GET",
         headers: { Authorization: `Bearer ${apiKey}` },
       });
+      if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
-    } catch {
-      return false;
+    } catch (err) {
+      if (err instanceof ProviderRequestError) throw err;
+      throw new ProviderRequestError({ provider: this.displayName, operation: "authentication", detail: err instanceof Error ? err.message : "network request failed", retryable: true });
     }
   }
 
   async listModels(apiKey: string, _apiUrl: string): Promise<Array<{ id: string; label: string }>> {
-    try {
-      const res = await fetch("https://nano-gpt.com/api/v1/image-models", {
-        method: "GET",
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-      if (!res.ok) return this.capabilities.staticModels || [];
-      const data = await res.json();
-      const modelList = Array.isArray(data) ? data : data.data || data.models || [];
-      const models = modelList.map((m: any) => ({
-        id: m.id || m.model || String(m),
-        label: m.name || m.label || m.id || m.model || String(m),
-      }));
-      return models.length > 0 ? models : this.capabilities.staticModels || [];
-    } catch {
-      return this.capabilities.staticModels || [];
-    }
+    const data = await fetchProviderJson<any>(this.displayName, "model listing", "https://nano-gpt.com/api/v1/image-models", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const modelList = Array.isArray(data) ? data : data.data || data.models || [];
+    const models = modelList.map((m: any) => ({
+      id: m.id || m.model || String(m),
+      label: m.name || m.label || m.id || m.model || String(m),
+    }));
+    return models.length > 0 ? models : this.capabilities.staticModels || [];
   }
 }

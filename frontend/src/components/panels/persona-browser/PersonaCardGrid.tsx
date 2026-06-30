@@ -1,4 +1,5 @@
 import { Fragment, memo, useRef, useState, useEffect, useCallback, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { User, UserCheck, Crown, Link2 } from 'lucide-react'
 import { getPersonaAvatarThumbUrl } from '@/lib/avatarUrls'
 import LazyImage from '@/components/shared/LazyImage'
@@ -28,6 +29,7 @@ const PersonaCard = memo(function PersonaCard({
   onSelect: (id: string | null) => void
   onDoubleClick: (id: string) => void
 }) {
+  const { t } = useTranslation('panels', { keyPrefix: 'personaManager.badges' })
   return (
     <div
       className={clsx(
@@ -57,17 +59,17 @@ const PersonaCard = memo(function PersonaCard({
         {/* Badge overlays */}
         <div className={styles.badges}>
           {isActive && (
-            <span className={clsx(styles.badge, styles.badgeActive)} title="Active">
+            <span className={clsx(styles.badge, styles.badgeActive)} title={t('active')}>
               <UserCheck size={10} />
             </span>
           )}
           {persona.is_default && (
-            <span className={clsx(styles.badge, styles.badgeDefault)} title="Default">
+            <span className={clsx(styles.badge, styles.badgeDefault)} title={t('default')}>
               <Crown size={10} />
             </span>
           )}
           {persona.attached_world_book_id && (
-            <span className={clsx(styles.badge, styles.badgeConnected)} title="Connected">
+            <span className={clsx(styles.badge, styles.badgeConnected)} title={t('connected')}>
               <Link2 size={10} />
             </span>
           )}
@@ -89,6 +91,7 @@ export default function PersonaCardGrid({
   onDoubleClick,
   renderEditor,
 }: PersonaCardGridProps) {
+  const { t } = useTranslation('panels', { keyPrefix: 'personaManager' })
   const gridRef = useRef<HTMLDivElement>(null)
   const [colCount, setColCount] = useState(4)
 
@@ -107,7 +110,7 @@ export default function PersonaCardGrid({
   }, [measureCols])
 
   if (personas.length === 0) {
-    return <div className={styles.empty}>No personas found.</div>
+    return <div className={styles.empty}>{t('noPersonasFound')}</div>
   }
 
   // Figure out which index to insert the editor after: the last card in the

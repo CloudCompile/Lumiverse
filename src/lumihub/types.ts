@@ -54,13 +54,58 @@ export interface InstallWorldbookResultPayload {
   error?: string;
 }
 
+export interface InstallThemePayload {
+  source: "lumihub";
+  themeId: string;
+  themeName: string;
+  /** Export shape returned by LumiHub's /themes/:id/export endpoint. */
+  themeData: Record<string, any>;
+}
+
+export interface InstallThemeResultPayload {
+  requestId: string;
+  success: boolean;
+  themeId?: string;
+  themeName?: string;
+  error?: string;
+}
+
+export interface InstallPresetPayload {
+  source: "lumihub";
+  presetId: string;
+  presetName: string;
+  /** Latest published version label (also present at presetData.preset.presetVersion). */
+  presetVersion?: string | null;
+  /** Uploader username, for the manifest creator field. */
+  presetCreator?: string | null;
+  /** Canonical `creator/name` manifest slug computed by the hub, echoed back in the manifest. */
+  presetSlug?: string | null;
+  /** Export shape returned by LumiHub's /presets/:id/export endpoint. */
+  presetData: Record<string, any>;
+  /** Manifest for private Hub-side preset blocks; content is fetched separately. */
+  sealedPreset?: {
+    version: string | null;
+    blocks: Array<{ key: string; sha256: string }>;
+  } | null;
+}
+
+export interface InstallPresetResultPayload {
+  requestId: string;
+  success: boolean;
+  presetId?: string;
+  presetName?: string;
+  error?: string;
+}
+
 export interface ManifestSyncPayload {
   entries: Array<{
     slug: string;
-    type: "character" | "worldbook";
+    type: "character" | "worldbook" | "theme" | "preset";
     name: string;
     creator: string;
     source: "local" | "chub" | "lumihub";
+    /** Installed version label (presets), enabling the hub to detect outdated installs. */
+    version?: string;
     installed_at: number;
   }>;
 }

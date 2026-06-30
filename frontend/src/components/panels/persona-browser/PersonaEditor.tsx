@@ -1,36 +1,60 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link, Globe, RefreshCw } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link, Globe, RefreshCw, X, BookOpen } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { getPersonaAvatarLargeUrl } from '@/lib/avatarUrls'
 import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
+import { charactersApi } from '@/api/characters'
 import { useStore } from '@/store'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { Spinner } from '@/components/shared/Spinner'
 import { Button } from '@/components/shared/FormComponents'
 import FolderDropdown from '@/components/shared/FolderDropdown'
+import SearchableSelect from '@/components/shared/SearchableSelect'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { useFolders } from '@/hooks/useFolders'
-import { resolveBinding } from '@/store/slices/personas'
-import type { Persona, WorldBook } from '@/types/api'
+import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
+import {
+  characterMatchesPersonaTagBinding,
+  getMatchingPersonaTagBindingIds,
+  resolveBinding,
+  resolvePersonaTagBinding,
+} from '@/store/slices/personas'
+import type { Persona, TagCount, WorldBook } from '@/types/api'
 import styles from './PersonaEditor.module.css'
 import clsx from 'clsx'
 
+type PronounField = 'subjective_pronoun' | 'objective_pronoun' | 'possessive_pronoun'
+
+const PRONOUN_FIELDS: Array<{
+  key: PronounField
+  labelKey: string
+  macro: '{{sub}}' | '{{obj}}' | '{{poss}}'
+  placeholderKey: string
+}> = [
+  { key: 'subjective_pronoun', labelKey: 'personaEditor.pronouns.subjective', macro: '{{sub}}', placeholderKey: 'personaEditor.pronouns.subjectivePlaceholder' },
+  { key: 'objective_pronoun', labelKey: 'personaEditor.pronouns.objective', macro: '{{obj}}', placeholderKey: 'personaEditor.pronouns.objectivePlaceholder' },
+  { key: 'possessive_pronoun', labelKey: 'personaEditor.pronouns.possessive', macro: '{{poss}}', placeholderKey: 'personaEditor.pronouns.possessivePlaceholder' },
+]
+
 const POSITION_OPTIONS = [
-  { value: 0, label: 'In Prompt' },
-  { value: 1, label: 'Top AN' },
-  { value: 2, label: 'Bottom AN' },
-  { value: 4, label: 'At Depth' },
-  { value: 99, label: 'Disabled' },
+  { value: 0, labelKey: 'personaEditor.position.inPrompt' },
+  { value: 1, labelKey: 'personaEditor.position.topAn' },
+  { value: 2, labelKey: 'personaEditor.position.bottomAn' },
+  { value: 4, labelKey: 'personaEditor.position.atDepth' },
+  { value: 99, labelKey: 'personaEditor.position.disabled' },
 ]
 
 const ROLE_OPTIONS = [
-  { value: 'system', label: 'System' },
-  { value: 'user', label: 'User' },
-  { value: 'assistant', label: 'Assistant' },
+  { value: 'system', labelKey: 'personaEditor.role.system' },
+  { value: 'user', labelKey: 'personaEditor.role.user' },
+  { value: 'assistant', labelKey: 'personaEditor.role.assistant' },
 ]
 
 interface PersonaEditorProps {
@@ -56,30 +80,40 @@ export default function PersonaEditor({
   onSetLorebook,
   onSwitchTo,
 }: PersonaEditorProps) {
+  const { t } = useTranslation('panels')
   const [name, setName] = useState(persona.name)
   const [title, setTitle] = useState(persona.title || '')
   const [description, setDescription] = useState(persona.description)
+  const [subjectivePronoun, setSubjectivePronoun] = useState(persona.subjective_pronoun || '')
+  const [objectivePronoun, setObjectivePronoun] = useState(persona.objective_pronoun || '')
+  const [possessivePronoun, setPossessivePronoun] = useState(persona.possessive_pronoun || '')
   const [folder, setFolder] = useState(persona.folder || '')
   const [descPosition, setDescPosition] = useState<number>(persona.metadata?.description_position ?? 0)
   const [descDepth, setDescDepth] = useState<number>(persona.metadata?.description_depth ?? 4)
   const [descRole, setDescRole] = useState<string>(persona.metadata?.description_role ?? 'system')
   const openModal = useStore((s) => s.openModal)
   const activeChatId = useStore((s) => s.activeChatId)
+  const activeChatMetadata = useStore((s) => s.activeChatMetadata)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const characterPersonaBindings = useStore((s) => s.characterPersonaBindings)
+  const personaTagBindings = useStore((s) => s.personaTagBindings)
   const setCharacterPersonaBinding = useStore((s) => s.setCharacterPersonaBinding)
+  const setPersonaTagBinding = useStore((s) => s.setPersonaTagBinding)
   const messages = useStore((s) => s.messages)
   const setMessages = useStore((s) => s.setMessages)
   const allPersonas = useStore((s) => s.personas)
   const [worldBooks, setWorldBooks] = useState<WorldBook[]>([])
+  const [availableTags, setAvailableTags] = useState<TagCount[]>([])
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showReattributeConfirm, setShowReattributeConfirm] = useState(false)
   const [reattributing, setReattributing] = useState(false)
   const [avatarKey, setAvatarKey] = useState(0)
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const nameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const titleTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const descTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const pronounTimers = useRef<Partial<Record<PronounField, ReturnType<typeof setTimeout>>>>({})
   const fileRef = useRef<HTMLInputElement>(null)
   const lastSyncedId = useRef<string | null>(null)
 
@@ -93,6 +127,9 @@ export default function PersonaEditor({
     setName(persona.name)
     setTitle(persona.title || '')
     setDescription(persona.description)
+    setSubjectivePronoun(persona.subjective_pronoun || '')
+    setObjectivePronoun(persona.objective_pronoun || '')
+    setPossessivePronoun(persona.possessive_pronoun || '')
     setFolder(persona.folder || '')
     setDescPosition(persona.metadata?.description_position ?? 0)
     setDescDepth(persona.metadata?.description_depth ?? 4)
@@ -105,6 +142,10 @@ export default function PersonaEditor({
       .list({ limit: 200 })
       .then((res) => setWorldBooks(res.data))
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    charactersApi.listTags().then(setAvailableTags).catch(() => {})
   }, [])
 
   // Debounced name save
@@ -138,6 +179,20 @@ export default function PersonaEditor({
       clearTimeout(descTimer.current)
       descTimer.current = setTimeout(() => {
         onUpdate(persona.id, { description: value })
+      }, 400)
+    },
+    [persona.id, onUpdate]
+  )
+
+  const handlePronounChange = useCallback(
+    (field: PronounField, value: string) => {
+      if (field === 'subjective_pronoun') setSubjectivePronoun(value)
+      if (field === 'objective_pronoun') setObjectivePronoun(value)
+      if (field === 'possessive_pronoun') setPossessivePronoun(value)
+
+      clearTimeout(pronounTimers.current[field])
+      pronounTimers.current[field] = setTimeout(() => {
+        onUpdate(persona.id, { [field]: value })
       }, 400)
     },
     [persona.id, onUpdate]
@@ -182,17 +237,31 @@ export default function PersonaEditor({
   )
 
   const handleLorebookChange = useCallback(
-    (value: string) => {
-      onSetLorebook(persona.id, value || null)
+    async (value: string) => {
+      const nextId = value || null
+      if (!nextId || !activeChatId || !isActive) {
+        await onSetLorebook(persona.id, nextId)
+        return
+      }
+
+      const approvedIds = await filterWorldBooksForChatContextAttachment(
+        worldBooks.filter((book) => book.id === nextId),
+      )
+      await onSetLorebook(persona.id, approvedIds[0] || null)
     },
-    [persona.id, onSetLorebook]
+    [activeChatId, isActive, onSetLorebook, persona.id, worldBooks]
   )
 
   // Avatar crop flow — upload both cropped (for avatar display) and original (for full viewing)
   const handleCropComplete = useCallback(
     async (croppedFile: File, originalFile: File) => {
-      await onUploadAvatar(persona.id, croppedFile, originalFile)
-      setAvatarKey((k) => k + 1)
+      setUploadingAvatar(true)
+      try {
+        await onUploadAvatar(persona.id, croppedFile, originalFile)
+        setAvatarKey((k) => k + 1)
+      } finally {
+        setUploadingAvatar(false)
+      }
     },
     [persona.id, onUploadAvatar]
   )
@@ -200,8 +269,9 @@ export default function PersonaEditor({
   const { cropModalProps, openCropFlow } = useImageCropFlow(handleCropComplete)
 
   const handleAvatarClick = useCallback(() => {
+    if (uploadingAvatar) return
     fileRef.current?.click()
-  }, [])
+  }, [uploadingAvatar])
 
   const handleFileSelected = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -216,10 +286,11 @@ export default function PersonaEditor({
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault()
+      if (uploadingAvatar) return
       const file = e.dataTransfer.files?.[0]
       if (file && file.type.startsWith('image/')) openCropFlow(file)
     },
-    [openCropFlow]
+    [openCropFlow, uploadingAvatar]
   )
 
   const handleReattributeChat = useCallback(async () => {
@@ -243,15 +314,45 @@ export default function PersonaEditor({
 
   // Character-persona binding
   const activeCharName = activeCharacterId ? characters.find((c) => c.id === activeCharacterId)?.name : null
+  const activeCharacter = activeCharacterId ? characters.find((c) => c.id === activeCharacterId) ?? null : null
+  const activeCharacterTags = activeCharacter?.tags ?? []
   const rawBinding = activeCharacterId ? characterPersonaBindings[activeCharacterId] : undefined
   const boundPersonaId = rawBinding ? resolveBinding(rawBinding).personaId : undefined
   const isBoundToActiveChar = boundPersonaId === persona.id
   const boundAddonStates = isBoundToActiveChar && rawBinding ? resolveBinding(rawBinding).addonStates : undefined
+  const tagBinding = resolvePersonaTagBinding(personaTagBindings[persona.id])
+  const tagBindingTagCount = tagBinding?.tags.length ?? 0
+  const tagBindingHasAddonStates = !!tagBinding?.addonStates && Object.keys(tagBinding.addonStates).length > 0
   const personaAddonCount = Array.isArray(persona.metadata?.addons) ? persona.metadata.addons.length : 0
   const globalAddonCount = Array.isArray(persona.metadata?.attached_global_addons) ? persona.metadata.attached_global_addons.length : 0
   const addonCount = personaAddonCount + globalAddonCount
+  const tagOptions = useMemo(
+    () => availableTags.map(({ tag, count }) => ({ value: tag, label: tag, sublabel: t('personaEditor.characterCount', { count }) })),
+    [availableTags],
+  )
+  const matchingCharacterCount = useMemo(
+    () => tagBinding ? characters.filter((character) => characterMatchesPersonaTagBinding(character.tags || [], tagBinding)).length : 0,
+    [characters, tagBinding],
+  )
+  const matchingActivePersonaIds = useMemo(
+    () => activeCharacter ? getMatchingPersonaTagBindingIds(allPersonas, personaTagBindings, activeCharacter.tags || []) : [],
+    [activeCharacter, allPersonas, personaTagBindings],
+  )
+  const matchesActiveCharacterByTag = activeCharacter ? characterMatchesPersonaTagBinding(activeCharacterTags, tagBinding) : false
+  const activeCharacterConflictCount = matchesActiveCharacterByTag
+    ? matchingActivePersonaIds.filter((personaId) => personaId !== persona.id).length
+    : 0
+  const activeCharacterTagSuggestions = useMemo(() => {
+    if (!activeCharacter) return []
+    const selected = new Set((tagBinding?.tags ?? []).map((tag) => tag.trim().toLowerCase()))
+    return activeCharacter.tags.filter((tag) => !selected.has(tag.trim().toLowerCase())).slice(0, 8)
+  }, [activeCharacter, tagBinding])
 
-  /** Build a snapshot of current addon enabled states. */
+  /** Build a snapshot of the *effective* addon enabled states — the persona's
+   *  saved defaults with the live per-chat overrides layered on top. In-chat
+   *  toggles persist to the chat's `persona_addon_states`, never to the persona
+   *  metadata, so reading metadata alone would capture stale defaults and make
+   *  "rebind add-ons" appear to do nothing. */
   const snapshotAddonStates = useCallback((): Record<string, boolean> => {
     const states: Record<string, boolean> = {}
     const addons = persona.metadata?.addons
@@ -262,8 +363,14 @@ export default function PersonaEditor({
     if (Array.isArray(globalRefs)) {
       for (const r of globalRefs) states[r.id] = r.enabled
     }
+    const chatOverrides = activeChatMetadata?.persona_addon_states?.[persona.id]
+    if (chatOverrides && typeof chatOverrides === 'object') {
+      for (const [id, enabled] of Object.entries(chatOverrides)) {
+        if (typeof enabled === 'boolean') states[id] = enabled
+      }
+    }
     return states
-  }, [persona.metadata])
+  }, [persona.metadata, persona.id, activeChatMetadata])
 
   const handleToggleCharacterBinding = useCallback(() => {
     if (!activeCharacterId) return
@@ -279,16 +386,58 @@ export default function PersonaEditor({
     setCharacterPersonaBinding(activeCharacterId, persona.id, snapshotAddonStates())
   }, [activeCharacterId, isBoundToActiveChar, persona.id, snapshotAddonStates, setCharacterPersonaBinding])
 
+  const handleTagBindingTagsChange = useCallback((tags: string[]) => {
+    const current = resolvePersonaTagBinding(useStore.getState().personaTagBindings[persona.id])
+    setPersonaTagBinding(persona.id, tags.length > 0
+      ? { tags, mode: current?.mode ?? 'any', addonStates: current?.addonStates }
+      : null)
+  }, [persona.id, setPersonaTagBinding])
+
+  const handleTagBindingModeChange = useCallback((value: string) => {
+    const current = resolvePersonaTagBinding(useStore.getState().personaTagBindings[persona.id])
+    if (!current) return
+    setPersonaTagBinding(persona.id, { ...current, mode: value === 'all' ? 'all' : 'any' })
+  }, [persona.id, setPersonaTagBinding])
+
+  const handleClearTagBinding = useCallback(() => {
+    setPersonaTagBinding(persona.id, null)
+  }, [persona.id, setPersonaTagBinding])
+
+  const handleSnapshotTagBindingAddons = useCallback(() => {
+    const current = resolvePersonaTagBinding(useStore.getState().personaTagBindings[persona.id])
+    if (!current) return
+    setPersonaTagBinding(persona.id, { ...current, addonStates: snapshotAddonStates() })
+  }, [persona.id, setPersonaTagBinding, snapshotAddonStates])
+
+  const handleRemoveTagBindingTag = useCallback((tagToRemove: string) => {
+    const current = resolvePersonaTagBinding(useStore.getState().personaTagBindings[persona.id])
+    if (!current) return
+    const nextTags = current.tags.filter((tag) => tag !== tagToRemove)
+    setPersonaTagBinding(persona.id, nextTags.length > 0 ? { ...current, tags: nextTags } : null)
+  }, [persona.id, setPersonaTagBinding])
+
+  const handleAddSuggestedTag = useCallback((tag: string) => {
+    const current = resolvePersonaTagBinding(useStore.getState().personaTagBindings[persona.id])
+    const nextTags = current?.tags ?? []
+    if (nextTags.some((candidate) => candidate.trim().toLowerCase() === tag.trim().toLowerCase())) return
+    setPersonaTagBinding(persona.id, {
+      tags: [...nextTags, tag],
+      mode: current?.mode ?? 'any',
+      addonStates: current?.addonStates,
+    })
+  }, [persona.id, setPersonaTagBinding])
+
   return (
     <div className={styles.editor}>
       {/* Avatar zone */}
       <div className={styles.topRow}>
         <div
-          className={styles.avatarZone}
+          className={clsx(styles.avatarZone, uploadingAvatar && styles.avatarZoneUploading)}
           onClick={handleAvatarClick}
           onDrop={handleDrop}
           onDragOver={(e) => e.preventDefault()}
-          title="Click or drop to change avatar"
+          title={uploadingAvatar ? t('personaEditor.uploadingAvatar') : t('personaEditor.clickOrDrop')}
+          aria-busy={uploadingAvatar}
         >
           <LazyImage
             key={avatarKey}
@@ -301,8 +450,8 @@ export default function PersonaEditor({
               </div>
             }
           />
-          <div className={styles.avatarOverlay}>
-            <Upload size={16} />
+          <div className={clsx(styles.avatarOverlay, uploadingAvatar && styles.avatarOverlayActive)}>
+            {uploadingAvatar ? <Spinner size={20} /> : <Upload size={16} />}
           </div>
           <input
             ref={fileRef}
@@ -320,7 +469,7 @@ export default function PersonaEditor({
             className={styles.nameInput}
             value={name}
             onChange={(e) => handleNameChange(e.target.value)}
-            placeholder="Persona name"
+            placeholder={t('personaEditor.personaName')}
           />
           {/* Title input */}
           <input
@@ -328,7 +477,7 @@ export default function PersonaEditor({
             className={styles.titleInput}
             value={title}
             onChange={(e) => handleTitleChange(e.target.value)}
-            placeholder="Short title / tagline"
+            placeholder={t('personaEditor.shortTitle')}
           />
         </div>
       </div>
@@ -339,8 +488,8 @@ export default function PersonaEditor({
           className={styles.descTextarea}
           value={description}
           onChange={handleDescriptionChange}
-          title={`${persona.name} — Description`}
-          placeholder="Persona description..."
+          title={`${persona.name} — ${t('personaEditor.description')}`}
+          placeholder={t('personaEditor.descriptionPlaceholder')}
           rows={4}
         />
         <div className={styles.descControls}>
@@ -351,7 +500,7 @@ export default function PersonaEditor({
           >
             {POSITION_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
-                {opt.label}
+                {t(opt.labelKey)}
               </option>
             ))}
           </select>
@@ -370,10 +519,45 @@ export default function PersonaEditor({
           >
             {ROLE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
-                {opt.label}
+                {t(opt.labelKey)}
               </option>
             ))}
           </select>
+        </div>
+      </div>
+
+      <div className={styles.pronounSection}>
+        <div className={styles.pronounHeader}>
+          <span className={styles.pronounTitle}>{t('personaEditor.pronouns.title')}</span>
+          <span className={styles.pronounHint}>{t('personaEditor.pronouns.hint')}</span>
+        </div>
+        <div className={styles.pronounGrid}>
+          {PRONOUN_FIELDS.map((field) => {
+            const value =
+              field.key === 'subjective_pronoun'
+                ? subjectivePronoun
+                : field.key === 'objective_pronoun'
+                  ? objectivePronoun
+                  : possessivePronoun
+
+            return (
+              <label key={field.key} className={styles.pronounField}>
+                <span className={styles.pronounLabel}>{t(field.labelKey)}</span>
+                <div className={styles.pronounInputWrap}>
+                  <code className={styles.pronounMacro} aria-hidden="true">
+                    {field.macro}
+                  </code>
+                  <input
+                    type="text"
+                    className={styles.pronounInput}
+                    value={value}
+                    onChange={(e) => handlePronounChange(field.key, e.target.value)}
+                    placeholder={t(field.placeholderKey)}
+                  />
+                </div>
+              </label>
+            )
+          })}
         </div>
       </div>
 
@@ -393,24 +577,32 @@ export default function PersonaEditor({
           type="button"
           className={clsx(styles.toggleBtn, persona.is_default && styles.toggleBtnActive)}
           onClick={() => onToggleDefault(persona.id)}
-          title={persona.is_default ? 'Remove default' : 'Set as default'}
+          title={persona.is_default ? t('personaEditor.removeDefault') : t('personaEditor.setDefault')}
         >
           <Crown size={13} />
-          <span>Default</span>
+          <span>{t('personaEditor.default')}</span>
+        </button>
+        <button
+          type="button"
+          className={clsx(styles.toggleBtn, persona.is_narrator && styles.toggleBtnActive)}
+          onClick={() => onUpdate(persona.id, { is_narrator: !persona.is_narrator })}
+          title={persona.is_narrator ? 'Unmark as narrator' : 'Mark as narrator — this persona narrates rather than self-inserts'}
+        >
+          <BookOpen size={13} />
+          <span>Narrator</span>
         </button>
         <div className={styles.lorebookRow}>
-          <select
-            className={styles.lorebookSelect}
+          <SearchableSelect
             value={persona.attached_world_book_id || ''}
-            onChange={(e) => handleLorebookChange(e.target.value)}
-          >
-            <option value="">No lorebook</option>
-            {worldBooks.map((wb) => (
-              <option key={wb.id} value={wb.id}>
-                {wb.name}
-              </option>
-            ))}
-          </select>
+            onChange={(value) => { void handleLorebookChange(value) }}
+            options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name, group: wb.folder || undefined }))}
+            placeholder={t('personaEditor.noLorebook')}
+            searchPlaceholder={t('personaEditor.searchWorldBooks')}
+            emptyMessage={t('personaEditor.noWorldBooks')}
+            clearable
+            clearLabel={t('personaEditor.noLorebook')}
+            className={styles.lorebookSelectWrapper}
+          />
           <Button
             size="icon-sm" variant="ghost"
             onClick={() =>
@@ -418,7 +610,7 @@ export default function PersonaEditor({
                 bookId: persona.attached_world_book_id || undefined,
               })
             }
-            title="Edit world books"
+            title={t('personaEditor.editWorldBooks')}
             icon={<Pencil size={12} />}
           />
         </div>
@@ -430,19 +622,19 @@ export default function PersonaEditor({
           type="button"
           className={clsx(styles.toggleBtn, addonCount > 0 && styles.addonsBtn)}
           onClick={() => openModal('personaAddons', { personaId: persona.id, personaName: persona.name })}
-          title="Manage persona add-ons"
+          title={t('personaEditor.manageAddons')}
         >
           <IconPlaylistAdd size={13} />
-          <span>Add-Ons{addonCount > 0 ? ` (${addonCount})` : ''}</span>
+          <span>{t('personaEditor.addons')}{addonCount > 0 ? ` (${addonCount})` : ''}</span>
         </button>
         <button
           type="button"
           className={styles.toggleBtn}
           onClick={() => openModal('globalAddonsLibrary')}
-          title="Global add-ons library"
+          title={t('personaEditor.globalAddonsLibrary')}
         >
           <Globe size={13} />
-          <span>Global Library</span>
+          <span>{t('personaEditor.globalLibrary')}</span>
         </button>
       </div>
 
@@ -455,28 +647,136 @@ export default function PersonaEditor({
             onClick={handleToggleCharacterBinding}
             title={
               isBoundToActiveChar
-                ? `Unbind from ${activeCharName || 'character'}`
-                : `Bind to ${activeCharName || 'character'} — auto-switch to this persona and add-on states when chatting with them`
+                ? t('personaEditor.unbindFrom', { name: activeCharName || t('personaEditor.character') })
+                : t('personaEditor.bindTo', { name: activeCharName || t('personaEditor.character') })
             }
           >
             <Link size={11} />
           </button>
           <span className={clsx(styles.bindingLabel, isBoundToActiveChar && styles.bindingLabelActive)}>
-            {isBoundToActiveChar ? `Bound to ${activeCharName}` : `Bind to ${activeCharName}`}
+            {isBoundToActiveChar ? t('personaEditor.boundTo', { name: activeCharName }) : t('personaEditor.bindToShort', { name: activeCharName })}
           </span>
           {isBoundToActiveChar && addonCount > 0 && (
             <button
               type="button"
               className={styles.rebindBtn}
               onClick={handleRebindAddons}
-              title={`Rebind add-on states to ${activeCharName || 'character'} — snapshot current enabled/disabled states`}
+              title={t('personaEditor.rebindAddonsTitle', { name: activeCharName || t('personaEditor.character') })}
             >
               <RefreshCw size={10} />
-              <span>{boundAddonStates ? 'Rebind' : 'Bind'} Add-Ons</span>
+              <span>{boundAddonStates ? t('personaEditor.rebind') : t('personaEditor.bind')} {t('personaEditor.addons')}</span>
             </button>
           )}
         </div>
       )}
+
+      <div className={styles.tagBindingSection}>
+        <div className={styles.tagBindingHeader}>
+          <span className={styles.tagBindingTitle}>{t('personaEditor.tagAutoBind')}</span>
+          <span className={styles.tagBindingHint}>
+            {t('personaEditor.tagAutoBindHint')}
+          </span>
+        </div>
+        <div className={styles.tagBindingControls}>
+          <SearchableSelect
+            multi
+            value={tagBinding?.tags ?? []}
+            onChange={handleTagBindingTagsChange}
+            options={tagOptions}
+            placeholder={t('personaEditor.chooseCharacterTags')}
+            searchPlaceholder={t('personaEditor.searchCharacterTags')}
+            emptyMessage={t('personaEditor.noCharacterTags')}
+            noResultsMessage={t('personaEditor.noMatchingTags')}
+            className={styles.tagBindingSelect}
+            portal
+          />
+          <select
+            className={clsx(styles.select, styles.tagModeSelect)}
+            value={tagBinding?.mode ?? 'any'}
+            onChange={(e) => handleTagBindingModeChange(e.target.value)}
+            disabled={!tagBinding || tagBindingTagCount < 2}
+            title={tagBindingTagCount < 2 ? t('personaEditor.chooseTwoTags') : undefined}
+          >
+            <option value="any">{t('personaEditor.anyTag')}</option>
+            <option value="all">{t('personaEditor.allTags')}</option>
+          </select>
+          {tagBinding && addonCount > 0 && (
+            <button
+              type="button"
+              className={styles.rebindBtn}
+              onClick={handleSnapshotTagBindingAddons}
+              title={t('personaEditor.snapshotAddonStates')}
+            >
+              <RefreshCw size={10} />
+              <span>{tagBindingHasAddonStates ? t('personaEditor.rebind') : t('personaEditor.bind')} {t('personaEditor.addons')}</span>
+            </button>
+          )}
+          {tagBinding && (
+            <button
+              type="button"
+              className={styles.clearBindingBtn}
+              onClick={handleClearTagBinding}
+              title={t('personaEditor.removeTagAutoBind')}
+            >
+              {t('personaEditor.clear')}
+            </button>
+          )}
+        </div>
+
+        {tagBinding?.tags.length ? (
+          <div className={styles.tagChipList}>
+            {tagBinding.tags.map((tag) => (
+              <span key={tag} className={styles.tagChip}>
+                {tag}
+                <button
+                  type="button"
+                  className={styles.tagChipRemove}
+                  onClick={() => handleRemoveTagBindingTag(tag)}
+                  title={`Remove ${tag}`}
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {activeCharacterTagSuggestions.length > 0 && (
+          <div className={styles.tagSuggestionRow}>
+            <span className={styles.tagSuggestionLabel}>{t('personaEditor.addFrom', { name: activeCharName || t('personaEditor.activeCharacter') })}:</span>
+            <div className={styles.tagSuggestionList}>
+              {activeCharacterTagSuggestions.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  className={styles.tagSuggestionBtn}
+                  onClick={() => handleAddSuggestedTag(tag)}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className={styles.tagBindingMeta}>
+          {tagBinding
+            ? <span>{t('personaEditor.matchesCharacters', { count: matchingCharacterCount })}</span>
+            : <span>{t('personaEditor.selectTagsHint')}</span>}
+          {activeCharacter && tagBinding && (
+            <span>
+              {matchesActiveCharacterByTag
+                ? activeCharacterConflictCount > 0
+                  ? t('personaEditor.activeMatchesWithConflict', { name: activeCharName || t('personaEditor.activeCharacter'), count: activeCharacterConflictCount })
+                  : t('personaEditor.activeMatchesRule', { name: activeCharName || t('personaEditor.activeCharacter') })
+                : t('personaEditor.activeNotMatchRule', { name: activeCharName || t('personaEditor.activeCharacter') })}
+            </span>
+          )}
+          {activeCharacter && tagBinding && rawBinding && boundPersonaId !== persona.id && matchesActiveCharacterByTag && (
+            <span>{t('personaEditor.currentChatPrefersExact')}</span>
+          )}
+        </div>
+      </div>
 
       {/* Action buttons */}
       <div className={styles.actions}>
@@ -485,27 +785,27 @@ export default function PersonaEditor({
           icon={<Play size={13} />}
           onClick={() => onSwitchTo(persona.id)}
         >
-          {isActive ? 'Deactivate' : 'Switch To'}
+          {isActive ? t('personaEditor.deactivate') : t('personaEditor.switchTo')}
         </Button>
         <Button
           variant="secondary" size="sm"
           icon={<MessagesSquare size={13} />}
           onClick={() => setShowReattributeConfirm(true)}
           disabled={!activeChatId || reattributing}
-          title={activeChatId ? 'Re-attribute all user messages in this chat to this persona' : 'Open a chat first'}
+          title={activeChatId ? t('personaEditor.reattributeTitle') : t('personaEditor.openChatFirst')}
         >
-          {reattributing ? 'Applying...' : 'Apply to Chat'}
+          {reattributing ? t('personaEditor.applying') : t('personaEditor.applyToChat')}
         </Button>
         <Button
           size="icon-sm" variant="ghost"
           onClick={() => onDuplicate(persona.id)}
-          title="Duplicate"
+          title={t('personaEditor.duplicate')}
           icon={<Copy size={13} />}
         />
         <Button
           size="icon-sm" variant="danger-ghost"
           onClick={() => setShowDeleteConfirm(true)}
-          title="Delete"
+          title={t('actions.delete', { ns: 'common' })}
           icon={<Trash2 size={13} />}
         />
       </div>
@@ -514,11 +814,11 @@ export default function PersonaEditor({
 
       {showDeleteConfirm && (
         <ConfirmationModal
-          title="Delete Persona"
-          message={`Delete "${persona.name}"? This cannot be undone.`}
+          title={t('personaEditor.deletePersona')}
+          message={t('personaEditor.deletePersonaConfirm', { name: persona.name })}
           isOpen={true}
           variant="danger"
-          confirmText="Delete"
+          confirmText={t('personaEditor.delete')}
           onConfirm={async () => {
             await onDelete(persona.id)
             setShowDeleteConfirm(false)
@@ -529,10 +829,10 @@ export default function PersonaEditor({
 
       {showReattributeConfirm && (
         <ConfirmationModal
-          title="Apply Persona to Chat"
-          message={`Rename all user messages in the active chat to "${persona.name}"?`}
+          title={t('personaEditor.applyPersonaToChat')}
+          message={t('personaEditor.applyPersonaConfirm', { name: persona.name })}
           isOpen={true}
-          confirmText="Apply"
+          confirmText={t('personaEditor.apply')}
           onConfirm={handleReattributeChat}
           onCancel={() => setShowReattributeConfirm(false)}
         />

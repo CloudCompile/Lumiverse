@@ -1,9 +1,16 @@
 /* ── Wrapper — always rendered, translates to open/close ── */
 
 .wrapper {
+  --drawer-tab-w: 48px;
   position: fixed;
-  top: env(safe-area-inset-top, 0px);
-  bottom: calc(0px - var(--ios-viewport-offset, 0px));
+  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
+  /* The `bottom: calc(0 - var(--ios-viewport-offset))` pattern used on pure
+     backdrops (ModalShell, PackBrowser overlay, etc.) is defensive viewport
+     overhang — harmless when the element is just a dimmed layer, but the
+     drawer's wrapper IS the scrollable content container, so extending past
+     the visible viewport puts the last ~safe-area-inset-top of .panelContent
+     off-screen and makes the bottom of tab content unreachable on iPhone. */
+  bottom: 0;
   z-index: 9992;
   display: flex;
   align-items: stretch;
@@ -11,16 +18,22 @@
   transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.wrapperCompact {
+  --drawer-tab-w: 32px;
+}
+
 .wrapperRight {
   right: 0;
   flex-direction: row;
-  transform: translateX(var(--drawer-panel-w));
+  /* Shift by the actual wrapper width minus the exposed handle width so the
+     tab stays flush even if viewport units and zoom compensation diverge. */
+  transform: translateX(calc(100% - var(--drawer-tab-w)));
 }
 
 .wrapperLeft {
   left: 0;
   flex-direction: row-reverse;
-  transform: translateX(calc(-1 * var(--drawer-panel-w)));
+  transform: translateX(calc(-100% + var(--drawer-tab-w)));
 }
 
 .wrapperOpen {
@@ -32,7 +45,7 @@
 .drawerTab {
   flex-shrink: 0;
   align-self: flex-start;
-  width: 48px;
+  width: var(--drawer-tab-w);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -74,7 +87,6 @@
 }
 
 .drawerTabCompact {
-  width: 32px;
   padding: 8px 6px;
   gap: 0;
 }
@@ -95,6 +107,8 @@
 .backdrop {
   position: fixed;
   inset: 0;
+  height: var(--app-scaled-viewport-height, calc(100vh / var(--lumiverse-ui-scale, 1)));
+  width: var(--app-scaled-viewport-width, calc(100vw / var(--lumiverse-ui-scale, 1)));
   bottom: calc(0px - var(--ios-viewport-offset, 0px));
   z-index: 9991;
   background: var(--lumiverse-fill-heavy);
@@ -231,7 +245,7 @@
 /* ── Tab label ── */
 
 .tabLabel {
-  font-size: 9px;
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
   font-weight: 500;
   line-height: 1;
   color: var(--lumiverse-text-dim);
@@ -303,7 +317,7 @@
   border-radius: 7px;
   background: var(--lumiverse-accent);
   color: var(--lumiverse-accent-fg);
-  font-size: 9px;
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -340,7 +354,7 @@
 }
 
 .panelTitle {
-  font-size: 15px;
+  font-size: calc(15px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-text);
 }
@@ -352,16 +366,19 @@
   overflow-x: hidden;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 12px;
+  /* Keep the last list item clear of the home indicator / gesture bar. Any
+     panel-specific bottom chrome (pagination bars, etc.) should add its own
+     spacing rather than relying on this buffer. */
+  padding: 12px 12px env(safe-area-inset-bottom, 0px);
   position: relative;
 }
 
 /* iOS PWA: the drawer doesn't resize when the keyboard opens (layout viewport
-   stays full-screen). Keyboard-height padding at the bottom creates scroll room
-   so the focusin handler can scroll inputs above the keyboard even when the
-   panel's actual content is shorter than the container. */
+   stays full-screen). Add keyboard-height padding so the focusin handler can
+   scroll inputs above the keyboard even when the panel's actual content is
+   shorter than the container. */
 :global(html[data-ios-pwa]) .panelContent {
-  padding-bottom: calc(12px + var(--app-keyboard-inset-bottom, 0px));
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--app-keyboard-inset-bottom, 0px));
 }
 
 .panelContentFull {
@@ -381,12 +398,12 @@
 }
 
 .stubPanel p {
-  font-size: 16px;
+  font-size: calc(16px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
 }
 
 .stubPanel span {
-  font-size: 13px;
+  font-size: calc(13px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text-dim);
 }
 
@@ -394,22 +411,25 @@
 
 @media (max-width: 600px) {
   .wrapper {
-    --drawer-panel-w: 100vw !important;
+    --drawer-panel-w: var(--app-scaled-viewport-width, calc(100vw / var(--lumiverse-ui-scale, 1))) !important;
+    --drawer-tab-w: 40px;
+  }
+
+  .wrapperCompact {
+    --drawer-tab-w: 28px;
   }
 
   .drawerTab {
-    width: 40px;
     padding: 12px 6px 16px;
     gap: 6px;
   }
 
   .drawerTabCompact {
-    width: 28px;
     padding: 6px 4px;
   }
 
   .drawer {
-    width: 100vw !important;
+    width: var(--drawer-panel-w) !important;
     flex-direction: column !important;
   }
 

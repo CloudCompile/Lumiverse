@@ -5,14 +5,19 @@ import {
   Eye, EyeOff, Columns, FolderOpen, ClipboardCopy, Upload, Search,
   GitBranch,
 } from 'lucide-react'
+import i18n from '@/i18n'
 import { useStore } from '@/store'
 import { chatsApi, messagesApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
 import { charactersApi } from '@/api/characters'
 import { DRAWER_TABS, registryToCommands } from '@/lib/drawer-tab-registry'
 import { getVisibleSettingsTabs, settingsRegistryToCommands } from '@/lib/settings-tab-registry'
+import { copyTextToClipboard } from '@/lib/clipboard'
+import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 
 export type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character'
+
+export type CommandGroup = 'actions' | 'panels' | 'settings' | 'extensions'
 
 export interface Command {
   id: string
@@ -20,12 +25,14 @@ export interface Command {
   description: string
   icon: ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
   keywords: string[]
-  group: 'Actions' | 'Panels' | 'Settings' | 'Extensions'
+  group: CommandGroup
   scope?: CommandScope
   run: (navigate: NavigateFunction) => void | Promise<void>
 }
 
-export const GROUP_ORDER: Command['group'][] = ['Actions', 'Panels', 'Settings', 'Extensions']
+export const GROUP_ORDER: CommandGroup[] = ['actions', 'panels', 'settings', 'extensions']
+
+const tc = (key: string, options?: Record<string, unknown>) => i18n.t(key, { ns: 'commands', ...options })
 
 export const COMMANDS: Command[] = [
 
@@ -36,23 +43,25 @@ export const COMMANDS: Command[] = [
     description: 'Delete the last AI reply and generate a new one',
     icon: RotateCw,
     keywords: ['regenerate', 'retry', 'redo', 'reroll', 'response'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, activeProfileId, activePersonaId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
+      const { activeChatId, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
       if (!activeChatId) return
       beginStreaming()
       try {
+        const presetId = getActivePresetForGeneration() || undefined
         const res = await generateApi.regenerate({
           chat_id: activeChatId,
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
-          preset_id: getActivePresetForGeneration() || undefined,
+          preset_id: presetId,
+          force_preset_id: shouldForceLoomRuntimePreset(presetId, activeChatId, activeCharacterId, activeProfileId),
           generation_type: 'regenerate',
         })
         startStreaming(res.generationId)
       } catch (err: any) {
-        const msg = err?.body?.error || err?.message || 'Failed to regenerate'
+        const msg = err?.body?.error || err?.message || tc('toast.failedRegenerate')
         setStreamingError(msg)
         addToast({ type: 'error', message: msg })
       }
@@ -64,23 +73,25 @@ export const COMMANDS: Command[] = [
     description: 'Prompt the AI to continue its last response',
     icon: CornerDownLeft,
     keywords: ['continue', 'extend', 'more', 'nudge', 'generation'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, activeProfileId, activePersonaId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
+      const { activeChatId, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
       if (!activeChatId) return
       beginStreaming()
       try {
+        const presetId = getActivePresetForGeneration() || undefined
         const res = await generateApi.continueGeneration({
           chat_id: activeChatId,
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
-          preset_id: getActivePresetForGeneration() || undefined,
+          preset_id: presetId,
+          force_preset_id: shouldForceLoomRuntimePreset(presetId, activeChatId, activeCharacterId, activeProfileId),
         })
 
         startStreaming(res.generationId)
       } catch (err: any) {
-        const msg = err?.body?.error || err?.message || 'Failed to continue'
+        const msg = err?.body?.error || err?.message || tc('toast.failedContinue')
         setStreamingError(msg)
         addToast({ type: 'error', message: msg })
       }
@@ -93,7 +104,7 @@ export const COMMANDS: Command[] = [
     description: 'Go to the home screen to start a new conversation',
     icon: Plus,
     keywords: ['new', 'chat', 'start', 'home', 'begin', 'create'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'global',
     run: (navigate) => navigate('/'),
   },
@@ -103,7 +114,7 @@ export const COMMANDS: Command[] = [
     description: 'Open the full character library',
     icon: Search,
     keywords: ['characters', 'library', 'browse', 'list', 'cards'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'global',
     run: (navigate) => navigate('/characters'),
   },
@@ -113,7 +124,7 @@ export const COMMANDS: Command[] = [
     description: 'Upload a character card (.png, .charx, .jpg, .json)',
     icon: Upload,
     keywords: ['import', 'upload', 'card', 'character', 'file'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'global',
     run: async () => {
       const input = document.createElement('input')
@@ -125,9 +136,9 @@ export const COMMANDS: Command[] = [
         const { addToast } = useStore.getState()
         try {
           const res = await charactersApi.importFile(file)
-          addToast({ type: 'success', message: `Imported "${res.character.name}"` })
+          addToast({ type: 'success', message: tc('toast.importedCharacter', { name: res.character.name }) })
         } catch (err: any) {
-          addToast({ type: 'error', message: err?.body?.error || 'Failed to import character' })
+          addToast({ type: 'error', message: err?.body?.error || tc('toast.failedImportCharacter') })
         }
       }
       input.click()
@@ -140,7 +151,7 @@ export const COMMANDS: Command[] = [
     description: 'Start a fresh conversation with the current character',
     icon: Plus,
     keywords: ['new', 'chat', 'same', 'character', 'fresh', 'restart'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat',
     run: (navigate) => {
       const { activeCharacterId } = useStore.getState()
@@ -157,7 +168,7 @@ export const COMMANDS: Command[] = [
     description: 'Branch the current chat at the latest message',
     icon: GitBranch,
     keywords: ['fork', 'branch', 'split', 'alternate', 'copy', 'diverge'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat-idle',
     run: async (navigate) => {
       const store = useStore.getState()
@@ -165,15 +176,15 @@ export const COMMANDS: Command[] = [
       if (!activeChatId || messages.length === 0) return
       const lastMessage = messages[messages.length - 1]
       store.openModal('confirm', {
-        title: 'Fork Chat',
-        message: 'Create a new branch at the latest message?',
-        confirmText: 'Fork',
+        title: tc('confirm.forkChat.title'),
+        message: tc('confirm.forkChat.message'),
+        confirmText: tc('confirm.forkChat.confirm'),
         onConfirm: async () => {
           try {
             const newChat = await chatsApi.branch(activeChatId, lastMessage.id)
             navigate(`/chat/${newChat.id}`)
           } catch {
-            useStore.getState().addToast({ type: 'error', message: 'Failed to fork chat.' })
+            useStore.getState().addToast({ type: 'error', message: tc('toast.failedForkChat') })
           }
         },
       })
@@ -185,15 +196,17 @@ export const COMMANDS: Command[] = [
     description: 'Open the chat manager for the current character',
     icon: FolderOpen,
     keywords: ['manage', 'chats', 'history', 'list', 'browse'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat',
     run: () => {
-      const { activeCharacterId, characters, openModal } = useStore.getState()
+      const { activeCharacterId, characters, isGroupChat, groupCharacterIds, openModal } = useStore.getState()
       if (!activeCharacterId) return
       const char = characters.find((c) => c.id === activeCharacterId)
       openModal('manageChats', {
         characterId: activeCharacterId,
-        characterName: char?.name || 'Character',
+        characterName: isGroupChat ? tc('misc.groupChat') : (char?.name || tc('misc.character')),
+        isGroupChat,
+        groupCharacterIds,
       })
     },
   },
@@ -204,17 +217,17 @@ export const COMMANDS: Command[] = [
     description: 'Copy the most recent message to clipboard',
     icon: ClipboardCopy,
     keywords: ['copy', 'clipboard', 'last', 'message', 'response'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat',
     run: async () => {
       const { messages, addToast } = useStore.getState()
       if (messages.length === 0) return
       const last = messages[messages.length - 1]
       try {
-        await navigator.clipboard.writeText(last.content)
-        addToast({ type: 'success', message: 'Copied to clipboard' })
+        await copyTextToClipboard(last.content)
+        addToast({ type: 'success', message: tc('toast.copiedToClipboard') })
       } catch {
-        addToast({ type: 'error', message: 'Failed to copy' })
+        addToast({ type: 'error', message: tc('toast.failedCopy') })
       }
     },
   },
@@ -224,7 +237,7 @@ export const COMMANDS: Command[] = [
     description: 'Remove the most recent message from this chat',
     icon: Trash2,
     keywords: ['delete', 'remove', 'last', 'message', 'undo'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat-idle',
     run: async () => {
       const { activeChatId, messages, removeMessage, addToast } = useStore.getState()
@@ -233,9 +246,9 @@ export const COMMANDS: Command[] = [
       try {
         await messagesApi.delete(activeChatId, last.id)
         removeMessage(last.id)
-        addToast({ type: 'success', message: 'Message deleted' })
+        addToast({ type: 'success', message: tc('toast.messageDeleted') })
       } catch {
-        addToast({ type: 'error', message: 'Failed to delete message' })
+        addToast({ type: 'error', message: tc('toast.failedDeleteMessage') })
       }
     },
   },
@@ -245,21 +258,24 @@ export const COMMANDS: Command[] = [
     description: 'Show or hide the last message from AI context',
     icon: EyeOff,
     keywords: ['hide', 'hidden', 'toggle', 'context', 'message', 'exclude'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, messages, updateMessage, addToast } = useStore.getState()
+      const { activeChatId, messages, addToast } = useStore.getState()
       if (!activeChatId || messages.length === 0) return
       const last = messages[messages.length - 1]
       const newHidden = !last.extra?.hidden
       try {
-        await messagesApi.update(activeChatId, last.id, {
+        const updated = await messagesApi.update(activeChatId, last.id, {
           extra: { ...last.extra, hidden: newHidden },
         })
-        updateMessage(last.id, { extra: { ...last.extra, hidden: newHidden } })
-        addToast({ type: 'success', message: newHidden ? 'Message hidden from context' : 'Message visible in context' })
+        useStore.getState().updateMessage(updated.id, updated)
+        addToast({
+          type: 'success',
+          message: newHidden ? tc('toast.messageHidden') : tc('toast.messageVisible'),
+        })
       } catch {
-        addToast({ type: 'error', message: 'Failed to update message' })
+        addToast({ type: 'error', message: tc('toast.failedUpdateMessage') })
       }
     },
   },
@@ -270,22 +286,24 @@ export const COMMANDS: Command[] = [
     description: 'Dry-run to see the assembled prompt and token count',
     icon: Eye,
     keywords: ['dry run', 'preview', 'prompt', 'tokens', 'assembly', 'debug'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, activeProfileId, activePersonaId, getActivePresetForGeneration, openModal, addToast } = useStore.getState()
+      const { activeChatId, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, openModal, addToast } = useStore.getState()
       if (!activeChatId) return
       try {
+        const presetId = getActivePresetForGeneration() || undefined
         const result = await generateApi.dryRun({
           chat_id: activeChatId,
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
-          preset_id: getActivePresetForGeneration() || undefined,
+          preset_id: presetId,
+          force_preset_id: shouldForceLoomRuntimePreset(presetId, activeChatId, activeCharacterId, activeProfileId),
         })
 
         openModal('dryRun', result)
       } catch (err: any) {
-        addToast({ type: 'error', message: err?.body?.error || 'Dry run failed' })
+        addToast({ type: 'error', message: err?.body?.error || tc('toast.dryRunFailed') })
       }
     },
   },
@@ -296,7 +314,7 @@ export const COMMANDS: Command[] = [
     description: 'Open the character editor for the current character',
     icon: Edit3,
     keywords: ['edit', 'character', 'modify', 'update', 'profile'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'character',
     run: (navigate) => {
       const { activeCharacterId } = useStore.getState()
@@ -310,16 +328,16 @@ export const COMMANDS: Command[] = [
     description: 'Create a copy of the current character',
     icon: Copy,
     keywords: ['duplicate', 'clone', 'copy', 'character'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'character',
     run: async () => {
       const { activeCharacterId, addToast } = useStore.getState()
       if (!activeCharacterId) return
       try {
         const dup = await charactersApi.duplicate(activeCharacterId)
-        addToast({ type: 'success', message: `Duplicated as "${dup.name}"` })
+        addToast({ type: 'success', message: tc('toast.duplicatedCharacter', { name: dup.name }) })
       } catch {
-        addToast({ type: 'error', message: 'Failed to duplicate character' })
+        addToast({ type: 'error', message: tc('toast.failedDuplicateCharacter') })
       }
     },
   },
@@ -330,7 +348,7 @@ export const COMMANDS: Command[] = [
     description: 'Show or hide the character portrait sidebar',
     icon: Columns,
     keywords: ['portrait', 'panel', 'sidebar', 'toggle', 'character', 'image'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat',
     run: () => {
       useStore.getState().togglePortraitPanel()
@@ -343,23 +361,23 @@ export const COMMANDS: Command[] = [
     description: 'Permanently delete this conversation',
     icon: Trash2,
     keywords: ['delete', 'remove', 'destroy', 'chat', 'conversation'],
-    group: 'Actions',
+    group: 'actions',
     scope: 'chat',
     run: (navigate) => {
       const { activeChatId, openModal, addToast } = useStore.getState()
       if (!activeChatId) return
       openModal('confirm', {
-        title: 'Delete Chat',
-        message: 'This will permanently delete this conversation and all its messages.',
+        title: tc('confirm.deleteChat.title'),
+        message: tc('confirm.deleteChat.message'),
         variant: 'danger',
-        confirmText: 'Delete',
+        confirmText: tc('confirm.deleteChat.confirm'),
         onConfirm: async () => {
           try {
             await chatsApi.delete(activeChatId)
-            addToast({ type: 'success', message: 'Chat deleted' })
+            addToast({ type: 'success', message: tc('toast.chatDeleted') })
             navigate('/')
           } catch {
-            addToast({ type: 'error', message: 'Failed to delete chat' })
+            addToast({ type: 'error', message: tc('toast.failedDeleteChat') })
           }
         },
       })

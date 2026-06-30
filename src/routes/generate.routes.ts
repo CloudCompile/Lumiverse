@@ -4,7 +4,11 @@ import type { Context, Next } from "hono";
 import * as svc from "../services/generate.service";
 import * as breakdownSvc from "../services/breakdown.service";
 import * as poolSvc from "../services/generation-pool.service";
+import * as summarizePoolSvc from "../services/summarize-pool.service";
 import { getSummarizationPromptDefaults } from "../services/summarization-prompts.service";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
+import { clampErrorMessage, describeProviderError } from "../utils/provider-errors";
 
 const LOCALHOST_ADDRS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -25,10 +29,10 @@ function chatRoute(handler: (input: any) => Promise<any>, extras?: Record<string
     const body = await c.req.json();
     if (!body.chat_id) return c.json({ error: "chat_id is required" }, 400);
     try {
-      const result = await handler({ ...body, userId, ...extras });
+      const result = await handler({ ...body, userId, signal: c.req.raw.signal, ...extras });
       return c.json(result);
     } catch (err: any) {
-      return c.json({ error: err.message }, 400);
+      return c.json({ error: clampErrorMessage(describeProviderError(err, "Generation failed")) }, 400);
     }
   };
 }
@@ -42,8 +46,19 @@ app.post("/stop", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (body.generation_id) {
-    const stopped = svc.stopGeneration(body.generation_id);
+    const stopped = svc.stopGeneration(userId, body.generation_id);
+    // Stale id (the client's generation state raced a newer generation, e.g.
+    // council retry or a quick regen): never let stop be a silent no-op —
+    // fall back to whatever is actually running for the chat.
+    if (!stopped && body.chat_id) {
+      return c.json({ stopped: svc.stopChatGenerations(userId, body.chat_id) });
+    }
     return c.json({ stopped });
+  }
+  // No generation id yet (optimistic phase). Prefer the chat-scoped stop so a
+  // background generation in another chat isn't collateral damage.
+  if (body.chat_id) {
+    return c.json({ stopped: svc.stopChatGenerations(userId, body.chat_id) });
   }
   svc.stopUserGenerations(userId);
   return c.json({ stopped: true });
@@ -54,25 +69,30 @@ app.post("/stop", async (c) => {
 app.get("/active", (c) => {
   const userId = c.get("userId");
   const entries = poolSvc.getChatHeadPoolsForUser(userId);
-  return c.json(entries.map((e) => ({
-    generationId: e.generationId,
-    chatId: e.chatId,
-    status: e.status,
-    generationType: e.generationType,
-    characterName: e.characterName,
-    characterId: e.characterId,
-    model: e.model,
-    startedAt: e.startedAt,
-    councilRetryPending: e.councilRetryPending || false,
-  })));
+  return c.json(entries.map((e) => {
+    return {
+      generationId: e.generationId,
+      chatId: e.chatId,
+      status: e.status,
+      generationType: e.generationType,
+      characterName: e.characterName,
+      characterId: e.characterId,
+      model: e.model,
+      startedAt: e.startedAt,
+      councilRetryPending: e.councilRetryPending || false,
+    };
+  }));
 });
 
 app.post("/acknowledge", async (c) => {
   const userId = c.get("userId");
   const { chatId } = await c.req.json<{ chatId: string }>();
   if (!chatId) return c.json({ error: "chatId required" }, 400);
-  poolSvc.acknowledgeChat(userId, chatId);
-  return c.json({ acknowledged: true });
+  const generationIds = poolSvc.acknowledgeChat(userId, chatId);
+  if (generationIds.length > 0) {
+    eventBus.emit(EventType.GENERATION_ACKNOWLEDGED, { chatId, generationIds }, userId);
+  }
+  return c.json({ acknowledged: true, removed: generationIds.length, generationIds });
 });
 
 app.get("/status/:chatId", (c) => {
@@ -80,16 +100,44 @@ app.get("/status/:chatId", (c) => {
   const chatId = c.req.param("chatId");
   const entry = poolSvc.getPoolForChat(userId, chatId);
   if (!entry) return c.json({ active: false });
-  const active = entry.status === "assembling" || entry.status === "council" || entry.status === "streaming";
+  const active = entry.status === "assembling" || entry.status === "council" || entry.status === "waiting" || entry.status === "reasoning" || entry.status === "streaming";
+
+  // Delta support: a client polling while it already holds a prefix of this
+  // generation's buffers sends its known lengths so we only ship the tail.
+  // Only honored when the client's generationId matches — lengths from a
+  // different generation are meaningless. contentOffset/reasoningOffset tell
+  // the client where the returned slice begins (0 = full buffer).
+  let content = entry.content;
+  let reasoning = entry.reasoning;
+  let contentOffset = 0;
+  let reasoningOffset = 0;
+  if (c.req.query("generationId") === entry.generationId) {
+    const contentLen = Number(c.req.query("contentLen"));
+    if (Number.isInteger(contentLen) && contentLen > 0 && contentLen <= entry.content.length) {
+      content = entry.content.slice(contentLen);
+      contentOffset = contentLen;
+    }
+    const reasoningLen = Number(c.req.query("reasoningLen"));
+    if (Number.isInteger(reasoningLen) && reasoningLen > 0 && reasoningLen <= entry.reasoning.length) {
+      reasoning = entry.reasoning.slice(reasoningLen);
+      reasoningOffset = reasoningLen;
+    }
+  }
+
   return c.json({
     active,
     generationId: entry.generationId,
     status: entry.status,
-    content: entry.content,
-    reasoning: entry.reasoning,
+    councilRetryPending: entry.councilRetryPending || false,
+    councilToolsFailure: entry.councilToolsFailure,
+    content,
+    reasoning,
+    contentOffset,
+    reasoningOffset,
     tokenSeq: entry.tokenSeq,
     generationType: entry.generationType,
     targetMessageId: entry.targetMessageId,
+    targetSwipeId: entry.targetSwipeId,
     characterName: entry.characterName,
     characterId: entry.characterId,
     model: entry.model,
@@ -112,7 +160,7 @@ app.post("/council-retry", async (c) => {
   if (decision !== "continue" && decision !== "retry") {
     return c.json({ error: "decision must be 'continue' or 'retry'" }, 400);
   }
-  const resolved = svc.resolveCouncilRetry(body.generation_id, decision, userId);
+  const resolved = svc.resolveCouncilRetry(userId, body.generation_id, decision);
   if (!resolved) return c.json({ error: "No pending council retry for this generation" }, 404);
   return c.json({ resolved: true });
 });
@@ -136,12 +184,54 @@ app.get("/summarize/prompt-defaults", (c) => {
 app.post("/summarize", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
-  if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
-    return c.json({ error: "messages array is required" }, 400);
+  if (!body.chat_id) {
+    return c.json({ error: "chat_id is required" }, 400);
+  }
+  if (!body.message_context || !Number.isFinite(body.message_context) || body.message_context < 1) {
+    return c.json({ error: "message_context must be a positive integer" }, 400);
   }
 
   try {
     const result = await svc.summarizeGenerate(userId, body);
+    return c.json(result);
+  } catch (err: any) {
+    const msg = clampErrorMessage(describeProviderError(err, "Summarization failed"));
+    const status = msg.includes("No connection") || msg.includes("Unknown provider") || msg.includes("No API key") ? 400 : 502;
+    return c.json({ error: msg }, status);
+  }
+});
+
+app.get("/summarize/status/:chatId", (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const entry = summarizePoolSvc.getSummarizePoolEntry(userId, chatId);
+  if (!entry) return c.json({ active: false });
+  return c.json({
+    active: true,
+    generationId: entry.generationId,
+    startedAt: entry.startedAt,
+  });
+});
+
+// --- Rebuild summary endpoint ---
+
+app.post("/summarize/rebuild", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+  if (!body.chat_id) return c.json({ error: "chat_id is required" }, 400);
+  if (!body.batch_size || !Number.isFinite(body.batch_size) || body.batch_size < 1) {
+    return c.json({ error: "batch_size must be a positive integer" }, 400);
+  }
+  if (!body.user_name || typeof body.user_name !== "string" || body.user_name.trim().length === 0) {
+    return c.json({ error: "user_name is required" }, 400);
+  }
+
+  try {
+    const result = await svc.rebuildSummary(userId, body);
+    // Start background processing — frontend tracks via WS events
+    void svc.startRebuildSummary(userId, body).catch((err) => {
+      console.error("[rebuild] Background processing failed:", err?.message);
+    });
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes("No connection") || err.message.includes("Unknown provider") || err.message.includes("No API key") ? 400 : 502;
@@ -164,8 +254,9 @@ app.post("/raw", localhostOnly, async (c) => {
     const result = await svc.rawGenerate(userId, body);
     return c.json(result);
   } catch (err: any) {
-    const status = err.message.includes("Unknown provider") || err.message.includes("No API key") ? 400 : 502;
-    return c.json({ error: err.message }, status);
+    const msg = clampErrorMessage(describeProviderError(err, "Raw generation failed"));
+    const status = msg.includes("Unknown provider") || msg.includes("No API key") ? 400 : 502;
+    return c.json({ error: msg }, status);
   }
 });
 
@@ -180,8 +271,9 @@ app.post("/quiet", localhostOnly, async (c) => {
     const result = await svc.quietGenerate(userId, body);
     return c.json(result);
   } catch (err: any) {
-    const status = err.message.includes("No connection") || err.message.includes("Unknown provider") || err.message.includes("No API key") ? 400 : 502;
-    return c.json({ error: err.message }, status);
+    const msg = clampErrorMessage(describeProviderError(err, "Quiet generation failed"));
+    const status = msg.includes("No connection") || msg.includes("Unknown provider") || msg.includes("No API key") ? 400 : 502;
+    return c.json({ error: msg }, status);
   }
 });
 
