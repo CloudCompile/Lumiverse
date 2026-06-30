@@ -44,6 +44,8 @@ export interface EnvConfig {
   stForceNewMigration: boolean;
   /** Optional Pollinations BYOP app key (publishable pk_...) */
   pollinationsAppKey: string;
+  dbMaintenanceVacuumMinFreeBytes: number;
+  dbMaintenanceVacuumFreePercentBuffer: number;
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
@@ -52,6 +54,23 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
   const parsed = parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
+}
+
+
+function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function parsePercentEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(parsed, 100);
 }
 
 function parseEphemeralOverrides(raw?: string): Record<string, number> {
@@ -137,6 +156,15 @@ export function loadEnv(): EnvConfig {
   // without an app key in anonymous mode; a key only enables extra quotas).
   const pollinationsAppKey = process.env.POLLINATIONS_APP_KEY || "";
 
+  const dbMaintenanceVacuumMinFreeBytes = parseNonNegativeIntEnv(
+    "DB_MAINTENANCE_VACUUM_MIN_FREE_BYTES",
+    0
+  );
+  const dbMaintenanceVacuumFreePercentBuffer = parsePercentEnv(
+    "DB_MAINTENANCE_VACUUM_FREE_PERCENT_BUFFER",
+    5
+  );
+
   return {
     port,
     encryptionKey,
@@ -158,6 +186,8 @@ export function loadEnv(): EnvConfig {
     stMigrationTarget,
     stForceNewMigration,
     pollinationsAppKey,
+    dbMaintenanceVacuumMinFreeBytes,
+    dbMaintenanceVacuumFreePercentBuffer,
   };
 }
 

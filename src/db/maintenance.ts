@@ -50,6 +50,8 @@ export interface DatabaseStats {
   filesystemFreeBytes: number | null;
   vacuumEstimatedRequiredBytes: number;
   vacuumHasEnoughFreeBytes: boolean | null;
+  vacuumFreeBytesRequiredFloor: number;
+  vacuumFreeBytesRequiredWithBuffer: number;
 }
 
 export interface AppliedDatabaseTuning {
@@ -157,9 +159,20 @@ function estimateVacuumRequiredBytes(stats: Pick<DatabaseStats, "fileBytes" | "w
   return rewriteBytes + stats.walBytes + 128 * MiB;
 }
 
+function applyVacuumFreeSpacePolicy(requiredBytes: number, filesystemTotalBytes: number | null): { floor: number; withBuffer: number } {
+  const percentFloor = filesystemTotalBytes == null
+    ? 0
+    : Math.ceil(filesystemTotalBytes * (env.dbMaintenanceVacuumFreePercentBuffer / 100));
+  const floor = Math.max(requiredBytes, env.dbMaintenanceVacuumMinFreeBytes, percentFloor);
+  return {
+    floor,
+    withBuffer: floor,
+  };
+}
+
 export function ensureVacuumDiskHeadroom(stats: DatabaseStats): void {
   if (stats.vacuumHasEnoughFreeBytes === false) {
-    throw new InsufficientDiskSpaceError(stats.filesystemFreeBytes, stats.vacuumEstimatedRequiredBytes);
+    throw new InsufficientDiskSpaceError(stats.filesystemFreeBytes, stats.vacuumFreeBytesRequiredWithBuffer);
   }
 }
 
@@ -350,6 +363,10 @@ export function collectDatabaseStats(db: Database, dbPath?: string): DatabaseSta
     logicalBytes: pageCount * pageSize,
     usedBytes: usedPageCount * pageSize,
   });
+  const vacuumFreeSpacePolicy = applyVacuumFreeSpacePolicy(
+    vacuumEstimatedRequiredBytes,
+    filesystem.totalBytes
+  );
 
   return {
     path,
@@ -376,7 +393,9 @@ export function collectDatabaseStats(db: Database, dbPath?: string): DatabaseSta
     filesystemTotalBytes: filesystem.totalBytes,
     filesystemFreeBytes: filesystem.freeBytes,
     vacuumEstimatedRequiredBytes,
-    vacuumHasEnoughFreeBytes: filesystem.freeBytes == null ? null : filesystem.freeBytes >= vacuumEstimatedRequiredBytes,
+    vacuumHasEnoughFreeBytes: filesystem.freeBytes == null ? null : filesystem.freeBytes >= vacuumFreeSpacePolicy.withBuffer,
+    vacuumFreeBytesRequiredFloor: vacuumFreeSpacePolicy.floor,
+    vacuumFreeBytesRequiredWithBuffer: vacuumFreeSpacePolicy.withBuffer,
   };
 }
 
