@@ -1360,6 +1360,38 @@ export interface LumiFileFormat {
   prompt_order: any[];
 }
 
+// ---- Leaderboard ----
+export interface LeaderboardEntry {
+  model: string;
+  provider: string;
+  connection_id: string | null;
+  elo: number;
+  wins: number;
+  losses: number;
+  total_votes: number;
+}
+
+export interface LeaderboardVote {
+  id?: number;
+  message_id: string;
+  swipe_id: number;
+  chat_id: string;
+  model: string;
+  provider: string;
+  vote: number;
+  created_at?: number;
+}
+
+export interface CastVoteInput {
+  messageId: string;
+  swipeId: number;
+  chatId: string;
+  model: string;
+  provider: string;
+  connectionId?: string | null;
+  vote: 1 | -1;
+}
+
 // ---- Pagination ----
 export interface PaginatedResult<T> {
   data: T[];

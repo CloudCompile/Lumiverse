@@ -34,6 +34,7 @@ import { createDatabankSlice } from './slices/databank'
 import { createConnectionSlice } from './slices/connection'
 import { createWeaverSlice } from './slices/weaver'
 import { createContainersSlice } from './slices/containers'
+import { createLeaderboardSlice } from './slices/leaderboard'
 import { registerUserScopedResetStore } from './user-scoped-reset'
 
 export const useStore = create<AppStore>()((...a) => ({
@@ -71,6 +72,7 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createConnectionSlice(...a),
   ...createWeaverSlice(...a),
   ...createContainersSlice(...a),
+  ...createLeaderboardSlice(...a),
 }))
 
 registerUserScopedResetStore(useStore, useStore.getState())

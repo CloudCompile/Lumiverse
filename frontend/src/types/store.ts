@@ -1575,6 +1575,17 @@ export interface WeaverSlice {
   startWeaverChat: (sessionId: string) => Promise<WeaverStartChatResult>
 }
 
+export interface LeaderboardSlice {
+  leaderboardEntries: import('./api').LeaderboardEntry[]
+  leaderboardVotes: Record<string, number>
+  leaderboardLoading: boolean
+  loadLeaderboard: () => Promise<void>
+  loadVotesForChat: (chatId: string) => Promise<void>
+  castLeaderboardVote: (input: import('./api').CastVoteInput) => Promise<void>
+  removeLeaderboardVote: (messageId: string, swipeId: number) => Promise<void>
+  resetLeaderboard: () => Promise<void>
+}
+
 export type AppStore = ChatSlice &
   CharactersSlice &
   PersonasSlice &
@@ -1608,4 +1619,5 @@ export type AppStore = ChatSlice &
   ChatHeadsSlice &
   DatabankSlice &
   ConnectionSlice &
-  ContainersSlice
+  ContainersSlice &
+  LeaderboardSlice

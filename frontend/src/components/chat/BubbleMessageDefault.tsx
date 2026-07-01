@@ -12,6 +12,7 @@ import MessageEditArea from './MessageEditArea'
 import MessageAttachments from './MessageAttachments'
 import MessageAudioSlot from './MessageAudioSlot'
 import SwipeControls from './SwipeControls'
+import VoteButtons from './VoteButtons'
 import GreetingNav from './GreetingNav'
 import ReasoningBlock from './ReasoningBlock'
 import StreamingIndicator from './StreamingIndicator'
@@ -461,20 +462,31 @@ export default function BubbleMessageDefault({
       </div>
 
       {!isEditing && !isSelectMode && (
-        <BubbleActions
-          onEdit={handleEdit}
-          onDelete={handleDelete}
-          onToggleHidden={handleToggleHidden}
-          onFork={handleFork}
-          onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
-          onPlay={canPlay ? togglePlayback : undefined}
-          isPlaying={isPlaying}
-          isGenerating={isGenerating}
-          hasSavedAudio={hasSavedAudio}
-          isHidden={isHidden}
-          content={message.content}
-          className={styles.actionsPill}
-        />
+        <>
+          <BubbleActions
+            onEdit={handleEdit}
+            onDelete={handleDelete}
+            onToggleHidden={handleToggleHidden}
+            onFork={handleFork}
+            onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
+            onPlay={canPlay ? togglePlayback : undefined}
+            isPlaying={isPlaying}
+            isGenerating={isGenerating}
+            hasSavedAudio={hasSavedAudio}
+            isHidden={isHidden}
+            content={message.content}
+            className={styles.actionsPill}
+          />
+          {!isUser && (
+            <VoteButtons
+              messageId={message.id}
+              swipeId={message.swipe_id}
+              chatId={chatId}
+              model={generationMetrics?.model}
+              provider={generationMetrics?.provider}
+            />
+          )}
+        </>
       )}
 
       <ContextMenu position={contextMenuPos} items={contextMenuItems} onClose={closeContextMenu} />

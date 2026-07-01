@@ -19,6 +19,7 @@ import MessageEditArea from './MessageEditArea'
 import MessageAttachments from './MessageAttachments'
 import MessageAudioSlot from './MessageAudioSlot'
 import MessageActions from './MessageActions'
+import VoteButtons from './VoteButtons'
 import SwipeControls from './SwipeControls'
 import GreetingNav from './GreetingNav'
 import ReasoningBlock from './ReasoningBlock'
@@ -456,6 +457,15 @@ export default function MinimalMessageDefault({
             isHidden={isHidden}
             content={message.content}
           />
+          {!isUser && (
+            <VoteButtons
+              messageId={message.id}
+              swipeId={message.swipe_id}
+              chatId={chatId}
+              model={generationMetrics?.model}
+              provider={generationMetrics?.provider}
+            />
+          )}
         </div>
       )}
 

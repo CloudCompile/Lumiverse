@@ -62,6 +62,7 @@ import { notificationSoundsRoutes } from "./routes/notification-sounds.routes";
 import { bootstrapRoutes } from "./routes/bootstrap.routes";
 import { signupRoutes } from "./routes/signup.routes";
 import { userDataRoutes } from "./routes/user-data.routes";
+import { leaderboardRoutes } from "./routes/leaderboard.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 import { rateLimit } from "./middleware/rate-limit";
@@ -488,6 +489,7 @@ app.route("/api/v1/web-search", webSearchRoutes);
 app.route("/api/v1/global-addons", globalAddonsRoutes);
 app.route("/api/v1/bootstrap", bootstrapRoutes);
 app.route("/api/v1/user-data", userDataRoutes);
+app.route("/api/v1/leaderboard", leaderboardRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {
