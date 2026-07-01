@@ -482,6 +482,9 @@ export default function ChatView() {
         useStore.getState().setActiveChatName(chat.name ?? null)
         setMessages(msgPage.data, msgPage.total)
 
+        // Load leaderboard votes for thumbs up/down indicators
+        useStore.getState().loadVotesForChat(chatId)
+
         if (msgPage.data.length === 0) {
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {

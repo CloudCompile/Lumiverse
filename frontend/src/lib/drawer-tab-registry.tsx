@@ -4,7 +4,7 @@ import {
   User, Wand2, GitFork, Link2, Package, Zap, Gamepad2,
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
-  GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database,
+  GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database, Trophy,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -43,6 +43,7 @@ import RegexPanel from '@/components/panels/RegexPanel'
 import MemoryCortexPanel from '@/components/panels/memory-cortex/MemoryCortexPanel'
 import DatabankPanel from '@/components/panels/databank/DatabankPanel'
 import MultiplayerPanel from '@/components/panels/multiplayer/MultiplayerPanel'
+import LeaderboardPanel from '@/components/panels/LeaderboardPanel'
 
 export interface DrawerTabEntry {
   id: string
@@ -362,6 +363,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabIcon: Palette,
     keywords: ['theme', 'colors', 'accent', 'appearance', 'dark', 'light', 'glass', 'radius', 'font', 'css', 'style', 'customize', 'ui', 'mode'],
     mount: (root) => mountReactComponent(root, <ThemePanel />),
+  },
+  {
+    id: 'leaderboard',
+    shortName: 'Board',
+    tabName: 'Leaderboard',
+    tabDescription: 'View Elo-ranked model leaderboard based on your feedback',
+    tabIcon: Trophy,
+    tabHeaderTitle: 'Leaderboard',
+    keywords: ['leaderboard', 'elo', 'rating', 'rank', 'model', 'vote', 'thumbs', 'feedback', 'roulette', 'compare', 'best'],
+    mount: (root) => mountReactComponent(root, <LeaderboardPanel />),
   },
   {
     id: 'spindle',

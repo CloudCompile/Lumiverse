@@ -1,0 +1,40 @@
+.wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--lumiverse-text-muted);
+  transition: all var(--lumiverse-transition-fast);
+}
+
+.btn:hover {
+  background: var(--lumiverse-fill-muted);
+}
+
+.btnUp {
+  composes: btn;
+}
+
+.btnDown {
+  composes: btn;
+}
+
+.btnUpActive {
+  color: var(--lumiverse-success, #22c55e);
+}
+
+.btnDownActive {
+  color: var(--lumiverse-danger, #ef4444);
+}
