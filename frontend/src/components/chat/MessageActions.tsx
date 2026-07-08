@@ -1,6 +1,7 @@
 import { Pencil, Trash2, Copy, Check, BarChart3, EyeOff, Eye, Volume2, Square } from 'lucide-react'
 import { IconGitFork } from '@tabler/icons-react'
 import { useState, useCallback } from 'react'
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/shared/FormComponents'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -26,6 +27,7 @@ interface MessageActionsProps {
   isUser: boolean
   isHidden: boolean
   content: string
+  children?: ReactNode
 }
 
 export default function MessageActions({
@@ -41,6 +43,7 @@ export default function MessageActions({
   isUser,
   isHidden,
   content,
+  children,
 }: MessageActionsProps) {
   const { t } = useTranslation('chat')
   const [copied, setCopied] = useState(false)
@@ -102,6 +105,7 @@ export default function MessageActions({
       <Button size="icon-sm" variant="danger-ghost" onClick={onDelete} title={t('messageActions.delete')} aria-label={t('messageActions.delete')}>
         <Trash2 size={13} />
       </Button>
+      {children}
     </div>
   )
 }

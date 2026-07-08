@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Copy, Check, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square } from 'lucide-react'
@@ -23,6 +24,7 @@ interface BubbleActionsProps {
   isHidden: boolean
   content: string
   className?: string
+  children?: ReactNode
 }
 
 export default function BubbleActions({
@@ -38,6 +40,7 @@ export default function BubbleActions({
   isHidden,
   content,
   className,
+  children,
 }: BubbleActionsProps) {
   const { t } = useTranslation('chat')
   const { t: tc } = useTranslation('common')
@@ -96,6 +99,7 @@ export default function BubbleActions({
       <button type="button" onClick={onDelete} title={tc('actions.delete')} aria-label={tc('actions.delete')}>
         <Trash2 size={13} />
       </button>
+      {children}
     </div>
   )
 }
