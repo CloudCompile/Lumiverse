@@ -456,16 +456,17 @@ export default function MinimalMessageDefault({
             isUser={isUser}
             isHidden={isHidden}
             content={message.content}
-          />
-          {!isUser && (
-            <VoteButtons
-              messageId={message.id}
-              swipeId={message.swipe_id}
-              chatId={chatId}
-              model={generationMetrics?.model}
-              provider={generationMetrics?.provider}
-            />
-          )}
+          >
+            {!isUser && (
+              <VoteButtons
+                messageId={message.id}
+                swipeId={message.swipe_id}
+                chatId={chatId}
+                model={generationMetrics?.model}
+                provider={generationMetrics?.provider}
+              />
+            )}
+          </MessageActions>
         </div>
       )}
 

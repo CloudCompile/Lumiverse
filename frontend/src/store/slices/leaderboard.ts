@@ -1,6 +1,17 @@
 import type { StateCreator } from 'zustand'
 import type { AppStore, LeaderboardSlice } from '@/types/store'
 import { leaderboardApi } from '@/api/leaderboard'
+import type { LeaderboardEntry } from '@/types/api'
+
+function sortLeaderboardEntries(entries: LeaderboardEntry[]): LeaderboardEntry[] {
+  return [...entries].sort((a, b) => {
+    if (b.elo !== a.elo) return b.elo - a.elo
+    if (b.total_votes !== a.total_votes) return b.total_votes - a.total_votes
+    if (b.wins !== a.wins) return b.wins - a.wins
+    if (a.provider !== b.provider) return a.provider.localeCompare(b.provider)
+    return a.model.localeCompare(b.model)
+  })
+}
 
 export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardSlice> = (set, get) => ({
   leaderboardEntries: [],
@@ -11,7 +22,7 @@ export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardS
     set({ leaderboardLoading: true })
     try {
       const entries = await leaderboardApi.getRankings()
-      set({ leaderboardEntries: entries, leaderboardLoading: false })
+      set({ leaderboardEntries: sortLeaderboardEntries(entries), leaderboardLoading: false })
     } catch {
       set({ leaderboardLoading: false })
     }
@@ -44,7 +55,7 @@ export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardS
         )
         return {
           leaderboardVotes: votes,
-          leaderboardEntries: exists ? entries : [...entries, entry],
+          leaderboardEntries: sortLeaderboardEntries(exists ? entries : [...entries, entry]),
         }
       })
     } catch {
@@ -56,10 +67,11 @@ export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardS
     const key = `${messageId}:${swipeId}`
     try {
       await leaderboardApi.removeVote(messageId, swipeId)
+      const entries = await leaderboardApi.getRankings()
       set((s) => {
         const votes = { ...s.leaderboardVotes }
         delete votes[key]
-        return { leaderboardVotes: votes }
+        return { leaderboardVotes: votes, leaderboardEntries: sortLeaderboardEntries(entries) }
       })
     } catch {
       // silent
