@@ -62,6 +62,7 @@ import { themeAssetsRoutes } from "./routes/theme-assets.routes";
 import { notificationSoundsRoutes } from "./routes/notification-sounds.routes";
 import { bootstrapRoutes } from "./routes/bootstrap.routes";
 import { userDataRoutes } from "./routes/user-data.routes";
+import { janitorBridgeRoutes } from "./routes/janitor-bridge.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 import { rateLimit } from "./middleware/rate-limit";
@@ -451,6 +452,14 @@ app.get("/api/v1/runtime-config", (c) => {
   c.header("Cache-Control", "no-store");
   return c.json({ safeThemeMode: env.safeThemeMode });
 });
+
+// Janitor Bridge — mounted BEFORE requireAuth because the OpenAI-compatible
+// proxy endpoints (/chat/completions, /v1/chat/completions, /v1/models) need
+// to accept requests from Janitor AI's web UI, which doesn't have a Lumiverse
+// session. Those endpoints use a separate bridge-key auth (bearer token).
+// The card management endpoints (/cards, /config, /stats) call requireAuth
+// themselves, so they're still protected.
+app.route("/api/v1/janitor-bridge", janitorBridgeRoutes);
 
 app.use("/api/v1/*", requireAuth);
 
