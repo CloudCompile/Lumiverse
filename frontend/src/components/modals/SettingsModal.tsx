@@ -53,6 +53,7 @@ import OperatorPanel from '@/components/settings/OperatorPanel'
 import VoiceSettings from '@/components/settings/VoiceSettings'
 import McpServerSettings from '@/components/settings/mcp-servers/McpServerSettings'
 import DataPortability from '@/components/settings/DataPortability'
+import JanitorBridgeSettings from '@/components/settings/JanitorBridgeSettings'
 import CollapsibleSection from '@/components/shared/CollapsibleSection'
 import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import { getVisibleSettingsTabs, sectionAnchorId } from '@/lib/settings-tab-registry'
@@ -255,6 +256,8 @@ function SettingsView({ view }: { view: string }) {
       return <Diagnostics />
     case 'migration':
       return <MigrationSettings />
+    case 'janitorBridge':
+      return <JanitorBridgeSettings />
     case 'operator':
       return <OperatorPanel />
     default:

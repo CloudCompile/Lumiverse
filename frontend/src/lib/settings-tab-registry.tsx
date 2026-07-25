@@ -3,7 +3,7 @@ import {
   Sliders, MessageSquare, Users, PanelRight,
   Compass, Reply, HardDrive, Puzzle, Database, Hash, Activity,
   Globe, Bell, Import, Brain, Terminal, Volume2, Plug, Search, UserRound,
-  PackageOpen, KeyRound,
+  PackageOpen, KeyRound, Network,
 } from 'lucide-react'
 import { useStore } from '@/store'
 import { translateSettingsField, translateSettingsSectionTitle } from '@/lib/i18n/resolveLabel'
@@ -301,6 +301,16 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabDescription: 'Import data from SillyTavern and other sources',
     tabIcon: Import,
     keywords: ['migration', 'import', 'sillytavern', 'transfer', 'data', 'convert'],
+    role: 'admin',
+    component: INLINE_SENTINEL,
+  },
+  {
+    id: 'janitorBridge',
+    shortName: 'Janitor Bridge',
+    tabName: 'Janitor Bridge',
+    tabDescription: 'Capture character cards from Janitor AI chat traffic',
+    tabIcon: Network,
+    keywords: ['janitor', 'bridge', 'proxy', 'capture', 'cards', 'extract', 'sillytavern', 'openai'],
     role: 'admin',
     component: INLINE_SENTINEL,
   },
