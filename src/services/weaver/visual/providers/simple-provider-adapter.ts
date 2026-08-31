@@ -10,13 +10,14 @@ import type { VisualProviderAdapter } from "../provider-adapter";
 
 type SimpleVisualProvider = Extract<
   WeaverVisualProvider,
-  "novelai" | "nanogpt" | "google_gemini" | "sdapi" | "swarmui"
+  "novelai" | "nanogpt" | "google_gemini" | "pollinations" | "sdapi" | "swarmui"
 >;
 
-const IMAGE_INPUT: Record<SimpleVisualProvider, WeaverVisualImageInputMechanism> = {
+const IMAGE_INPUT: Record<SimpleVisualProvider, WeaverVisualImageInputMechanism | null> = {
   google_gemini: "edit",
   nanogpt: "edit",
   novelai: "reference",
+  pollinations: "edit",
   sdapi: "init",
   swarmui: "init",
 };
@@ -61,6 +62,9 @@ function applySourceImage(
         },
       ];
       return;
+    case "pollinations":
+      parameters.resolvedSourceImages = [{ data: source.data, mimeType: source.mimeType }];
+      return;
     case "sdapi":
       parameters.mode = "img2img";
       parameters.init_images = `data:${source.mimeType};base64,${source.data}`;
@@ -100,6 +104,12 @@ function buildProviderSpecificParameters(
     case "google_gemini":
       return {
         aspectRatio: asset.aspect_ratio,
+      };
+    case "pollinations":
+      return {
+        width: asset.width,
+        height: asset.height,
+        ...(asset.seed != null ? { seed: asset.seed } : {}),
       };
     case "sdapi":
     case "swarmui": {

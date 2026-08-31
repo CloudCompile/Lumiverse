@@ -1900,6 +1900,7 @@ function EmbeddingsSettings() {
     electronhub: { api_url: 'https://api.electronhub.top/v1/embeddings' },
     bananabread: { api_url: 'http://localhost:8008/v1/embeddings' },
     nanogpt: { api_url: 'https://nano-gpt.com/api/v1/embeddings' },
+    pollinations: { api_url: 'https://gen.pollinations.ai/v1/embeddings' },
   }
 
   const providerAllowsCustomApiUrl = (provider: EmbeddingConfig['provider']) => {
@@ -2159,6 +2160,7 @@ function EmbeddingsSettings() {
                 <option value="electronhub">ElectronHub</option>
                 <option value="bananabread">BananaBread</option>
                 <option value="nanogpt">Nano-GPT</option>
+                <option value="pollinations">Pollinations</option>
               </select>
             </div>
 

@@ -404,6 +404,7 @@ export async function generateSceneBackground(
       connection.provider === "google_gemini" ||
       connection.provider === "openrouter" ||
       connection.provider === "openai" ||
+      connection.provider === "pollinations" ||
       connection.provider === "sdapi"
     ) {
       const sources = await resolveSourceImages(userId, chatId, params);
