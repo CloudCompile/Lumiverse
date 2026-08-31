@@ -176,6 +176,7 @@ export type EmbeddingProvider =
   | "electronhub"
   | "bananabread"
   | "nanogpt"
+  | "pollinations"
   | "google_vertex";
 
 export interface EmbeddingConfig {
@@ -465,6 +466,7 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
   electronhub: "https://api.electronhub.top/v1/embeddings",
   bananabread: "http://localhost:8008/v1/embeddings",
   nanogpt: "https://nano-gpt.com/api/v1/embeddings",
+  pollinations: "https://gen.pollinations.ai/v1/embeddings",
   // Vertex derives its host from vertex_region — this is a cosmetic default.
   google_vertex: "https://aiplatform.googleapis.com",
 };
@@ -472,6 +474,7 @@ const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
 function providerDefaultModel(provider: EmbeddingProvider): string {
   if (provider === "bananabread") return "mixedbread-ai/mxbai-embed-large-v1";
   if (provider === "nanogpt") return "text-embedding-3-small";
+  if (provider === "pollinations") return "text-embedding-3-small";
   if (provider === "openrouter") return "text-embedding-3-small";
   if (provider === "electronhub") return "text-embedding-3-small";
   if (provider === "openai") return "text-embedding-3-small";
@@ -507,7 +510,7 @@ function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): Embed
 }
 
 const VALID_EMBEDDING_PROVIDERS: EmbeddingProvider[] = [
-  "openai-compatible", "openai", "openrouter", "electronhub", "bananabread", "nanogpt", "google_vertex",
+  "openai-compatible", "openai", "openrouter", "electronhub", "bananabread", "nanogpt", "pollinations", "google_vertex",
 ];
 
 function normalizeConfig(input: any): EmbeddingConfig {

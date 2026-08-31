@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand'
 import type { AppStore, LeaderboardSlice } from '@/types/store'
 import { leaderboardApi } from '@/api/leaderboard'
 import type { LeaderboardEntry } from '@/types/api'
+import { toast } from '@/lib/toast'
 
 function sortLeaderboardEntries(entries: LeaderboardEntry[]): LeaderboardEntry[] {
   return [...entries].sort((a, b) => {
@@ -37,7 +38,7 @@ export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardS
       }
       set({ leaderboardVotes: map })
     } catch {
-      // silent
+      // Loading vote indicators is best-effort; the controls remain usable.
     }
   },
 
@@ -58,8 +59,11 @@ export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardS
           leaderboardEntries: sortLeaderboardEntries(exists ? entries : [...entries, entry]),
         }
       })
-    } catch {
-      // silent
+    } catch (error) {
+      // A silent failure made the controls appear unresponsive, particularly
+      // for an expired session or a rate-limited vote. Preserve the current
+      // selection and give the user an actionable response instead.
+      toast.error(error instanceof Error ? error.message : 'Could not save your rating. Please try again.')
     }
   },
 
@@ -73,8 +77,8 @@ export const createLeaderboardSlice: StateCreator<AppStore, [], [], LeaderboardS
         delete votes[key]
         return { leaderboardVotes: votes, leaderboardEntries: sortLeaderboardEntries(entries) }
       })
-    } catch {
-      // silent
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not remove your rating. Please try again.')
     }
   },
 

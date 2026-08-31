@@ -1107,6 +1107,16 @@ export default function LandingPage() {
     navigate('/characters')
   }, [navigate])
 
+  // A low-friction "I'm bored" entry point: choose one of the user's recent
+  // conversations without creating throwaway data or changing its settings.
+  const handleRandomChat = useCallback(() => {
+    if (items.length === 0) {
+      handleNewChat()
+      return
+    }
+    handleChatClick(items[Math.floor(Math.random() * items.length)])
+  }, [items, handleChatClick, handleNewChat])
+
   const handleTempChat = useCallback(async (noPreset: boolean) => {
     if (creatingTempChat) return
     setCreatingTempChat(true)
@@ -1248,6 +1258,15 @@ export default function LandingPage() {
             </div>
           </div>
           <div className={styles.headerActions}>
+            <button
+              type="button"
+              className={styles.accountBtn}
+              onClick={handleRandomChat}
+              title="Open a random recent chat"
+            >
+              <span className={styles.accountName}>Random chat</span>
+              <Gamepad2 size={13} strokeWidth={1.5} />
+            </button>
             {showMobileMotionEnable && mobileMotionPermission !== 'denied' && (
               <button
                 type="button"
