@@ -4,7 +4,7 @@ import {
   User, Wand2, GitFork, Link2, Package, Zap, Gamepad2,
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
-  GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database, Trophy,
+  GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database, Trophy, Activity,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -44,6 +44,7 @@ import MemoryCortexPanel from '@/components/panels/memory-cortex/MemoryCortexPan
 import DatabankPanel from '@/components/panels/databank/DatabankPanel'
 import MultiplayerPanel from '@/components/panels/multiplayer/MultiplayerPanel'
 import LeaderboardPanel from '@/components/panels/LeaderboardPanel'
+import StatusPanel from '@/components/panels/StatusPanel'
 
 export interface DrawerTabEntry {
   id: string
@@ -179,6 +180,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
         </div>
       </div>
     )),
+  },
+  {
+    id: 'status',
+    shortName: 'Status',
+    tabName: 'Status',
+    tabDescription: 'Check connection health and open provider status pages',
+    tabIcon: Activity,
+    tabHeaderTitle: 'Status',
+    keywords: ['status', 'health', 'uptime', 'outage', 'provider', 'model', 'monitor', 'connection'],
+    mount: (root) => mountReactComponent(root, <StatusPanel />),
   },
   {
     id: 'browser',
