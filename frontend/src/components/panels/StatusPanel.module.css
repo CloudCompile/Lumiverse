@@ -4,6 +4,7 @@
 .header button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); border-radius: 6px; padding: 6px 9px; cursor: pointer; }
 .header button:disabled { cursor: wait; opacity: .65; }
 .help, .empty { margin: 0; color: var(--lumiverse-text-muted); font-size: 12px; line-height: 1.45; }
+.controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--lumiverse-text-muted); }.controls label { display: flex; align-items: center; gap: 6px; }.controls select { background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); border: 1px solid var(--lumiverse-border); border-radius: 4px; padding: 3px; }
 .list { display: flex; flex-direction: column; gap: 6px; }
 .row { display: flex; align-items: center; gap: 9px; border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); border-radius: 8px; padding: 9px; }
 .info { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }

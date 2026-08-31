@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Activity, ExternalLink, RefreshCw, CircleCheck, CircleX, Clock3 } from 'lucide-react'
 import { useStore } from '@/store'
 import { connectionsApi } from '@/api/connections'
@@ -12,14 +12,21 @@ export default function StatusPanel() {
   const profiles = useStore((s) => s.profiles)
   const [checks, setChecks] = useState<Record<string, Check>>({})
   const [checking, setChecking] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [intervalMinutes, setIntervalMinutes] = useState(0)
   const statusProfiles = useMemo(
     () => profiles.filter((profile) => profile.provider !== 'model_roulette'),
     [profiles],
   )
 
+  const selectedProfiles = useMemo(() => {
+    if (selectedIds.length === 0) return statusProfiles
+    return statusProfiles.filter((profile) => selectedIds.includes(profile.id))
+  }, [selectedIds, statusProfiles])
+
   const runChecks = useCallback(async () => {
     setChecking(true)
-    const results = await Promise.all(statusProfiles.map(async (profile) => {
+    const results = await Promise.all(selectedProfiles.map(async (profile) => {
       try {
         const result = await connectionsApi.test(profile.id)
         return [profile.id, { ok: result.success, message: result.message, checkedAt: Date.now() }] as const
@@ -29,22 +36,37 @@ export default function StatusPanel() {
     }))
     setChecks(Object.fromEntries(results))
     setChecking(false)
-  }, [statusProfiles])
+  }, [selectedProfiles])
+
+  useEffect(() => {
+    if (intervalMinutes <= 0) return
+    const timer = window.setInterval(() => { void runChecks() }, intervalMinutes * 60_000)
+    return () => window.clearInterval(timer)
+  }, [intervalMinutes, runChecks])
+
+  const toggleProfile = useCallback((id: string) => {
+    setSelectedIds((ids) => ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id])
+  }, [])
 
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
         <div><Activity size={16} /><span>Provider Status</span></div>
-        <button type="button" onClick={runChecks} disabled={checking || statusProfiles.length === 0}>
+        <button type="button" onClick={runChecks} disabled={checking || selectedProfiles.length === 0}>
           <RefreshCw size={13} className={checking ? styles.spinning : undefined} /> {checking ? 'Checking…' : 'Check connections'}
         </button>
       </div>
-      <p className={styles.help}>Run an on-demand connection check, or open each provider’s public status page. Checks never run automatically.</p>
+      <p className={styles.help}>Choose connections, then run checks on demand or on a local recurring timer. This configuration stays in this browser and never probes providers while this tab is closed.</p>
+      {statusProfiles.length > 0 && <div className={styles.controls}>
+        <label>Recurring check <select value={intervalMinutes} onChange={(event) => setIntervalMinutes(Number(event.target.value))}><option value={0}>Off</option><option value={5}>Every 5 min</option><option value={15}>Every 15 min</option><option value={60}>Hourly</option></select></label>
+        <span>{selectedIds.length === 0 ? 'All connections selected' : `${selectedIds.length} selected`}</span>
+      </div>}
       {statusProfiles.length === 0 ? <div className={styles.empty}>Add a connection to monitor its health.</div> : (
         <div className={styles.list}>{statusProfiles.map((profile) => {
           const check = checks[profile.id]
           const statusUrl = typeof profile.metadata?.status_url === 'string' ? profile.metadata.status_url : null
           return <div className={styles.row} key={profile.id}>
+            <input type="checkbox" checked={selectedIds.includes(profile.id)} onChange={() => toggleProfile(profile.id)} aria-label={`Monitor ${profile.name}`} />
             {check ? check.ok ? <CircleCheck className={styles.ok} size={17} /> : <CircleX className={styles.bad} size={17} /> : <Clock3 className={styles.pending} size={17} />}
             <div className={styles.info}><strong>{profile.name}</strong><span>{profile.provider} · {check?.message || 'Not checked yet'}</span></div>
             {statusUrl && <a href={statusUrl} target="_blank" rel="noreferrer" title="Open provider status page"><ExternalLink size={15} /></a>}
