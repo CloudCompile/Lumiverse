@@ -100,6 +100,7 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
   const [provider, setProvider] = useState(profile?.provider || initialProvider || 'openai')
   const [apiKey, setApiKey] = useState('')
   const [apiUrl, setApiUrl] = useState(profile?.api_url || '')
+  const [statusUrl, setStatusUrl] = useState(String(profile?.metadata?.status_url || (profile?.provider === 'pollinations' ? 'https://model-monitor.pollinations.ai' : '')))
   const [model, setModel] = useState(profile?.model || '')
   const [isDefault, setIsDefault] = useState(profile?.is_default || false)
   const [useResponsesApi, setUseResponsesApi] = useState(profile?.metadata?.use_responses_api || false)
@@ -464,6 +465,8 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
       return
     }
     delete metadata.connection_roulette
+    if (statusUrl.trim()) metadata.status_url = statusUrl.trim()
+    else delete metadata.status_url
     if (showResponsesApiToggle) {
       metadata.use_responses_api = useResponsesApi
     } else {
@@ -536,7 +539,7 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
       is_default: isDefault,
       metadata,
     })
-  }, [name, provider, apiKey, apiUrl, model, isDefault, isRoulette, validRouletteConnectionIds, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, useZaiCodingPlanEndpoint, showZaiCodingPlanToggle, showAnthropicPromptCachingToggle, anthropicPromptCachingSettings, showNanoGptCachingToggle, nanogptCachingSettings, bindReasoning, boundReasoningSettings, boundPromptBias, profile?.id, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isBedrock, bedrockRegion, bedrockEndpoint, isOpenRouter, openrouterSettings])
+  }, [name, provider, apiKey, apiUrl, statusUrl, model, isDefault, isRoulette, validRouletteConnectionIds, useResponsesApi, showResponsesApiToggle, useSubscriptionApi, showSubscriptionApiToggle, useZaiCodingPlanEndpoint, showZaiCodingPlanToggle, showAnthropicPromptCachingToggle, anthropicPromptCachingSettings, showNanoGptCachingToggle, nanogptCachingSettings, bindReasoning, boundReasoningSettings, boundPromptBias, profile?.id, profile?.metadata, onSave, isVertexAI, vertexRegion, saFileName, isBedrock, bedrockRegion, bedrockEndpoint, isOpenRouter, openrouterSettings])
 
   const canSubmit = name.trim().length > 0 && (!isRoulette || validRouletteConnectionIds.length > 0)
 
@@ -655,6 +658,11 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
       {!isRoulette && !hideApiUrl && (
         <FormField label={t('connectionForm.apiUrl')} hint={isVertexAI ? t('connectionForm.vertexApiUrlHint') : t('connectionForm.defaultApiUrlHint')}>
           <TextInput value={apiUrl} onChange={setApiUrl} placeholder={urlPlaceholder} />
+        </FormField>
+      )}
+      {!isRoulette && (
+        <FormField label="Provider status page" hint="Optional public status or model-health URL, saved with this connection.">
+          <TextInput value={statusUrl} onChange={setStatusUrl} placeholder="https://model-monitor.pollinations.ai" type="url" />
         </FormField>
       )}
       {!isRoulette && isBedrock && (

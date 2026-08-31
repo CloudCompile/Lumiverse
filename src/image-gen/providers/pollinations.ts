@@ -106,11 +106,18 @@ export class PollinationsImageProvider implements ImageProvider {
 
     const finalBody = applyRawOverride(body, request.parameters.rawRequestOverride);
 
-    const res = await fetch(`${base}/images/generations`, {
+    const sources: Array<{ data: string; mimeType?: string }> =
+      request.parameters.resolvedSourceImages || request.parameters.referenceImages || [];
+    const usableSources = sources.filter((source) => !!source?.data);
+    const res = usableSources.length > 0
+      ? await this.requestEdit(base, apiKey, finalBody, usableSources, request.signal)
+      : await fetch(`${base}/images/generations`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        // Connections sometimes contain a key pasted with its Bearer prefix.
+        // Sending that prefix twice causes an opaque 401 from Pollinations.
+        Authorization: `Bearer ${apiKey.trim().replace(/^Bearer\s+/i, "")}`,
       },
       body: JSON.stringify(finalBody),
       signal: request.signal,
@@ -120,7 +127,10 @@ export class PollinationsImageProvider implements ImageProvider {
 
     const data = (await res.json()) as any;
     const item = data?.data?.[0];
-    const b64 = item?.b64_json;
+    // Pollinations has returned both OpenAI's b64_json field and base64 from
+    // different image backends. Supporting both keeps the connection working
+    // when the selected model is routed to a different backend.
+    const b64 = item?.b64_json || item?.base64;
     const imageUrl = item?.url;
 
     if (b64) {
@@ -149,12 +159,40 @@ export class PollinationsImageProvider implements ImageProvider {
     throw new Error("Pollinations returned no image data");
   }
 
+  /** Pollinations supports the OpenAI-compatible image edit surface. */
+  private async requestEdit(
+    base: string,
+    apiKey: string,
+    body: Record<string, any>,
+    sources: Array<{ data: string; mimeType?: string }>,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(body)) {
+      if (key === "response_format" || value == null) continue;
+      form.append(key, String(value));
+    }
+    for (const [index, source] of sources.entries()) {
+      const match = source.data.match(/^data:([^;,]+)?;base64,(.*)$/s);
+      const mimeType = source.mimeType || match?.[1] || "image/png";
+      const base64 = match ? match[2] : source.data;
+      const ext = mimeType.split("/")[1] || "png";
+      form.append(sources.length > 1 ? "image[]" : "image", new Blob([Buffer.from(base64, "base64")], { type: mimeType }), `source-${index}.${ext}`);
+    }
+    return fetch(`${base}/images/edits`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey.trim().replace(/^Bearer\s+/i, "")}` },
+      body: form,
+      signal,
+    });
+  }
+
   async validateKey(apiKey: string, apiUrl: string): Promise<boolean> {
     if (!apiKey) return false;
     try {
       const base = this.baseUrl(apiUrl).replace(/\/v1\/?$/, "");
       const res = await fetch(`${base}/account/key`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
+        headers: { Authorization: `Bearer ${apiKey.trim().replace(/^Bearer\s+/i, "")}` },
       });
       if (!res.ok) await throwProviderResponseError(this.displayName, "authentication", res);
       return res.ok;
@@ -165,10 +203,23 @@ export class PollinationsImageProvider implements ImageProvider {
   }
 
   async listModels(apiKey: string, apiUrl: string): Promise<Array<{ id: string; label: string }>> {
-    const base = this.baseUrl(apiUrl).replace(/\/v1\/?$/, "");
+    const base = this.baseUrl(apiUrl);
     const headers: Record<string, string> = {};
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    const data = await fetchProviderJson<any>(this.displayName, "model listing", `${base}/image/models`, { headers });
+    if (apiKey) headers.Authorization = `Bearer ${apiKey.trim().replace(/^Bearer\s+/i, "")}`;
+
+    // The current API exposes OpenAI-style models at /v1/models. Older
+    // deployments used /image/models at the host root, so retain it as a
+    // compatibility fallback instead of making model selection unavailable.
+    let data: any;
+    try {
+      data = await fetchProviderJson<any>(this.displayName, "model listing", `${base}/models`, { headers });
+    } catch {
+      try {
+        data = await fetchProviderJson<any>(this.displayName, "model listing", `${base.replace(/\/v1\/?$/, "")}/image/models`, { headers });
+      } catch {
+        return this.capabilities.staticModels || [];
+      }
+    }
     const list = Array.isArray(data)
       ? data
       : Array.isArray(data?.models)
