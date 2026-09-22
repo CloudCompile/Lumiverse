@@ -4,7 +4,7 @@ import { useStore } from '@/store'
 import WallpaperLayer from '@/components/shared/WallpaperLayer'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { Button } from '@/components/shared/FormComponents'
-import { activeTab } from '@/lib/active-tab'
+import { InactiveTabError, activeTab } from '@/lib/active-tab'
 import styles from './ActiveTabGuard.module.css'
 
 function captureBackground() {
@@ -36,7 +36,18 @@ export default function ActiveTabGuard({ children }: { children: ReactNode }) {
       setBlocked(true)
     }
     activeTab.signal.addEventListener('abort', onBlocked, { once: true })
-    const release = activeTab.claim(userId)
+    let release: () => void
+    try {
+      release = activeTab.claim(userId)
+    } catch (err) {
+      // A rejected storage write means the ownership claim never landed, so
+      // holding the app hostage would lock the user out permanently. Only a
+      // lost claim to another document is a real block.
+      activeTab.signal.removeEventListener('abort', onBlocked)
+      if (err instanceof InactiveTabError) setBlocked(true)
+      else setReadyUser(userId)
+      return
+    }
     setReadyUser(userId)
     return () => {
       release()

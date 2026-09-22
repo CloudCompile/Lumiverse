@@ -29,10 +29,17 @@ function createId(): string {
 }
 
 function getTabId(): string {
-  let id = sessionStorage.getItem(TAB_ID_KEY)
+  // Runs during startup; storage can be unavailable (private mode, quota), and
+  // an uncaught throw here would abort module evaluation before first render.
+  let id: string | null = null
+  try {
+    id = sessionStorage.getItem(TAB_ID_KEY)
+  } catch {}
   if (!id) {
     id = createId()
-    sessionStorage.setItem(TAB_ID_KEY, id)
+    try {
+      sessionStorage.setItem(TAB_ID_KEY, id)
+    } catch {}
   }
   return id
 }
